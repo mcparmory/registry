@@ -1,5 +1,5 @@
 # AgentQL API - Dependencies
-# Generated: 2026-03-25 13:40:59 UTC
+# Generated: 2026-03-25 16:10:53 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0

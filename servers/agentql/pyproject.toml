@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcparmory-agentql-mcp"
-version = "1.0.1"
+name = "mcparmory-agentql"
+version = "1.0.2"
 description = "MCP server for AgentQL API"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
-mcparmory-agentql-mcp = "server:main"
+mcparmory-agentql = "server:main"
 
 [project.urls]
 Homepage = "https://mcparmory.com"

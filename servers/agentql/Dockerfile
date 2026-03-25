@@ -1,8 +1,8 @@
 # AgentQL API MCP Server
 #
 # Usage:
-#   1. Build: docker build -t mcparmory-agentql-api .
-#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-agentql-api
+#   1. Build: docker build -t mcparmory-agentql .
+#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-agentql
 #
 # The .env file should contain your API credentials.
 # See the generated .env file for required variables.

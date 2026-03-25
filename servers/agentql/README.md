@@ -10,15 +10,15 @@ Base URL: https://api.agentql.com
 
 ```bash
 API_KEY=YOUR_API_KEY \
-uvx mcparmory-agentql-mcp
+uvx mcparmory-agentql
 ```
 
 ### With pip
 
 ```bash
-pip install mcparmory-agentql-mcp
+pip install mcparmory-agentql
 API_KEY=YOUR_API_KEY \
-mcparmory-agentql-mcp
+mcparmory-agentql
 ```
 
 ### MCP Client Configuration
@@ -28,9 +28,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 ```json
 {
   "mcpServers": {
-    "agentql-api": {
+    "agentql": {
       "command": "uvx",
-      "args": ["mcparmory-agentql-mcp"],
+      "args": ["mcparmory-agentql"],
       "env": {
         "API_KEY": "YOUR_API_KEY"
       }
@@ -63,13 +63,13 @@ python server.py
 
 Edit `.mcp.json` and replace `<SERVER_DIR>` with the absolute path to this directory, then add to your MCP client configuration.
 
-Example (if server is at `/home/user/mcp-servers/agentql-api`):
+Example (if server is at `/home/user/mcp-servers/agentql`):
 ```json
 {
   "mcpServers": {
-    "agentql-api": {
+    "agentql": {
       "command": "python",
-      "args": ["/home/user/mcp-servers/agentql-api/server.py"]
+      "args": ["/home/user/mcp-servers/agentql/server.py"]
     }
   }
 }
@@ -82,15 +82,15 @@ Example (if server is at `/home/user/mcp-servers/agentql-api`):
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
-docker build -t agentql-api .
-docker run -p 8000:8000 --env-file .env agentql-api
+docker build -t agentql .
+docker run -p 8000:8000 --env-file .env agentql
 ```
 
 **Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
-    "agentql-api": {
+    "agentql": {
       "type": "sse",
       "url": "http://localhost:8000/sse"
     }
