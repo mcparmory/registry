@@ -1,5 +1,5 @@
 # Asana - Dependencies
-# Generated: 2026-03-26 19:30:56 UTC
+# Generated: 2026-03-26 20:12:24 UTC
 authlib>=1.2.0,<2.0.0
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
