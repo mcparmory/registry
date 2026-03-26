@@ -57,6 +57,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 }
 ```
 
+Set `OAUTH2_SCOPES` to a comma-separated list of scopes your app requires (e.g. `OAUTH2_SCOPES=scope_a,scope_b`). Open `.env` to see all available scopes with descriptions.
+
 ---
 
 ## Credentials
