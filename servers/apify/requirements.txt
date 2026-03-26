@@ -1,5 +1,5 @@
 # Apify API - Dependencies
-# Generated: 2026-03-25 22:42:22 UTC
+# Generated: 2026-03-26 20:13:20 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0
