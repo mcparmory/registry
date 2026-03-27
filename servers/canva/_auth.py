@@ -630,8 +630,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "exchange_oauth_token": [["basicAuth"]],
     "introspect_token": [["basicAuth"]],
     "revoke_token": [["basicAuth"]],
-    "get_oidc_jwks": [],
-    "get_current_user_info": [["oauthAuthCode"]],
     "resize_design": [["oauthAuthCode"]],
     "get_design_resize_job": [["oauthAuthCode"]],
     "get_current_user": [["oauthAuthCode"]],

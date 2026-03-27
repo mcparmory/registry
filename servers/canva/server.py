@@ -2708,66 +2708,6 @@ async def revoke_token(token: str = Field(..., description="The OAuth access tok
 
     return _response_data
 
-# Tags: oidc
-@mcp.tool()
-async def get_oidc_jwks() -> dict[str, Any]:
-    """Retrieves the JSON Web Key Set (JWKS) containing the public keys used to verify JWTs issued during OpenID Connect authentication flows. Clients and resource servers use these keys to validate token signatures without contacting the authorization server for each request."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_oidc_jwks", "GET", "/v1/oidc/jwks", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/v1/oidc/jwks"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_oidc_jwks")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_oidc_jwks",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: oidc
-@mcp.tool()
-async def get_current_user_info() -> dict[str, Any]:
-    """Retrieves the OIDC UserInfo claims for the currently authenticated user, returning the same identity fields included in the ID token issued during authorization."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_current_user_info", "GET", "/v1/oidc/userinfo", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/v1/oidc/userinfo"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_current_user_info")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_current_user_info",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: resize
 @mcp.tool()
 async def resize_design(

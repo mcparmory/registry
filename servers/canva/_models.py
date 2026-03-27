@@ -40,7 +40,6 @@ __all__ = [
     "GetDesignRequest",
     "GetDesignResizeJobRequest",
     "GetFolderRequest",
-    "GetOidcJwksRequest",
     "GetReplyRequest",
     "GetSigningPublicKeysRequest",
     "GetThreadRequest",
@@ -57,7 +56,6 @@ __all__ = [
     "RevokeTokensRequest",
     "UpdateAssetRequest",
     "UpdateFolderRequest",
-    "UserInfoRequest",
     "UsersMeRequest",
     "CreateAssetUploadJobHeaderAssetUploadMetadata",
     "CreateDesignImportJobHeaderImportMetadata",
@@ -404,14 +402,6 @@ class RevokeTokensRequestBody(StrictModel):
 class RevokeTokensRequest(StrictModel):
     """Revokes an OAuth access token or refresh token. Revoking a refresh token also invalidates its entire lineage of access tokens and removes the user's consent for the integration, requiring them to re-authorize via OAuth."""
     body: RevokeTokensRequestBody
-
-# Operation: get_oidc_jwks
-class GetOidcJwksRequest(StrictModel):
-    """Retrieves the JSON Web Key Set (JWKS) containing the public keys used to verify JWTs issued during OpenID Connect authentication flows. Clients and resource servers use these keys to validate token signatures without contacting the authorization server for each request."""
-
-# Operation: get_current_user_info
-class UserInfoRequest(StrictModel):
-    """Retrieves the OIDC UserInfo claims for the currently authenticated user, returning the same identity fields included in the ID token issued during authorization."""
 
 # Operation: resize_design
 class CreateDesignResizeJobRequestBody(StrictModel):
