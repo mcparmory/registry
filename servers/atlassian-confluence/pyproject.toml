@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-atlassian-confluence"
-version = "1.0.1"
+version = "1.0.3"
 description = "MCP server for The Confluence Cloud REST API"
 readme = "README.md"
 license = "MIT"
