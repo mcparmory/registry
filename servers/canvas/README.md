@@ -1,6 +1,6 @@
 # Canvas API MCP Server
 
-Base URL: 
+Base URL: https://canvas.instructure.com/api
 
 ---
 
