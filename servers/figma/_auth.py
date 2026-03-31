@@ -1,7 +1,7 @@
 """
 Authentication module for Figma API MCP server.
 
-Generated: 2026-03-31 11:06:56 UTC
+Generated: 2026-03-31 14:11:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -234,11 +234,15 @@ class OAuth2Auth:
         ).rstrip(b"=").decode()
 
         # Build authorization URL
+        # state param required by many providers (e.g., Figma) for CSRF protection
+        from authlib.common.security import generate_token as _gen_token
+        state = _gen_token(30)
         auth_params = {
             "response_type": "code",
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
             "scope": " ".join(self.scopes),
+            "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
@@ -252,6 +256,16 @@ class OAuth2Auth:
                 parsed = urllib.parse.urlparse(self.path)
                 params = urllib.parse.parse_qs(parsed.query)
                 if "code" in params:
+                    # Verify state matches to prevent CSRF
+                    callback_state = params.get("state", [None])[0]
+                    if callback_state != state:
+                        result["error"] = "state_mismatch"
+                        result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                        self.send_response(400)
+                        self.send_header("Content-type", "text/html")
+                        self.end_headers()
+                        self.wfile.write(b"<html><body><h2>Authorization failed</h2><p>State mismatch</p></body></html>")
+                        return
                     result["code"] = params["code"][0]
                     self.send_response(200)
                     self.send_header("Content-type", "text/html")
@@ -504,11 +518,15 @@ class OrgOAuth2Auth:
         ).rstrip(b"=").decode()
 
         # Build authorization URL
+        # state param required by many providers (e.g., Figma) for CSRF protection
+        from authlib.common.security import generate_token as _gen_token
+        state = _gen_token(30)
         auth_params = {
             "response_type": "code",
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
             "scope": " ".join(self.scopes),
+            "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
@@ -522,6 +540,16 @@ class OrgOAuth2Auth:
                 parsed = urllib.parse.urlparse(self.path)
                 params = urllib.parse.parse_qs(parsed.query)
                 if "code" in params:
+                    # Verify state matches to prevent CSRF
+                    callback_state = params.get("state", [None])[0]
+                    if callback_state != state:
+                        result["error"] = "state_mismatch"
+                        result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                        self.send_response(400)
+                        self.send_header("Content-type", "text/html")
+                        self.end_headers()
+                        self.wfile.write(b"<html><body><h2>Authorization failed</h2><p>State mismatch</p></body></html>")
+                        return
                     result["code"] = params["code"][0]
                     self.send_response(200)
                     self.send_header("Content-type", "text/html")

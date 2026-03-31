@@ -5,7 +5,7 @@ Figma Api MCP Server
 API Info:
 - Terms of Service: https://www.figma.com/developer-terms/
 
-Generated: 2026-03-31 11:06:56 UTC
+Generated: 2026-03-31 14:11:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 
@@ -572,7 +572,7 @@ async def _make_request(
                     _auth_retried = True
                     logging.warning(f"401 Unauthorized for {tool_name} - clearing token and re-authorizing")
                     _on_auth_failure()
-                    _fresh_auth = _get_auth_for_operation(tool_name)
+                    _fresh_auth = await _get_auth_for_operation(tool_name)
                     if _fresh_auth.get("headers"):
                         headers = {**headers, **_fresh_auth["headers"]}
                     if _fresh_auth.get("params") and params is not None:
@@ -914,7 +914,7 @@ def _on_auth_failure() -> None:
             handler.clear_token()
             logging.info(f"Cleared token for auth scheme '{scheme_name}' after 401")
 
-def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
+async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
     """Get authentication for specific operation (handles multi-auth with OR/AND logic).
 
     Args:
@@ -980,12 +980,17 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 
             try:
                 # Try all injection methods (headers, params, cookies)
+                # OAuth2 methods are async (token refresh/authorize); others are sync.
+                import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
-                    headers.update(handler.get_auth_headers())
+                    _h = handler.get_auth_headers()
+                    headers.update(await _h if _inspect.isawaitable(_h) else _h)
                 if hasattr(handler, 'get_auth_params'):
-                    params.update(handler.get_auth_params())
+                    _p = handler.get_auth_params()
+                    params.update(await _p if _inspect.isawaitable(_p) else _p)
                 if hasattr(handler, 'get_auth_cookies'):
-                    cookies.update(handler.get_auth_cookies())
+                    _c = handler.get_auth_cookies()
+                    cookies.update(await _c if _inspect.isawaitable(_c) else _c)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
@@ -1045,7 +1050,7 @@ async def export_file_json(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("export_file_json")
+    _auth = await _get_auth_for_operation("export_file_json")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1093,7 +1098,7 @@ async def get_file_nodes(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_file_nodes")
+    _auth = await _get_auth_for_operation("get_file_nodes")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1141,7 +1146,7 @@ async def render_node_images(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("render_node_images")
+    _auth = await _get_auth_for_operation("render_node_images")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1181,7 +1186,7 @@ async def list_image_fills(file_key: str = Field(..., description="The Figma fil
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_image_fills")
+    _auth = await _get_auth_for_operation("list_image_fills")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1220,7 +1225,7 @@ async def get_file_metadata(file_key: str = Field(..., description="The unique i
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_file_metadata")
+    _auth = await _get_auth_for_operation("get_file_metadata")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1259,7 +1264,7 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_team_projects")
+    _auth = await _get_auth_for_operation("list_team_projects")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1303,7 +1308,7 @@ async def list_project_files(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_project_files")
+    _auth = await _get_auth_for_operation("list_project_files")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1348,7 +1353,7 @@ async def list_file_versions(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_file_versions")
+    _auth = await _get_auth_for_operation("list_file_versions")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1393,7 +1398,7 @@ async def list_file_comments(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_file_comments")
+    _auth = await _get_auth_for_operation("list_file_comments")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1440,7 +1445,7 @@ async def add_file_comment(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("add_file_comment")
+    _auth = await _get_auth_for_operation("add_file_comment")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1483,7 +1488,7 @@ async def delete_comment(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("delete_comment")
+    _auth = await _get_auth_for_operation("delete_comment")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1525,7 +1530,7 @@ async def list_comment_reactions(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_comment_reactions")
+    _auth = await _get_auth_for_operation("list_comment_reactions")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1570,7 +1575,7 @@ async def add_comment_reaction(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("add_comment_reaction")
+    _auth = await _get_auth_for_operation("add_comment_reaction")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1616,7 +1621,7 @@ async def remove_comment_reaction(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("remove_comment_reaction")
+    _auth = await _get_auth_for_operation("remove_comment_reaction")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1647,7 +1652,7 @@ async def get_current_user() -> dict[str, Any]:
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_current_user")
+    _auth = await _get_auth_for_operation("get_current_user")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1691,7 +1696,7 @@ async def list_team_components(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_team_components")
+    _auth = await _get_auth_for_operation("list_team_components")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1731,7 +1736,7 @@ async def list_file_components(file_key: str = Field(..., description="The main 
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_file_components")
+    _auth = await _get_auth_for_operation("list_file_components")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1770,7 +1775,7 @@ async def get_component(key: str = Field(..., description="The unique identifier
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_component")
+    _auth = await _get_auth_for_operation("get_component")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1814,7 +1819,7 @@ async def list_component_sets(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_component_sets")
+    _auth = await _get_auth_for_operation("list_component_sets")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1854,7 +1859,7 @@ async def list_component_sets_file(file_key: str = Field(..., description="The m
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_component_sets_file")
+    _auth = await _get_auth_for_operation("list_component_sets_file")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1893,7 +1898,7 @@ async def get_component_set(key: str = Field(..., description="The unique identi
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_component_set")
+    _auth = await _get_auth_for_operation("get_component_set")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1937,7 +1942,7 @@ async def list_team_styles(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_team_styles")
+    _auth = await _get_auth_for_operation("list_team_styles")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -1977,7 +1982,7 @@ async def list_file_styles(file_key: str = Field(..., description="The main file
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_file_styles")
+    _auth = await _get_auth_for_operation("list_file_styles")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2016,7 +2021,7 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_style")
+    _auth = await _get_auth_for_operation("get_style")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2059,7 +2064,7 @@ async def list_webhooks(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_webhooks")
+    _auth = await _get_auth_for_operation("list_webhooks")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2108,7 +2113,7 @@ async def create_webhook(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("create_webhook")
+    _auth = await _get_auth_for_operation("create_webhook")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2148,7 +2153,7 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("get_webhook")
+    _auth = await _get_auth_for_operation("get_webhook")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2196,7 +2201,7 @@ async def update_webhook(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("update_webhook")
+    _auth = await _get_auth_for_operation("update_webhook")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2236,7 +2241,7 @@ async def delete_webhook(webhook_id: str = Field(..., description="The unique id
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("delete_webhook")
+    _auth = await _get_auth_for_operation("delete_webhook")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2275,7 +2280,7 @@ async def list_webhook_requests(webhook_id: str = Field(..., description="The un
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_webhook_requests")
+    _auth = await _get_auth_for_operation("list_webhook_requests")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2321,7 +2326,7 @@ async def list_activity_logs(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_activity_logs")
+    _auth = await _get_auth_for_operation("list_activity_logs")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2367,7 +2372,7 @@ async def list_payments(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_payments")
+    _auth = await _get_auth_for_operation("list_payments")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2407,7 +2412,7 @@ async def list_local_variables(file_key: str = Field(..., description="The file 
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_local_variables")
+    _auth = await _get_auth_for_operation("list_local_variables")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2446,7 +2451,7 @@ async def list_published_variables(file_key: str = Field(..., description="The m
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_published_variables")
+    _auth = await _get_auth_for_operation("list_published_variables")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2493,7 +2498,7 @@ async def bulk_modify_variables(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("bulk_modify_variables")
+    _auth = await _get_auth_for_operation("bulk_modify_variables")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2538,7 +2543,7 @@ async def list_dev_resources(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_dev_resources")
+    _auth = await _get_auth_for_operation("list_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2579,7 +2584,7 @@ async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyD
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("create_dev_resources")
+    _auth = await _get_auth_for_operation("create_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2620,7 +2625,7 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("update_dev_resources")
+    _auth = await _get_auth_for_operation("update_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2663,7 +2668,7 @@ async def remove_dev_resource(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("remove_dev_resource")
+    _auth = await _get_auth_for_operation("remove_dev_resource")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2709,7 +2714,7 @@ async def list_library_component_actions(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_component_actions")
+    _auth = await _get_auth_for_operation("list_library_component_actions")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2754,7 +2759,7 @@ async def list_library_component_usages(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_component_usages")
+    _auth = await _get_auth_for_operation("list_library_component_usages")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2801,7 +2806,7 @@ async def list_library_style_actions(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_style_actions")
+    _auth = await _get_auth_for_operation("list_library_style_actions")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2846,7 +2851,7 @@ async def list_library_style_usages(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_style_usages")
+    _auth = await _get_auth_for_operation("list_library_style_usages")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2893,7 +2898,7 @@ async def list_library_variable_actions(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_variable_actions")
+    _auth = await _get_auth_for_operation("list_library_variable_actions")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
@@ -2938,7 +2943,7 @@ async def list_library_variable_usages(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = _get_auth_for_operation("list_library_variable_usages")
+    _auth = await _get_auth_for_operation("list_library_variable_usages")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
