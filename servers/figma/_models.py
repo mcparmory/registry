@@ -1,7 +1,7 @@
 """
 Figma Api MCP Server - Pydantic Models
 
-Generated: 2026-03-31 15:14:51 UTC
+Generated: 2026-03-31 15:28:44 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 

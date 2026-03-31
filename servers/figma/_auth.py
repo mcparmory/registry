@@ -1,7 +1,7 @@
 """
 Authentication module for Figma API MCP server.
 
-Generated: 2026-03-31 15:14:51 UTC
+Generated: 2026-03-31 15:28:44 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -11,6 +11,7 @@ This module contains:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -142,6 +143,7 @@ class OAuth2Auth:
         self.token_file = self.token_dir / "oauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
+        self._auth_lock: asyncio.Lock | None = None  # Lazy init (no event loop yet)
 
         # Load existing token if available
         self._load_token()
@@ -330,14 +332,18 @@ class OAuth2Auth:
         Returns:
             Dict with Authorization header (Bearer token)
         """
-        # No token at all — need initial authorization
-        if not self.token:
-            await self.authorize()
-
-        # Token expired — try refresh, then re-authorize
-        if self._is_token_expired():
-            if not await self._refresh_token():
+        # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
+        if self._auth_lock is None:
+            self._auth_lock = asyncio.Lock()
+        async with self._auth_lock:
+            # Re-check after acquiring lock (another call may have completed auth)
+            if not self.token:
                 await self.authorize()
+
+            # Token expired — try refresh, then re-authorize
+            if self._is_token_expired():
+                if not await self._refresh_token():
+                    await self.authorize()
 
         if not self.token or not self.token.get("access_token"):
             raise ValueError("Failed to obtain access token after authorization attempt")
@@ -426,6 +432,7 @@ class OrgOAuth2Auth:
         self.token_file = self.token_dir / "orgoauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
+        self._auth_lock: asyncio.Lock | None = None  # Lazy init (no event loop yet)
 
         # Load existing token if available
         self._load_token()
@@ -614,14 +621,18 @@ class OrgOAuth2Auth:
         Returns:
             Dict with Authorization header (Bearer token)
         """
-        # No token at all — need initial authorization
-        if not self.token:
-            await self.authorize()
-
-        # Token expired — try refresh, then re-authorize
-        if self._is_token_expired():
-            if not await self._refresh_token():
+        # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
+        if self._auth_lock is None:
+            self._auth_lock = asyncio.Lock()
+        async with self._auth_lock:
+            # Re-check after acquiring lock (another call may have completed auth)
+            if not self.token:
                 await self.authorize()
+
+            # Token expired — try refresh, then re-authorize
+            if self._is_token_expired():
+                if not await self._refresh_token():
+                    await self.authorize()
 
         if not self.token or not self.token.get("access_token"):
             raise ValueError("Failed to obtain access token after authorization attempt")
