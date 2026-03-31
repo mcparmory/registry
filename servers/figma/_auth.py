@@ -1,7 +1,7 @@
 """
 Authentication module for Figma API MCP server.
 
-Generated: 2026-03-31 14:11:27 UTC
+Generated: 2026-03-31 15:14:51 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -137,7 +137,7 @@ class OAuth2Auth:
         self.auth_url = "https://www.figma.com/oauth"
         self.refresh_url = "https://api.figma.com/v1/oauth/refresh"
 
-        # Token storage (secure file-based)
+        # Token storage (secure file-based, unique per scheme)
         self.token_dir = Path(__file__).parent / "tokens"
         self.token_file = self.token_dir / "oauth2_tokens.json"
         self.client: OAuth2Client | None = None
@@ -367,7 +367,7 @@ class OrgOAuth2Auth:
         - Configured via ORG_OAUTH2_CALLBACK_PORT in .env (default: 9400)
         - Must match redirect URI in your OAuth application configuration
     Token Storage:
-        Location: ./tokens/oauth2_tokens.json
+        Location: ./tokens/orgoauth2_tokens.json
         Permissions: 0o600 (owner read/write only)
         Format: JSON with access_token, refresh_token, expires_at
 
@@ -421,9 +421,9 @@ class OrgOAuth2Auth:
         self.auth_url = "https://www.figma.com/oauth"
         self.refresh_url = "https://api.figma.com/v1/oauth/refresh"
 
-        # Token storage (secure file-based)
+        # Token storage (secure file-based, unique per scheme)
         self.token_dir = Path(__file__).parent / "tokens"
-        self.token_file = self.token_dir / "oauth2_tokens.json"
+        self.token_file = self.token_dir / "orgoauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
 

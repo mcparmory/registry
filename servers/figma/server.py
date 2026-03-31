@@ -5,7 +5,7 @@ Figma Api MCP Server
 API Info:
 - Terms of Service: https://www.figma.com/developer-terms/
 
-Generated: 2026-03-31 14:11:27 UTC
+Generated: 2026-03-31 15:14:51 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 
