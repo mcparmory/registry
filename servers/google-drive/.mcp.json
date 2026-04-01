@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "google-drive": {
+      "command": "python",
+      "args": ["<SERVER_DIR>/server.py"]
+    }
+  }
+}
