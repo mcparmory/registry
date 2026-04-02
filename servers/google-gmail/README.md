@@ -1,4 +1,4 @@
-# Gmail API MCP Server
+# Google Gmail MCP Server
 
 Base URL: https://gmail.googleapis.com
 ## API Info

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Gmail Api MCP Server
+Google Gmail MCP Server
 
 API Info:
 - API License: Creative Commons Attribution 3.0 (http://creativecommons.org/licenses/by/3.0/)
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-01 12:46:06 UTC
+Generated: 2026-04-02 11:32:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 
@@ -16,8 +16,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import email.mime.multipart
-import email.mime.text
 import logging
 import os
 import random
@@ -25,6 +23,8 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -45,7 +45,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://gmail.googleapis.com")
-SERVER_NAME = "Gmail API"
+SERVER_NAME = "Google Gmail"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -744,47 +744,43 @@ async def _make_request(
 # Helper Functions
 # ============================================================================
 
-def build_rfc2822_message(from_address: str | None = None, to_addresses: list[str] | None = None, cc_addresses: list[str] | None = None, bcc_addresses: list[str] | None = None, subject: str | None = None, body_text: str | None = None, body_html: str | None = None, in_reply_to: str | None = None, references: str | None = None, date: str | None = None) -> str | None:
+def build_raw_message(email_from: str | None = None, email_to: str | None = None, email_cc: str | None = None, email_bcc: str | None = None, email_subject: str | None = None, email_body: str | None = None, email_body_is_html: bool | None = None, email_reply_to: str | None = None, email_in_reply_to: str | None = None, email_references: str | None = None) -> str | None:
     """Helper function for parameter transformation"""
-    if all(v is None for v in [from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references, date]):
+    if all(v is None for v in [email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references]):
         return None
 
     try:
-        if body_html and body_text:
-            msg = email.mime.multipart.MIMEMultipart('alternative')
-            msg.attach(email.mime.text.MIMEText(body_text, 'plain'))
-            msg.attach(email.mime.text.MIMEText(body_html, 'html'))
-        elif body_html:
-            msg = email.mime.text.MIMEText(body_html, 'html')
-        else:
-            msg = email.mime.text.MIMEText(body_text or '', 'plain')
+        is_html = email_body_is_html if email_body_is_html is not None else False
+        body_subtype = 'html' if is_html else 'plain'
+        msg = MIMEText(email_body or '', _subtype=body_subtype)
         
-        if from_address:
-            msg['From'] = from_address
-        if to_addresses:
-            msg['To'] = ', '.join(to_addresses)
-        if cc_addresses:
-            msg['Cc'] = ', '.join(cc_addresses)
-        if bcc_addresses:
-            msg['Bcc'] = ', '.join(bcc_addresses)
-        if subject:
-            msg['Subject'] = subject
-        if in_reply_to:
-            msg['In-Reply-To'] = in_reply_to
-        if references:
-            msg['References'] = references
-        if date:
-            msg['Date'] = date
+        if email_from:
+            msg['From'] = email_from
+        if email_to:
+            msg['To'] = email_to
+        if email_cc:
+            msg['Cc'] = email_cc
+        if email_subject:
+            msg['Subject'] = email_subject
+        if email_reply_to:
+            msg['Reply-To'] = email_reply_to
+        if email_in_reply_to:
+            msg['In-Reply-To'] = email_in_reply_to
+        if email_references:
+            msg['References'] = email_references
         
-        raw_message = msg.as_string()
-        encoded = base64.urlsafe_b64encode(raw_message.encode()).decode()
+        msg['Date'] = formatdate(localtime=False)
+        msg['Message-ID'] = make_msgid()
+        
+        raw_bytes = msg.as_bytes()
+        encoded = base64.urlsafe_b64encode(raw_bytes).decode('ascii')
         return encoded
     except Exception as e:
         raise ValueError(f"Failed to build RFC 2822 message: {e}") from e
 
-def build_gmail_query(from_address: str | None = None, to_address: str | None = None, subject_contains: str | None = None, has_attachment: bool | None = None, is_unread: bool | None = None, is_starred: bool | None = None, before_date: str | None = None, after_date: str | None = None, rfc822_message_id: str | None = None) -> str | None:
+def build_gmail_query(from_address: str | None = None, to_address: str | None = None, subject_contains: str | None = None, has_attachment: bool | None = None, is_unread: bool | None = None, is_starred: bool | None = None, before_date: str | None = None, after_date: str | None = None, custom_query: str | None = None) -> str | None:
     """Helper function for parameter transformation"""
-    if all(v is None for v in [from_address, to_address, subject_contains, has_attachment, is_unread, is_starred, before_date, after_date, rfc822_message_id]):
+    if all(v is None for v in [from_address, to_address, subject_contains, has_attachment, is_unread, is_starred, before_date, after_date, custom_query]):
         return None
 
     query_parts = []
@@ -805,8 +801,8 @@ def build_gmail_query(from_address: str | None = None, to_address: str | None = 
         query_parts.append(f'before:{before_date}')
     if after_date:
         query_parts.append(f'after:{after_date}')
-    if rfc822_message_id:
-        query_parts.append(f'rfc822msgid:{rfc822_message_id}')
+    if custom_query:
+        query_parts.append(custom_query)
 
     return ' '.join(query_parts)
 
@@ -817,12 +813,12 @@ def parse_from_address(value: str | None = None) -> dict | None:
     value = value.strip()
     if '<' in value and '>' in value:
         display_name = value[:value.index('<')].strip()
-        send_as_email = value[value.index('<') + 1:value.index('>')].strip()
+        send_as_email = value[value.index('<')+1:value.index('>')].strip()
     else:
         display_name = ''
         send_as_email = value
     if not send_as_email:
-        raise ValueError('Email address cannot be empty') from None
+        raise ValueError('Invalid from_address format: email address is required') from None
     return {'displayName': display_name, 'sendAsEmail': send_as_email}
 
 
@@ -1084,7 +1080,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Gmail API")
+mcp = FastMCP("Google Gmail")
 
 # Tags: users
 @mcp.tool()
@@ -1170,7 +1166,7 @@ async def enable_mailbox_watch(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose mailbox to watch. Use the special value 'me' to refer to the authenticated user."),
     label_filter_behavior: Literal["include", "exclude"] | None = Field(None, alias="labelFilterBehavior", description="Determines how the labelIds list is applied: 'include' to only notify on changes to specified labels, or 'exclude' to notify on all changes except those to specified labels."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to filter notifications. When combined with labelFilterBehavior, controls which mailbox changes trigger push notifications. If omitted, all changes are included by default."),
-    topic_name: str | None = Field(None, alias="topicName", description="The fully qualified Cloud Pub/Sub topic name where notifications will be published (format: projects/{project-id}/topics/{topic-name}). The topic must exist and Gmail must have publish permissions on it.")
+    topic_name: str | None = Field(None, alias="topicName", description="The fully qualified Cloud Pub/Sub topic name where notifications will be published. The topic must already exist and Gmail must have publish permissions on it. Use the Cloud Pub/Sub v1 naming format: projects/{project-id}/topics/{topic-name}.")
 ) -> dict[str, Any]:
     """Enable or update push notifications for a Gmail mailbox by subscribing to a Cloud Pub/Sub topic. Changes matching the specified criteria will be published to the configured topic."""
 
@@ -1215,7 +1211,7 @@ async def enable_mailbox_watch(
 @mcp.tool()
 async def list_drafts(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
-    include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include draft messages from the SPAM and TRASH folders in the results."),
+    include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Whether to include draft messages from the SPAM and TRASH folders in the results."),
     max_results: int | None = Field(100, alias="maxResults", description="Maximum number of drafts to return. The default is 100 and the maximum allowed value is 500.", le=500),
     q: str | None = Field(None, description="Filter draft messages using Gmail search query syntax. Supports the same query operators as the Gmail search box (e.g., from:, rfc822msgid:, is:unread).")
 ) -> dict[str, Any]:
@@ -1261,30 +1257,30 @@ async def list_drafts(
 # Tags: users
 @mcp.tool()
 async def create_draft(
-    user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
-    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
-    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this draft message. Labels organize and categorize messages in Gmail."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="Email headers for the message, such as `To`, `From`, and `Subject`. For the top-level message part, these follow standard RFC 2822 format."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    in_reply_to: str | None = Field(None, description="Message-ID of the message being replied to (In-Reply-To header)"),
-    references: str | None = Field(None, description="Message-IDs of related messages (References header)")
+    user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user."),
+    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the draft message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
+    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to the draft message. Labels are applied in the order provided."),
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
 ) -> dict[str, Any]:
-    """Creates a new email draft with the DRAFT label in Gmail. The draft can include message content, labels, and classification metadata."""
+    """Creates a new email draft with the DRAFT label in Gmail. The draft can optionally include classification labels and custom label IDs."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, None, in_reply_to, references, None)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.DraftsCreateRequest(
             path=_models.DraftsCreateRequestPath(user_id=user_id),
-            body=_models.DraftsCreateRequestBody(message=_models.DraftsCreateRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                    payload=_models.DraftsCreateRequestBodyMessagePayload(headers=headers) if any(v is not None for v in [headers]) else None) if any(v is not None for v in [classification_label_values, label_ids, headers, raw]) else None)
+            body=_models.DraftsCreateRequestBody(message=_models.DraftsCreateRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw) if any(v is not None for v in [classification_label_values, label_ids, raw]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_draft: {_validation_err}")
@@ -1300,6 +1296,7 @@ async def create_draft(
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_draft")
@@ -1312,6 +1309,7 @@ async def create_draft(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -1366,33 +1364,31 @@ async def get_draft(
 # Tags: users
 @mcp.tool()
 async def update_draft(
-    user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to update."),
-    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
+    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts. Classification label schemas can be queried using the Google Drive Labels API."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this message. Labels are used to organize and categorize messages in Gmail."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="Email headers for this message part, such as `To`, `From`, and `Subject`. For the top-level message part, includes standard RFC 2822 headers."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    body_html: str | None = Field(None, description="HTML body content (optional, for multipart messages)"),
-    in_reply_to: str | None = Field(None, description="Message-ID of the message being replied to (In-Reply-To header)"),
-    references: str | None = Field(None, description="Message-IDs of related messages (References header)"),
-    date: str | None = Field(None, description="Email date in RFC 2822 format (e.g., 'Mon, 23 May 1960 09:22:33 +0000')")
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
 ) -> dict[str, Any]:
-    """Updates the content and metadata of a draft email message. Replaces the specified draft with new message content, labels, and headers."""
+    """Updates the content of an existing draft message. Replaces the draft's message body and metadata with the provided values."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references, date)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.DraftsUpdateRequest(
             path=_models.DraftsUpdateRequestPath(user_id=user_id, id_=id_),
-            body=_models.DraftsUpdateRequestBody(message=_models.DraftsUpdateRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                    payload=_models.DraftsUpdateRequestBodyMessagePayload(headers=headers) if any(v is not None for v in [headers]) else None) if any(v is not None for v in [classification_label_values, label_ids, headers, raw]) else None)
+            body=_models.DraftsUpdateRequestBody(message=_models.DraftsUpdateRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw) if any(v is not None for v in [classification_label_values, label_ids, raw]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_draft: {_validation_err}")
@@ -1408,6 +1404,7 @@ async def update_draft(
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/{id}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_draft")
@@ -1420,6 +1417,7 @@ async def update_draft(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -1472,32 +1470,30 @@ async def delete_draft(
 async def send_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
-    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this message. Labels organize and categorize messages in the mailbox."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="List of email headers on this message, including standard RFC 2822 headers such as To, From, Subject, and Cc/Bcc for recipient specification."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    body_html: str | None = Field(None, description="HTML body content (optional, for multipart messages)"),
-    in_reply_to: str | None = Field(None, description="Message-ID of the message being replied to (In-Reply-To header)"),
-    references: str | None = Field(None, description="Message-IDs of related messages (References header)"),
-    date: str | None = Field(None, description="Email date in RFC 2822 format (e.g., 'Mon, 23 May 1960 09:22:33 +0000')"),
+    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this message. Labels are applied in the order provided."),
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
     id_: str | None = Field(None, alias="id", description="The immutable ID of the draft.")
 ) -> dict[str, Any]:
-    """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist in the user's mailbox."""
+    """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist and contain valid recipient information."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references, date)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.DraftsSendRequest(
             path=_models.DraftsSendRequestPath(user_id=user_id),
             body=_models.DraftsSendRequestBody(id_=id_,
-                message=_models.DraftsSendRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                    payload=_models.DraftsSendRequestBodyMessagePayload(headers=headers) if any(v is not None for v in [headers]) else None) if any(v is not None for v in [classification_label_values, label_ids, headers, raw]) else None)
+                message=_models.DraftsSendRequestBodyMessage(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw) if any(v is not None for v in [classification_label_values, label_ids, raw]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for send_draft: {_validation_err}")
@@ -1513,6 +1509,7 @@ async def send_draft(
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/send", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/send"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("send_draft")
@@ -1525,6 +1522,7 @@ async def send_draft(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -1537,7 +1535,7 @@ async def list_mailbox_history(
     history_types: list[Literal["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]] | None = Field(None, alias="historyTypes", description="Types of history events to include in results. When specified, only changes matching these types are returned."),
     label_id: str | None = Field(None, alias="labelId", description="Filter results to only include messages with a specific label ID."),
     max_results: int | None = Field(100, alias="maxResults", description="Maximum number of history records to return per request. Defaults to 100 if not specified.", le=500),
-    start_history_id: str | None = Field(None, alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous message, thread, or list response to retrieve changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync instead.")
+    start_history_id: str | None = Field(None, alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous response or message to retrieve all changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync. Omit this parameter for the initial sync request.")
 ) -> dict[str, Any]:
     """Retrieves the chronological history of all changes to a mailbox, including message additions, deletions, and label modifications. Results are returned in chronological order by historyId and support pagination for efficient sync operations."""
 
@@ -1759,14 +1757,14 @@ async def update_label(
 # Tags: users
 @mcp.tool()
 async def update_label_partial(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose label should be updated. Use the special value `me` to refer to the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to update."),
-    label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether the label appears in the label list within the Gmail web interface."),
-    message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within the Gmail web interface."),
-    name: str | None = Field(None, description="The human-readable name displayed for the label in the Gmail interface."),
-    type_: Literal["system", "user"] | None = Field(None, alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be added, modified, or deleted, though some may be applied to or removed from messages under certain conditions.")
+    label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether this label appears in the label list within Gmail's web interface."),
+    message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within Gmail's web interface."),
+    name: str | None = Field(None, description="The human-readable name displayed for this label in the Gmail interface."),
+    type_: Literal["system", "user"] | None = Field(None, alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be modified or deleted, while user labels can be fully customized.")
 ) -> dict[str, Any]:
-    """Update properties of a Gmail label using a patch operation. Modify label visibility settings, display name, or other label attributes without replacing the entire label resource."""
+    """Update properties of a Gmail label using partial update semantics. Modify visibility settings, display name, or other label attributes without replacing the entire label configuration."""
 
     # Construct request model with validation
     try:
@@ -1895,7 +1893,7 @@ async def delete_messages(
 # Tags: users
 @mcp.tool()
 async def modify_message_labels(
-    user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="Label IDs to add to the specified messages. Order is not significant."),
     ids: list[str] | None = Field(None, description="The message IDs to modify. Maximum of 1000 IDs per request."),
     remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="Label IDs to remove from the specified messages. Order is not significant.")
@@ -1942,12 +1940,12 @@ async def modify_message_labels(
 # Tags: users
 @mcp.tool()
 async def get_message(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose message is being retrieved. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the message to retrieve. This ID is typically obtained from message list operations or returned when a message is inserted or imported."),
-    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the message content. Determines the level of detail and structure of the response."),
-    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to `metadata`, specify which email headers to include in the response. Headers should be provided as an array of header names.")
+    user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
+    id_: str = Field(..., alias="id", description="The ID of the message to retrieve, typically obtained from messages.list, messages.insert, or messages.import operations."),
+    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the message content and structure."),
+    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to `metadata`, specify which message headers to include in the response. Headers should be provided as an array of header names.")
 ) -> dict[str, Any]:
-    """Retrieves a specific Gmail message by its ID. Returns message content in the requested format, with optional filtering of metadata headers."""
+    """Retrieves a specific message by ID from the user's mailbox. Supports multiple output formats including full message content, headers only, or raw RFC 2822 format."""
 
     # Construct request model with validation
     try:
@@ -1992,7 +1990,7 @@ async def delete_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to delete.")
 ) -> dict[str, Any]:
-    """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message as a recoverable alternative."""
+    """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message for recoverable deletion instead."""
 
     # Construct request model with validation
     try:
@@ -2031,34 +2029,35 @@ async def delete_message(
 # Tags: users
 @mcp.tool()
 async def import_message(
-    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to reference the authenticated user."),
-    deleted: bool | None = Field(None, description="Mark the email as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to reference the authenticated user."),
+    deleted: bool | None = Field(None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
     internal_date_source: Literal["receivedTime", "dateHeader"] | None = Field(None, alias="internalDateSource", description="Determines the source for Gmail's internal date assignment to the message."),
-    never_mark_spam: bool | None = Field(None, alias="neverMarkSpam", description="Prevent Gmail's spam classifier from marking this email as SPAM, regardless of its classification decision."),
-    process_for_calendar: bool | None = Field(None, alias="processForCalendar", description="Automatically process calendar invitations in the email and add extracted meetings to the user's Google Calendar."),
-    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried via the Google Drive Labels API."),
-    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this message. Labels control message organization and visibility in the mailbox."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="Email headers for this message part. For the top-level message part, includes standard RFC 2822 headers such as `To`, `From`, and `Subject`."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    date: str | None = Field(None, description="Email date in RFC 2822 format (e.g., 'Mon, 23 May 1960 09:22:33 +0000')")
+    never_mark_spam: bool | None = Field(None, alias="neverMarkSpam", description="Prevent Gmail's spam classifier from marking this message as SPAM, regardless of its classification decision."),
+    process_for_calendar: bool | None = Field(None, alias="processForCalendar", description="Automatically process calendar invitations in the message and add any extracted meetings to the user's Google Calendar."),
+    classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried using the Google Drive Labels API."),
+    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to the imported message. Labels are applied in the order provided."),
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
 ) -> dict[str, Any]:
     """Imports a message into the user's mailbox with standard email delivery scanning and classification. The message is processed similarly to SMTP delivery, with a maximum size limit of 150MB."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, None, None, None, date)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.MessagesImportRequest(
             path=_models.MessagesImportRequestPath(user_id=user_id),
             query=_models.MessagesImportRequestQuery(deleted=deleted, internal_date_source=internal_date_source, never_mark_spam=never_mark_spam, process_for_calendar=process_for_calendar),
-            body=_models.MessagesImportRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                payload=_models.MessagesImportRequestBodyPayload(headers=headers) if any(v is not None for v in [headers]) else None)
+            body=_models.MessagesImportRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for import_message: {_validation_err}")
@@ -2075,6 +2074,7 @@ async def import_message(
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("import_message")
@@ -2088,6 +2088,7 @@ async def import_message(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -2100,20 +2101,20 @@ async def list_messages(
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include messages from SPAM and TRASH folders in the results. Defaults to false if not specified."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="Filter results to only include messages with labels matching all specified label IDs. Messages within the same thread may have different labels. Provide as an array of label ID strings."),
     max_results: int | None = Field(100, alias="maxResults", description="Maximum number of messages to return per request. Defaults to 100 if not specified.", le=500),
-    from_address: str | None = Field(None, description="Filter messages from a specific sender email address (e.g., 'someuser@example.com')"),
-    to_address: str | None = Field(None, description="Filter messages sent to a specific recipient email address"),
-    subject_contains: str | None = Field(None, description="Filter messages where subject contains this text"),
-    has_attachment: bool | None = Field(None, description="If true, only return messages with attachments"),
-    is_unread: bool | None = Field(None, description="If true, only return unread messages"),
-    is_starred: bool | None = Field(None, description="If true, only return starred messages"),
-    before_date: str | None = Field(None, description="Filter messages before this date (ISO 8601 format, e.g., '2024-01-15')"),
-    after_date: str | None = Field(None, description="Filter messages after this date (ISO 8601 format, e.g., '2024-01-01')"),
-    rfc822_message_id: str | None = Field(None, description="Filter by RFC 822 message ID")
+    from_address: str | None = Field(None, description="Filter messages from a specific sender email address"),
+    to_address: str | None = Field(None, description="Filter messages to a specific recipient email address"),
+    subject_contains: str | None = Field(None, description="Filter messages with subject containing this text"),
+    has_attachment: bool | None = Field(None, description="Filter messages that have attachments"),
+    is_unread: bool | None = Field(None, description="Filter unread messages only"),
+    is_starred: bool | None = Field(None, description="Filter starred messages only"),
+    before_date: str | None = Field(None, description="Filter messages before this date (YYYY/MM/DD format)"),
+    after_date: str | None = Field(None, description="Filter messages after this date (YYYY/MM/DD format)"),
+    custom_query: str | None = Field(None, description="Custom Gmail query string for advanced filters (e.g., 'rfc822msgid:<id>')")
 ) -> dict[str, Any]:
     """Retrieves a list of messages from the user's mailbox, with optional filtering by labels and inclusion of spam/trash folders. Supports pagination through the maxResults parameter."""
 
     # Call helper functions
-    q = build_gmail_query(from_address, to_address, subject_contains, has_attachment, is_unread, is_starred, before_date, after_date, rfc822_message_id)
+    q = build_gmail_query(from_address, to_address, subject_contains, has_attachment, is_unread, is_starred, before_date, after_date, custom_query)
 
     # Construct request model with validation
     try:
@@ -2155,35 +2156,33 @@ async def list_messages(
 # Tags: users
 @mcp.tool()
 async def insert_message(
-    user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user."),
-    deleted: bool | None = Field(None, description="Mark the message as permanently deleted (not in TRASH) and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
+    deleted: bool | None = Field(None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts."),
     internal_date_source: Literal["receivedTime", "dateHeader"] | None = Field(None, alias="internalDateSource", description="Determines the source for Gmail's internal date assigned to the message."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried via the Google Drive Labels API."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to apply to this message. Labels are applied in the order provided."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="List of email headers for this message part. For the top-level message part, includes standard RFC 2822 headers such as To, From, and Subject."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    body_html: str | None = Field(None, description="HTML body content (optional, for multipart messages)"),
-    in_reply_to: str | None = Field(None, description="Message-ID of the message being replied to (In-Reply-To header)"),
-    references: str | None = Field(None, description="Message-IDs of related messages (References header)"),
-    date: str | None = Field(None, description="Email date in RFC 2822 format (e.g., 'Mon, 23 May 1960 09:22:33 +0000')")
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
 ) -> dict[str, Any]:
-    """Inserts a message directly into a user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send the message but adds it to the mailbox with specified metadata."""
+    """Inserts a message directly into the user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send a message but adds it to the mailbox with optional metadata."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references, date)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.MessagesInsertRequest(
             path=_models.MessagesInsertRequestPath(user_id=user_id),
             query=_models.MessagesInsertRequestQuery(deleted=deleted, internal_date_source=internal_date_source),
-            body=_models.MessagesInsertRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                payload=_models.MessagesInsertRequestBodyPayload(headers=headers) if any(v is not None for v in [headers]) else None)
+            body=_models.MessagesInsertRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for insert_message: {_validation_err}")
@@ -2200,6 +2199,7 @@ async def insert_message(
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("insert_message")
@@ -2213,6 +2213,7 @@ async def insert_message(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -2270,30 +2271,28 @@ async def update_message_labels(
 async def send_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user sending the message. Use the special value `me` to refer to the authenticated user."),
     classification_label_values: list[_models.ClassificationLabelValue] | None = Field(None, alias="classificationLabelValues", description="Classification labels to apply to the message for organizational purposes. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts."),
-    label_ids: list[str] | None = Field(None, alias="labelIds", description="IDs of Gmail labels to apply to the message. Labels are used to organize and categorize messages within the user's mailbox."),
-    headers: list[_models.MessagePartHeader] | None = Field(None, description="Email headers for the message, including standard RFC 2822 headers such as To, From, Subject, Cc, Bcc, and custom headers. Headers are processed in the order provided."),
-    from_address: str | None = Field(None, description="Sender email address (From header)"),
-    to_addresses: list[str] | None = Field(None, description="Recipient email addresses (To header)"),
-    cc_addresses: list[str] | None = Field(None, description="Carbon copy email addresses (Cc header)"),
-    bcc_addresses: list[str] | None = Field(None, description="Blind carbon copy email addresses (Bcc header)"),
-    subject: str | None = Field(None, description="Email subject line (Subject header)"),
-    body_text: str | None = Field(None, description="Plain text body content"),
-    body_html: str | None = Field(None, description="HTML body content (optional, for multipart messages)"),
-    in_reply_to: str | None = Field(None, description="Message-ID of the message being replied to (In-Reply-To header)"),
-    references: str | None = Field(None, description="Message-IDs of related messages (References header)"),
-    date: str | None = Field(None, description="Email date in RFC 2822 format (e.g., 'Mon, 23 May 1960 09:22:33 +0000')")
+    label_ids: list[str] | None = Field(None, alias="labelIds", description="IDs of labels to apply to the message. Labels help organize and categorize messages in Gmail."),
+    email_from: str | None = Field(None, description="Sender email address (From header)"),
+    email_to: str | None = Field(None, description="Recipient email address (To header)"),
+    email_cc: str | None = Field(None, description="Carbon copy recipients (Cc header), comma-separated"),
+    email_bcc: str | None = Field(None, description="Blind carbon copy recipients (Bcc header), comma-separated"),
+    email_subject: str | None = Field(None, description="Email subject line"),
+    email_body: str | None = Field(None, description="Email body content (plain text or HTML)"),
+    email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
+    email_reply_to: str | None = Field(None, description="Reply-To header address"),
+    email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
 ) -> dict[str, Any]:
-    """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered through Gmail's SMTP infrastructure to all specified recipients."""
+    """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered immediately to all specified recipients."""
 
     # Call helper functions
-    raw = build_rfc2822_message(from_address, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references, date)
+    raw = build_raw_message(email_from, email_to, email_cc, email_bcc, email_subject, email_body, email_body_is_html, email_reply_to, email_in_reply_to, email_references)
 
     # Construct request model with validation
     try:
         _request = _models.MessagesSendRequest(
             path=_models.MessagesSendRequestPath(user_id=user_id),
-            body=_models.MessagesSendRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw,
-                payload=_models.MessagesSendRequestBodyPayload(headers=headers) if any(v is not None for v in [headers]) else None)
+            body=_models.MessagesSendRequestBody(classification_label_values=classification_label_values, label_ids=label_ids, raw=raw)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for send_message: {_validation_err}")
@@ -2309,6 +2308,7 @@ async def send_message(
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/send", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/send"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
+    _http_headers["Content-Type"] = "message/cpim"
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("send_message")
@@ -2321,6 +2321,7 @@ async def send_message(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        body_content_type="message/cpim",
         headers=_http_headers,
     )
 
@@ -2455,8 +2456,8 @@ async def get_attachment(
 
 # Tags: users
 @mcp.tool()
-async def get_auto_forwarding(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
-    """Retrieves the auto-forwarding configuration for the specified Gmail account, including the forwarding address and enabled status."""
+async def get_auto_forwarding(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the email address associated with the account, or use the special value \"me\" to refer to the authenticated user's account.")) -> dict[str, Any]:
+    """Retrieves the auto-forwarding configuration for the specified Gmail account. This includes the forwarding address and whether auto-forwarding is enabled."""
 
     # Construct request model with validation
     try:
@@ -2581,11 +2582,11 @@ async def get_imap_settings(user_id: str = Field(..., alias="userId", descriptio
 # Tags: users
 @mcp.tool()
 async def update_imap_settings(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    auto_expunge: bool | None = Field(None, alias="autoExpunge", description="Whether Gmail should immediately expunge messages marked as deleted in IMAP, or wait for client confirmation before removal."),
-    enabled: bool | None = Field(None, description="Whether IMAP access is enabled for this account."),
-    expunge_behavior: Literal["expungeBehaviorUnspecified", "archive", "trash", "deleteForever"] | None = Field(None, alias="expungeBehavior", description="The action to perform on messages when they are marked as deleted and expunged from the last visible IMAP folder."),
-    max_folder_size: int | None = Field(None, alias="maxFolderSize", description="Optional limit on the number of messages an IMAP folder may contain. Valid values are 0 (no limit), 1000, 2000, 5000, or 10000.", json_schema_extra={'format': 'int32'})
+    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address."),
+    auto_expunge: bool | None = Field(None, alias="autoExpunge", description="When enabled, Gmail will immediately expunge messages marked as deleted in IMAP. When disabled, Gmail waits for client confirmation before expunging."),
+    enabled: bool | None = Field(None, description="Controls whether IMAP access is enabled for this Gmail account."),
+    expunge_behavior: Literal["expungeBehaviorUnspecified", "archive", "trash", "deleteForever"] | None = Field(None, alias="expungeBehavior", description="Specifies the action to perform on messages when they are marked as deleted and expunged from the last visible IMAP folder."),
+    max_folder_size: int | None = Field(None, alias="maxFolderSize", description="Optional limit on the maximum number of messages an IMAP folder can contain. Valid values are 0 (no limit), 1000, 2000, 5000, or 10000.", json_schema_extra={'format': 'int32'})
 ) -> dict[str, Any]:
     """Updates IMAP configuration settings for a Gmail account, including enablement status, auto-expunge behavior, and folder size limits."""
 
@@ -2669,7 +2670,7 @@ async def get_language_settings(user_id: str = Field(..., alias="userId", descri
 @mcp.tool()
 async def update_language_setting(
     user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    display_language: str | None = Field(None, alias="displayLanguage", description="The language to display Gmail in, formatted as an RFC 3066 Language Tag. Gmail automatically selects the closest supported variant if the requested language is unavailable on the client. Refer to Gmail settings for the complete list of supported languages.")
+    display_language: str | None = Field(None, alias="displayLanguage", description="The language to display Gmail in, formatted as an RFC 3066 Language Tag. Gmail automatically selects the closest supported variant if the requested language is unavailable on the client.")
 ) -> dict[str, Any]:
     """Updates the display language for Gmail. The saved language may differ from the requested value if Gmail automatically substitutes a supported variant."""
 
@@ -2712,8 +2713,8 @@ async def update_language_setting(
 
 # Tags: users
 @mcp.tool()
-async def get_pop_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
-    """Retrieves the POP (Post Office Protocol) settings for a Gmail account. This includes configuration for POP access to the user's mailbox."""
+async def get_pop_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value \"me\" to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
+    """Retrieves POP (Post Office Protocol) settings for a Gmail account. Returns the current POP configuration including whether POP is enabled and related preferences."""
 
     # Construct request model with validation
     try:
@@ -2797,7 +2798,7 @@ async def update_pop_settings(
 
 # Tags: users
 @mcp.tool()
-async def get_vacation_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
+async def get_vacation_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
     """Retrieves the vacation responder settings for a Gmail account, including whether auto-reply is enabled and the message content."""
 
     # Construct request model with validation
@@ -2837,20 +2838,22 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
 # Tags: users
 @mcp.tool()
 async def update_vacation_responder(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    enable_auto_reply: bool | None = Field(None, alias="enableAutoReply", description="Enable or disable automatic replies to incoming messages during vacation."),
-    end_time: str | None = Field(None, alias="endTime", description="End time for auto-replies as milliseconds since epoch. Gmail will only send auto-replies to messages received before this time. Must be after startTime if both are specified.", json_schema_extra={'format': 'int64'}),
-    response_body_html: str | None = Field(None, alias="responseBodyHtml", description="Response message body in HTML format. Gmail sanitizes HTML before storage. Takes precedence over plain text if both are provided."),
-    response_subject: str | None = Field(None, alias="responseSubject", description="Optional subject line prefix for vacation responses. Either this or the response body must be non-empty to enable auto-replies."),
-    restrict_to_domain: bool | None = Field(None, alias="restrictToDomain", description="Restrict auto-replies to recipients within the user's domain. Only available for Google Workspace users.")
+    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to refer to the authenticated user."),
+    enable_auto_reply: bool | None = Field(None, alias="enableAutoReply", description="Enable or disable automatic vacation replies to incoming messages."),
+    end_time: str | None = Field(None, alias="endTime", description="End time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received before this time. Must be after startTime if both are specified.", json_schema_extra={'format': 'int64'}),
+    response_body_html: str | None = Field(None, alias="responseBodyHtml", description="Vacation response message in HTML format. Gmail will sanitize the HTML before storing. Takes precedence over plain text if both are provided."),
+    response_subject: str | None = Field(None, alias="responseSubject", description="Optional subject line prefix for vacation responses. Either this or responseBodyHtml must be non-empty to enable auto-replies."),
+    restrict_to_contacts: bool | None = Field(None, alias="restrictToContacts", description="Restrict vacation replies to contacts in the user's contact list only."),
+    restrict_to_domain: bool | None = Field(None, alias="restrictToDomain", description="Restrict vacation replies to recipients within the user's domain. Only available for Google Workspace users."),
+    start_time: str | None = Field(None, alias="startTime", description="Start time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received after this time. Must be before endTime if both are specified.", json_schema_extra={'format': 'int64'})
 ) -> dict[str, Any]:
-    """Configure Gmail's automatic vacation responder settings, including enable/disable status, time windows, response content, and domain restrictions."""
+    """Configure Gmail's vacation auto-reply settings, including response message, timing window, and recipient restrictions. At least one of responseSubject or responseBodyHtml must be provided to enable auto-replies."""
 
     # Construct request model with validation
     try:
         _request = _models.SettingsUpdateVacationRequest(
             path=_models.SettingsUpdateVacationRequestPath(user_id=user_id),
-            body=_models.SettingsUpdateVacationRequestBody(enable_auto_reply=enable_auto_reply, end_time=end_time, response_body_html=response_body_html, response_subject=response_subject, restrict_to_domain=restrict_to_domain)
+            body=_models.SettingsUpdateVacationRequestBody(enable_auto_reply=enable_auto_reply, end_time=end_time, response_body_html=response_body_html, response_subject=response_subject, restrict_to_contacts=restrict_to_contacts, restrict_to_domain=restrict_to_domain, start_time=start_time)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_vacation_responder: {_validation_err}")
@@ -2889,7 +2892,7 @@ async def list_cse_identities(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     page_size: int | None = Field(20, alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries.")
 ) -> dict[str, Any]:
-    """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while individual users require hardware key encryption to be enabled."""
+    """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while users managing their own identities require hardware key encryption to be enabled."""
 
     # Construct request model with validation
     try:
@@ -2931,7 +2934,7 @@ async def list_cse_identities(
 # Tags: users
 @mcp.tool()
 async def create_cse_identity(
-    user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user."),
     email_address: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user.")
 ) -> dict[str, Any]:
     """Creates and configures a client-side encryption identity for sending encrypted mail from a user account. The S/MIME certificate is published to a shared domain-wide directory, enabling secure communication within a Google Workspace organization."""
@@ -3151,11 +3154,11 @@ async def list_encryption_keypairs(
 # Tags: users
 @mcp.tool()
 async def create_cse_keypair(
-    user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     pkcs7: str | None = Field(None, description="The public key and its certificate chain in PKCS#7 format with PEM encoding and ASCII armor."),
-    private_key_metadata: list[_models.CsePrivateKeyMetadata] | None = Field(None, alias="privateKeyMetadata", description="Metadata for instances of this key pair's private key. Array order and format should match the key pair structure.")
+    private_key_metadata: list[_models.CsePrivateKeyMetadata] | None = Field(None, alias="privateKeyMetadata", description="An ordered array of metadata objects for instances of this key pair's private key. Order significance and item structure should follow the API specification.")
 ) -> dict[str, Any]:
-    """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires domain-wide delegation for administrators or hardware key encryption enabled for individual users."""
+    """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
 
     # Construct request model with validation
     try:
@@ -3242,7 +3245,7 @@ async def enable_encryption_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to reactivate.")
 ) -> dict[str, Any]:
-    """Reactivates a previously disabled client-side encryption key pair for the user's associated encryption identities. This operation requires either domain-wide delegation authority for administrators or hardware key encryption configured for individual users."""
+    """Reactivates a previously disabled client-side encryption key pair for use with associated encryption identities. Administrators require service account with domain-wide delegation authority; end users require hardware key encryption to be enabled."""
 
     # Construct request model with validation
     try:
@@ -3280,11 +3283,11 @@ async def enable_encryption_keypair(
 
 # Tags: users
 @mcp.tool()
-async def get_cse_keypair(
-    user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
-    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to retrieve.")
+async def get_encryption_keypair(
+    user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair is being retrieved. Use the special value `me` to refer to the authenticated user."),
+    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve.")
 ) -> dict[str, Any]:
-    """Retrieves a client-side encryption key pair for a user. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
+    """Retrieves a client-side encryption key pair for Gmail. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
 
     # Construct request model with validation
     try:
@@ -3292,26 +3295,26 @@ async def get_cse_keypair(
             path=_models.SettingsCseKeypairsGetRequestPath(user_id=user_id, key_pair_id=key_pair_id)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_cse_keypair: {_validation_err}")
+        logging.error(f"Parameter validation failed for get_encryption_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
     # Generate request ID
     _request_id = str(uuid.uuid4())
 
     # Log invocation
-    _log_tool_invocation("get_cse_keypair", "GET", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}", _request_id)
+    _log_tool_invocation("get_encryption_keypair", "GET", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_cse_keypair")
+    _auth = await _get_auth_for_operation("get_encryption_keypair")
     _http_headers.update(_auth.get("headers", {}))
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="get_cse_keypair",
+        tool_name="get_encryption_keypair",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -3323,7 +3326,7 @@ async def get_cse_keypair(
 # Tags: users
 @mcp.tool()
 async def obliterate_cse_keypair(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value 'me' to refer to the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to permanently delete.")
 ) -> dict[str, Any]:
     """Permanently and immediately deletes a client-side encryption key pair. The key pair must be disabled for at least 30 days before obliteration. Once obliterated, all messages encrypted with this key become permanently inaccessible to all users."""
@@ -3450,7 +3453,7 @@ async def add_delegate(
 @mcp.tool()
 async def get_delegate(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose delegates are being queried. Use the special value 'me' to refer to the authenticated user."),
-    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved.")
+    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required.")
 ) -> dict[str, Any]:
     """Retrieves the delegate relationship for a specified email address. This operation requires service account clients with domain-wide authority and uses the delegate's primary email address (not aliases)."""
 
@@ -3492,9 +3495,9 @@ async def get_delegate(
 @mcp.tool()
 async def remove_delegate(
     user_id: str = Field(..., alias="userId", description="The email address of the Gmail account owner. Use the special value 'me' to refer to the authenticated user."),
-    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate to be removed. Delegates must be referenced by their primary email address, not an alias.")
+    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate to be removed from the account.")
 ) -> dict[str, Any]:
-    """Removes a delegate from the user's Gmail account and revokes any associated verification. This operation permanently revokes the delegate's access and is only available to service accounts with domain-wide authority."""
+    """Removes a delegate from the user's Gmail account and revokes any associated verification. This operation requires domain-wide authority and uses the delegate's primary email address."""
 
     # Construct request model with validation
     try:
@@ -3577,13 +3580,13 @@ async def create_filter(
     forward: str | None = Field(None, description="Email address to automatically forward matching messages to."),
     remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="List of label IDs to automatically remove from messages matching this filter."),
     exclude_chats: bool | None = Field(None, alias="excludeChats", description="Whether to exclude chat messages from this filter."),
-    from_: str | None = Field(None, alias="from", description="The sender's display name or email address to match against the message's 'from' field."),
+    from_: str | None = Field(None, alias="from", description="The sender's display name or email address to match against. Matching is case-insensitive."),
     has_attachment: bool | None = Field(None, alias="hasAttachment", description="Whether the message must have one or more attachments to match this filter."),
-    size_comparison: Literal["unspecified", "smaller", "larger"] | None = Field(None, alias="sizeComparison", description="The comparison operator for evaluating message size in bytes against the size threshold."),
+    size_comparison: Literal["unspecified", "smaller", "larger"] | None = Field(None, alias="sizeComparison", description="The comparison operator for message size in bytes relative to the size field."),
     subject: str | None = Field(None, description="Case-insensitive phrase to match in the message subject line. Leading and trailing whitespace is trimmed, and consecutive spaces are collapsed."),
-    to: str | None = Field(None, description="The recipient's display name or email address to match against 'to', 'cc', and 'bcc' header fields. Supports partial email matching (e.g., 'example' matches 'example@gmail.com'). Case-insensitive.")
+    to: str | None = Field(None, description="The recipient's display name or email address to match against. Matches recipients in 'to', 'cc', and 'bcc' fields. The local part of an email address (before @) is sufficient for matching. Matching is case-insensitive.")
 ) -> dict[str, Any]:
-    """Creates an email filter to automatically organize, forward, or modify incoming messages based on specified criteria. Note: A maximum of 1,000 filters can be created per user."""
+    """Creates an email filter to automatically organize, forward, or modify messages based on specified criteria. Note: A maximum of 1,000 filters can be created per user."""
 
     # Construct request model with validation
     try:
@@ -3668,7 +3671,7 @@ async def get_filter(
 # Tags: users
 @mcp.tool()
 async def delete_filter(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose filter will be deleted. Use the special value 'me' to refer to the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The email address of the user whose filter will be deleted. Use the special value \"me\" to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to be deleted.")
 ) -> dict[str, Any]:
     """Permanently deletes a specified Gmail filter. This action is immediate and cannot be undone."""
@@ -3709,8 +3712,8 @@ async def delete_filter(
 
 # Tags: users
 @mcp.tool()
-async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the authenticated user's email address or the special value 'me' to refer to the currently authenticated user.")) -> dict[str, Any]:
-    """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses allow emails to be automatically sent to alternate email accounts."""
+async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the authenticated user's email address, or specify 'me' to refer to the currently authenticated user.")) -> dict[str, Any]:
+    """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses are alternative email addresses where incoming messages can be automatically sent."""
 
     # Construct request model with validation
     try:
@@ -3750,7 +3753,7 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
 @mcp.tool()
 async def create_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the user's email address or the special value 'me' to refer to the authenticated user."),
-    forwarding_email: str | None = Field(None, alias="forwardingEmail", description="The email address to which messages will be forwarded. This address will receive a verification request if ownership confirmation is required.")
+    forwarding_email: str | None = Field(None, alias="forwardingEmail", description="The email address to which messages will be forwarded. This address will receive a verification message if ownership confirmation is required.")
 ) -> dict[str, Any]:
     """Creates a forwarding address for a Gmail account to automatically redirect incoming messages. If ownership verification is required, a verification message will be sent to the recipient; otherwise, the address is immediately accepted. This operation requires service account credentials with domain-wide delegation authority."""
 
@@ -3794,10 +3797,10 @@ async def create_forwarding_address(
 # Tags: users
 @mcp.tool()
 async def get_forwarding_address(
-    user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to reference the authenticated user, or provide the user's email address."),
-    forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address configured for forwarding that should be retrieved.")
+    user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user's account, or provide the user's full email address."),
+    forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved.")
 ) -> dict[str, Any]:
-    """Retrieves the configuration details for a specified forwarding address associated with a Gmail account."""
+    """Retrieves the configuration details for a specified forwarding address associated with a Gmail account. Use this to view forwarding settings for a particular email address."""
 
     # Construct request model with validation
     try:
@@ -3921,18 +3924,18 @@ async def create_send_as_alias(
     is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this address as the default 'From:' address for new messages and auto-replies. Only 'true' can be written; setting this to 'true' automatically sets the previous default address to 'false'."),
     reply_to_address: str | None = Field(None, alias="replyToAddress", description="Optional email address to include in the 'Reply-To:' header for messages sent using this alias. Leave empty to omit the 'Reply-To:' header."),
     signature: str | None = Field(None, description="Optional HTML signature to append to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving."),
-    host: str | None = Field(None, description="The SMTP server hostname for outgoing mail validation and delivery. Required if configuring SMTP settings."),
+    host: str | None = Field(None, description="The SMTP server hostname for outgoing mail validation and delivery. Required if configuring SMTP MSA settings."),
     password: str | None = Field(None, description="The password for SMTP authentication. This write-only field is never returned in responses."),
-    port: int | None = Field(None, description="The SMTP server port number for outgoing mail. Required if configuring SMTP settings.", json_schema_extra={'format': 'int32'}),
-    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication. Required if configuring SMTP settings."),
+    port: int | None = Field(None, description="The SMTP server port number for outgoing mail. Required if configuring SMTP MSA settings.", json_schema_extra={'format': 'int32'}),
+    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication. Required if configuring SMTP MSA settings."),
     username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is never returned in responses."),
-    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. Only applies to custom 'from' aliases."),
-    from_address: str | None = Field(None, description="Email address with optional display name in RFC 5322 format (e.g., 'John Doe <john@example.com>' or 'john@example.com')")
+    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases."),
+    from_address: str | None = Field(None, description="Sender identity in RFC 5322 format: 'Display Name <email@domain>' or just 'email@domain'")
 ) -> dict[str, Any]:
     """Creates a custom 'from' send-as alias for a Gmail account, with optional SMTP configuration validation and ownership verification. This operation is restricted to service accounts with domain-wide delegation authority."""
 
     # Call helper functions
-    from_address_parsed = parse_from_address(None)
+    from_address_parsed = parse_from_address(from_address)
 
     # Construct request model with validation
     try:
@@ -3976,9 +3979,9 @@ async def create_send_as_alias(
 @mcp.tool()
 async def get_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The send-as email address to retrieve. Must be a configured send-as alias for the user.")
+    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to retrieve.")
 ) -> dict[str, Any]:
-    """Retrieves a specific send-as alias configuration for a user. Returns HTTP 404 if the specified send-as email address is not configured."""
+    """Retrieves a specific send-as alias configuration for a user. Returns an HTTP 404 error if the specified email address is not configured as a send-as alias."""
 
     # Construct request model with validation
     try:
@@ -4020,18 +4023,18 @@ async def update_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The Gmail user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to be updated."),
     send_as_email2: str | None = Field(None, alias="sendAsEmail", description="The email address displayed in the 'From:' header for messages sent using this alias. This field is read-only and cannot be modified after creation."),
-    display_name: str | None = Field(None, alias="displayName", description="A display name that appears in the 'From:' header for messages sent using this alias. If empty for custom addresses, Gmail will use the primary account's name. Updates to this field may be silently ignored if the admin has restricted name format changes."),
-    is_default: bool | None = Field(None, alias="isDefault", description="Whether this address should be the default 'From:' address for new messages and auto-replies. Only the value true can be written; setting this to true automatically sets the previous default address to false. Every Gmail account must have exactly one default send-as address."),
-    reply_to_address: str | None = Field(None, alias="replyToAddress", description="An optional email address to include in the 'Reply-To:' header for messages sent using this alias. If empty, no 'Reply-To:' header will be generated."),
-    signature: str | None = Field(None, description="An optional HTML signature to be appended to new emails composed with this alias in the Gmail web UI. Gmail will sanitize the HTML before saving."),
+    display_name: str | None = Field(None, alias="displayName", description="The display name shown in the 'From:' header for messages sent using this alias. If empty for custom addresses, Gmail will use the primary account's name. Updates to this field may be silently ignored if the admin has restricted name format changes."),
+    is_default: bool | None = Field(None, alias="isDefault", description="Whether this alias is the default 'From:' address for new messages and auto-replies. Only 'true' can be written; setting this to true automatically sets the previous default address to false. Every Gmail account must have exactly one default send-as address."),
+    reply_to_address: str | None = Field(None, alias="replyToAddress", description="An optional email address to include in the 'Reply-To:' header for messages sent using this alias. Leave empty to omit the 'Reply-To:' header."),
+    signature: str | None = Field(None, description="An optional HTML signature appended to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving."),
     host: str | None = Field(None, description="The hostname of the SMTP server used for sending mail through this alias."),
-    password: str | None = Field(None, description="The password for authenticating with the SMTP service. This write-only field is never returned in responses."),
-    port: int | None = Field(None, description="The port number of the SMTP service.", json_schema_extra={'format': 'int32'}),
-    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for communicating with the SMTP service."),
-    username: str | None = Field(None, description="The username for authenticating with the SMTP service. This write-only field is never returned in responses."),
+    password: str | None = Field(None, description="The password for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses."),
+    port: int | None = Field(None, description="The port number of the SMTP server.", json_schema_extra={'format': 'int32'}),
+    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication."),
+    username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses."),
     treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases.")
 ) -> dict[str, Any]:
-    """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. For non-primary addresses, this operation requires service account clients with domain-wide delegation authority."""
+    """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. Service accounts with domain-wide delegation can update non-primary addresses; standard users can only modify their own aliases."""
 
     # Construct request model with validation
     try:
@@ -4131,7 +4134,7 @@ async def update_send_as_alias_partial(
 # Tags: users
 @mcp.tool()
 async def delete_send_as_alias(
-    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's email address."),
+    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to reference the authenticated user, or provide the user's email address."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to be deleted.")
 ) -> dict[str, Any]:
     """Deletes a send-as alias for a Gmail account and revokes any associated verification. This operation requires service account credentials with domain-wide delegation authority."""
@@ -4343,19 +4346,20 @@ async def list_smime_configs(
 # Tags: users
 @mcp.tool()
 async def upload_smime_certificate(
-    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that will appear in the 'From:' header for messages sent using this S/MIME configuration."),
-    encrypted_key_password: str | None = Field(None, alias="encryptedKeyPassword", description="Password for the encrypted private key, required if the key is encrypted."),
-    expiration: str | None = Field(None, description="Certificate expiration time expressed in milliseconds since Unix epoch (January 1, 1970 UTC).", json_schema_extra={'format': 'int64'}),
-    is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this S/MIME configuration as the default for this send-as address.")
+    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
+    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that will appear in the From header for messages sent using this S/MIME alias."),
+    encrypted_key_password: str | None = Field(None, alias="encryptedKeyPassword", description="Password for the encrypted private key, required if the PKCS#12 certificate is password-protected."),
+    expiration: str | None = Field(None, description="Certificate expiration timestamp in milliseconds since epoch (Unix time).", json_schema_extra={'format': 'int64'}),
+    is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this S/MIME certificate as the default for this send-as address."),
+    pkcs12: str | None = Field(None, description="The S/MIME certificate in PKCS#12 format. Must contain a single private/public key pair and certificate chain. The private key may be encrypted; if so, provide the password in encryptedKeyPassword.", json_schema_extra={'format': 'byte'})
 ) -> dict[str, Any]:
-    """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be in PKCS12 format and will be associated with the specified email address."""
+    """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be provided in PKCS#12 format containing a private/public key pair and certificate chain."""
 
     # Construct request model with validation
     try:
         _request = _models.SettingsSendAsSmimeInfoInsertRequest(
             path=_models.SettingsSendAsSmimeInfoInsertRequestPath(user_id=user_id, send_as_email=send_as_email),
-            body=_models.SettingsSendAsSmimeInfoInsertRequestBody(encrypted_key_password=encrypted_key_password, expiration=expiration, is_default=is_default)
+            body=_models.SettingsSendAsSmimeInfoInsertRequestBody(encrypted_key_password=encrypted_key_password, expiration=expiration, is_default=is_default, pkcs12=pkcs12)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for upload_smime_certificate: {_validation_err}")
@@ -4437,7 +4441,7 @@ async def get_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread should be retrieved. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to retrieve."),
     format_: Literal["full", "metadata", "minimal"] | None = Field(None, alias="format", description="The format in which to return thread messages. Controls the level of detail included in the response."),
-    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers are returned in the order specified.")
+    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers should be provided as an array of header names.")
 ) -> dict[str, Any]:
     """Retrieves a specific email thread by ID. Returns thread messages in the requested format with optional filtering of metadata headers."""
 
@@ -4526,8 +4530,8 @@ async def list_threads(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include threads from the SPAM and TRASH folders in the results."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="Filter results to only return threads that have all of the specified label IDs. Provide as an array of label ID strings."),
-    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of threads to return in the response. The default is 100 and the maximum allowed value is 500.", le=500),
-    q: str | None = Field(None, description="Filter results to only return threads matching the specified search query. Supports Gmail search syntax (e.g., from, is, rfc822msgid operators). Cannot be used with the gmail.metadata scope.")
+    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of threads to return in the response.", le=500),
+    q: str | None = Field(None, description="Filter results using Gmail search query syntax (e.g., sender, subject, date filters, read status). Not supported when using the gmail.metadata scope.")
 ) -> dict[str, Any]:
     """Retrieves a list of message threads from the user's mailbox, with optional filtering by labels, search query, and inclusion of spam/trash folders."""
 
@@ -4618,7 +4622,7 @@ async def update_thread_labels(
 # Tags: users
 @mcp.tool()
 async def trash_thread(
-    user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user."),
+    user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to reference the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to move to trash.")
 ) -> dict[str, Any]:
     """Moves a thread and all its associated messages to the trash. The thread and its messages can be permanently deleted or recovered from trash."""
@@ -4783,7 +4787,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python gmail_api_server.py", file=sys.stderr)
+        print("  python google_gmail_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -4885,7 +4889,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Gmail Api MCP Server")
+    parser = argparse.ArgumentParser(description="Google Gmail MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -4986,7 +4990,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Gmail Api MCP Server")
+    logger.info("Starting Google Gmail MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

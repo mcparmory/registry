@@ -1,7 +1,7 @@
 """
-Gmail Api MCP Server - Pydantic Models
+Google Gmail MCP Server - Pydantic Models
 
-Generated: 2026-04-01 12:46:06 UTC
+Generated: 2026-04-02 11:32:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 
@@ -94,7 +94,6 @@ __all__ = [
     "WatchRequest",
     "ClassificationLabelValue",
     "CsePrivateKeyMetadata",
-    "MessagePartHeader",
 ]
 
 # ============================================================================
@@ -121,7 +120,7 @@ class WatchRequestPath(StrictModel):
 class WatchRequestBody(StrictModel):
     label_filter_behavior: Literal["include", "exclude"] | None = Field(default=None, validation_alias="labelFilterBehavior", serialization_alias="labelFilterBehavior", description="Determines how the labelIds list is applied: 'include' to only notify on changes to specified labels, or 'exclude' to notify on all changes except those to specified labels.")
     label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to filter notifications. When combined with labelFilterBehavior, controls which mailbox changes trigger push notifications. If omitted, all changes are included by default.")
-    topic_name: str | None = Field(default=None, validation_alias="topicName", serialization_alias="topicName", description="The fully qualified Cloud Pub/Sub topic name where notifications will be published (format: projects/{project-id}/topics/{topic-name}). The topic must exist and Gmail must have publish permissions on it.")
+    topic_name: str | None = Field(default=None, validation_alias="topicName", serialization_alias="topicName", description="The fully qualified Cloud Pub/Sub topic name where notifications will be published. The topic must already exist and Gmail must have publish permissions on it. Use the Cloud Pub/Sub v1 naming format: projects/{project-id}/topics/{topic-name}.")
 class WatchRequest(StrictModel):
     """Enable or update push notifications for a Gmail mailbox by subscribing to a Cloud Pub/Sub topic. Changes matching the specified criteria will be published to the configured topic."""
     path: WatchRequestPath
@@ -131,7 +130,7 @@ class WatchRequest(StrictModel):
 class DraftsListRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user.")
 class DraftsListRequestQuery(StrictModel):
-    include_spam_trash: bool | None = Field(default=None, validation_alias="includeSpamTrash", serialization_alias="includeSpamTrash", description="Include draft messages from the SPAM and TRASH folders in the results.")
+    include_spam_trash: bool | None = Field(default=None, validation_alias="includeSpamTrash", serialization_alias="includeSpamTrash", description="Whether to include draft messages from the SPAM and TRASH folders in the results.")
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of drafts to return. The default is 100 and the maximum allowed value is 500.", le=500)
     q: str | None = Field(default=None, description="Filter draft messages using Gmail search query syntax. Supports the same query operators as the Gmail search box (e.g., from:, rfc822msgid:, is:unread).")
 class DraftsListRequest(StrictModel):
@@ -141,18 +140,15 @@ class DraftsListRequest(StrictModel):
 
 # Operation: create_draft
 class DraftsCreateRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user.")
-class DraftsCreateRequestBodyMessagePayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="Email headers for the message, such as `To`, `From`, and `Subject`. For the top-level message part, these follow standard RFC 2822 format.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user.")
 class DraftsCreateRequestBodyMessage(StrictModel):
-    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts.")
-    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this draft message. Labels organize and categorize messages in Gmail.")
+    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the draft message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts.")
+    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to the draft message. Labels are applied in the order provided.")
     raw: str | None = Field(default=None, validation_alias="raw", serialization_alias="raw", description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: DraftsCreateRequestBodyMessagePayload | None = None
 class DraftsCreateRequestBody(StrictModel):
     message: DraftsCreateRequestBodyMessage | None = None
 class DraftsCreateRequest(StrictModel):
-    """Creates a new email draft with the DRAFT label in Gmail. The draft can include message content, labels, and classification metadata."""
+    """Creates a new email draft with the DRAFT label in Gmail. The draft can optionally include classification labels and custom label IDs."""
     path: DraftsCreateRequestPath
     body: DraftsCreateRequestBody | None = None
 
@@ -169,19 +165,16 @@ class DraftsGetRequest(StrictModel):
 
 # Operation: update_draft
 class DraftsUpdateRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the draft message to update.")
-class DraftsUpdateRequestBodyMessagePayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="Email headers for this message part, such as `To`, `From`, and `Subject`. For the top-level message part, includes standard RFC 2822 headers.")
 class DraftsUpdateRequestBodyMessage(StrictModel):
-    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts.")
+    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts. Classification label schemas can be queried using the Google Drive Labels API.")
     label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this message. Labels are used to organize and categorize messages in Gmail.")
     raw: str | None = Field(default=None, validation_alias="raw", serialization_alias="raw", description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: DraftsUpdateRequestBodyMessagePayload | None = None
 class DraftsUpdateRequestBody(StrictModel):
     message: DraftsUpdateRequestBodyMessage | None = None
 class DraftsUpdateRequest(StrictModel):
-    """Updates the content and metadata of a draft email message. Replaces the specified draft with new message content, labels, and headers."""
+    """Updates the content of an existing draft message. Replaces the draft's message body and metadata with the provided values."""
     path: DraftsUpdateRequestPath
     body: DraftsUpdateRequestBody | None = None
 
@@ -196,18 +189,15 @@ class DraftsDeleteRequest(StrictModel):
 # Operation: send_draft
 class DraftsSendRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user.")
-class DraftsSendRequestBodyMessagePayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="List of email headers on this message, including standard RFC 2822 headers such as To, From, Subject, and Cc/Bcc for recipient specification.")
 class DraftsSendRequestBodyMessage(StrictModel):
     classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts.")
-    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this message. Labels organize and categorize messages in the mailbox.")
+    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this message. Labels are applied in the order provided.")
     raw: str | None = Field(default=None, validation_alias="raw", serialization_alias="raw", description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: DraftsSendRequestBodyMessagePayload | None = None
 class DraftsSendRequestBody(StrictModel):
     id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="The immutable ID of the draft.")
     message: DraftsSendRequestBodyMessage | None = None
 class DraftsSendRequest(StrictModel):
-    """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist in the user's mailbox."""
+    """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist and contain valid recipient information."""
     path: DraftsSendRequestPath
     body: DraftsSendRequestBody | None = None
 
@@ -218,7 +208,7 @@ class HistoryListRequestQuery(StrictModel):
     history_types: list[Literal["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]] | None = Field(default=None, validation_alias="historyTypes", serialization_alias="historyTypes", description="Types of history events to include in results. When specified, only changes matching these types are returned.")
     label_id: str | None = Field(default=None, validation_alias="labelId", serialization_alias="labelId", description="Filter results to only include messages with a specific label ID.")
     max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of history records to return per request. Defaults to 100 if not specified.", le=500)
-    start_history_id: str | None = Field(default=None, validation_alias="startHistoryId", serialization_alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous message, thread, or list response to retrieve changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync instead.")
+    start_history_id: str | None = Field(default=None, validation_alias="startHistoryId", serialization_alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous response or message to retrieve all changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync. Omit this parameter for the initial sync request.")
 class HistoryListRequest(StrictModel):
     """Retrieves the chronological history of all changes to a mailbox, including message additions, deletions, and label modifications. Results are returned in chronological order by historyId and support pagination for efficient sync operations."""
     path: HistoryListRequestPath
@@ -268,15 +258,15 @@ class LabelsUpdateRequest(StrictModel):
 
 # Operation: update_label_partial
 class LabelsPatchRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose label should be updated. Use the special value `me` to refer to the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the label to update.")
 class LabelsPatchRequestBody(StrictModel):
-    label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(default=None, validation_alias="labelListVisibility", serialization_alias="labelListVisibility", description="Controls whether the label appears in the label list within the Gmail web interface.")
-    message_list_visibility: Literal["show", "hide"] | None = Field(default=None, validation_alias="messageListVisibility", serialization_alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within the Gmail web interface.")
-    name: str | None = Field(default=None, description="The human-readable name displayed for the label in the Gmail interface.")
-    type_: Literal["system", "user"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be added, modified, or deleted, though some may be applied to or removed from messages under certain conditions.")
+    label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(default=None, validation_alias="labelListVisibility", serialization_alias="labelListVisibility", description="Controls whether this label appears in the label list within Gmail's web interface.")
+    message_list_visibility: Literal["show", "hide"] | None = Field(default=None, validation_alias="messageListVisibility", serialization_alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within Gmail's web interface.")
+    name: str | None = Field(default=None, description="The human-readable name displayed for this label in the Gmail interface.")
+    type_: Literal["system", "user"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be modified or deleted, while user labels can be fully customized.")
 class LabelsPatchRequest(StrictModel):
-    """Update properties of a Gmail label using a patch operation. Modify label visibility settings, display name, or other label attributes without replacing the entire label resource."""
+    """Update properties of a Gmail label using partial update semantics. Modify visibility settings, display name, or other label attributes without replacing the entire label configuration."""
     path: LabelsPatchRequestPath
     body: LabelsPatchRequestBody | None = None
 
@@ -300,7 +290,7 @@ class MessagesBatchDeleteRequest(StrictModel):
 
 # Operation: modify_message_labels
 class MessagesBatchModifyRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user.")
 class MessagesBatchModifyRequestBody(StrictModel):
     add_label_ids: list[str] | None = Field(default=None, validation_alias="addLabelIds", serialization_alias="addLabelIds", description="Label IDs to add to the specified messages. Order is not significant.")
     ids: list[str] | None = Field(default=None, description="The message IDs to modify. Maximum of 1000 IDs per request.")
@@ -312,13 +302,13 @@ class MessagesBatchModifyRequest(StrictModel):
 
 # Operation: get_message
 class MessagesGetRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose message is being retrieved. Use the special value `me` to refer to the authenticated user.")
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the message to retrieve. This ID is typically obtained from message list operations or returned when a message is inserted or imported.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user.")
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The ID of the message to retrieve, typically obtained from messages.list, messages.insert, or messages.import operations.")
 class MessagesGetRequestQuery(StrictModel):
-    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(default=None, validation_alias="format", serialization_alias="format", description="The format in which to return the message content. Determines the level of detail and structure of the response.")
-    metadata_headers: list[str] | None = Field(default=None, validation_alias="metadataHeaders", serialization_alias="metadataHeaders", description="When format is set to `metadata`, specify which email headers to include in the response. Headers should be provided as an array of header names.")
+    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(default=None, validation_alias="format", serialization_alias="format", description="The format in which to return the message content and structure.")
+    metadata_headers: list[str] | None = Field(default=None, validation_alias="metadataHeaders", serialization_alias="metadataHeaders", description="When format is set to `metadata`, specify which message headers to include in the response. Headers should be provided as an array of header names.")
 class MessagesGetRequest(StrictModel):
-    """Retrieves a specific Gmail message by its ID. Returns message content in the requested format, with optional filtering of metadata headers."""
+    """Retrieves a specific message by ID from the user's mailbox. Supports multiple output formats including full message content, headers only, or raw RFC 2822 format."""
     path: MessagesGetRequestPath
     query: MessagesGetRequestQuery | None = None
 
@@ -327,24 +317,21 @@ class MessagesDeleteRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose message will be deleted. Use the special value `me` to refer to the authenticated user.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the message to delete.")
 class MessagesDeleteRequest(StrictModel):
-    """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message as a recoverable alternative."""
+    """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message for recoverable deletion instead."""
     path: MessagesDeleteRequestPath
 
 # Operation: import_message
 class MessagesImportRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to reference the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value 'me' to reference the authenticated user.")
 class MessagesImportRequestQuery(StrictModel):
-    deleted: bool | None = Field(default=None, description="Mark the email as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts.")
+    deleted: bool | None = Field(default=None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts.")
     internal_date_source: Literal["receivedTime", "dateHeader"] | None = Field(default=None, validation_alias="internalDateSource", serialization_alias="internalDateSource", description="Determines the source for Gmail's internal date assignment to the message.")
-    never_mark_spam: bool | None = Field(default=None, validation_alias="neverMarkSpam", serialization_alias="neverMarkSpam", description="Prevent Gmail's spam classifier from marking this email as SPAM, regardless of its classification decision.")
-    process_for_calendar: bool | None = Field(default=None, validation_alias="processForCalendar", serialization_alias="processForCalendar", description="Automatically process calendar invitations in the email and add extracted meetings to the user's Google Calendar.")
-class MessagesImportRequestBodyPayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="Email headers for this message part. For the top-level message part, includes standard RFC 2822 headers such as `To`, `From`, and `Subject`.")
+    never_mark_spam: bool | None = Field(default=None, validation_alias="neverMarkSpam", serialization_alias="neverMarkSpam", description="Prevent Gmail's spam classifier from marking this message as SPAM, regardless of its classification decision.")
+    process_for_calendar: bool | None = Field(default=None, validation_alias="processForCalendar", serialization_alias="processForCalendar", description="Automatically process calendar invitations in the message and add any extracted meetings to the user's Google Calendar.")
 class MessagesImportRequestBody(StrictModel):
-    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried via the Google Drive Labels API.")
-    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this message. Labels control message organization and visibility in the mailbox.")
+    classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried using the Google Drive Labels API.")
+    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to the imported message. Labels are applied in the order provided.")
     raw: str | None = Field(default=None, description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: MessagesImportRequestBodyPayload | None = None
 class MessagesImportRequest(StrictModel):
     """Imports a message into the user's mailbox with standard email delivery scanning and classification. The message is processed similarly to SMTP delivery, with a maximum size limit of 150MB."""
     path: MessagesImportRequestPath
@@ -366,19 +353,16 @@ class MessagesListRequest(StrictModel):
 
 # Operation: insert_message
 class MessagesInsertRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user.")
 class MessagesInsertRequestQuery(StrictModel):
-    deleted: bool | None = Field(default=None, description="Mark the message as permanently deleted (not in TRASH) and only visible to Google Vault administrators. Only applicable for Google Workspace accounts.")
+    deleted: bool | None = Field(default=None, description="Mark the message as permanently deleted and only visible to Google Vault administrators. Only applicable for Google Workspace accounts.")
     internal_date_source: Literal["receivedTime", "dateHeader"] | None = Field(default=None, validation_alias="internalDateSource", serialization_alias="internalDateSource", description="Determines the source for Gmail's internal date assigned to the message.")
-class MessagesInsertRequestBodyPayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="List of email headers for this message part. For the top-level message part, includes standard RFC 2822 headers such as To, From, and Subject.")
 class MessagesInsertRequestBody(StrictModel):
     classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification label values to apply to the message. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only applicable for Google Workspace accounts. Available schemas can be queried via the Google Drive Labels API.")
     label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="List of label IDs to apply to this message. Labels are applied in the order provided.")
     raw: str | None = Field(default=None, description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: MessagesInsertRequestBodyPayload | None = None
 class MessagesInsertRequest(StrictModel):
-    """Inserts a message directly into a user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send the message but adds it to the mailbox with specified metadata."""
+    """Inserts a message directly into the user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send a message but adds it to the mailbox with optional metadata."""
     path: MessagesInsertRequestPath
     query: MessagesInsertRequestQuery | None = None
     body: MessagesInsertRequestBody | None = None
@@ -398,15 +382,12 @@ class MessagesModifyRequest(StrictModel):
 # Operation: send_message
 class MessagesSendRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user sending the message. Use the special value `me` to refer to the authenticated user.")
-class MessagesSendRequestBodyPayload(StrictModel):
-    headers: list[MessagePartHeader] | None = Field(default=None, validation_alias="headers", serialization_alias="headers", description="Email headers for the message, including standard RFC 2822 headers such as To, From, Subject, Cc, Bcc, and custom headers. Headers are processed in the order provided.")
 class MessagesSendRequestBody(StrictModel):
     classification_label_values: list[ClassificationLabelValue] | None = Field(default=None, validation_alias="classificationLabelValues", serialization_alias="classificationLabelValues", description="Classification labels to apply to the message for organizational purposes. Each classification label ID must be unique; duplicate IDs will be deduplicated arbitrarily. Only available for Google Workspace accounts.")
-    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="IDs of Gmail labels to apply to the message. Labels are used to organize and categorize messages within the user's mailbox.")
+    label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="IDs of labels to apply to the message. Labels help organize and categorize messages in Gmail.")
     raw: str | None = Field(default=None, description="The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.", json_schema_extra={'format': 'byte'})
-    payload: MessagesSendRequestBodyPayload | None = None
 class MessagesSendRequest(StrictModel):
-    """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered through Gmail's SMTP infrastructure to all specified recipients."""
+    """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered immediately to all specified recipients."""
     path: MessagesSendRequestPath
     body: MessagesSendRequestBody | None = None
 
@@ -437,9 +418,9 @@ class MessagesAttachmentsGetRequest(StrictModel):
 
 # Operation: get_auto_forwarding
 class SettingsGetAutoForwardingRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use the email address associated with the account, or use the special value \"me\" to refer to the authenticated user's account.")
 class SettingsGetAutoForwardingRequest(StrictModel):
-    """Retrieves the auto-forwarding configuration for the specified Gmail account, including the forwarding address and enabled status."""
+    """Retrieves the auto-forwarding configuration for the specified Gmail account. This includes the forwarding address and whether auto-forwarding is enabled."""
     path: SettingsGetAutoForwardingRequestPath
 
 # Operation: update_auto_forwarding
@@ -463,12 +444,12 @@ class SettingsGetImapRequest(StrictModel):
 
 # Operation: update_imap_settings
 class SettingsUpdateImapRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or 'me' to reference the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address.")
 class SettingsUpdateImapRequestBody(StrictModel):
-    auto_expunge: bool | None = Field(default=None, validation_alias="autoExpunge", serialization_alias="autoExpunge", description="Whether Gmail should immediately expunge messages marked as deleted in IMAP, or wait for client confirmation before removal.")
-    enabled: bool | None = Field(default=None, description="Whether IMAP access is enabled for this account.")
-    expunge_behavior: Literal["expungeBehaviorUnspecified", "archive", "trash", "deleteForever"] | None = Field(default=None, validation_alias="expungeBehavior", serialization_alias="expungeBehavior", description="The action to perform on messages when they are marked as deleted and expunged from the last visible IMAP folder.")
-    max_folder_size: int | None = Field(default=None, validation_alias="maxFolderSize", serialization_alias="maxFolderSize", description="Optional limit on the number of messages an IMAP folder may contain. Valid values are 0 (no limit), 1000, 2000, 5000, or 10000.", json_schema_extra={'format': 'int32'})
+    auto_expunge: bool | None = Field(default=None, validation_alias="autoExpunge", serialization_alias="autoExpunge", description="When enabled, Gmail will immediately expunge messages marked as deleted in IMAP. When disabled, Gmail waits for client confirmation before expunging.")
+    enabled: bool | None = Field(default=None, description="Controls whether IMAP access is enabled for this Gmail account.")
+    expunge_behavior: Literal["expungeBehaviorUnspecified", "archive", "trash", "deleteForever"] | None = Field(default=None, validation_alias="expungeBehavior", serialization_alias="expungeBehavior", description="Specifies the action to perform on messages when they are marked as deleted and expunged from the last visible IMAP folder.")
+    max_folder_size: int | None = Field(default=None, validation_alias="maxFolderSize", serialization_alias="maxFolderSize", description="Optional limit on the maximum number of messages an IMAP folder can contain. Valid values are 0 (no limit), 1000, 2000, 5000, or 10000.", json_schema_extra={'format': 'int32'})
 class SettingsUpdateImapRequest(StrictModel):
     """Updates IMAP configuration settings for a Gmail account, including enablement status, auto-expunge behavior, and folder size limits."""
     path: SettingsUpdateImapRequestPath
@@ -485,7 +466,7 @@ class SettingsGetLanguageRequest(StrictModel):
 class SettingsUpdateLanguageRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or 'me' to reference the authenticated user.")
 class SettingsUpdateLanguageRequestBody(StrictModel):
-    display_language: str | None = Field(default=None, validation_alias="displayLanguage", serialization_alias="displayLanguage", description="The language to display Gmail in, formatted as an RFC 3066 Language Tag. Gmail automatically selects the closest supported variant if the requested language is unavailable on the client. Refer to Gmail settings for the complete list of supported languages.")
+    display_language: str | None = Field(default=None, validation_alias="displayLanguage", serialization_alias="displayLanguage", description="The language to display Gmail in, formatted as an RFC 3066 Language Tag. Gmail automatically selects the closest supported variant if the requested language is unavailable on the client.")
 class SettingsUpdateLanguageRequest(StrictModel):
     """Updates the display language for Gmail. The saved language may differ from the requested value if Gmail automatically substitutes a supported variant."""
     path: SettingsUpdateLanguageRequestPath
@@ -493,9 +474,9 @@ class SettingsUpdateLanguageRequest(StrictModel):
 
 # Operation: get_pop_settings
 class SettingsGetPopRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the special value \"me\" to refer to the authenticated user, or provide a specific email address.")
 class SettingsGetPopRequest(StrictModel):
-    """Retrieves the POP (Post Office Protocol) settings for a Gmail account. This includes configuration for POP access to the user's mailbox."""
+    """Retrieves POP (Post Office Protocol) settings for a Gmail account. Returns the current POP configuration including whether POP is enabled and related preferences."""
     path: SettingsGetPopRequestPath
 
 # Operation: update_pop_settings
@@ -511,22 +492,24 @@ class SettingsUpdatePopRequest(StrictModel):
 
 # Operation: get_vacation_settings
 class SettingsGetVacationRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address.")
 class SettingsGetVacationRequest(StrictModel):
     """Retrieves the vacation responder settings for a Gmail account, including whether auto-reply is enabled and the message content."""
     path: SettingsGetVacationRequestPath
 
 # Operation: update_vacation_responder
 class SettingsUpdateVacationRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or 'me' to reference the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or 'me' to refer to the authenticated user.")
 class SettingsUpdateVacationRequestBody(StrictModel):
-    enable_auto_reply: bool | None = Field(default=None, validation_alias="enableAutoReply", serialization_alias="enableAutoReply", description="Enable or disable automatic replies to incoming messages during vacation.")
-    end_time: str | None = Field(default=None, validation_alias="endTime", serialization_alias="endTime", description="End time for auto-replies as milliseconds since epoch. Gmail will only send auto-replies to messages received before this time. Must be after startTime if both are specified.", json_schema_extra={'format': 'int64'})
-    response_body_html: str | None = Field(default=None, validation_alias="responseBodyHtml", serialization_alias="responseBodyHtml", description="Response message body in HTML format. Gmail sanitizes HTML before storage. Takes precedence over plain text if both are provided.")
-    response_subject: str | None = Field(default=None, validation_alias="responseSubject", serialization_alias="responseSubject", description="Optional subject line prefix for vacation responses. Either this or the response body must be non-empty to enable auto-replies.")
-    restrict_to_domain: bool | None = Field(default=None, validation_alias="restrictToDomain", serialization_alias="restrictToDomain", description="Restrict auto-replies to recipients within the user's domain. Only available for Google Workspace users.")
+    enable_auto_reply: bool | None = Field(default=None, validation_alias="enableAutoReply", serialization_alias="enableAutoReply", description="Enable or disable automatic vacation replies to incoming messages.")
+    end_time: str | None = Field(default=None, validation_alias="endTime", serialization_alias="endTime", description="End time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received before this time. Must be after startTime if both are specified.", json_schema_extra={'format': 'int64'})
+    response_body_html: str | None = Field(default=None, validation_alias="responseBodyHtml", serialization_alias="responseBodyHtml", description="Vacation response message in HTML format. Gmail will sanitize the HTML before storing. Takes precedence over plain text if both are provided.")
+    response_subject: str | None = Field(default=None, validation_alias="responseSubject", serialization_alias="responseSubject", description="Optional subject line prefix for vacation responses. Either this or responseBodyHtml must be non-empty to enable auto-replies.")
+    restrict_to_contacts: bool | None = Field(default=None, validation_alias="restrictToContacts", serialization_alias="restrictToContacts", description="Restrict vacation replies to contacts in the user's contact list only.")
+    restrict_to_domain: bool | None = Field(default=None, validation_alias="restrictToDomain", serialization_alias="restrictToDomain", description="Restrict vacation replies to recipients within the user's domain. Only available for Google Workspace users.")
+    start_time: str | None = Field(default=None, validation_alias="startTime", serialization_alias="startTime", description="Start time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received after this time. Must be before endTime if both are specified.", json_schema_extra={'format': 'int64'})
 class SettingsUpdateVacationRequest(StrictModel):
-    """Configure Gmail's automatic vacation responder settings, including enable/disable status, time windows, response content, and domain restrictions."""
+    """Configure Gmail's vacation auto-reply settings, including response message, timing window, and recipient restrictions. At least one of responseSubject or responseBodyHtml must be provided to enable auto-replies."""
     path: SettingsUpdateVacationRequestPath
     body: SettingsUpdateVacationRequestBody | None = None
 
@@ -536,13 +519,13 @@ class SettingsCseIdentitiesListRequestPath(StrictModel):
 class SettingsCseIdentitiesListRequestQuery(StrictModel):
     page_size: int | None = Field(default=None, validation_alias="pageSize", serialization_alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries.")
 class SettingsCseIdentitiesListRequest(StrictModel):
-    """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while individual users require hardware key encryption to be enabled."""
+    """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while users managing their own identities require hardware key encryption to be enabled."""
     path: SettingsCseIdentitiesListRequestPath
     query: SettingsCseIdentitiesListRequestQuery | None = None
 
 # Operation: create_cse_identity
 class SettingsCseIdentitiesCreateRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user.")
 class SettingsCseIdentitiesCreateRequestBody(StrictModel):
     email_address: str | None = Field(default=None, validation_alias="emailAddress", serialization_alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user.")
 class SettingsCseIdentitiesCreateRequest(StrictModel):
@@ -589,12 +572,12 @@ class SettingsCseKeypairsListRequest(StrictModel):
 
 # Operation: create_cse_keypair
 class SettingsCseKeypairsCreateRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user.")
 class SettingsCseKeypairsCreateRequestBody(StrictModel):
     pkcs7: str | None = Field(default=None, description="The public key and its certificate chain in PKCS#7 format with PEM encoding and ASCII armor.")
-    private_key_metadata: list[CsePrivateKeyMetadata] | None = Field(default=None, validation_alias="privateKeyMetadata", serialization_alias="privateKeyMetadata", description="Metadata for instances of this key pair's private key. Array order and format should match the key pair structure.")
+    private_key_metadata: list[CsePrivateKeyMetadata] | None = Field(default=None, validation_alias="privateKeyMetadata", serialization_alias="privateKeyMetadata", description="An ordered array of metadata objects for instances of this key pair's private key. Order significance and item structure should follow the API specification.")
 class SettingsCseKeypairsCreateRequest(StrictModel):
-    """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires domain-wide delegation for administrators or hardware key encryption enabled for individual users."""
+    """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
     path: SettingsCseKeypairsCreateRequestPath
     body: SettingsCseKeypairsCreateRequestBody | None = None
 
@@ -611,20 +594,20 @@ class SettingsCseKeypairsEnableRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user.")
     key_pair_id: str = Field(default=..., validation_alias="keyPairId", serialization_alias="keyPairId", description="The unique identifier of the key pair to reactivate.")
 class SettingsCseKeypairsEnableRequest(StrictModel):
-    """Reactivates a previously disabled client-side encryption key pair for the user's associated encryption identities. This operation requires either domain-wide delegation authority for administrators or hardware key encryption configured for individual users."""
+    """Reactivates a previously disabled client-side encryption key pair for use with associated encryption identities. Administrators require service account with domain-wide delegation authority; end users require hardware key encryption to be enabled."""
     path: SettingsCseKeypairsEnableRequestPath
 
-# Operation: get_cse_keypair
+# Operation: get_encryption_keypair
 class SettingsCseKeypairsGetRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user.")
-    key_pair_id: str = Field(default=..., validation_alias="keyPairId", serialization_alias="keyPairId", description="The unique identifier of the key pair to retrieve.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose key pair is being retrieved. Use the special value `me` to refer to the authenticated user.")
+    key_pair_id: str = Field(default=..., validation_alias="keyPairId", serialization_alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve.")
 class SettingsCseKeypairsGetRequest(StrictModel):
-    """Retrieves a client-side encryption key pair for a user. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
+    """Retrieves a client-side encryption key pair for Gmail. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
     path: SettingsCseKeypairsGetRequestPath
 
 # Operation: obliterate_cse_keypair
 class SettingsCseKeypairsObliterateRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value 'me' to refer to the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value `me` to refer to the authenticated user.")
     key_pair_id: str = Field(default=..., validation_alias="keyPairId", serialization_alias="keyPairId", description="The unique identifier of the key pair to permanently delete.")
 class SettingsCseKeypairsObliterateRequest(StrictModel):
     """Permanently and immediately deletes a client-side encryption key pair. The key pair must be disabled for at least 30 days before obliteration. Once obliterated, all messages encrypted with this key become permanently inaccessible to all users."""
@@ -650,7 +633,7 @@ class SettingsDelegatesCreateRequest(StrictModel):
 # Operation: get_delegate
 class SettingsDelegatesGetRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose delegates are being queried. Use the special value 'me' to refer to the authenticated user.")
-    delegate_email: str = Field(default=..., validation_alias="delegateEmail", serialization_alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved.")
+    delegate_email: str = Field(default=..., validation_alias="delegateEmail", serialization_alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required.")
 class SettingsDelegatesGetRequest(StrictModel):
     """Retrieves the delegate relationship for a specified email address. This operation requires service account clients with domain-wide authority and uses the delegate's primary email address (not aliases)."""
     path: SettingsDelegatesGetRequestPath
@@ -658,9 +641,9 @@ class SettingsDelegatesGetRequest(StrictModel):
 # Operation: remove_delegate
 class SettingsDelegatesDeleteRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the Gmail account owner. Use the special value 'me' to refer to the authenticated user.")
-    delegate_email: str = Field(default=..., validation_alias="delegateEmail", serialization_alias="delegateEmail", description="The primary email address of the delegate to be removed. Delegates must be referenced by their primary email address, not an alias.")
+    delegate_email: str = Field(default=..., validation_alias="delegateEmail", serialization_alias="delegateEmail", description="The primary email address of the delegate to be removed from the account.")
 class SettingsDelegatesDeleteRequest(StrictModel):
-    """Removes a delegate from the user's Gmail account and revokes any associated verification. This operation permanently revokes the delegate's access and is only available to service accounts with domain-wide authority."""
+    """Removes a delegate from the user's Gmail account and revokes any associated verification. This operation requires domain-wide authority and uses the delegate's primary email address."""
     path: SettingsDelegatesDeleteRequestPath
 
 # Operation: list_filters
@@ -679,16 +662,16 @@ class SettingsFiltersCreateRequestBodyAction(StrictModel):
     remove_label_ids: list[str] | None = Field(default=None, validation_alias="removeLabelIds", serialization_alias="removeLabelIds", description="List of label IDs to automatically remove from messages matching this filter.")
 class SettingsFiltersCreateRequestBodyCriteria(StrictModel):
     exclude_chats: bool | None = Field(default=None, validation_alias="excludeChats", serialization_alias="excludeChats", description="Whether to exclude chat messages from this filter.")
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="The sender's display name or email address to match against the message's 'from' field.")
+    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="The sender's display name or email address to match against. Matching is case-insensitive.")
     has_attachment: bool | None = Field(default=None, validation_alias="hasAttachment", serialization_alias="hasAttachment", description="Whether the message must have one or more attachments to match this filter.")
-    size_comparison: Literal["unspecified", "smaller", "larger"] | None = Field(default=None, validation_alias="sizeComparison", serialization_alias="sizeComparison", description="The comparison operator for evaluating message size in bytes against the size threshold.")
+    size_comparison: Literal["unspecified", "smaller", "larger"] | None = Field(default=None, validation_alias="sizeComparison", serialization_alias="sizeComparison", description="The comparison operator for message size in bytes relative to the size field.")
     subject: str | None = Field(default=None, validation_alias="subject", serialization_alias="subject", description="Case-insensitive phrase to match in the message subject line. Leading and trailing whitespace is trimmed, and consecutive spaces are collapsed.")
-    to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="The recipient's display name or email address to match against 'to', 'cc', and 'bcc' header fields. Supports partial email matching (e.g., 'example' matches 'example@gmail.com'). Case-insensitive.")
+    to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="The recipient's display name or email address to match against. Matches recipients in 'to', 'cc', and 'bcc' fields. The local part of an email address (before @) is sufficient for matching. Matching is case-insensitive.")
 class SettingsFiltersCreateRequestBody(StrictModel):
     action: SettingsFiltersCreateRequestBodyAction | None = None
     criteria: SettingsFiltersCreateRequestBodyCriteria | None = None
 class SettingsFiltersCreateRequest(StrictModel):
-    """Creates an email filter to automatically organize, forward, or modify incoming messages based on specified criteria. Note: A maximum of 1,000 filters can be created per user."""
+    """Creates an email filter to automatically organize, forward, or modify messages based on specified criteria. Note: A maximum of 1,000 filters can be created per user."""
     path: SettingsFiltersCreateRequestPath
     body: SettingsFiltersCreateRequestBody | None = None
 
@@ -702,7 +685,7 @@ class SettingsFiltersGetRequest(StrictModel):
 
 # Operation: delete_filter
 class SettingsFiltersDeleteRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose filter will be deleted. Use the special value 'me' to refer to the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The email address of the user whose filter will be deleted. Use the special value \"me\" to refer to the authenticated user.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the filter to be deleted.")
 class SettingsFiltersDeleteRequest(StrictModel):
     """Permanently deletes a specified Gmail filter. This action is immediate and cannot be undone."""
@@ -710,16 +693,16 @@ class SettingsFiltersDeleteRequest(StrictModel):
 
 # Operation: list_forwarding_addresses
 class SettingsForwardingAddressesListRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use the authenticated user's email address or the special value 'me' to refer to the currently authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use the authenticated user's email address, or specify 'me' to refer to the currently authenticated user.")
 class SettingsForwardingAddressesListRequest(StrictModel):
-    """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses allow emails to be automatically sent to alternate email accounts."""
+    """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses are alternative email addresses where incoming messages can be automatically sent."""
     path: SettingsForwardingAddressesListRequestPath
 
 # Operation: create_forwarding_address
 class SettingsForwardingAddressesCreateRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the user's email address or the special value 'me' to refer to the authenticated user.")
 class SettingsForwardingAddressesCreateRequestBody(StrictModel):
-    forwarding_email: str | None = Field(default=None, validation_alias="forwardingEmail", serialization_alias="forwardingEmail", description="The email address to which messages will be forwarded. This address will receive a verification request if ownership confirmation is required.")
+    forwarding_email: str | None = Field(default=None, validation_alias="forwardingEmail", serialization_alias="forwardingEmail", description="The email address to which messages will be forwarded. This address will receive a verification message if ownership confirmation is required.")
 class SettingsForwardingAddressesCreateRequest(StrictModel):
     """Creates a forwarding address for a Gmail account to automatically redirect incoming messages. If ownership verification is required, a verification message will be sent to the recipient; otherwise, the address is immediately accepted. This operation requires service account credentials with domain-wide delegation authority."""
     path: SettingsForwardingAddressesCreateRequestPath
@@ -727,10 +710,10 @@ class SettingsForwardingAddressesCreateRequest(StrictModel):
 
 # Operation: get_forwarding_address
 class SettingsForwardingAddressesGetRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use 'me' to reference the authenticated user, or provide the user's email address.")
-    forwarding_email: str = Field(default=..., validation_alias="forwardingEmail", serialization_alias="forwardingEmail", description="The email address configured for forwarding that should be retrieved.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user's account, or provide the user's full email address.")
+    forwarding_email: str = Field(default=..., validation_alias="forwardingEmail", serialization_alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved.")
 class SettingsForwardingAddressesGetRequest(StrictModel):
-    """Retrieves the configuration details for a specified forwarding address associated with a Gmail account."""
+    """Retrieves the configuration details for a specified forwarding address associated with a Gmail account. Use this to view forwarding settings for a particular email address."""
     path: SettingsForwardingAddressesGetRequestPath
 
 # Operation: delete_forwarding_address
@@ -752,16 +735,16 @@ class SettingsSendAsListRequest(StrictModel):
 class SettingsSendAsCreateRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user's email address or 'me' to reference the authenticated user.")
 class SettingsSendAsCreateRequestBodySmtpMsa(StrictModel):
-    host: str | None = Field(default=None, validation_alias="host", serialization_alias="host", description="The SMTP server hostname for outgoing mail validation and delivery. Required if configuring SMTP settings.")
+    host: str | None = Field(default=None, validation_alias="host", serialization_alias="host", description="The SMTP server hostname for outgoing mail validation and delivery. Required if configuring SMTP MSA settings.")
     password: str | None = Field(default=None, validation_alias="password", serialization_alias="password", description="The password for SMTP authentication. This write-only field is never returned in responses.")
-    port: int | None = Field(default=None, validation_alias="port", serialization_alias="port", description="The SMTP server port number for outgoing mail. Required if configuring SMTP settings.", json_schema_extra={'format': 'int32'})
-    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(default=None, validation_alias="securityMode", serialization_alias="securityMode", description="The security protocol for SMTP communication. Required if configuring SMTP settings.")
+    port: int | None = Field(default=None, validation_alias="port", serialization_alias="port", description="The SMTP server port number for outgoing mail. Required if configuring SMTP MSA settings.", json_schema_extra={'format': 'int32'})
+    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(default=None, validation_alias="securityMode", serialization_alias="securityMode", description="The security protocol for SMTP communication. Required if configuring SMTP MSA settings.")
     username: str | None = Field(default=None, validation_alias="username", serialization_alias="username", description="The username for SMTP authentication. This write-only field is never returned in responses.")
 class SettingsSendAsCreateRequestBody(StrictModel):
     is_default: bool | None = Field(default=None, validation_alias="isDefault", serialization_alias="isDefault", description="Whether to set this address as the default 'From:' address for new messages and auto-replies. Only 'true' can be written; setting this to 'true' automatically sets the previous default address to 'false'.")
     reply_to_address: str | None = Field(default=None, validation_alias="replyToAddress", serialization_alias="replyToAddress", description="Optional email address to include in the 'Reply-To:' header for messages sent using this alias. Leave empty to omit the 'Reply-To:' header.")
     signature: str | None = Field(default=None, description="Optional HTML signature to append to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving.")
-    treat_as_alias: bool | None = Field(default=None, validation_alias="treatAsAlias", serialization_alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. Only applies to custom 'from' aliases.")
+    treat_as_alias: bool | None = Field(default=None, validation_alias="treatAsAlias", serialization_alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases.")
     display_name: dict | None = Field(default=None, validation_alias="displayName", serialization_alias="displayName", description="A name that appears in the \"From:\" header for mail sent using this alias. For custom \"from\" addresses, when this is empty, Gmail will populate the \"From:\" header with the name that is used for the primary address associated with the account. If the admin has disabled the ability for users to update their name format, requests to update this field for the primary login will silently fail.")
     send_as_email: str | None = Field(default=None, validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address that appears in the \"From:\" header for mail sent using this alias. This is read-only for all operations except create.")
     smtp_msa: SettingsSendAsCreateRequestBodySmtpMsa | None = Field(default=None, validation_alias="smtpMsa", serialization_alias="smtpMsa")
@@ -773,9 +756,9 @@ class SettingsSendAsCreateRequest(StrictModel):
 # Operation: get_send_as_alias
 class SettingsSendAsGetRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user.")
-    send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The send-as email address to retrieve. Must be a configured send-as alias for the user.")
+    send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address of the send-as alias to retrieve.")
 class SettingsSendAsGetRequest(StrictModel):
-    """Retrieves a specific send-as alias configuration for a user. Returns HTTP 404 if the specified send-as email address is not configured."""
+    """Retrieves a specific send-as alias configuration for a user. Returns an HTTP 404 error if the specified email address is not configured as a send-as alias."""
     path: SettingsSendAsGetRequestPath
 
 # Operation: update_send_as_alias
@@ -784,20 +767,20 @@ class SettingsSendAsUpdateRequestPath(StrictModel):
     send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address of the send-as alias to be updated.")
 class SettingsSendAsUpdateRequestBodySmtpMsa(StrictModel):
     host: str | None = Field(default=None, validation_alias="host", serialization_alias="host", description="The hostname of the SMTP server used for sending mail through this alias.")
-    password: str | None = Field(default=None, validation_alias="password", serialization_alias="password", description="The password for authenticating with the SMTP service. This write-only field is never returned in responses.")
-    port: int | None = Field(default=None, validation_alias="port", serialization_alias="port", description="The port number of the SMTP service.", json_schema_extra={'format': 'int32'})
-    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(default=None, validation_alias="securityMode", serialization_alias="securityMode", description="The security protocol for communicating with the SMTP service.")
-    username: str | None = Field(default=None, validation_alias="username", serialization_alias="username", description="The username for authenticating with the SMTP service. This write-only field is never returned in responses.")
+    password: str | None = Field(default=None, validation_alias="password", serialization_alias="password", description="The password for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses.")
+    port: int | None = Field(default=None, validation_alias="port", serialization_alias="port", description="The port number of the SMTP server.", json_schema_extra={'format': 'int32'})
+    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(default=None, validation_alias="securityMode", serialization_alias="securityMode", description="The security protocol for SMTP communication.")
+    username: str | None = Field(default=None, validation_alias="username", serialization_alias="username", description="The username for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses.")
 class SettingsSendAsUpdateRequestBody(StrictModel):
     send_as_email: str | None = Field(default=None, validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address displayed in the 'From:' header for messages sent using this alias. This field is read-only and cannot be modified after creation.")
-    display_name: str | None = Field(default=None, validation_alias="displayName", serialization_alias="displayName", description="A display name that appears in the 'From:' header for messages sent using this alias. If empty for custom addresses, Gmail will use the primary account's name. Updates to this field may be silently ignored if the admin has restricted name format changes.")
-    is_default: bool | None = Field(default=None, validation_alias="isDefault", serialization_alias="isDefault", description="Whether this address should be the default 'From:' address for new messages and auto-replies. Only the value true can be written; setting this to true automatically sets the previous default address to false. Every Gmail account must have exactly one default send-as address.")
-    reply_to_address: str | None = Field(default=None, validation_alias="replyToAddress", serialization_alias="replyToAddress", description="An optional email address to include in the 'Reply-To:' header for messages sent using this alias. If empty, no 'Reply-To:' header will be generated.")
-    signature: str | None = Field(default=None, description="An optional HTML signature to be appended to new emails composed with this alias in the Gmail web UI. Gmail will sanitize the HTML before saving.")
+    display_name: str | None = Field(default=None, validation_alias="displayName", serialization_alias="displayName", description="The display name shown in the 'From:' header for messages sent using this alias. If empty for custom addresses, Gmail will use the primary account's name. Updates to this field may be silently ignored if the admin has restricted name format changes.")
+    is_default: bool | None = Field(default=None, validation_alias="isDefault", serialization_alias="isDefault", description="Whether this alias is the default 'From:' address for new messages and auto-replies. Only 'true' can be written; setting this to true automatically sets the previous default address to false. Every Gmail account must have exactly one default send-as address.")
+    reply_to_address: str | None = Field(default=None, validation_alias="replyToAddress", serialization_alias="replyToAddress", description="An optional email address to include in the 'Reply-To:' header for messages sent using this alias. Leave empty to omit the 'Reply-To:' header.")
+    signature: str | None = Field(default=None, description="An optional HTML signature appended to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving.")
     treat_as_alias: bool | None = Field(default=None, validation_alias="treatAsAlias", serialization_alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases.")
     smtp_msa: SettingsSendAsUpdateRequestBodySmtpMsa | None = Field(default=None, validation_alias="smtpMsa", serialization_alias="smtpMsa")
 class SettingsSendAsUpdateRequest(StrictModel):
-    """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. For non-primary addresses, this operation requires service account clients with domain-wide delegation authority."""
+    """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. Service accounts with domain-wide delegation can update non-primary addresses; standard users can only modify their own aliases."""
     path: SettingsSendAsUpdateRequestPath
     body: SettingsSendAsUpdateRequestBody | None = None
 
@@ -826,7 +809,7 @@ class SettingsSendAsPatchRequest(StrictModel):
 
 # Operation: delete_send_as_alias
 class SettingsSendAsDeleteRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's email address.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The Gmail user account identifier. Use the special value 'me' to reference the authenticated user, or provide the user's email address.")
     send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address of the send-as alias to be deleted.")
 class SettingsSendAsDeleteRequest(StrictModel):
     """Deletes a send-as alias for a Gmail account and revokes any associated verification. This operation requires service account credentials with domain-wide delegation authority."""
@@ -868,14 +851,15 @@ class SettingsSendAsSmimeInfoListRequest(StrictModel):
 
 # Operation: upload_smime_certificate
 class SettingsSendAsSmimeInfoInsertRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user.")
-    send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address that will appear in the 'From:' header for messages sent using this S/MIME configuration.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user.")
+    send_as_email: str = Field(default=..., validation_alias="sendAsEmail", serialization_alias="sendAsEmail", description="The email address that will appear in the From header for messages sent using this S/MIME alias.")
 class SettingsSendAsSmimeInfoInsertRequestBody(StrictModel):
-    encrypted_key_password: str | None = Field(default=None, validation_alias="encryptedKeyPassword", serialization_alias="encryptedKeyPassword", description="Password for the encrypted private key, required if the key is encrypted.")
-    expiration: str | None = Field(default=None, description="Certificate expiration time expressed in milliseconds since Unix epoch (January 1, 1970 UTC).", json_schema_extra={'format': 'int64'})
-    is_default: bool | None = Field(default=None, validation_alias="isDefault", serialization_alias="isDefault", description="Whether to set this S/MIME configuration as the default for this send-as address.")
+    encrypted_key_password: str | None = Field(default=None, validation_alias="encryptedKeyPassword", serialization_alias="encryptedKeyPassword", description="Password for the encrypted private key, required if the PKCS#12 certificate is password-protected.")
+    expiration: str | None = Field(default=None, description="Certificate expiration timestamp in milliseconds since epoch (Unix time).", json_schema_extra={'format': 'int64'})
+    is_default: bool | None = Field(default=None, validation_alias="isDefault", serialization_alias="isDefault", description="Whether to set this S/MIME certificate as the default for this send-as address.")
+    pkcs12: str | None = Field(default=None, description="The S/MIME certificate in PKCS#12 format. Must contain a single private/public key pair and certificate chain. The private key may be encrypted; if so, provide the password in encryptedKeyPassword.", json_schema_extra={'format': 'byte'})
 class SettingsSendAsSmimeInfoInsertRequest(StrictModel):
-    """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be in PKCS12 format and will be associated with the specified email address."""
+    """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be provided in PKCS#12 format containing a private/public key pair and certificate chain."""
     path: SettingsSendAsSmimeInfoInsertRequestPath
     body: SettingsSendAsSmimeInfoInsertRequestBody | None = None
 
@@ -894,7 +878,7 @@ class ThreadsGetRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the thread to retrieve.")
 class ThreadsGetRequestQuery(StrictModel):
     format_: Literal["full", "metadata", "minimal"] | None = Field(default=None, validation_alias="format", serialization_alias="format", description="The format in which to return thread messages. Controls the level of detail included in the response.")
-    metadata_headers: list[str] | None = Field(default=None, validation_alias="metadataHeaders", serialization_alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers are returned in the order specified.")
+    metadata_headers: list[str] | None = Field(default=None, validation_alias="metadataHeaders", serialization_alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers should be provided as an array of header names.")
 class ThreadsGetRequest(StrictModel):
     """Retrieves a specific email thread by ID. Returns thread messages in the requested format with optional filtering of metadata headers."""
     path: ThreadsGetRequestPath
@@ -914,8 +898,8 @@ class ThreadsListRequestPath(StrictModel):
 class ThreadsListRequestQuery(StrictModel):
     include_spam_trash: bool | None = Field(default=None, validation_alias="includeSpamTrash", serialization_alias="includeSpamTrash", description="Include threads from the SPAM and TRASH folders in the results.")
     label_ids: list[str] | None = Field(default=None, validation_alias="labelIds", serialization_alias="labelIds", description="Filter results to only return threads that have all of the specified label IDs. Provide as an array of label ID strings.")
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of threads to return in the response. The default is 100 and the maximum allowed value is 500.", le=500)
-    q: str | None = Field(default=None, description="Filter results to only return threads matching the specified search query. Supports Gmail search syntax (e.g., from, is, rfc822msgid operators). Cannot be used with the gmail.metadata scope.")
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of threads to return in the response.", le=500)
+    q: str | None = Field(default=None, description="Filter results using Gmail search query syntax (e.g., sender, subject, date filters, read status). Not supported when using the gmail.metadata scope.")
 class ThreadsListRequest(StrictModel):
     """Retrieves a list of message threads from the user's mailbox, with optional filtering by labels, search query, and inclusion of spam/trash folders."""
     path: ThreadsListRequestPath
@@ -935,7 +919,7 @@ class ThreadsModifyRequest(StrictModel):
 
 # Operation: trash_thread
 class ThreadsTrashRequestPath(StrictModel):
-    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value 'me' to indicate the authenticated user.")
+    user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The user's email address or the special value 'me' to reference the authenticated user.")
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the thread to move to trash.")
 class ThreadsTrashRequest(StrictModel):
     """Moves a thread and all its associated messages to the trash. The thread and its messages can be permanently deleted or recovered from trash."""

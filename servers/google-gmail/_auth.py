@@ -1,7 +1,7 @@
 """
-Authentication module for Gmail API MCP server.
+Authentication module for Google Gmail MCP server.
 
-Generated: 2026-04-01 12:46:06 UTC
+Generated: 2026-04-02 11:32:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -135,7 +135,7 @@ class OAuth2Auth:
         self.token_file = self.token_dir / "oauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
-        self._auth_lock: asyncio.Lock | None = None  # Lazy init (no event loop yet)
+        self._auth_lock = asyncio.Lock()  # Prevents concurrent auth flows (dual browser tabs)
 
         # Load existing token if available
         self._load_token()
@@ -324,8 +324,6 @@ class OAuth2Auth:
             Dict with Authorization header (Bearer token)
         """
         # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
-        if self._auth_lock is None:
-            self._auth_lock = asyncio.Lock()
         async with self._auth_lock:
             # Re-check after acquiring lock (another call may have completed auth)
             if not self.token:
@@ -404,7 +402,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_cse_keypair": [["OAuth2"]],
     "disable_cse_keypair": [["OAuth2"]],
     "enable_encryption_keypair": [["OAuth2"]],
-    "get_cse_keypair": [["OAuth2"]],
+    "get_encryption_keypair": [["OAuth2"]],
     "obliterate_cse_keypair": [["OAuth2"]],
     "list_delegates": [["OAuth2"]],
     "add_delegate": [["OAuth2"]],

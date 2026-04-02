@@ -1,7 +1,7 @@
 """
-Gmail Api MCP Server - Validators
+Google Gmail MCP Server - Validators
 
-Generated: 2026-04-01 12:46:06 UTC
+Generated: 2026-04-02 11:32:27 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
 

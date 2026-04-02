@@ -1,4 +1,4 @@
-# Gmail API MCP Server
+# Google Gmail MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-google-gmail .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Gmail API MCP Server" \
+LABEL org.opencontainers.image.title="Google Gmail MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
