@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-The Confluence Cloud Rest Api MCP Server
+Atlassian Confluence MCP Server
 
 API Info:
 - Terms of Service: https://atlassian.com/terms/
@@ -6907,7 +6907,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="The Confluence Cloud Rest Api MCP Server")
+    parser = argparse.ArgumentParser(description="Atlassian Confluence MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -7008,7 +7008,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting The Confluence Cloud Rest Api MCP Server")
+    logger.info("Starting Atlassian Confluence MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

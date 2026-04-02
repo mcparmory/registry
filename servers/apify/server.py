@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Apify Api MCP Server
+Apify MCP Server
 
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0.html)
@@ -6806,7 +6806,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Apify Api MCP Server")
+    parser = argparse.ArgumentParser(description="Apify MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -6907,7 +6907,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Apify Api MCP Server")
+    logger.info("Starting Apify MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

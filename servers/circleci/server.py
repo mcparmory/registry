@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Circleci Api MCP Server
+CircleCI MCP Server
 
 API Info:
 - API License: MIT (https://opensource.org/license/MIT)
@@ -6390,7 +6390,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Circleci Api MCP Server")
+    parser = argparse.ArgumentParser(description="CircleCI MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -6491,7 +6491,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Circleci Api MCP Server")
+    logger.info("Starting CircleCI MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bitbucket Api MCP Server
+Bitbucket MCP Server
 
 API Info:
 - Contact: Bitbucket Support <support@bitbucket.org> (https://support.atlassian.com/bitbucket-cloud/)
@@ -13293,7 +13293,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Bitbucket Api MCP Server")
+    parser = argparse.ArgumentParser(description="Bitbucket MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -13394,7 +13394,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Bitbucket Api MCP Server")
+    logger.info("Starting Bitbucket MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gitlab Api MCP Server
+GitLab MCP Server
 
 API Info:
 - API License: CC BY-SA 4.0 (https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
@@ -4369,7 +4369,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Gitlab Api MCP Server")
+    parser = argparse.ArgumentParser(description="GitLab MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -4470,7 +4470,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Gitlab Api MCP Server")
+    logger.info("Starting GitLab MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

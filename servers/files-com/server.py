@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Files.com Api MCP Server
+Files.com MCP Server
 
 API Info:
 - Contact: Files.com Customer Success Team <support@files.com>
@@ -10811,7 +10811,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Files.com Api MCP Server")
+    parser = argparse.ArgumentParser(description="Files.com MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -10912,7 +10912,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Files.com Api MCP Server")
+    logger.info("Starting Files.com MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

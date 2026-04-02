@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Globalping Api MCP Server
+Globalping MCP Server
 
 API Info:
 - API License: Open Software License 3.0 (OSL-3.0)
@@ -1336,7 +1336,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Globalping Api MCP Server")
+    parser = argparse.ArgumentParser(description="Globalping MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -1437,7 +1437,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Globalping Api MCP Server")
+    logger.info("Starting Globalping MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

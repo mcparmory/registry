@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Canva Connect Api MCP Server
+Canva MCP Server
 
 API Info:
 - API License: ©2023 All Rights Reserved
@@ -3057,7 +3057,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Canva Connect Api MCP Server")
+    parser = argparse.ArgumentParser(description="Canva MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -3158,7 +3158,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Canva Connect Api MCP Server")
+    logger.info("Starting Canva MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

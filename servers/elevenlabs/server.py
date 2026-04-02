@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Elevenlabs Api Documentation MCP Server
+ElevenLabs MCP Server
 Generated: 2026-03-31 17:05:14 UTC
 Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
 """
@@ -13770,7 +13770,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Elevenlabs Api Documentation MCP Server")
+    parser = argparse.ArgumentParser(description="ElevenLabs MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -13871,7 +13871,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Elevenlabs Api Documentation MCP Server")
+    logger.info("Starting ElevenLabs MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

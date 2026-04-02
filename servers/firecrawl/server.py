@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Firecrawl Api MCP Server
+Firecrawl MCP Server
 
 API Info:
 - Contact: Firecrawl Support <support@firecrawl.dev> (https://firecrawl.dev/support)
@@ -2119,7 +2119,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Firecrawl Api MCP Server")
+    parser = argparse.ArgumentParser(description="Firecrawl MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2220,7 +2220,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Firecrawl Api MCP Server")
+    logger.info("Starting Firecrawl MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

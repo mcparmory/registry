@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Google Analytics Data Api MCP Server
+Google Analytics MCP Server
 
 API Info:
 - API License: Creative Commons Attribution 3.0 (http://creativecommons.org/licenses/by/3.0/)
@@ -1819,7 +1819,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Google Analytics Data Api MCP Server")
+    parser = argparse.ArgumentParser(description="Google Analytics MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -1920,7 +1920,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Google Analytics Data Api MCP Server")
+    logger.info("Starting Google Analytics MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

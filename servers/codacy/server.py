@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Codacy Api MCP Server
+Codacy MCP Server
 
 API Info:
 - API License: Codacy. All rights reserved (https://www.codacy.com)
@@ -13119,7 +13119,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Codacy Api MCP Server")
+    parser = argparse.ArgumentParser(description="Codacy MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -13220,7 +13220,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Codacy Api MCP Server")
+    logger.info("Starting Codacy MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

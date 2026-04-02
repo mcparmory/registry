@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Box Platform Api MCP Server
+Box MCP Server
 
 API Info:
 - API License: Apache-2.0 (https://www.apache.org/licenses/LICENSE-2.0)
@@ -14343,7 +14343,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Box Platform Api MCP Server")
+    parser = argparse.ArgumentParser(description="Box MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -14444,7 +14444,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Box Platform Api MCP Server")
+    logger.info("Starting Box MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
