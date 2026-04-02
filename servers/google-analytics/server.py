@@ -42,7 +42,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://analyticsdata.googleapis.com")
-SERVER_NAME = "Google Analytics Data API"
+SERVER_NAME = "Google Analytics"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1000,7 +1000,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Google Analytics Data API")
+mcp = FastMCP("Google Analytics")
 
 # Tags: properties
 @mcp.tool()

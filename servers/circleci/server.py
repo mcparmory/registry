@@ -40,7 +40,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://circleci.com/api/v2")
-SERVER_NAME = "CircleCI API"
+SERVER_NAME = "CircleCI"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1009,7 +1009,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("CircleCI API")
+mcp = FastMCP("CircleCI")
 
 # Tags: Insights
 @mcp.tool()

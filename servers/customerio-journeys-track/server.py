@@ -37,7 +37,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://track.customer.io")
-SERVER_NAME = "Journeys Track API"
+SERVER_NAME = "Customer.io Journeys Track"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -990,7 +990,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Journeys Track API")
+mcp = FastMCP("Customer.io Journeys Track")
 
 # Tags: trackRegion
 @mcp.tool()

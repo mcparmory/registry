@@ -43,7 +43,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.canva.com/rest")
-SERVER_NAME = "Canva Connect API"
+SERVER_NAME = "Canva"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1042,7 +1042,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Canva Connect API")
+mcp = FastMCP("Canva")
 
 # Tags: app
 @mcp.tool()

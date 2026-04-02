@@ -56,7 +56,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "resolve_page": os.getenv("SERVER_URL_RESOLVE_PAGE", "https://navy.oncall.datadoghq.com"),
     "send_server_event": os.getenv("SERVER_URL_SEND_SERVER_EVENT", "https://browser-intake-datadoghq.com"),
 }
-SERVER_NAME = "Datadog API V2 Collection"
+SERVER_NAME = "Datadog"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1287,7 +1287,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Datadog API V2 Collection")
+mcp = FastMCP("Datadog")
 
 # Tags: Fleet Automation
 @mcp.tool()

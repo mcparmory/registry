@@ -38,7 +38,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.clickup.com/api")
-SERVER_NAME = "ClickUp API v2 Reference"
+SERVER_NAME = "ClickUp"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1032,7 +1032,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("ClickUp API v2 Reference")
+mcp = FastMCP("ClickUp")
 
 # Tags: Attachments
 @mcp.tool()

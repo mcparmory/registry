@@ -59,7 +59,7 @@ OPERATION_URL_MAP: dict[str, str] = {
     "commit_upload_session": os.getenv("SERVER_URL_COMMIT_UPLOAD_SESSION", "https://upload.box.com/api/2.0"),
     "download_zip_archive": os.getenv("SERVER_URL_DOWNLOAD_ZIP_ARCHIVE", "https://dl.boxcloud.com/2.0"),
 }
-SERVER_NAME = "Box Platform API"
+SERVER_NAME = "Box"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1079,7 +1079,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Box Platform API")
+mcp = FastMCP("Box")
 
 # Tags: Authorization
 @mcp.tool()

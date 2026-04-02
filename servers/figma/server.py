@@ -40,7 +40,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.figma.com")
-SERVER_NAME = "Figma API"
+SERVER_NAME = "Figma"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1014,7 +1014,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Figma API")
+mcp = FastMCP("Figma")
 
 # Tags: Files
 @mcp.tool()

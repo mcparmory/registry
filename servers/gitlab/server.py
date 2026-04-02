@@ -41,7 +41,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.gitlab.com/api/v4")
-SERVER_NAME = "GitLab API"
+SERVER_NAME = "GitLab"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1000,7 +1000,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("GitLab API")
+mcp = FastMCP("GitLab")
 
 # Tags: badges
 @mcp.tool()

@@ -41,7 +41,7 @@ _SERVER_VARS = {
     "appId": os.getenv("SERVER_APPID", "ALGOLIA_APPLICATION_ID"),
 }
 BASE_URL = os.getenv("BASE_URL", "https://{appId}.algolia.net".format_map(collections.defaultdict(str, _SERVER_VARS)))
-SERVER_NAME = "Search API"
+SERVER_NAME = "Algolia Search"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1002,7 +1002,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Search API")
+mcp = FastMCP("Algolia Search")
 
 # Tags: algoliasearch
 @mcp.tool()

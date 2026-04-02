@@ -40,7 +40,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "//your-domain.atlassian.net")
-SERVER_NAME = "The Confluence Cloud REST API"
+SERVER_NAME = "Atlassian Confluence"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1086,7 +1086,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("The Confluence Cloud REST API")
+mcp = FastMCP("Atlassian Confluence")
 
 # Tags: Audit
 @mcp.tool()

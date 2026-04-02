@@ -36,7 +36,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.browserbase.com")
-SERVER_NAME = "Browserbase API"
+SERVER_NAME = "Browserbase"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1032,7 +1032,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Browserbase API")
+mcp = FastMCP("Browserbase")
 
 
 @mcp.tool()

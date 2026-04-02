@@ -40,7 +40,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "http://app.files.com/api/rest/v1")
-SERVER_NAME = "Files.com API"
+SERVER_NAME = "Files.com"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1048,7 +1048,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Files.com API")
+mcp = FastMCP("Files.com")
 
 # Tags: action_notification_export_results
 @mcp.tool()

@@ -37,7 +37,7 @@ from fastmcp import FastMCP
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.e2b.app")
-SERVER_NAME = "E2B API"
+SERVER_NAME = "E2B"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1059,7 +1059,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("E2B API")
+mcp = FastMCP("E2B")
 
 
 @mcp.tool()

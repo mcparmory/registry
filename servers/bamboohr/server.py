@@ -41,7 +41,7 @@ _SERVER_VARS = {
     "companyDomain": os.getenv("SERVER_COMPANYDOMAIN", "companySubDomain"),
 }
 BASE_URL = os.getenv("BASE_URL", "https://{companyDomain}.bamboohr.com".format_map(collections.defaultdict(str, _SERVER_VARS)))
-SERVER_NAME = "BambooHR API"
+SERVER_NAME = "BambooHR"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1047,7 +1047,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("BambooHR API")
+mcp = FastMCP("BambooHR")
 
 # Tags: Time Tracking, Public API
 @mcp.tool()

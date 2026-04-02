@@ -41,7 +41,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.bitbucket.org/2.0")
-SERVER_NAME = "Bitbucket API"
+SERVER_NAME = "Bitbucket"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1010,7 +1010,7 @@ def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Bitbucket API")
+mcp = FastMCP("Bitbucket")
 
 # Tags: Addon
 @mcp.tool()
