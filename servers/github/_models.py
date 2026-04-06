@@ -1,7 +1,7 @@
 """
 Github MCP Server - Pydantic Models
 
-Generated: 2026-04-05 18:57:15 UTC
+Generated: 2026-04-06 14:24:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -528,7 +528,6 @@ __all__ = [
     "IssuesListForAuthenticatedUserRequest",
     "IssuesListForOrgRequest",
     "IssuesListForRepoRequest",
-    "IssuesListIssueFieldValuesForIssueRequest",
     "IssuesListLabelsForMilestoneRequest",
     "IssuesListLabelsForRepoRequest",
     "IssuesListLabelsOnIssueRequest",
@@ -688,7 +687,6 @@ __all__ = [
     "PackagesGetPackageVersionForOrganizationRequest",
     "PackagesGetPackageVersionForUserRequest",
     "PackagesListDockerMigrationConflictingPackagesForOrganizationRequest",
-    "PackagesListDockerMigrationConflictingPackagesForUserRequest",
     "PackagesListPackagesForAuthenticatedUserRequest",
     "PackagesListPackagesForOrganizationRequest",
     "PackagesListPackagesForUserRequest",
@@ -992,7 +990,6 @@ __all__ = [
     "SecurityAdvisoriesCreatePrivateVulnerabilityReportRequest",
     "SecurityAdvisoriesCreateRepositoryAdvisoryCveRequest",
     "SecurityAdvisoriesCreateRepositoryAdvisoryRequest",
-    "SecurityAdvisoriesGetGlobalAdvisoryRequest",
     "SecurityAdvisoriesGetRepositoryAdvisoryRequest",
     "SecurityAdvisoriesListGlobalAdvisoriesRequest",
     "SecurityAdvisoriesListOrgRepositoryAdvisoriesRequest",
@@ -1021,7 +1018,6 @@ __all__ = [
     "UsersCheckPersonIsFollowedByAuthenticatedRequest",
     "UsersCreateGpgKeyForAuthenticatedUserRequest",
     "UsersCreatePublicSshKeyForAuthenticatedUserRequest",
-    "UsersCreateSshSigningKeyForAuthenticatedUserRequest",
     "UsersDeleteAttestationsBulkRequest",
     "UsersDeleteAttestationsByIdRequest",
     "UsersDeleteAttestationsBySubjectDigestRequest",
@@ -1029,14 +1025,12 @@ __all__ = [
     "UsersDeleteGpgKeyForAuthenticatedUserRequest",
     "UsersDeletePublicSshKeyForAuthenticatedUserRequest",
     "UsersDeleteSocialAccountForAuthenticatedUserRequest",
-    "UsersDeleteSshSigningKeyForAuthenticatedUserRequest",
     "UsersFollowRequest",
     "UsersGetByIdRequest",
     "UsersGetByUsernameRequest",
     "UsersGetContextForUserRequest",
     "UsersGetGpgKeyForAuthenticatedUserRequest",
     "UsersGetPublicSshKeyForAuthenticatedUserRequest",
-    "UsersGetSshSigningKeyForAuthenticatedUserRequest",
     "UsersListAttestationsBulkRequest",
     "UsersListAttestationsRequest",
     "UsersListFollowersForUserRequest",
@@ -1160,13 +1154,6 @@ class SecurityAdvisoriesListGlobalAdvisoriesRequestQuery(StrictModel):
 class SecurityAdvisoriesListGlobalAdvisoriesRequest(StrictModel):
     """Retrieve global security advisories filtered by various criteria such as identifier, type, ecosystem, and vulnerability metrics. By default, returns only GitHub-reviewed advisories excluding malware."""
     query: SecurityAdvisoriesListGlobalAdvisoriesRequestQuery | None = None
-
-# Operation: get_security_advisory
-class SecurityAdvisoriesGetGlobalAdvisoryRequestPath(StrictModel):
-    ghsa_id: str = Field(default=..., description="The GitHub Security Advisory (GHSA) identifier that uniquely identifies the security advisory (format: GHSA-xxxx-xxxx-xxxx).")
-class SecurityAdvisoriesGetGlobalAdvisoryRequest(StrictModel):
-    """Retrieve a global security advisory by its GitHub Security Advisory (GHSA) identifier. Use this to access detailed information about a specific security vulnerability."""
-    path: SecurityAdvisoriesGetGlobalAdvisoryRequestPath
 
 # Operation: complete_github_app_manifest
 class AppsCreateFromManifestRequestPath(StrictModel):
@@ -8626,15 +8613,6 @@ class IssuesListEventsRequest(StrictModel):
     """Retrieves a chronological list of all events that have occurred on a specific issue, including comments, state changes, assignments, and other activity."""
     path: IssuesListEventsRequestPath
 
-# Operation: list_issue_field_values
-class IssuesListIssueFieldValuesForIssueRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. The name is case-insensitive.")
-    issue_number: int = Field(default=..., description="The issue number that uniquely identifies the issue within the repository.")
-class IssuesListIssueFieldValuesForIssueRequest(StrictModel):
-    """Retrieves all custom field values associated with a specific issue in a repository. This allows you to view the current values of any custom fields configured for the issue."""
-    path: IssuesListIssueFieldValuesForIssueRequestPath
-
 # Operation: list_issue_labels
 class IssuesListLabelsOnIssueRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -9114,6 +9092,7 @@ class ReposCreatePagesDeploymentRequestBody(StrictModel):
     environment: str | None = Field(default=None, description="The target environment for this GitHub Pages deployment.")
     pages_build_version: str = Field(default=..., description="A unique string that represents the version of the build for this deployment.")
     oidc_token: str = Field(default=..., description="The OIDC token issued by GitHub Actions certifying the origin of the deployment.")
+    artifact_url: str | None = Field(default=None, description="The URL of an artifact that contains the .zip or .tar of static assets to deploy. The artifact belongs to the repository. Either `artifact_id` or `artifact_url` are required.")
 class ReposCreatePagesDeploymentRequest(StrictModel):
     """Create a GitHub Pages deployment for a repository. The authenticated user must have write permission to the repository."""
     path: ReposCreatePagesDeploymentRequestPath
@@ -9364,6 +9343,8 @@ class PullsCreateReviewCommentRequestBody(StrictModel):
     start_line: int | None = Field(default=None, description="The first line number in the pull request diff that a multi-line comment applies to. Required for multi-line comments unless replying to an existing review comment.")
     in_reply_to: int | None = Field(default=None, description="The ID of an existing review comment to reply to. When specified, all other request body parameters except `body` are ignored.")
     subject_type: Literal["line", "file"] | None = Field(default=None, description="The scope level at which the comment is targeted, either at a specific line or for the entire file.")
+    line: int | None = Field(default=None, description="**Required unless using `subject_type:file`**. The line of the blob in the pull request diff that the comment applies to. For a multi-line comment, the last line of the range that your comment applies to.")
+    position: int | None = Field(default=None, description="**This parameter is closing down. Use `line` instead**. The position in the diff where you want to add a review comment. Note this value is not the same as the line number in the file. The position value equals the number of lines down from the first \"@@\" hunk header in the file you want to add a comment. The line just below the \"@@\" line is position 1, the next line is position 2, and so on. The position in the diff continues to increase through lines of whitespace and additional hunks until the beginning of a new file.")
 class PullsCreateReviewCommentRequest(StrictModel):
     """Create a review comment on a specific line or range of lines in a pull request diff. This enables targeted feedback on code changes and triggers notifications to relevant participants."""
     path: PullsCreateReviewCommentRequestPath
@@ -9600,6 +9581,7 @@ class ReposCreateReleaseRequestBody(StrictModel):
     discussion_category_name: str | None = Field(default=None, description="Category name for an automatically created discussion linked to this release. The category must already exist in the repository.")
     generate_release_notes: bool | None = Field(default=None, description="Whether to automatically generate release name and body from commit history. If a name is provided, it will be used; if body is provided, it will be prepended to auto-generated notes.")
     make_latest: Literal["true", "false", "legacy"] | None = Field(default=None, description="Whether to set this release as the latest for the repository. Drafts and prereleases cannot be marked as latest. Use 'legacy' to determine latest by creation date and semantic version.")
+    name: str | None = Field(default=None, description="The name of the release.")
 class ReposCreateReleaseRequest(StrictModel):
     """Create a new release for a repository. Users with push access can publish releases, which trigger notifications. Be aware of secondary rate limits when creating releases in rapid succession."""
     path: ReposCreateReleaseRequestPath
@@ -9842,6 +9824,7 @@ class ReposUpdateRepoRulesetRequestBody(StrictModel):
     enforcement: Literal["disabled", "active", "evaluate"] | None = Field(default=None, description="The enforcement level of the ruleset. Use `disabled` to turn off the ruleset, `active` to enforce rules, or `evaluate` to allow admins to test rules before enforcing them (GitHub Enterprise only).")
     bypass_actors: list[RepositoryRulesetBypassActor] | None = Field(default=None, description="An array of actors who can bypass the rules in this ruleset. Each actor is an object specifying the actor type and ID.")
     rules: list[RepositoryRule] | None = Field(default=None, description="An array of rules within the ruleset. Each rule object defines conditions and enforcement behavior for the repository.")
+    name: str | None = Field(default=None, description="The name of the ruleset.")
 class ReposUpdateRepoRulesetRequest(StrictModel):
     """Update an existing repository ruleset to modify its enforcement level, bypass actors, or rules. Changes take effect immediately on the repository."""
     path: ReposUpdateRepoRulesetRequestPath
@@ -9972,6 +9955,7 @@ class SecurityAdvisoriesCreateRepositoryAdvisoryRequestBody(StrictModel):
     cwe_ids: list[str] | None = Field(default=None, description="An array of Common Weakness Enumeration (CWE) IDs that relate to this vulnerability.")
     credits_: list[SecurityAdvisoriesCreateRepositoryAdvisoryBodyCreditsItem] | None = Field(default=None, validation_alias="credits", serialization_alias="credits", description="An array of users to receive credit for their participation in identifying or fixing the security advisory.")
     start_private_fork: bool | None = Field(default=None, description="Whether to create a temporary private fork of the repository to collaborate on a fix.")
+    severity: Literal["critical", "high", "medium", "low"] | None = Field(default=None, description="The severity of the advisory. You must choose between setting this field or `cvss_vector_string`.")
 class SecurityAdvisoriesCreateRepositoryAdvisoryRequest(StrictModel):
     """Create a new repository security advisory to document and track vulnerabilities. The authenticated user must be a security manager or administrator of the repository."""
     path: SecurityAdvisoriesCreateRepositoryAdvisoryRequestPath
@@ -10879,27 +10863,6 @@ class UsersDeleteSocialAccountForAuthenticatedUserRequest(StrictModel):
     """Remove one or more social media accounts from the authenticated user's profile. Requires the `user` OAuth scope."""
     body: UsersDeleteSocialAccountForAuthenticatedUserRequestBody
 
-# Operation: add_ssh_signing_key
-class UsersCreateSshSigningKeyForAuthenticatedUserRequestBody(StrictModel):
-    key: str = Field(default=..., description="The public SSH key to add to your GitHub account. Must be a valid SSH public key in one of the supported formats (RSA, DSS, Ed25519, ECDSA, or OpenSSH security key variants).", pattern='^ssh-(rsa|dss|ed25519) |^ecdsa-sha2-nistp(256|384|521) |^(sk-ssh-ed25519|sk-ecdsa-sha2-nistp256)@openssh.com ')
-class UsersCreateSshSigningKeyForAuthenticatedUserRequest(StrictModel):
-    """Add an SSH signing key to the authenticated user's GitHub account. This enables SSH commit signing for enhanced security and verification of commits."""
-    body: UsersCreateSshSigningKeyForAuthenticatedUserRequestBody
-
-# Operation: get_ssh_signing_key
-class UsersGetSshSigningKeyForAuthenticatedUserRequestPath(StrictModel):
-    ssh_signing_key_id: int = Field(default=..., description="The unique identifier of the SSH signing key to retrieve.")
-class UsersGetSshSigningKeyForAuthenticatedUserRequest(StrictModel):
-    """Retrieve detailed information about a specific SSH signing key for the authenticated user. Requires the `read:ssh_signing_key` scope."""
-    path: UsersGetSshSigningKeyForAuthenticatedUserRequestPath
-
-# Operation: delete_ssh_signing_key
-class UsersDeleteSshSigningKeyForAuthenticatedUserRequestPath(StrictModel):
-    ssh_signing_key_id: int = Field(default=..., description="The unique identifier of the SSH signing key to delete.")
-class UsersDeleteSshSigningKeyForAuthenticatedUserRequest(StrictModel):
-    """Remove an SSH signing key from the authenticated user's GitHub account. Requires the `admin:ssh_signing_key` scope for OAuth apps and personal access tokens (classic)."""
-    path: UsersDeleteSshSigningKeyForAuthenticatedUserRequestPath
-
 # Operation: list_starred_repositories
 class ActivityListReposStarredByAuthenticatedUserRequestQuery(StrictModel):
     direction: Literal["asc", "desc"] | None = Field(default=None, description="Sort order for the results. Use ascending to show oldest stars first, or descending to show newest stars first.")
@@ -11026,13 +10989,6 @@ class UsersListAttestationsRequest(StrictModel):
     """Retrieve artifact attestations for a specific subject digest across repositories owned by a user. Results are filtered based on the authenticated user's repository access permissions and require cryptographic verification before use."""
     path: UsersListAttestationsRequestPath
     query: UsersListAttestationsRequestQuery | None = None
-
-# Operation: list_docker_migration_conflicts_for_user
-class PackagesListDockerMigrationConflictingPackagesForUserRequestPath(StrictModel):
-    username: str = Field(default=..., description="The GitHub username whose Docker migration conflicts should be listed.")
-class PackagesListDockerMigrationConflictingPackagesForUserRequest(StrictModel):
-    """Retrieves all packages in a user's namespace that have conflicts during Docker migration and are accessible to the requesting user. Requires `read:packages` OAuth scope."""
-    path: PackagesListDockerMigrationConflictingPackagesForUserRequestPath
 
 # Operation: list_user_events
 class ActivityListEventsForAuthenticatedUserRequestPath(StrictModel):

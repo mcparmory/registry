@@ -1,7 +1,7 @@
 """
 Authentication module for GitHub MCP server.
 
-Generated: 2026-04-05 18:57:15 UTC
+Generated: 2026-04-06 14:24:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -666,7 +666,6 @@ using OR/AND relationships (outer list = OR, inner list = AND).
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_api_root": [["bearer_token"], ["oauth2"]],
     "list_advisories": [["bearer_token"], ["oauth2"]],
-    "get_security_advisory": [["bearer_token"], ["oauth2"]],
     "get_authenticated_app": [["jwt_bearer"]],
     "complete_github_app_manifest": [["bearer_token"], ["oauth2"]],
     "get_webhook_config": [["jwt_bearer"]],
@@ -1541,7 +1540,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "publish_codespace": [["bearer_token"], ["oauth2"]],
     "start_codespace": [["bearer_token"], ["oauth2"]],
     "stop_codespace_authenticated": [["bearer_token"], ["oauth2"]],
-    "list_docker_migration_conflicts_for_authenticated_user": [["bearer_token"], ["oauth2"]],
     "set_primary_email_visibility": [["bearer_token"], ["oauth2"]],
     "list_emails": [["bearer_token"], ["oauth2"]],
     "add_email": [["bearer_token"], ["oauth2"]],
@@ -1597,10 +1595,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_social_accounts": [["bearer_token"], ["oauth2"]],
     "add_social_accounts": [["bearer_token"], ["oauth2"]],
     "delete_social_accounts": [["bearer_token"], ["oauth2"]],
-    "list_ssh_signing_keys": [["bearer_token"], ["oauth2"]],
-    "add_ssh_signing_key": [["bearer_token"], ["oauth2"]],
-    "get_ssh_signing_key": [["bearer_token"], ["oauth2"]],
-    "delete_ssh_signing_key": [["bearer_token"], ["oauth2"]],
     "list_starred_repositories": [["bearer_token"], ["oauth2"]],
     "check_repository_starred": [["bearer_token"], ["oauth2"]],
     "star_repository": [["bearer_token"], ["oauth2"]],
@@ -1615,7 +1609,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_attestation_by_subject_digest_user": [["bearer_token"], ["oauth2"]],
     "delete_attestation_user": [["bearer_token"], ["oauth2"]],
     "list_attestations_user": [["bearer_token"], ["oauth2"]],
-    "list_docker_migration_conflicts_for_user": [["bearer_token"], ["oauth2"]],
     "list_user_events": [["bearer_token"], ["oauth2"]],
     "list_organization_events_for_user": [["bearer_token"], ["oauth2"]],
     "list_user_public_events": [["bearer_token"], ["oauth2"]],
@@ -1660,6 +1653,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "add_oidc_custom_property_org": [["bearer_token"], ["oauth2"]],
     "add_project_field": [["bearer_token"], ["oauth2"]],
     "add_project_field_user": [["bearer_token"], ["oauth2"]],
+    "add_ssh_signing_key": [["bearer_token"], ["oauth2"]],
     "assign_team_to_organization": [["bearer_token"], ["oauth2"]],
     "assign_team_to_organizations": [["bearer_token"], ["oauth2"]],
     "configure_actions_cache_retention": [["bearer_token"], ["oauth2"]],
@@ -1677,6 +1671,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_custom_runner_image": [["bearer_token"], ["oauth2"]],
     "delete_issue_field": [["bearer_token"], ["oauth2"]],
     "delete_issue_field_value": [["bearer_token"], ["oauth2"]],
+    "delete_ssh_signing_key": [["bearer_token"], ["oauth2"]],
     "disable_copilot_coding_agent_for_repository": [["bearer_token"], ["oauth2"]],
     "disable_immutable_releases": [["bearer_token"], ["oauth2"]],
     "enable_copilot_coding_agent_for_repository": [["bearer_token"], ["oauth2"]],
@@ -1697,6 +1692,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_immutable_releases_settings": [["bearer_token"], ["oauth2"]],
     "get_premium_request_usage_report": [["bearer_token"], ["oauth2"]],
     "get_premium_request_usage_report_user": [["bearer_token"], ["oauth2"]],
+    "get_security_advisory": [["bearer_token"], ["oauth2"]],
+    "get_ssh_signing_key": [["bearer_token"], ["oauth2"]],
     "list_artifact_deployment_records": [["bearer_token"], ["oauth2"]],
     "list_attestation_repositories": [["bearer_token"], ["oauth2"]],
     "list_copilot_coding_agent_permissions": [["bearer_token"], ["oauth2"]],
@@ -1704,6 +1701,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_copilot_content_exclusions": [["bearer_token"], ["oauth2"]],
     "list_custom_image_versions": [["bearer_token"], ["oauth2"]],
     "list_custom_runner_images": [["bearer_token"], ["oauth2"]],
+    "list_docker_migration_conflicts_for_authenticated_user": [["bearer_token"], ["oauth2"]],
+    "list_docker_migration_conflicts_for_user": [["bearer_token"], ["oauth2"]],
     "list_immutable_release_repositories": [["bearer_token"], ["oauth2"]],
     "list_issue_field_values": [["bearer_token"], ["oauth2"]],
     "list_issue_fields": [["bearer_token"], ["oauth2"]],
@@ -1713,6 +1712,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_organization_budgets": [["bearer_token"], ["oauth2"]],
     "list_project_view_items": [["bearer_token"], ["oauth2"]],
     "list_project_view_items_user": [["bearer_token"], ["oauth2"]],
+    "list_ssh_signing_keys": [["bearer_token"], ["oauth2"]],
     "pin_issue_comment": [["bearer_token"], ["oauth2"]],
     "record_artifact_deployment": [["bearer_token"], ["oauth2"]],
     "record_cluster_deployments": [["bearer_token"], ["oauth2"]],
