@@ -39,6 +39,8 @@ mcparmory-github
 
 Package names follow the pattern `mcparmory-<server-name>`.
 
+Each server's `README.md` has full credential setup and configuration instructions for all launch options (uvx, pip, Docker, Python script, and MCP client JSON).
+
 ## Servers
 
 | Server | Package | Tools |
