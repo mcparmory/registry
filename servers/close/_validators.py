@@ -1,7 +1,7 @@
 """
 Close Api MCP Server - Validators
 
-Generated: 2026-04-06 18:43:55 UTC
+Generated: 2026-04-07 08:42:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

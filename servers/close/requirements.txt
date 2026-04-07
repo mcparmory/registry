@@ -1,5 +1,5 @@
 # Close API - Dependencies
-# Generated: 2026-04-06 18:43:55 UTC
+# Generated: 2026-04-07 08:42:04 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0

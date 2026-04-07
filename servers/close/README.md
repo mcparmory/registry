@@ -1,6 +1,6 @@
 # Close API MCP Server
 
-Base URL: https://api.close.com/api
+Base URL: https://api.close.com/api/v1
 ## API Info
 - **Contact:** Joe Kemp, VP of Engineering — [https://calendly.com/joe-close/api-chat](https://calendly.com/joe-close/api-chat)
 

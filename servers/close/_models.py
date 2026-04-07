@@ -1,7 +1,7 @@
 """
 Close Api MCP Server - Pydantic Models
 
-Generated: 2026-04-06 18:43:55 UTC
+Generated: 2026-04-07 08:42:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,262 +13,268 @@ from _validators import PermissiveModel, StrictModel
 from pydantic import Field
 
 __all__ = [
-    "DeleteV1ActivityCallIdRequest",
-    "DeleteV1ActivityCustomIdRequest",
-    "DeleteV1ActivityEmailIdRequest",
-    "DeleteV1ActivityEmailthreadIdRequest",
-    "DeleteV1ActivityFormSubmissionIdRequest",
-    "DeleteV1ActivityMeetingIdRequest",
-    "DeleteV1ActivityNoteIdRequest",
-    "DeleteV1ActivitySmsIdRequest",
-    "DeleteV1ActivityStatusChangeLeadIdRequest",
-    "DeleteV1ActivityStatusChangeOpportunityIdRequest",
-    "DeleteV1ActivityTaskCompletedIdRequest",
-    "DeleteV1ActivityWhatsappMessageIdRequest",
-    "DeleteV1CommentCommentIdRequest",
-    "DeleteV1ContactIdRequest",
-    "DeleteV1CustomActivityIdRequest",
-    "DeleteV1CustomFieldActivityCustomFieldIdRequest",
-    "DeleteV1CustomFieldContactCustomFieldIdRequest",
-    "DeleteV1CustomFieldCustomObjectTypeCustomFieldIdRequest",
-    "DeleteV1CustomFieldLeadCustomFieldIdRequest",
-    "DeleteV1CustomFieldOpportunityCustomFieldIdRequest",
-    "DeleteV1CustomFieldSharedCustomFieldIdAssociationObjectTypeRequest",
-    "DeleteV1CustomFieldSharedCustomFieldIdRequest",
-    "DeleteV1CustomObjectIdRequest",
-    "DeleteV1CustomObjectTypeIdRequest",
-    "DeleteV1EmailTemplateIdRequest",
-    "DeleteV1GroupGroupIdMemberUserIdRequest",
-    "DeleteV1GroupGroupIdRequest",
-    "DeleteV1IntegrationLinkIdRequest",
-    "DeleteV1LeadIdRequest",
-    "DeleteV1OpportunityIdRequest",
-    "DeleteV1OutcomeIdRequest",
-    "DeleteV1PhoneNumberIdRequest",
-    "DeleteV1PipelinePipelineIdRequest",
-    "DeleteV1RoleRoleIdRequest",
-    "DeleteV1SavedSearchIdRequest",
-    "DeleteV1SchedulingLinkIdRequest",
-    "DeleteV1SchedulingLinkIntegrationSourceIdRequest",
-    "DeleteV1SendAsIdRequest",
-    "DeleteV1SendAsRequest",
-    "DeleteV1SequenceIdRequest",
-    "DeleteV1SharedSchedulingLinkIdRequest",
-    "DeleteV1SmsTemplateIdRequest",
-    "DeleteV1StatusLeadStatusIdRequest",
-    "DeleteV1StatusOpportunityStatusIdRequest",
-    "DeleteV1TaskIdRequest",
-    "DeleteV1UnsubscribeEmailEmailAddressRequest",
-    "DeleteV1WebhookIdRequest",
-    "GetV1ActivityCallIdRequest",
-    "GetV1ActivityCallRequest",
-    "GetV1ActivityCreatedIdRequest",
-    "GetV1ActivityCreatedRequest",
-    "GetV1ActivityCustomIdRequest",
-    "GetV1ActivityCustomRequest",
-    "GetV1ActivityEmailIdRequest",
-    "GetV1ActivityEmailRequest",
-    "GetV1ActivityEmailthreadIdRequest",
-    "GetV1ActivityEmailthreadRequest",
-    "GetV1ActivityFormSubmissionIdRequest",
-    "GetV1ActivityFormSubmissionRequest",
-    "GetV1ActivityLeadMergeIdRequest",
-    "GetV1ActivityLeadMergeRequest",
-    "GetV1ActivityMeetingIdRequest",
-    "GetV1ActivityMeetingRequest",
-    "GetV1ActivityNoteIdRequest",
-    "GetV1ActivityNoteRequest",
-    "GetV1ActivityRequest",
-    "GetV1ActivitySmsIdRequest",
-    "GetV1ActivitySmsRequest",
-    "GetV1ActivityStatusChangeLeadIdRequest",
-    "GetV1ActivityStatusChangeLeadRequest",
-    "GetV1ActivityStatusChangeOpportunityIdRequest",
-    "GetV1ActivityStatusChangeOpportunityRequest",
-    "GetV1ActivityTaskCompletedIdRequest",
-    "GetV1ActivityTaskCompletedRequest",
-    "GetV1ActivityWhatsappMessageIdRequest",
-    "GetV1ActivityWhatsappMessageRequest",
-    "GetV1BulkActionDeleteIdRequest",
-    "GetV1BulkActionEditIdRequest",
-    "GetV1BulkActionEmailIdRequest",
-    "GetV1BulkActionSequenceSubscriptionIdRequest",
-    "GetV1CommentCommentIdRequest",
-    "GetV1CommentRequest",
-    "GetV1CommentThreadRequest",
-    "GetV1CommentThreadThreadIdRequest",
-    "GetV1ConnectedAccountIdRequest",
-    "GetV1ContactIdRequest",
-    "GetV1ContactRequest",
-    "GetV1CustomActivityIdRequest",
-    "GetV1CustomFieldActivityIdRequest",
-    "GetV1CustomFieldActivityRequest",
-    "GetV1CustomFieldContactIdRequest",
-    "GetV1CustomFieldContactRequest",
-    "GetV1CustomFieldCustomObjectTypeIdRequest",
-    "GetV1CustomFieldLeadIdRequest",
-    "GetV1CustomFieldLeadRequest",
-    "GetV1CustomFieldOpportunityIdRequest",
-    "GetV1CustomFieldOpportunityRequest",
-    "GetV1CustomFieldSchemaObjectTypeRequest",
-    "GetV1CustomObjectIdRequest",
-    "GetV1CustomObjectRequest",
-    "GetV1CustomObjectTypeIdRequest",
-    "GetV1DialerIdRequest",
-    "GetV1DialerRequest",
-    "GetV1EmailTemplateIdRenderRequest",
-    "GetV1EmailTemplateIdRequest",
-    "GetV1EmailTemplateRequest",
-    "GetV1EventIdRequest",
-    "GetV1EventRequest",
-    "GetV1ExportIdRequest",
-    "GetV1ExportRequest",
-    "GetV1GroupGroupIdRequest",
-    "GetV1GroupRequest",
-    "GetV1IntegrationLinkIdRequest",
-    "GetV1LeadIdRequest",
-    "GetV1LeadRequest",
-    "GetV1MembershipIdPinnedViewsRequest",
-    "GetV1OpportunityIdRequest",
-    "GetV1OpportunityRequest",
-    "GetV1OrganizationIdRequest",
-    "GetV1OutcomeIdRequest",
-    "GetV1PhoneNumberIdRequest",
-    "GetV1PhoneNumberRequest",
-    "GetV1ReportCustomOrganizationIdRequest",
-    "GetV1ReportSentEmailsOrganizationIdRequest",
-    "GetV1ReportStatusesLeadOrganizationIdRequest",
-    "GetV1ReportStatusesOpportunityOrganizationIdRequest",
-    "GetV1RoleIdRequest",
-    "GetV1SavedSearchIdRequest",
-    "GetV1SchedulingLinkIdRequest",
-    "GetV1SendAsIdRequest",
-    "GetV1SendAsRequest",
-    "GetV1SequenceIdRequest",
-    "GetV1SequenceRequest",
-    "GetV1SequenceSubscriptionIdRequest",
-    "GetV1SequenceSubscriptionRequest",
-    "GetV1SharedSchedulingLinkIdRequest",
-    "GetV1SmsTemplateIdRequest",
-    "GetV1SmsTemplateRequest",
-    "GetV1TaskIdRequest",
-    "GetV1TaskRequest",
-    "GetV1UserAvailabilityRequest",
-    "GetV1UserIdRequest",
-    "GetV1UserRequest",
-    "GetV1WebhookIdRequest",
+    "DeleteActivityCallIdRequest",
+    "DeleteActivityCustomIdRequest",
+    "DeleteActivityEmailIdRequest",
+    "DeleteActivityEmailthreadIdRequest",
+    "DeleteActivityFormSubmissionIdRequest",
+    "DeleteActivityMeetingIdRequest",
+    "DeleteActivityNoteIdRequest",
+    "DeleteActivitySmsIdRequest",
+    "DeleteActivityStatusChangeLeadIdRequest",
+    "DeleteActivityStatusChangeOpportunityIdRequest",
+    "DeleteActivityTaskCompletedIdRequest",
+    "DeleteActivityWhatsappMessageIdRequest",
+    "DeleteCommentCommentIdRequest",
+    "DeleteContactIdRequest",
+    "DeleteCustomActivityIdRequest",
+    "DeleteCustomFieldActivityCustomFieldIdRequest",
+    "DeleteCustomFieldContactCustomFieldIdRequest",
+    "DeleteCustomFieldCustomObjectTypeCustomFieldIdRequest",
+    "DeleteCustomFieldLeadCustomFieldIdRequest",
+    "DeleteCustomFieldOpportunityCustomFieldIdRequest",
+    "DeleteCustomFieldSharedCustomFieldIdAssociationObjectTypeRequest",
+    "DeleteCustomFieldSharedCustomFieldIdRequest",
+    "DeleteCustomObjectIdRequest",
+    "DeleteCustomObjectTypeIdRequest",
+    "DeleteEmailTemplateIdRequest",
+    "DeleteGroupGroupIdMemberUserIdRequest",
+    "DeleteGroupGroupIdRequest",
+    "DeleteIntegrationLinkIdRequest",
+    "DeleteLeadIdRequest",
+    "DeleteOpportunityIdRequest",
+    "DeleteOutcomeIdRequest",
+    "DeletePhoneNumberIdRequest",
+    "DeletePipelinePipelineIdRequest",
+    "DeleteRoleRoleIdRequest",
+    "DeleteSavedSearchIdRequest",
+    "DeleteSchedulingLinkIdRequest",
+    "DeleteSchedulingLinkIntegrationSourceIdRequest",
+    "DeleteSendAsIdRequest",
+    "DeleteSendAsRequest",
+    "DeleteSequenceIdRequest",
+    "DeleteSharedSchedulingLinkIdRequest",
+    "DeleteSmsTemplateIdRequest",
+    "DeleteStatusLeadStatusIdRequest",
+    "DeleteStatusOpportunityStatusIdRequest",
+    "DeleteTaskIdRequest",
+    "DeleteUnsubscribeEmailEmailAddressRequest",
+    "DeleteWebhookIdRequest",
+    "GetActivityCallIdRequest",
+    "GetActivityCallRequest",
+    "GetActivityCreatedIdRequest",
+    "GetActivityCreatedRequest",
+    "GetActivityCustomIdRequest",
+    "GetActivityCustomRequest",
+    "GetActivityEmailIdRequest",
+    "GetActivityEmailRequest",
+    "GetActivityEmailthreadIdRequest",
+    "GetActivityEmailthreadRequest",
+    "GetActivityFormSubmissionIdRequest",
+    "GetActivityFormSubmissionRequest",
+    "GetActivityLeadMergeIdRequest",
+    "GetActivityLeadMergeRequest",
+    "GetActivityMeetingIdRequest",
+    "GetActivityMeetingRequest",
+    "GetActivityNoteIdRequest",
+    "GetActivityNoteRequest",
+    "GetActivityRequest",
+    "GetActivitySmsIdRequest",
+    "GetActivitySmsRequest",
+    "GetActivityStatusChangeLeadIdRequest",
+    "GetActivityStatusChangeLeadRequest",
+    "GetActivityStatusChangeOpportunityIdRequest",
+    "GetActivityStatusChangeOpportunityRequest",
+    "GetActivityTaskCompletedIdRequest",
+    "GetActivityTaskCompletedRequest",
+    "GetActivityWhatsappMessageIdRequest",
+    "GetActivityWhatsappMessageRequest",
+    "GetBulkActionDeleteIdRequest",
+    "GetBulkActionEditIdRequest",
+    "GetBulkActionEmailIdRequest",
+    "GetBulkActionSequenceSubscriptionIdRequest",
+    "GetCommentCommentIdRequest",
+    "GetCommentRequest",
+    "GetCommentThreadRequest",
+    "GetCommentThreadThreadIdRequest",
+    "GetConnectedAccountIdRequest",
+    "GetContactIdRequest",
+    "GetContactRequest",
+    "GetCustomActivityIdRequest",
+    "GetCustomFieldActivityIdRequest",
+    "GetCustomFieldActivityRequest",
+    "GetCustomFieldContactIdRequest",
+    "GetCustomFieldContactRequest",
+    "GetCustomFieldCustomObjectTypeIdRequest",
+    "GetCustomFieldLeadIdRequest",
+    "GetCustomFieldLeadRequest",
+    "GetCustomFieldOpportunityIdRequest",
+    "GetCustomFieldOpportunityRequest",
+    "GetCustomFieldSchemaObjectTypeRequest",
+    "GetCustomObjectIdRequest",
+    "GetCustomObjectRequest",
+    "GetCustomObjectTypeIdRequest",
+    "GetDialerIdRequest",
+    "GetDialerRequest",
+    "GetEmailTemplateIdRenderRequest",
+    "GetEmailTemplateIdRequest",
+    "GetEmailTemplateRequest",
+    "GetEventIdRequest",
+    "GetEventRequest",
+    "GetExportIdRequest",
+    "GetExportRequest",
+    "GetGroupGroupIdRequest",
+    "GetGroupRequest",
+    "GetIntegrationLinkIdRequest",
+    "GetLeadIdRequest",
+    "GetLeadRequest",
+    "GetMembershipIdPinnedViewsRequest",
+    "GetOpportunityIdRequest",
+    "GetOpportunityRequest",
+    "GetOrganizationIdRequest",
+    "GetOutcomeIdRequest",
+    "GetPhoneNumberIdRequest",
+    "GetPhoneNumberRequest",
+    "GetReportCustomOrganizationIdRequest",
+    "GetReportSentEmailsOrganizationIdRequest",
+    "GetReportStatusesLeadOrganizationIdRequest",
+    "GetReportStatusesOpportunityOrganizationIdRequest",
+    "GetRoleIdRequest",
+    "GetSavedSearchIdRequest",
+    "GetSavedSearchRequest",
+    "GetSchedulingLinkIdRequest",
+    "GetSendAsIdRequest",
+    "GetSendAsRequest",
+    "GetSequenceIdRequest",
+    "GetSequenceRequest",
+    "GetSequenceSubscriptionIdRequest",
+    "GetSequenceSubscriptionRequest",
+    "GetSharedSchedulingLinkIdRequest",
+    "GetSmsTemplateIdRequest",
+    "GetSmsTemplateRequest",
+    "GetTaskIdRequest",
+    "GetTaskRequest",
+    "GetUserAvailabilityRequest",
+    "GetUserIdRequest",
+    "GetUserRequest",
+    "GetWebhookIdRequest",
+    "PostActivityCallRequest",
+    "PostActivityCustomRequest",
+    "PostActivityEmailRequest",
+    "PostActivityMeetingIdIntegrationRequest",
+    "PostActivityNoteRequest",
+    "PostActivitySmsRequest",
+    "PostActivityStatusChangeLeadRequest",
+    "PostActivityStatusChangeOpportunityRequest",
+    "PostActivityWhatsappMessageRequest",
     "PostApiV1DataSearchRequest",
-    "PostV1ActivityCallRequest",
-    "PostV1ActivityCustomRequest",
-    "PostV1ActivityEmailRequest",
-    "PostV1ActivityMeetingIdIntegrationRequest",
-    "PostV1ActivityNoteRequest",
-    "PostV1ActivitySmsRequest",
-    "PostV1ActivityStatusChangeLeadRequest",
-    "PostV1ActivityStatusChangeOpportunityRequest",
-    "PostV1ActivityWhatsappMessageRequest",
-    "PostV1BulkActionDeleteRequest",
-    "PostV1BulkActionEditRequest",
-    "PostV1BulkActionEmailRequest",
-    "PostV1BulkActionSequenceSubscriptionRequest",
-    "PostV1CommentRequest",
-    "PostV1ContactRequest",
-    "PostV1CustomActivityRequest",
-    "PostV1CustomFieldActivityRequest",
-    "PostV1CustomFieldContactRequest",
-    "PostV1CustomFieldCustomObjectTypeRequest",
-    "PostV1CustomFieldLeadRequest",
-    "PostV1CustomFieldOpportunityRequest",
-    "PostV1CustomFieldSharedRequest",
-    "PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequest",
-    "PostV1CustomObjectRequest",
-    "PostV1CustomObjectTypeRequest",
-    "PostV1EmailTemplateRequest",
-    "PostV1EnrichFieldRequest",
-    "PostV1ExportLeadRequest",
-    "PostV1ExportOpportunityRequest",
-    "PostV1FilesUploadRequest",
-    "PostV1GroupGroupIdMemberRequest",
-    "PostV1GroupRequest",
-    "PostV1IntegrationLinkRequest",
-    "PostV1LeadMergeRequest",
-    "PostV1LeadRequest",
-    "PostV1MembershipRequest",
-    "PostV1OutcomeRequest",
-    "PostV1PhoneNumberRequestInternalRequest",
-    "PostV1PipelineRequest",
-    "PostV1ReportActivityRequest",
-    "PostV1ReportFunnelOpportunityStagesRequest",
-    "PostV1ReportFunnelOpportunityTotalsRequest",
-    "PostV1RoleRequest",
-    "PostV1SavedSearchRequest",
-    "PostV1SchedulingLinkIntegrationRequest",
-    "PostV1SchedulingLinkRequest",
-    "PostV1SendAsBulkRequest",
-    "PostV1SendAsRequest",
-    "PostV1SequenceRequest",
-    "PostV1SequenceSubscriptionRequest",
-    "PostV1SharedSchedulingLinkAssociationRequest",
-    "PostV1SharedSchedulingLinkAssociationUnmapRequest",
-    "PostV1SharedSchedulingLinkRequest",
-    "PostV1SmsTemplateRequest",
-    "PostV1StatusLeadRequest",
-    "PostV1StatusOpportunityRequest",
-    "PostV1TaskRequest",
-    "PostV1UnsubscribeEmailRequest",
-    "PostV1WebhookRequest",
-    "PutV1ActivityCallIdRequest",
-    "PutV1ActivityCustomIdRequest",
-    "PutV1ActivityEmailIdRequest",
-    "PutV1ActivityMeetingIdRequest",
-    "PutV1ActivityNoteIdRequest",
-    "PutV1ActivitySmsIdRequest",
-    "PutV1ActivityWhatsappMessageIdRequest",
-    "PutV1CommentCommentIdRequest",
-    "PutV1ContactIdRequest",
-    "PutV1CustomActivityIdRequest",
-    "PutV1CustomFieldActivityCustomFieldIdRequest",
-    "PutV1CustomFieldContactCustomFieldIdRequest",
-    "PutV1CustomFieldCustomObjectTypeCustomFieldIdRequest",
-    "PutV1CustomFieldLeadCustomFieldIdRequest",
-    "PutV1CustomFieldOpportunityCustomFieldIdRequest",
-    "PutV1CustomFieldSchemaObjectTypeRequest",
-    "PutV1CustomFieldSharedCustomFieldIdRequest",
-    "PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequest",
-    "PutV1CustomObjectIdRequest",
-    "PutV1CustomObjectTypeIdRequest",
-    "PutV1EmailTemplateIdRequest",
-    "PutV1GroupGroupIdRequest",
-    "PutV1IntegrationLinkIdRequest",
-    "PutV1LeadIdRequest",
-    "PutV1MembershipIdPinnedViewsRequest",
-    "PutV1MembershipIdRequest",
-    "PutV1MembershipRequest",
-    "PutV1OpportunityIdRequest",
-    "PutV1OrganizationIdRequest",
-    "PutV1OutcomeIdRequest",
-    "PutV1PhoneNumberIdRequest",
-    "PutV1PipelinePipelineIdRequest",
-    "PutV1RoleRoleIdRequest",
-    "PutV1SavedSearchIdRequest",
-    "PutV1SchedulingLinkIdRequest",
-    "PutV1SequenceIdRequest",
-    "PutV1SequenceSubscriptionIdRequest",
-    "PutV1SharedSchedulingLinkIdRequest",
-    "PutV1SmsTemplateIdRequest",
-    "PutV1StatusLeadStatusIdRequest",
-    "PutV1StatusOpportunityStatusIdRequest",
-    "PutV1TaskIdRequest",
-    "PutV1TaskRequest",
-    "PutV1WebhookIdRequest",
+    "PostBulkActionDeleteRequest",
+    "PostBulkActionEditRequest",
+    "PostBulkActionEmailRequest",
+    "PostBulkActionSequenceSubscriptionRequest",
+    "PostCommentRequest",
+    "PostContactRequest",
+    "PostCustomActivityRequest",
+    "PostCustomFieldActivityRequest",
+    "PostCustomFieldContactRequest",
+    "PostCustomFieldCustomObjectTypeRequest",
+    "PostCustomFieldLeadRequest",
+    "PostCustomFieldOpportunityRequest",
+    "PostCustomFieldSharedRequest",
+    "PostCustomFieldSharedSharedCustomFieldIdAssociationRequest",
+    "PostCustomObjectRequest",
+    "PostCustomObjectTypeRequest",
+    "PostEmailTemplateRequest",
+    "PostEnrichFieldRequest",
+    "PostExportLeadRequest",
+    "PostExportOpportunityRequest",
+    "PostFilesUploadRequest",
+    "PostGroupGroupIdMemberRequest",
+    "PostGroupRequest",
+    "PostIntegrationLinkRequest",
+    "PostLeadMergeRequest",
+    "PostLeadRequest",
+    "PostMembershipRequest",
+    "PostOpportunityRequest",
+    "PostOutcomeRequest",
+    "PostPhoneNumberRequestInternalRequest",
+    "PostPipelineRequest",
+    "PostReportActivityRequest",
+    "PostReportFunnelOpportunityStagesRequest",
+    "PostReportFunnelOpportunityTotalsRequest",
+    "PostRoleRequest",
+    "PostSavedSearchRequest",
+    "PostSchedulingLinkIntegrationRequest",
+    "PostSchedulingLinkRequest",
+    "PostSendAsBulkRequest",
+    "PostSendAsRequest",
+    "PostSequenceRequest",
+    "PostSequenceSubscriptionRequest",
+    "PostSharedSchedulingLinkAssociationRequest",
+    "PostSharedSchedulingLinkAssociationUnmapRequest",
+    "PostSharedSchedulingLinkRequest",
+    "PostSmsTemplateRequest",
+    "PostStatusLeadRequest",
+    "PostStatusOpportunityRequest",
+    "PostTaskRequest",
+    "PostUnsubscribeEmailRequest",
+    "PostWebhookRequest",
+    "PutActivityCallIdRequest",
+    "PutActivityCustomIdRequest",
+    "PutActivityEmailIdRequest",
+    "PutActivityMeetingIdRequest",
+    "PutActivityNoteIdRequest",
+    "PutActivitySmsIdRequest",
+    "PutActivityWhatsappMessageIdRequest",
+    "PutCommentCommentIdRequest",
+    "PutContactIdRequest",
+    "PutCustomActivityIdRequest",
+    "PutCustomFieldActivityCustomFieldIdRequest",
+    "PutCustomFieldContactCustomFieldIdRequest",
+    "PutCustomFieldCustomObjectTypeCustomFieldIdRequest",
+    "PutCustomFieldLeadCustomFieldIdRequest",
+    "PutCustomFieldOpportunityCustomFieldIdRequest",
+    "PutCustomFieldSchemaObjectTypeRequest",
+    "PutCustomFieldSharedCustomFieldIdRequest",
+    "PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequest",
+    "PutCustomObjectIdRequest",
+    "PutCustomObjectTypeIdRequest",
+    "PutEmailTemplateIdRequest",
+    "PutGroupGroupIdRequest",
+    "PutIntegrationLinkIdRequest",
+    "PutLeadIdRequest",
+    "PutMembershipIdPinnedViewsRequest",
+    "PutMembershipIdRequest",
+    "PutMembershipRequest",
+    "PutOpportunityIdRequest",
+    "PutOrganizationIdRequest",
+    "PutOutcomeIdRequest",
+    "PutPhoneNumberIdRequest",
+    "PutPipelinePipelineIdRequest",
+    "PutRoleRoleIdRequest",
+    "PutSavedSearchIdRequest",
+    "PutSchedulingLinkIdRequest",
+    "PutSequenceIdRequest",
+    "PutSequenceSubscriptionIdRequest",
+    "PutSharedSchedulingLinkIdRequest",
+    "PutSmsTemplateIdRequest",
+    "PutStatusLeadStatusIdRequest",
+    "PutStatusOpportunityStatusIdRequest",
+    "PutTaskIdRequest",
+    "PutTaskRequest",
+    "PutWebhookIdRequest",
+    "PostActivityEmailBodyAttachmentsItem",
+    "PostActivityNoteBodyAttachmentsItem",
+    "PostActivityWhatsappMessageBodyAttachmentsItem",
     "PostApiV1DataSearchBodySortItem",
-    "PostV1ActivityEmailBodyAttachmentsItem",
-    "PostV1ActivityNoteBodyAttachmentsItem",
-    "PostV1ActivityWhatsappMessageBodyAttachmentsItem",
-    "PostV1WebhookBodyEventsItem",
-    "PutV1CustomFieldSchemaObjectTypeBodyFieldsItem",
-    "PutV1PipelinePipelineIdBodyStatusesItem",
-    "PutV1WebhookIdBodyEventsItem",
+    "PostContactBodyEmailsItem",
+    "PostContactBodyPhonesItem",
+    "PostWebhookBodyEventsItem",
+    "PutActivityNoteIdBodyAttachmentsItem",
+    "PutActivityWhatsappMessageIdBodyAttachmentsItem",
+    "PutCustomFieldSchemaObjectTypeBodyFieldsItem",
+    "PutPipelinePipelineIdBodyStatusesItem",
+    "PutWebhookIdBodyEventsItem",
 ]
 
 # ============================================================================
@@ -276,2243 +282,2316 @@ __all__ = [
 # ============================================================================
 
 # Operation: list_leads
-class GetV1LeadRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of leads to return in a single request. Must be at least 1.", ge=1)
-class GetV1LeadRequest(StrictModel):
-    """Retrieve a list of all leads with optional pagination support. Use the limit parameter to control the number of results returned per request."""
-    query: GetV1LeadRequestQuery | None = None
+class GetLeadRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of leads to return in the response. Specify a positive integer to limit the result set size.")
+class GetLeadRequest(StrictModel):
+    """Retrieve a list of leads with optional pagination control. Use the limit parameter to specify the maximum number of results to return."""
+    query: GetLeadRequestQuery | None = None
 
 # Operation: create_lead
-class PostV1LeadRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The name of the lead being created.")
-class PostV1LeadRequest(StrictModel):
-    """Create a new lead in the system. Nested contacts, addresses, and custom fields can be included in the request, while activities, tasks, and opportunities should be created separately."""
-    body: PostV1LeadRequestBody | None = None
+class PostLeadRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The name of the lead.")
+    contacts: list[dict[str, Any]] | None = Field(default=None, description="An array of nested contact objects to associate with the lead. Order is preserved as provided.")
+    addresses: list[dict[str, Any]] | None = Field(default=None, description="An array of nested address objects to associate with the lead. Order is preserved as provided.")
+class PostLeadRequest(StrictModel):
+    """Create a new lead with optional nested contacts and addresses. Related entities like activities, tasks, and opportunities must be created separately."""
+    body: PostLeadRequestBody | None = None
 
 # Operation: get_lead
-class GetV1LeadIdRequestPath(StrictModel):
+class GetLeadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead to retrieve.")
-class GetV1LeadIdRequest(StrictModel):
-    """Retrieve a lead by ID with basic information, related tasks, opportunities, and custom fields. Note that activities must be fetched separately using a dedicated endpoint."""
-    path: GetV1LeadIdRequestPath
+class GetLeadIdRequest(StrictModel):
+    """Retrieve a single lead by its unique identifier. Use this operation to fetch detailed information about a specific lead."""
+    path: GetLeadIdRequestPath
 
 # Operation: update_lead
-class PutV1LeadIdRequestPath(StrictModel):
+class PutLeadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead to update.")
-class PutV1LeadIdRequestBody(StrictModel):
-    custom_field_id_add: str | None = Field(default=None, validation_alias="custom.FIELD_ID.add", serialization_alias="custom.FIELD_ID.add", description="Add a value to a multi-value custom field. Use the field ID in the parameter name to target the specific custom field.")
-    custom_field_id_remove: str | None = Field(default=None, validation_alias="custom.FIELD_ID.remove", serialization_alias="custom.FIELD_ID.remove", description="Remove a value from a multi-value custom field. Use the field ID in the parameter name to target the specific custom field.")
-class PutV1LeadIdRequest(StrictModel):
-    """Update an existing lead with support for non-destructive patches. Modify lead status, custom fields, and manage multi-value custom field entries using add/remove modifiers."""
-    path: PutV1LeadIdRequestPath
-    body: PutV1LeadIdRequestBody | None = None
+class PutLeadIdRequestBody(StrictModel):
+    custom_field_id: str | None = Field(default=None, validation_alias="custom.FIELD_ID", serialization_alias="custom.FIELD_ID", description="Custom field value to set, update, or remove. Set to null to unset a field. For multi-value fields, use the .add suffix to append values or .remove suffix to delete specific values.")
+class PutLeadIdRequest(StrictModel):
+    """Update an existing lead with support for partial updates. Modify standard fields like status, custom fields, or multi-value fields using add/remove suffixes without affecting unspecified fields."""
+    path: PutLeadIdRequestPath
+    body: PutLeadIdRequestBody | None = None
 
 # Operation: delete_lead
-class DeleteV1LeadIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead to delete.")
-class DeleteV1LeadIdRequest(StrictModel):
-    """Permanently delete a lead from the system by its ID. This action cannot be undone."""
-    path: DeleteV1LeadIdRequestPath
+class DeleteLeadIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead to delete. This must be a valid lead ID that exists in the system.")
+class DeleteLeadIdRequest(StrictModel):
+    """Permanently remove a lead from the system by its ID. This action cannot be undone and will delete all associated data."""
+    path: DeleteLeadIdRequestPath
 
 # Operation: merge_leads
-class PostV1LeadMergeRequestBody(StrictModel):
-    source: str | None = Field(default=None, description="The ID of the lead to merge from. This lead's data will be consolidated into the destination lead.")
-    destination: str | None = Field(default=None, description="The ID of the lead to merge into. This lead will retain the merged data and become the primary record after the operation completes.")
-class PostV1LeadMergeRequest(StrictModel):
-    """Merge two leads by consolidating data from a source lead into a destination lead. The source lead's information is transferred to the destination lead, which becomes the primary record."""
-    body: PostV1LeadMergeRequestBody | None = None
+class PostLeadMergeRequestBody(StrictModel):
+    source: str = Field(default=..., description="The ID of the source lead whose data will be consolidated into the destination lead.")
+    destination: str = Field(default=..., description="The ID of the destination lead that will retain all merged data and serve as the primary record after the operation completes.")
+class PostLeadMergeRequest(StrictModel):
+    """Merge two leads by consolidating all data from a source lead into a destination lead. The destination lead becomes the primary record containing the merged information."""
+    body: PostLeadMergeRequestBody
 
 # Operation: list_contacts
-class GetV1ContactRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of contacts to return in a single request. Defaults to 100 if not specified.")
-class GetV1ContactRequest(StrictModel):
+class GetContactRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of contacts to return in a single request. Allows you to control pagination size for efficient data retrieval.")
+class GetContactRequest(StrictModel):
     """Retrieve a paginated list of all contacts in the system. Use the limit parameter to control the number of results returned per request."""
-    query: GetV1ContactRequestQuery | None = None
+    query: GetContactRequestQuery | None = None
 
 # Operation: create_contact
-class PostV1ContactRequestBody(StrictModel):
-    name: str = Field(default=..., description="The full name of the contact.")
-    emails: list[dict[str, Any]] | None = Field(default=None, description="A list of email addresses associated with the contact. Order is preserved as provided.")
-    phones: list[dict[str, Any]] | None = Field(default=None, description="A list of phone numbers associated with the contact. Order is preserved as provided.")
-    urls: list[dict[str, Any]] | None = Field(default=None, description="A list of URLs associated with the contact (e.g., website, social profiles). Order is preserved as provided.")
-class PostV1ContactRequest(StrictModel):
-    """Create a new contact and optionally associate it with an existing lead. If no lead is specified, a new lead will be automatically created using the contact's name."""
-    body: PostV1ContactRequestBody
+class PostContactRequestBody(StrictModel):
+    lead_id: str = Field(default=..., description="The ID of the lead to associate with this contact. Required to link the contact to an existing lead; if omitted, a new lead will be created automatically.")
+    name: str = Field(default=..., description="The full name of the contact. Used to identify the contact and, if no lead_id is provided, to name the newly created lead.")
+    title: str | None = Field(default=None, description="The contact's job title or professional role.")
+    emails: list[PostContactBodyEmailsItem] | None = Field(default=None, description="A list of email addresses for the contact. Each item should be a valid email address.")
+    phones: list[PostContactBodyPhonesItem] | None = Field(default=None, description="A list of phone numbers for the contact. Each item should be a valid phone number.")
+class PostContactRequest(StrictModel):
+    """Create a new contact and associate it with a lead. If no lead_id is provided, a new lead will be automatically created using the contact's name."""
+    body: PostContactRequestBody
 
 # Operation: get_contact
-class GetV1ContactIdRequestPath(StrictModel):
+class GetContactIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the contact to retrieve.")
-class GetV1ContactIdRequest(StrictModel):
-    """Retrieve a specific contact by its unique identifier. Returns the complete contact details including name, email, phone, and other associated information."""
-    path: GetV1ContactIdRequestPath
+class GetContactIdRequest(StrictModel):
+    """Retrieve a single contact by its unique identifier. Use this operation to fetch detailed information about a specific contact."""
+    path: GetContactIdRequestPath
 
 # Operation: update_contact
-class PutV1ContactIdRequestPath(StrictModel):
+class PutContactIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the contact to update.")
-class PutV1ContactIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The contact's full name or display name.")
+class PutContactIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The contact's full name.")
     emails: list[dict[str, Any]] | None = Field(default=None, description="A list of email addresses associated with the contact. Order is preserved as provided.")
     phones: list[dict[str, Any]] | None = Field(default=None, description="A list of phone numbers associated with the contact. Order is preserved as provided.")
-    urls: list[dict[str, Any]] | None = Field(default=None, description="A list of URLs associated with the contact (e.g., website, social profiles). Order is preserved as provided.")
-class PutV1ContactIdRequest(StrictModel):
-    """Update an existing contact's information including name, email addresses, phone numbers, and URLs. Supports adding or removing individual values from multi-value custom fields using .add or .remove suffixes."""
-    path: PutV1ContactIdRequestPath
-    body: PutV1ContactIdRequestBody | None = None
+    urls: list[dict[str, Any]] | None = Field(default=None, description="A list of URLs associated with the contact. Order is preserved as provided.")
+class PutContactIdRequest(StrictModel):
+    """Update an existing contact's information including name, email addresses, phone numbers, and URLs. Use `.add` or `.remove` suffixes on custom field keys to add or remove individual values from multi-value fields."""
+    path: PutContactIdRequestPath
+    body: PutContactIdRequestBody | None = None
 
 # Operation: delete_contact
-class DeleteV1ContactIdRequestPath(StrictModel):
+class DeleteContactIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the contact to delete.")
-class DeleteV1ContactIdRequest(StrictModel):
-    """Permanently delete a contact from the system by its ID. This action cannot be undone."""
-    path: DeleteV1ContactIdRequestPath
+class DeleteContactIdRequest(StrictModel):
+    """Permanently remove a contact from the system by its ID. This action cannot be undone and will delete all associated data."""
+    path: DeleteContactIdRequestPath
 
 # Operation: list_activities
-class GetV1ActivityRequestQuery(StrictModel):
-    user_id__in: list[str] | None = Field(default=None, description="Filter results to activities created by specific users. Only applicable when querying activities for a single lead.")
-    contact_id__in: list[str] | None = Field(default=None, description="Filter results to activities associated with specific contacts. Only applicable when querying activities for a single lead.")
-    type__in: list[str] | None = Field(default=None, validation_alias="_type__in", serialization_alias="_type__in", description="Filter results to specific activity types by type ID or name. Supports multiple types including 'Custom' for custom activity types. Only applicable when querying activities for a single lead.")
-    activity_at__gt: str | None = Field(default=None, description="Return only activities that occurred after this date and time (ISO 8601 format). Requires sorting by activity_at in descending order.", json_schema_extra={'format': 'date-time'})
-    activity_at__lt: str | None = Field(default=None, description="Return only activities that occurred before this date and time (ISO 8601 format). Requires sorting by activity_at in descending order.", json_schema_extra={'format': 'date-time'})
-    order_by: str | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by date_created or activity_at. Prefix with '-' for descending order (e.g., -activity_at for newest first).")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return per request.")
-    thread_emails: Literal["true", "only"] | None = Field(default=None, description="Controls email object formatting in results. Use 'true' to group emails into threads with condensed email objects, or 'only' to return threads exclusively without individual email objects.")
-class GetV1ActivityRequest(StrictModel):
-    """Retrieve and filter activities across your CRM. Supports filtering by lead, user, contact, activity type, and date ranges, with flexible sorting and email threading options."""
-    query: GetV1ActivityRequestQuery | None = None
+class GetActivityRequestQuery(StrictModel):
+    user_id__in: str | None = Field(default=None, description="Filter activities by one or more user IDs (comma-separated). Only available when querying activities for a single lead using lead_id.")
+    contact_id__in: str | None = Field(default=None, description="Filter activities by one or more contact IDs (comma-separated). Only available when querying activities for a single lead using lead_id.")
+    activity_at__gt: str | None = Field(default=None, description="Return only activities that occurred after this date and time (ISO 8601 format). Requires sorting by -activity_at when used.", json_schema_extra={'format': 'date-time'})
+    activity_at__lt: str | None = Field(default=None, description="Return only activities that occurred before this date and time (ISO 8601 format). Requires sorting by -activity_at when used.", json_schema_extra={'format': 'date-time'})
+    order_by: Literal["date_created", "-date_created", "activity_at", "-activity_at"] | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by creation date or activity timestamp. Use date_created for creation order or activity_at for activity order; prefix with hyphen (-) for descending order. Sorting by -activity_at is only available when querying a single lead with lead_id.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response.")
+    thread_emails: Literal["true", "only"] | None = Field(default=None, description="Control how emails are grouped in results. Use 'true' to return email threads alongside individual email objects, or 'only' to return email threads without individual email objects. Omit to return individual email objects per message.")
+class GetActivityRequest(StrictModel):
+    """Retrieve and filter activity records across leads or for a specific lead. Supports advanced filtering by user, contact, and activity timestamp, with optional email threading to group related messages."""
+    query: GetActivityRequestQuery | None = None
 
-# Operation: list_call_activities
-class GetV1ActivityCallRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of call activity records to return in a single response for pagination purposes.")
-class GetV1ActivityCallRequest(StrictModel):
-    """Retrieve a list of all Call activities with optional filtering and pagination support. Use query parameters to narrow results by lead, user, or date range as needed."""
-    query: GetV1ActivityCallRequestQuery | None = None
+# Operation: list_calls
+class GetActivityCallRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of call records to return in the response. Limits the result set size for pagination or performance optimization.")
+class GetActivityCallRequest(StrictModel):
+    """Retrieve a list of all Call activities, with optional filtering by result count. Use this to view call records and activity history."""
+    query: GetActivityCallRequestQuery | None = None
 
 # Operation: log_call_activity
-class PostV1ActivityCallRequestBody(StrictModel):
-    direction: Literal["outbound", "inbound"] | None = Field(default=None, description="Specifies whether the call was inbound or outbound. If not provided, the direction will not be recorded.")
-    recording_url: str | None = Field(default=None, description="HTTPS URL pointing to an MP3 recording of the call. Must use HTTPS protocol for security purposes.", json_schema_extra={'format': 'uri'})
-class PostV1ActivityCallRequest(StrictModel):
-    """Manually log a call activity for calls made outside the Close VoIP system. The activity status defaults to completed upon creation."""
-    body: PostV1ActivityCallRequestBody | None = None
+class PostActivityCallRequestBody(StrictModel):
+    direction: Literal["outbound", "inbound"] = Field(default=..., description="Specify whether the call was outbound or inbound.")
+    recording_url: str | None = Field(default=None, description="Optional HTTPS URL pointing to an MP3 recording of the call.", json_schema_extra={'format': 'uri'})
+    lead_id: str = Field(default=..., description="The ID of the lead associated with this call activity.")
+    duration: int | None = Field(default=None, description="Optional call duration specified in seconds.")
+class PostActivityCallRequest(StrictModel):
+    """Manually log a call activity for calls made outside the Close VoIP system. The activity is automatically marked as completed."""
+    body: PostActivityCallRequestBody
 
-# Operation: get_call_activity
-class GetV1ActivityCallIdRequestPath(StrictModel):
+# Operation: get_call
+class GetActivityCallIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Call activity record to retrieve.")
-class GetV1ActivityCallIdRequest(StrictModel):
-    """Retrieve a single Call activity record by its unique identifier. Use this to fetch detailed information about a specific call interaction."""
-    path: GetV1ActivityCallIdRequestPath
+class GetActivityCallIdRequest(StrictModel):
+    """Retrieve a specific Call activity record by its unique identifier. Use this to fetch detailed information about a single call activity."""
+    path: GetActivityCallIdRequestPath
 
-# Operation: update_call_activity
-class PutV1ActivityCallIdRequestPath(StrictModel):
+# Operation: update_call
+class PutActivityCallIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Call activity to update.")
-class PutV1ActivityCallIdRequestBody(StrictModel):
-    outcome_id: str | None = Field(default=None, description="The user-defined outcome ID to assign to this call activity, indicating how the call concluded.")
-class PutV1ActivityCallIdRequest(StrictModel):
-    """Update a Call activity record, such as adding notes or changing the outcome. Note that certain fields like status, duration, and direction cannot be modified for calls made through Close's VoIP system."""
-    path: PutV1ActivityCallIdRequestPath
-    body: PutV1ActivityCallIdRequestBody | None = None
+class PutActivityCallIdRequestBody(StrictModel):
+    note_html: str | None = Field(default=None, description="HTML-formatted note content to attach to the call activity.")
+    outcome_id: str | None = Field(default=None, description="The outcome identifier to associate with this call activity.")
+class PutActivityCallIdRequest(StrictModel):
+    """Update a Call activity record, typically to modify the call notes or assign an outcome. Note that certain fields like status, duration, and direction cannot be modified for calls made through Close's VoIP system."""
+    path: PutActivityCallIdRequestPath
+    body: PutActivityCallIdRequestBody | None = None
 
-# Operation: delete_call_activity
-class DeleteV1ActivityCallIdRequestPath(StrictModel):
+# Operation: delete_call
+class DeleteActivityCallIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Call activity to delete.")
-class DeleteV1ActivityCallIdRequest(StrictModel):
-    """Permanently delete a Call activity record by its ID. This action cannot be undone."""
-    path: DeleteV1ActivityCallIdRequestPath
+class DeleteActivityCallIdRequest(StrictModel):
+    """Permanently delete a Call activity record by its ID. This action cannot be undone and will remove all associated data."""
+    path: DeleteActivityCallIdRequestPath
 
 # Operation: list_created_activities
-class GetV1ActivityCreatedRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response. Defaults to 100 if not specified.")
-class GetV1ActivityCreatedRequest(StrictModel):
-    """Retrieve a list of all Created activities, which represent the time and method by which leads were initially created in the system. Results can be limited to control response size."""
-    query: GetV1ActivityCreatedRequestQuery | None = None
+class GetActivityCreatedRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of activities to return in the response. Useful for pagination or limiting result set size.")
+class GetActivityCreatedRequest(StrictModel):
+    """Retrieve a list of all activities with Created status, optionally limiting the number of results returned."""
+    query: GetActivityCreatedRequestQuery | None = None
 
-# Operation: get_activity_created
-class GetV1ActivityCreatedIdRequestPath(StrictModel):
+# Operation: get_activity
+class GetActivityCreatedIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Created activity record to retrieve.")
-class GetV1ActivityCreatedIdRequest(StrictModel):
-    """Retrieve a single Created activity by ID. Created activities record when and how a lead was initially created in the system."""
-    path: GetV1ActivityCreatedIdRequestPath
+class GetActivityCreatedIdRequest(StrictModel):
+    """Retrieve a single Created activity record by its unique identifier. Use this to fetch detailed information about a specific activity that was created."""
+    path: GetActivityCreatedIdRequestPath
 
 # Operation: list_email_activities
-class GetV1ActivityEmailRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of email activities to return in the response. Must be at least 1.", ge=1)
-class GetV1ActivityEmailRequest(StrictModel):
-    """Retrieve a list of email activities, with one object returned per email message. Use the limit parameter to control the number of results returned."""
-    query: GetV1ActivityEmailRequestQuery | None = None
+class GetActivityEmailRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of email activity records to return in the response. Limits the result set size for pagination or performance optimization.")
+class GetActivityEmailRequest(StrictModel):
+    """Retrieve a list of email activities, with each result representing a single email message. Optionally filter results by specifying a maximum number of records to return."""
+    query: GetActivityEmailRequestQuery | None = None
 
-# Operation: create_email_activity
-class PostV1ActivityEmailRequestBody(StrictModel):
-    status: Literal["inbox", "draft", "scheduled", "outbox", "sent", "error"] = Field(default=..., description="The current state of the email. Must be one of: inbox (received), draft (unsent), scheduled (queued for future send), outbox (pending send), sent (successfully delivered), or error (failed to send).")
-    followup_date: str | None = Field(default=None, description="Optional ISO 8601 date-time for when a follow-up task should be created if no response is received by that time.", json_schema_extra={'format': 'date-time'})
-    template_id: str | None = Field(default=None, description="Optional ID of a pre-defined email template to render on the server side, which will populate the email content.")
-    sender: str | None = Field(default=None, description="Optional sender email address. Can be a plain email address or formatted as 'Display Name' <email@example.com>.")
-    attachments: list[PostV1ActivityEmailBodyAttachmentsItem] | None = Field(default=None, description="Optional array of attachment objects to include with the email. Order is preserved as provided.")
-class PostV1ActivityEmailRequest(StrictModel):
-    """Create a new email activity with a specified status. Use this to log incoming emails, draft new messages, schedule sends, or record sent/outbox items."""
-    body: PostV1ActivityEmailRequestBody
+# Operation: create_activity_email
+class PostActivityEmailRequestBody(StrictModel):
+    status: Literal["inbox", "draft", "scheduled", "outbox", "sent"] = Field(default=..., description="The email's status: use 'inbox' to log received emails, 'draft' to create editable drafts, 'scheduled' to send at a future time, 'outbox' to send immediately, or 'sent' to log already-sent emails.")
+    sender: str | None = Field(default=None, description="Sender's name and email address in the format 'Name <email@example.com>'. Required when status is inbox, scheduled, outbox, or sent.")
+    followup_date: str | None = Field(default=None, description="ISO 8601 date-time for scheduling a follow-up task if no response is received. Only applicable for scheduled, outbox, or sent emails.", json_schema_extra={'format': 'date-time'})
+    template_id: str | None = Field(default=None, description="ID of an email template to render server-side. When using a template, do not include body_text or body_html parameters.")
+    attachments: list[PostActivityEmailBodyAttachmentsItem] | None = Field(default=None, description="List of file attachments. All files must be pre-uploaded via the Files API before referencing them here.")
+    lead_id: str = Field(default=..., description="The unique identifier of the lead associated with this email activity.")
+    subject: str | None = Field(default=None, description="The subject line of the email.")
+    to: list[str] | None = Field(default=None, description="Array of recipient email addresses.")
+class PostActivityEmailRequest(StrictModel):
+    """Create a new email activity with a specified status to log received emails, create drafts, schedule future sends, send immediately, or record already-sent emails. Only draft emails can be modified after creation."""
+    body: PostActivityEmailRequestBody
 
 # Operation: get_email_activity
-class GetV1ActivityEmailIdRequestPath(StrictModel):
+class GetActivityEmailIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email activity record to retrieve.")
-class GetV1ActivityEmailIdRequest(StrictModel):
-    """Retrieve a single email activity record by its unique identifier. Use this to fetch detailed information about a specific email interaction."""
-    path: GetV1ActivityEmailIdRequestPath
+class GetActivityEmailIdRequest(StrictModel):
+    """Retrieve a single email activity record by its unique identifier. Use this to fetch detailed information about a specific email interaction or communication event."""
+    path: GetActivityEmailIdRequestPath
 
 # Operation: update_email_activity
-class PutV1ActivityEmailIdRequestPath(StrictModel):
+class PutActivityEmailIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email activity to update.")
-class PutV1ActivityEmailIdRequestBody(StrictModel):
-    sender: str | None = Field(default=None, description="The sender's email address, optionally formatted as a display name with the email address (e.g., \"Name\" <email@example.com>). Required when changing the activity status to scheduled or outbox if not previously set.")
+class PutActivityEmailIdRequestBody(StrictModel):
+    sender: str | None = Field(default=None, description="The sender email address. Required when changing the email status to scheduled or outbox if not already set on the email.")
     followup_date: str | None = Field(default=None, description="The date and time for an associated follow-up task, specified in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
-class PutV1ActivityEmailIdRequest(StrictModel):
-    """Update an email activity to modify draft content or change its status. Use this operation to transition emails between draft, scheduled, and outbox states, or to adjust follow-up timing."""
-    path: PutV1ActivityEmailIdRequestPath
-    body: PutV1ActivityEmailIdRequestBody | None = None
+class PutActivityEmailIdRequest(StrictModel):
+    """Update a draft email activity or change its status to scheduled or outbox. When transitioning to scheduled or outbox status, the sender email address is required if not already set on the email."""
+    path: PutActivityEmailIdRequestPath
+    body: PutActivityEmailIdRequestBody | None = None
 
 # Operation: delete_email_activity
-class DeleteV1ActivityEmailIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email activity to delete.")
-class DeleteV1ActivityEmailIdRequest(StrictModel):
-    """Permanently delete an email activity record by its ID. This action cannot be undone."""
-    path: DeleteV1ActivityEmailIdRequestPath
+class DeleteActivityEmailIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email activity record to delete.")
+class DeleteActivityEmailIdRequest(StrictModel):
+    """Permanently delete an email activity record by its unique identifier. This action cannot be undone and will remove all associated data."""
+    path: DeleteActivityEmailIdRequestPath
 
 # Operation: list_email_threads
-class GetV1ActivityEmailthreadRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of email threads to return in the response; omit to retrieve all available results.")
-class GetV1ActivityEmailthreadRequest(StrictModel):
-    """Retrieve a list of email thread activities, with each result representing one email conversation typically grouped by subject line."""
-    query: GetV1ActivityEmailthreadRequestQuery | None = None
+class GetActivityEmailthreadRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of email threads to return in the response. Limits the result set size for pagination or performance optimization.")
+class GetActivityEmailthreadRequest(StrictModel):
+    """Retrieve a list of email thread activities, where each thread represents a single email conversation typically grouped by subject line."""
+    query: GetActivityEmailthreadRequestQuery | None = None
 
 # Operation: get_email_thread
-class GetV1ActivityEmailthreadIdRequestPath(StrictModel):
+class GetActivityEmailthreadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email thread activity to retrieve.")
-class GetV1ActivityEmailthreadIdRequest(StrictModel):
-    """Retrieve a specific email thread activity by its unique identifier. Use this to fetch details about a single email thread conversation."""
-    path: GetV1ActivityEmailthreadIdRequestPath
+class GetActivityEmailthreadIdRequest(StrictModel):
+    """Retrieve a specific email thread activity by its unique identifier. Use this to fetch detailed information about a single email thread record."""
+    path: GetActivityEmailthreadIdRequestPath
 
 # Operation: delete_email_thread
-class DeleteV1ActivityEmailthreadIdRequestPath(StrictModel):
+class DeleteActivityEmailthreadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email thread activity to delete.")
-class DeleteV1ActivityEmailthreadIdRequest(StrictModel):
+class DeleteActivityEmailthreadIdRequest(StrictModel):
     """Delete an email thread activity and all associated email activities within that thread. This is a permanent operation that removes the entire thread conversation."""
-    path: DeleteV1ActivityEmailthreadIdRequestPath
+    path: DeleteActivityEmailthreadIdRequestPath
 
 # Operation: list_lead_status_changes
-class GetV1ActivityStatusChangeLeadRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return. Must be at least 1.", ge=1)
-class GetV1ActivityStatusChangeLeadRequest(StrictModel):
+class GetActivityStatusChangeLeadRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of lead status change records to return in the response. Useful for pagination or limiting result set size.")
+class GetActivityStatusChangeLeadRequest(StrictModel):
     """Retrieve a list of all lead status change activities, with optional filtering by result limit. Use this to track when and how lead statuses have been modified."""
-    query: GetV1ActivityStatusChangeLeadRequestQuery | None = None
+    query: GetActivityStatusChangeLeadRequestQuery | None = None
 
 # Operation: log_lead_status_change
-class PostV1ActivityStatusChangeLeadRequestBody(StrictModel):
-    lead_id: str = Field(default=..., description="The unique identifier of the lead for which to log the status change.")
-    old_status_id: str | None = Field(default=None, description="The unique identifier of the status the lead was transitioning from. Optional if only recording the new status.")
-    new_status_id: str | None = Field(default=None, description="The unique identifier of the status the lead was transitioning to. Optional if only recording the previous status.")
-class PostV1ActivityStatusChangeLeadRequest(StrictModel):
-    """Log a historical lead status change event in the activity feed without modifying the lead's current status. Use this operation to import status change records from another system or organization."""
-    body: PostV1ActivityStatusChangeLeadRequestBody
+class PostActivityStatusChangeLeadRequestBody(StrictModel):
+    new_status_id: str | None = Field(default=None, description="The ID of the lead status after the change. Required to document what status the lead transitioned to.")
+    old_status_id: str | None = Field(default=None, description="The ID of the lead status before the change. Required to document what status the lead transitioned from.")
+class PostActivityStatusChangeLeadRequest(StrictModel):
+    """Log a historical lead status change event in the activity feed without modifying the lead's current status. Use this operation to import status change records from external systems or organizations."""
+    body: PostActivityStatusChangeLeadRequestBody | None = None
 
 # Operation: get_lead_status_change
-class GetV1ActivityStatusChangeLeadIdRequestPath(StrictModel):
+class GetActivityStatusChangeLeadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead status change activity record to retrieve.")
-class GetV1ActivityStatusChangeLeadIdRequest(StrictModel):
-    """Retrieve a specific lead status change activity record by its ID. Use this to view details about when and how a lead's status was modified."""
-    path: GetV1ActivityStatusChangeLeadIdRequestPath
+class GetActivityStatusChangeLeadIdRequest(StrictModel):
+    """Retrieve details of a specific lead status change activity, including when and how the lead's status was modified."""
+    path: GetActivityStatusChangeLeadIdRequestPath
 
 # Operation: delete_lead_status_change
-class DeleteV1ActivityStatusChangeLeadIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the LeadStatusChange activity to delete.")
-class DeleteV1ActivityStatusChangeLeadIdRequest(StrictModel):
-    """Remove a LeadStatusChange activity from a lead's activity feed. This deletion only removes the status change event record and does not alter the lead's current status; use this when a status change event is irrelevant or causing integration issues with external systems."""
-    path: DeleteV1ActivityStatusChangeLeadIdRequestPath
+class DeleteActivityStatusChangeLeadIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the LeadStatusChange activity record to delete.")
+class DeleteActivityStatusChangeLeadIdRequest(StrictModel):
+    """Remove a status change event from a lead's activity history. This deletes the activity record without affecting the lead's current status, useful when a status change event is outdated or causing sync issues with external systems."""
+    path: DeleteActivityStatusChangeLeadIdRequestPath
 
-# Operation: search_meeting_by_calendar_event
-class GetV1ActivityMeetingRequestQuery(StrictModel):
-    provider_calendar_event_id: str = Field(default=..., description="The unique identifier of the calendar event from the provider (Google, Microsoft, etc.) that the meeting was synced from. This is the primary search criterion.")
-    provider_calendar_id: str | None = Field(default=None, description="The unique identifier of the calendar from the provider where the event originated. Use this to narrow results to a specific calendar.")
-    provider_calendar_type: Literal["google", "microsoft"] | None = Field(default=None, description="The calendar provider type. Specify either 'google' for Google Calendar or 'microsoft' for Microsoft Outlook/Exchange.")
-    starts_at: str | None = Field(default=None, description="The meeting start time in ISO 8601 format. Useful for distinguishing meetings created from different instances of recurring calendar events.", json_schema_extra={'format': 'date-time'})
-class GetV1ActivityMeetingRequest(StrictModel):
-    """Search for meetings by their synced calendar event information. Use the provider calendar event ID along with optional filters like calendar ID, provider type, or start time to locate specific meetings."""
-    query: GetV1ActivityMeetingRequestQuery
+# Operation: search_meetings
+class GetActivityMeetingRequestQuery(StrictModel):
+    provider_calendar_event_id: str | None = Field(default=None, description="The unique event identifier from the calendar provider (e.g., Google Calendar or Microsoft Outlook) that the meeting was synced from. Required when searching by any other calendar provider field.")
+    provider_calendar_id: str | None = Field(default=None, description="The calendar identifier from the provider where the meeting event is stored.")
+    provider_calendar_type: Literal["google", "microsoft"] | None = Field(default=None, description="The calendar service provider type. Supported providers are Google Calendar or Microsoft Outlook.")
+class GetActivityMeetingRequest(StrictModel):
+    """Search for meetings by their synced calendar provider information, including event ID, calendar ID, provider type, and start time."""
+    query: GetActivityMeetingRequestQuery | None = None
 
 # Operation: get_meeting
-class GetV1ActivityMeetingIdRequestPath(StrictModel):
+class GetActivityMeetingIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Meeting activity to retrieve.")
-class GetV1ActivityMeetingIdRequest(StrictModel):
+class GetActivityMeetingIdRequest(StrictModel):
     """Retrieve a specific Meeting activity by its unique identifier. Use this to fetch details about a scheduled or completed meeting."""
-    path: GetV1ActivityMeetingIdRequestPath
+    path: GetActivityMeetingIdRequestPath
 
 # Operation: update_meeting
-class PutV1ActivityMeetingIdRequestPath(StrictModel):
+class PutActivityMeetingIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Meeting activity to update.")
-class PutV1ActivityMeetingIdRequestBody(StrictModel):
-    user_note_html: str | None = Field(default=None, description="Rich text HTML content for meeting notes. Allows formatted text documentation of meeting details and discussion points.")
-    outcome_id: str | None = Field(default=None, description="Custom outcome identifier to associate with the meeting, used for tracking meeting results or classifications.")
-class PutV1ActivityMeetingIdRequest(StrictModel):
-    """Update a Meeting activity by modifying notes or outcome. Commonly used to record meeting notes in rich text format or assign a custom outcome to the meeting."""
-    path: PutV1ActivityMeetingIdRequestPath
-    body: PutV1ActivityMeetingIdRequestBody | None = None
+class PutActivityMeetingIdRequestBody(StrictModel):
+    user_note_html: str | None = Field(default=None, description="Rich text HTML content for meeting notes. Allows formatted text documentation of meeting details and discussions.")
+    outcome_id: str | None = Field(default=None, description="Custom outcome identifier to associate with the meeting, linking the meeting to a specific result or resolution.")
+class PutActivityMeetingIdRequest(StrictModel):
+    """Update a Meeting activity by modifying its notes or associated outcome. Use this to record meeting notes in rich text format or link the meeting to a specific outcome."""
+    path: PutActivityMeetingIdRequestPath
+    body: PutActivityMeetingIdRequestBody | None = None
 
 # Operation: delete_meeting
-class DeleteV1ActivityMeetingIdRequestPath(StrictModel):
+class DeleteActivityMeetingIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Meeting activity to delete.")
-class DeleteV1ActivityMeetingIdRequest(StrictModel):
-    """Permanently delete a specific Meeting activity by its ID. This action cannot be undone."""
-    path: DeleteV1ActivityMeetingIdRequestPath
+class DeleteActivityMeetingIdRequest(StrictModel):
+    """Permanently delete a specific Meeting activity by its ID. This action cannot be undone and will remove all associated data."""
+    path: DeleteActivityMeetingIdRequestPath
 
 # Operation: create_or_update_meeting_integration
-class PostV1ActivityMeetingIdIntegrationRequestPath(StrictModel):
+class PostActivityMeetingIdIntegrationRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the meeting activity to integrate with a third-party service.")
-class PostV1ActivityMeetingIdIntegrationRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="Integration configuration object. Submitting an empty object will not perform any action. The structure depends on the third-party service being integrated.")
-class PostV1ActivityMeetingIdIntegrationRequest(StrictModel):
-    """Create a new third-party meeting integration or update an existing one for a specific meeting activity. This operation is only available to OAuth applications; API key authentication will result in an error."""
-    path: PostV1ActivityMeetingIdIntegrationRequestPath
-    body: PostV1ActivityMeetingIdIntegrationRequestBody
+class PostActivityMeetingIdIntegrationRequestBody(StrictModel):
+    body: dict[str, Any] = Field(default=..., description="The integration configuration payload. Submit an empty JSON object to perform no action, or include integration details to create or update the integration.")
+class PostActivityMeetingIdIntegrationRequest(StrictModel):
+    """Create a new third-party meeting integration or update an existing one for a specific meeting activity. This operation is only available to OAuth applications and allows third-party services to be presented as tabs in the activity feed."""
+    path: PostActivityMeetingIdIntegrationRequestPath
+    body: PostActivityMeetingIdIntegrationRequestBody
 
-# Operation: list_activity_notes
-class GetV1ActivityNoteRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return per request. Must be at least 1.", ge=1)
-class GetV1ActivityNoteRequest(StrictModel):
-    """Retrieve a list of Note activities with optional pagination. Use this to view all notes or filter results by applying additional query parameters."""
-    query: GetV1ActivityNoteRequestQuery | None = None
+# Operation: list_notes
+class GetActivityNoteRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of note records to return in the response. Useful for pagination or limiting result set size.")
+class GetActivityNoteRequest(StrictModel):
+    """Retrieve a list of all Note activities, with optional filtering by result count. Use this to view note records across your activity stream."""
+    query: GetActivityNoteRequestQuery | None = None
 
 # Operation: create_note
-class PostV1ActivityNoteRequestBody(StrictModel):
-    attachments: list[PostV1ActivityNoteBodyAttachmentsItem] | None = Field(default=None, description="Array of attachments to include with the note. Each attachment object should contain a URL from the Files API, filename, and content type. Attachments are displayed in the order provided.")
-    pinned: bool | None = Field(default=None, description="Set to true to pin this note, making it appear at the top of the activity feed for easy reference.")
-class PostV1ActivityNoteRequest(StrictModel):
-    """Create a new Note activity with optional rich-text content, attachments, and pinning. Rich HTML content takes precedence over plain text if both are provided."""
-    body: PostV1ActivityNoteRequestBody | None = None
+class PostActivityNoteRequestBody(StrictModel):
+    lead_id: str = Field(default=..., description="The lead ID to associate this note with. Required to link the note to a specific lead record.")
+    note_html: str | None = Field(default=None, description="Rich-text note content using a subset of HTML tags. When both note_html and note are provided, note_html takes precedence.")
+    pinned: bool | None = Field(default=None, description="Whether to pin this note for prominence. Set to true to pin or false to unpin.")
+    attachments: list[PostActivityNoteBodyAttachmentsItem] | None = Field(default=None, description="List of file attachments to include with the note. Each attachment must include a URL (beginning with https://app.close.com/go/file/), filename, and content type. Files should be uploaded via the Files API first before referencing them here.")
+class PostActivityNoteRequest(StrictModel):
+    """Create a note activity associated with a lead. Notes support rich-text formatting, optional attachments, and can be pinned for visibility."""
+    body: PostActivityNoteRequestBody
 
-# Operation: get_activity_note
-class GetV1ActivityNoteIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Note activity to retrieve.")
-class GetV1ActivityNoteIdRequest(StrictModel):
-    """Retrieve a single Note activity by its unique identifier. Use this to fetch detailed information about a specific note entry."""
-    path: GetV1ActivityNoteIdRequestPath
+# Operation: get_note
+class GetActivityNoteIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the note activity to retrieve.")
+class GetActivityNoteIdRequest(StrictModel):
+    """Retrieve a single note activity by its unique identifier. Use this to fetch detailed information about a specific note."""
+    path: GetActivityNoteIdRequestPath
 
 # Operation: update_note
-class PutV1ActivityNoteIdRequestPath(StrictModel):
+class PutActivityNoteIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the note activity to update.")
-class PutV1ActivityNoteIdRequestBody(StrictModel):
-    attachments: list[dict[str, Any]] | None = Field(default=None, description="List of attachment objects to associate with the note. Attachments are processed in the order provided.")
-    pinned: bool | None = Field(default=None, description="Set to true to pin the note for visibility, or false to unpin it.")
-class PutV1ActivityNoteIdRequest(StrictModel):
-    """Update an existing note activity, including its content, attachments, and pin status. You can modify the note text, add or remove attachments, and pin or unpin the note."""
-    path: PutV1ActivityNoteIdRequestPath
-    body: PutV1ActivityNoteIdRequestBody | None = None
+class PutActivityNoteIdRequestBody(StrictModel):
+    note_html: str | None = Field(default=None, description="Rich-text note content formatted with a subset of HTML tags. When both note_html and plain text note are provided, this field takes precedence.")
+    pinned: bool | None = Field(default=None, description="Set to true to pin this note for visibility, or false to unpin it.")
+    attachments: list[PutActivityNoteIdBodyAttachmentsItem] | None = Field(default=None, description="An ordered list of file attachments to associate with this note. Order is preserved as provided.")
+class PutActivityNoteIdRequest(StrictModel):
+    """Update an existing note activity, including its content, formatting, and pin status. Use note_html for rich-text content with HTML formatting, which takes precedence over plain text if both are provided."""
+    path: PutActivityNoteIdRequestPath
+    body: PutActivityNoteIdRequestBody | None = None
 
 # Operation: delete_activity_note
-class DeleteV1ActivityNoteIdRequestPath(StrictModel):
+class DeleteActivityNoteIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Note activity to delete.")
-class DeleteV1ActivityNoteIdRequest(StrictModel):
-    """Permanently delete a Note activity by its ID. This action cannot be undone."""
-    path: DeleteV1ActivityNoteIdRequestPath
+class DeleteActivityNoteIdRequest(StrictModel):
+    """Permanently delete a Note activity by its ID. This action cannot be undone and will remove all associated data."""
+    path: DeleteActivityNoteIdRequestPath
 
 # Operation: list_opportunity_status_changes
-class GetV1ActivityStatusChangeOpportunityRequestQuery(StrictModel):
+class GetActivityStatusChangeOpportunityRequestQuery(StrictModel):
     opportunity_id: str | None = Field(default=None, description="Filter results to show status changes for a specific opportunity by its ID.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Limit the number of status change records returned in the response.")
-class GetV1ActivityStatusChangeOpportunityRequest(StrictModel):
-    """Retrieve a list of opportunity status change activities with optional filtering by opportunity ID and result limits."""
-    query: GetV1ActivityStatusChangeOpportunityRequestQuery | None = None
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Limit the number of results returned in the response.")
+class GetActivityStatusChangeOpportunityRequest(StrictModel):
+    """Retrieve a list of status change activities for opportunities, with optional filtering by opportunity ID and result limiting."""
+    query: GetActivityStatusChangeOpportunityRequestQuery | None = None
 
 # Operation: log_opportunity_status_change
-class PostV1ActivityStatusChangeOpportunityRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The status change event details including the opportunity identifier, previous status, new status, and any additional context about the change.")
-class PostV1ActivityStatusChangeOpportunityRequest(StrictModel):
-    """Log a historical opportunity status change event in the activity feed. This operation records a status change event without modifying the actual opportunity status, and is intended for importing historical status changes from external systems or organizations."""
-    body: PostV1ActivityStatusChangeOpportunityRequestBody
+class PostActivityStatusChangeOpportunityRequestBody(StrictModel):
+    opportunity_id: str | None = Field(default=None, description="The unique identifier of the opportunity associated with this status change event.")
+    new_status_id: str | None = Field(default=None, description="The unique identifier of the opportunity status that was transitioned to.")
+    old_status_id: str | None = Field(default=None, description="The unique identifier of the opportunity status that was transitioned from.")
+class PostActivityStatusChangeOpportunityRequest(StrictModel):
+    """Log a historical opportunity status change event in the activity feed without modifying the actual opportunity status. Use this operation to import status change records from external systems or organizations."""
+    body: PostActivityStatusChangeOpportunityRequestBody | None = None
 
 # Operation: get_opportunity_status_change
-class GetV1ActivityStatusChangeOpportunityIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the opportunity status change activity record to retrieve.")
-class GetV1ActivityStatusChangeOpportunityIdRequest(StrictModel):
-    """Retrieve a single opportunity status change activity by its ID. Use this to fetch details about when and how an opportunity's status was modified."""
-    path: GetV1ActivityStatusChangeOpportunityIdRequestPath
+class GetActivityStatusChangeOpportunityIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the OpportunityStatusChange activity record to retrieve.")
+class GetActivityStatusChangeOpportunityIdRequest(StrictModel):
+    """Retrieve details of a specific opportunity status change activity, including what changed and when the transition occurred."""
+    path: GetActivityStatusChangeOpportunityIdRequestPath
 
 # Operation: delete_opportunity_status_change
-class DeleteV1ActivityStatusChangeOpportunityIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the OpportunityStatusChange activity to delete.")
-class DeleteV1ActivityStatusChangeOpportunityIdRequest(StrictModel):
-    """Remove an OpportunityStatusChange activity from the activity feed. This deletion only removes the status change event record and does not affect the actual opportunity status; use this only when the status change event is irrelevant or causing integration issues with external systems."""
-    path: DeleteV1ActivityStatusChangeOpportunityIdRequestPath
+class DeleteActivityStatusChangeOpportunityIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the OpportunityStatusChange activity record to delete.")
+class DeleteActivityStatusChangeOpportunityIdRequest(StrictModel):
+    """Remove a status change activity from an opportunity's activity feed. This deletion does not alter the opportunity's current status—it only removes the historical status change event, useful when the activity is irrelevant or causing integration conflicts."""
+    path: DeleteActivityStatusChangeOpportunityIdRequestPath
 
 # Operation: list_sms_activities
-class GetV1ActivitySmsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of SMS activity records to return in the response. Limits the result set size for pagination or performance optimization.")
-class GetV1ActivitySmsRequest(StrictModel):
-    """Retrieve a list of SMS activities with optional filtering. Includes MMS messages (SMS with attachments) where attachments contain URLs, filenames, sizes, content types, and optional thumbnails accessible via authenticated S3 URLs."""
-    query: GetV1ActivitySmsRequestQuery | None = None
+class GetActivitySmsRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of SMS activities to return in the response. Limits the result set size for pagination or performance optimization.")
+class GetActivitySmsRequest(StrictModel):
+    """Retrieve a list of SMS activities, including MMS messages with attachments. Attachments contain metadata (URL, filename, size, content type) and optional thumbnails; accessing URLs requires an authenticated session."""
+    query: GetActivitySmsRequestQuery | None = None
 
 # Operation: create_sms_activity
-class PostV1ActivitySmsRequestQuery(StrictModel):
+class PostActivitySmsRequestQuery(StrictModel):
     send_to_inbox: bool | None = Field(default=None, description="When creating an SMS with inbox status, set to true to automatically generate a corresponding Inbox Notification for the SMS.")
-class PostV1ActivitySmsRequestBody(StrictModel):
+class PostActivitySmsRequestBody(StrictModel):
     status: Literal["inbox", "draft", "scheduled", "outbox", "sent"] = Field(default=..., description="The current status of the SMS activity. Use inbox to log a received SMS, draft to create an editable SMS, scheduled to send at a future date/time, outbox to send immediately, or sent to log an already-sent SMS.")
-    local_phone: str | None = Field(default=None, description="The phone number to send the SMS from. Must be associated with a Phone Number configured as type internal. Required unless using a template_id.")
-    template_id: str | None = Field(default=None, description="The ID of an SMS template to use instead of providing raw text content.")
-    direction: Literal["inbound", "outbound"] | None = Field(default=None, description="The direction of the SMS flow. Defaults to inbound when status is inbox, otherwise defaults to outbound.")
-class PostV1ActivitySmsRequest(StrictModel):
-    """Create an SMS activity with various statuses (inbox, draft, scheduled, outbox, or sent) to log, draft, schedule, or send SMS messages. Only draft SMS activities can be modified after creation."""
-    query: PostV1ActivitySmsRequestQuery | None = None
-    body: PostV1ActivitySmsRequestBody
+    template_id: str | None = Field(default=None, description="The ID of an SMS template to use as the content for this activity instead of providing raw text.")
+    remote_phone: str | None = Field(default=None, description="The remote phone number for the SMS recipient (when sending) or sender (when receiving).")
+class PostActivitySmsRequest(StrictModel):
+    """Create an SMS activity to log, draft, schedule, or send SMS messages. Only draft SMS activities can be modified after creation."""
+    query: PostActivitySmsRequestQuery | None = None
+    body: PostActivitySmsRequestBody
 
 # Operation: get_sms_activity
-class GetV1ActivitySmsIdRequestPath(StrictModel):
+class GetActivitySmsIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS activity record to retrieve.")
-class GetV1ActivitySmsIdRequest(StrictModel):
-    """Retrieve details of a specific SMS activity by its unique identifier. Use this to fetch information about a single SMS message or communication event."""
-    path: GetV1ActivitySmsIdRequestPath
+class GetActivitySmsIdRequest(StrictModel):
+    """Retrieve detailed information about a specific SMS activity by its unique identifier. Use this to fetch the complete record of a single SMS message or communication event."""
+    path: GetActivitySmsIdRequestPath
 
 # Operation: update_sms_activity
-class PutV1ActivitySmsIdRequestPath(StrictModel):
+class PutActivitySmsIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS activity to update.")
-class PutV1ActivitySmsIdRequest(StrictModel):
-    """Update an SMS activity to modify draft content or change its send status. Use this to send immediately by setting status to outbox, or schedule for later by setting status to scheduled with a date_scheduled value."""
-    path: PutV1ActivitySmsIdRequestPath
+class PutActivitySmsIdRequest(StrictModel):
+    """Update an SMS activity to modify its content, schedule delivery, or send it immediately. Only draft SMS activities can be modified; use status to control whether the SMS is sent immediately (outbox) or scheduled for later delivery (scheduled)."""
+    path: PutActivitySmsIdRequestPath
 
 # Operation: delete_sms_activity
-class DeleteV1ActivitySmsIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS activity to delete.")
-class DeleteV1ActivitySmsIdRequest(StrictModel):
-    """Permanently delete a specific SMS activity record by its ID. This action cannot be undone."""
-    path: DeleteV1ActivitySmsIdRequestPath
+class DeleteActivitySmsIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS activity record to delete.")
+class DeleteActivitySmsIdRequest(StrictModel):
+    """Permanently delete a specific SMS activity record by its unique identifier. This action cannot be undone and will remove all associated data."""
+    path: DeleteActivitySmsIdRequestPath
 
-# Operation: list_completed_tasks
-class GetV1ActivityTaskCompletedRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response. Must be at least 1.", ge=1)
-class GetV1ActivityTaskCompletedRequest(StrictModel):
-    """Retrieve a list of task completion activities. Task completed activities are generated when a task is marked as finished on a lead record."""
-    query: GetV1ActivityTaskCompletedRequestQuery | None = None
+# Operation: list_completed_activities
+class GetActivityTaskCompletedRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of completed activities to return in the response. Must be at least 1.", ge=1)
+class GetActivityTaskCompletedRequest(StrictModel):
+    """Retrieve a list of completed task activities, with optional filtering by result count. Use this to view historical task completion records."""
+    query: GetActivityTaskCompletedRequestQuery | None = None
 
 # Operation: get_completed_task
-class GetV1ActivityTaskCompletedIdRequestPath(StrictModel):
+class GetActivityTaskCompletedIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the completed task activity to retrieve.")
-class GetV1ActivityTaskCompletedIdRequest(StrictModel):
-    """Retrieve details of a specific completed task activity by its unique identifier."""
-    path: GetV1ActivityTaskCompletedIdRequestPath
+class GetActivityTaskCompletedIdRequest(StrictModel):
+    """Retrieve a single completed task activity by its unique identifier. Use this to fetch details about a specific task that has been marked as completed."""
+    path: GetActivityTaskCompletedIdRequestPath
 
 # Operation: delete_completed_task
-class DeleteV1ActivityTaskCompletedIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the TaskCompleted activity to delete.")
-class DeleteV1ActivityTaskCompletedIdRequest(StrictModel):
-    """Remove a completed task activity from the system. This permanently deletes the TaskCompleted activity record identified by the provided ID."""
-    path: DeleteV1ActivityTaskCompletedIdRequestPath
+class DeleteActivityTaskCompletedIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the completed task activity to delete.")
+class DeleteActivityTaskCompletedIdRequest(StrictModel):
+    """Permanently remove a completed task activity from the system. This action cannot be undone and will delete the TaskCompleted activity record and all associated data."""
+    path: DeleteActivityTaskCompletedIdRequestPath
 
 # Operation: list_lead_merges
-class GetV1ActivityLeadMergeRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of LeadMerge activities to return in the response. Useful for pagination or controlling result set size.")
-class GetV1ActivityLeadMergeRequest(StrictModel):
-    """Retrieve a list of LeadMerge activities, which are automatically created when one lead is merged into another. Use optional filtering to limit the number of results returned."""
-    query: GetV1ActivityLeadMergeRequestQuery | None = None
+class GetActivityLeadMergeRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in a single response. Limits the size of the result set.")
+class GetActivityLeadMergeRequest(StrictModel):
+    """Retrieve a list of LeadMerge activities, which are created when one lead is merged into another. The source lead is deleted after being merged into the destination lead."""
+    query: GetActivityLeadMergeRequestQuery | None = None
 
 # Operation: get_lead_merge
-class GetV1ActivityLeadMergeIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the LeadMerge activity record to retrieve.")
-class GetV1ActivityLeadMergeIdRequest(StrictModel):
-    """Retrieve a specific LeadMerge activity record by its unique identifier. Use this to fetch details about a lead merge operation."""
-    path: GetV1ActivityLeadMergeIdRequestPath
+class GetActivityLeadMergeIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the LeadMerge activity to retrieve.")
+class GetActivityLeadMergeIdRequest(StrictModel):
+    """Retrieve a single LeadMerge activity by its ID. Use this to fetch details about a specific lead merge operation."""
+    path: GetActivityLeadMergeIdRequestPath
 
 # Operation: list_whatsapp_messages
-class GetV1ActivityWhatsappMessageRequestQuery(StrictModel):
-    external_whatsapp_message_id: str | None = Field(default=None, description="Filter results to a specific WhatsApp message by its external message ID. Useful for locating a particular message in Close that corresponds to a WhatsApp message ID.")
-class GetV1ActivityWhatsappMessageRequest(StrictModel):
-    """Retrieve WhatsApp message activities from Close, with optional filtering by external WhatsApp message ID. Use this to sync message data between WhatsApp and Close, or to locate specific messages for updates or deletion."""
-    query: GetV1ActivityWhatsappMessageRequestQuery | None = None
+class GetActivityWhatsappMessageRequestQuery(StrictModel):
+    external_whatsapp_message_id: str | None = Field(default=None, description="Filter results to a specific WhatsApp message by its external message ID. Useful for locating a message in Close that corresponds to a WhatsApp message that was updated or deleted.")
+class GetActivityWhatsappMessageRequest(StrictModel):
+    """Retrieve WhatsApp message activities from Close, optionally filtered by external WhatsApp message ID. Use this to sync message updates or deletions that occurred in WhatsApp."""
+    query: GetActivityWhatsappMessageRequestQuery | None = None
 
 # Operation: create_whatsapp_message
-class PostV1ActivityWhatsappMessageRequestQuery(StrictModel):
-    send_to_inbox: bool | None = Field(default=None, description="When the message direction is set to 'incoming', set this to true to automatically create a corresponding Inbox Notification for the message.")
-class PostV1ActivityWhatsappMessageRequestBody(StrictModel):
-    external_whatsapp_message_id: str = Field(default=..., description="The unique identifier of the message as assigned by WhatsApp. This is required to link the activity to the original message.")
-    message_markdown: str = Field(default=..., description="The message content formatted using WhatsApp Markdown syntax. This is the body text that will be displayed in the activity.")
-    attachments: list[PostV1ActivityWhatsappMessageBodyAttachmentsItem] | None = Field(default=None, description="An optional array of file attachments previously uploaded via the Files API. Each attachment should include its URL, filename, and content type. The combined size of all attachments cannot exceed 25MB.")
-    integration_link: str | None = Field(default=None, description="An optional URL provided by the integration partner that links back to this message in the external WhatsApp system, enabling cross-system navigation.")
-    response_to_id: str | None = Field(default=None, description="The Close activity ID of another WhatsApp message activity that this message is replying to, establishing a conversation thread.")
-class PostV1ActivityWhatsappMessageRequest(StrictModel):
-    """Create a new WhatsApp message activity in Close. The message must reference a valid WhatsApp message ID and include the message body in WhatsApp Markdown format. Any attachments must be pre-uploaded via the Files API and cannot exceed 25MB in total size."""
-    query: PostV1ActivityWhatsappMessageRequestQuery | None = None
-    body: PostV1ActivityWhatsappMessageRequestBody
+class PostActivityWhatsappMessageRequestQuery(StrictModel):
+    send_to_inbox: bool | None = Field(default=None, description="Set to true when creating an incoming WhatsApp message to automatically generate a corresponding inbox notification.")
+class PostActivityWhatsappMessageRequestBody(StrictModel):
+    external_whatsapp_message_id: str = Field(default=..., description="The unique identifier of the message within WhatsApp. Used to track and filter message updates or deletions.")
+    message_markdown: str = Field(default=..., description="The message content formatted in WhatsApp Markdown syntax. The system will automatically convert this to HTML for display.")
+    attachments: list[PostActivityWhatsappMessageBodyAttachmentsItem] | None = Field(default=None, description="Array of file attachments to include with the message. Files must be pre-uploaded via the Files API. The combined size of all attachments cannot exceed 25MB.")
+    integration_link: str | None = Field(default=None, description="Optional URL pointing back to this message in the external system where it was created, enabling cross-system navigation.", json_schema_extra={'format': 'uri'})
+    response_to_id: str | None = Field(default=None, description="The Close activity ID of the WhatsApp message this message is replying to (use the Close activity ID starting with 'acti_', not the WhatsApp native message ID).")
+class PostActivityWhatsappMessageRequest(StrictModel):
+    """Create a new WhatsApp message activity linked to a Close contact or lead. Supports WhatsApp Markdown formatted text and file attachments (up to 25MB total). Incoming messages can automatically generate inbox notifications."""
+    query: PostActivityWhatsappMessageRequestQuery | None = None
+    body: PostActivityWhatsappMessageRequestBody
 
 # Operation: get_whatsapp_message
-class GetV1ActivityWhatsappMessageIdRequestPath(StrictModel):
+class GetActivityWhatsappMessageIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the WhatsApp message activity to retrieve.")
-class GetV1ActivityWhatsappMessageIdRequest(StrictModel):
+class GetActivityWhatsappMessageIdRequest(StrictModel):
     """Retrieve a specific WhatsApp message activity by its unique identifier. Use this to fetch details about a single WhatsApp message interaction."""
-    path: GetV1ActivityWhatsappMessageIdRequestPath
+    path: GetActivityWhatsappMessageIdRequestPath
 
 # Operation: update_whatsapp_message
-class PutV1ActivityWhatsappMessageIdRequestPath(StrictModel):
+class PutActivityWhatsappMessageIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the WhatsApp message activity to update.")
-class PutV1ActivityWhatsappMessageIdRequestBody(StrictModel):
-    message_markdown: str | None = Field(default=None, description="The message body formatted using WhatsApp Markdown syntax for text styling and formatting.")
-    attachments: list[dict[str, Any]] | None = Field(default=None, description="An ordered array of file or media attachments to include with the message. Each attachment should specify its file reference or media identifier.")
-class PutV1ActivityWhatsappMessageIdRequest(StrictModel):
-    """Update an existing WhatsApp message activity, including its text content and any attached files or media."""
-    path: PutV1ActivityWhatsappMessageIdRequestPath
-    body: PutV1ActivityWhatsappMessageIdRequestBody | None = None
+class PutActivityWhatsappMessageIdRequestBody(StrictModel):
+    message_markdown: str | None = Field(default=None, description="The message body formatted in WhatsApp Markdown syntax for rich text formatting.")
+    attachments: list[PutActivityWhatsappMessageIdBodyAttachmentsItem] | None = Field(default=None, description="Array of file attachments to include with the message. Order is preserved as provided.")
+    integration_link: str | None = Field(default=None, description="A URL that links back to this message in the external system. Must be a valid URI format.", json_schema_extra={'format': 'uri'})
+class PutActivityWhatsappMessageIdRequest(StrictModel):
+    """Update an existing WhatsApp message activity by its ID. Modify the message content, attachments, or external system link."""
+    path: PutActivityWhatsappMessageIdRequestPath
+    body: PutActivityWhatsappMessageIdRequestBody | None = None
 
 # Operation: delete_whatsapp_message
-class DeleteV1ActivityWhatsappMessageIdRequestPath(StrictModel):
+class DeleteActivityWhatsappMessageIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the WhatsApp message activity to delete.")
-class DeleteV1ActivityWhatsappMessageIdRequest(StrictModel):
-    """Delete a WhatsApp message activity record. This removes the activity log entry for a specific WhatsApp message interaction."""
-    path: DeleteV1ActivityWhatsappMessageIdRequestPath
+class DeleteActivityWhatsappMessageIdRequest(StrictModel):
+    """Delete a WhatsApp message activity by its ID. This removes the activity record from the system."""
+    path: DeleteActivityWhatsappMessageIdRequestPath
 
 # Operation: list_form_submissions
-class GetV1ActivityFormSubmissionRequestQuery(StrictModel):
-    organization_id: str | None = Field(default=None, description="Filter results to a specific organization. Only activities belonging to this organization will be returned.")
-    form_id__in: list[str] | None = Field(default=None, description="Filter results to one or more specific forms by providing their IDs. Only submissions from the specified forms will be included in the results.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return. Use this to control pagination and response size.")
-class GetV1ActivityFormSubmissionRequest(StrictModel):
-    """Retrieve a list of form submission activities, with support for filtering by organization and specific forms. Use standard activity filtering parameters along with form-specific filters to narrow results."""
-    query: GetV1ActivityFormSubmissionRequestQuery | None = None
+class GetActivityFormSubmissionRequestQuery(StrictModel):
+    organization_id: str | None = Field(default=None, description="Filter results to form submissions within a specific organization.")
+    form_id: str | None = Field(default=None, description="Filter results to submissions from a specific form by its ID.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response. Use to control pagination.")
+class GetActivityFormSubmissionRequest(StrictModel):
+    """Retrieve a list of form submission activities, with optional filtering by organization and specific form(s). Supports pagination to control result size."""
+    query: GetActivityFormSubmissionRequestQuery | None = None
 
 # Operation: get_form_submission
-class GetV1ActivityFormSubmissionIdRequestPath(StrictModel):
+class GetActivityFormSubmissionIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the form submission activity to retrieve.")
-class GetV1ActivityFormSubmissionIdRequest(StrictModel):
-    """Retrieve a specific form submission activity by its unique identifier. Use this to access details about a completed or in-progress form submission."""
-    path: GetV1ActivityFormSubmissionIdRequestPath
+class GetActivityFormSubmissionIdRequest(StrictModel):
+    """Retrieve a single form submission activity by its unique identifier. Use this to fetch details about a specific form submission event."""
+    path: GetActivityFormSubmissionIdRequestPath
 
 # Operation: delete_form_submission
-class DeleteV1ActivityFormSubmissionIdRequestPath(StrictModel):
+class DeleteActivityFormSubmissionIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the FormSubmission activity to delete.")
-class DeleteV1ActivityFormSubmissionIdRequest(StrictModel):
-    """Permanently delete a FormSubmission activity record. This action cannot be undone."""
-    path: DeleteV1ActivityFormSubmissionIdRequestPath
+class DeleteActivityFormSubmissionIdRequest(StrictModel):
+    """Delete a FormSubmission activity by its ID. This operation permanently removes the form submission record from the system."""
+    path: DeleteActivityFormSubmissionIdRequestPath
 
 # Operation: list_opportunities
-class GetV1OpportunityRequestQuery(StrictModel):
-    status_type: Literal["active", "won", "lost"] | None = Field(default=None, description="Filter opportunities by status. Use active for ongoing deals, won for closed-won, or lost for closed-lost. Multiple statuses can be specified together.")
-    date_created__lte: str | None = Field(default=None, description="Filter opportunities created on or before this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_created__gte: str | None = Field(default=None, description="Filter opportunities created on or after this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_updated__lte: str | None = Field(default=None, description="Filter opportunities last updated on or before this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_updated__gte: str | None = Field(default=None, description="Filter opportunities last updated on or after this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_won__lte: str | None = Field(default=None, description="Filter opportunities won on or before this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_won__gte: str | None = Field(default=None, description="Filter opportunities won on or after this date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    value_period: Literal["one_time", "monthly", "annual"] | None = Field(default=None, description="Filter opportunities by revenue period type: one_time for single payments, monthly for recurring monthly revenue, or annual for recurring annual revenue. Multiple periods can be specified together.")
-    order_by: str | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by a specific field in ascending order, or prepend a minus sign for descending order. Sortable fields include date_won, date_updated, date_created, confidence, user_name, value, annualized_value, and annualized_expected_value.")
-    group_by: str | None = Field(default=None, validation_alias="_group_by", serialization_alias="_group_by", description="Group results by a dimension such as user_id or time-based periods (week, month, quarter, or year based on date_won). Grouping aggregates metrics across matching opportunities.")
-    lead_saved_search_id: str | None = Field(default=None, description="Filter opportunities by a saved lead search (Smart View) ID to narrow results to leads matching that view.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return. If not specified, all matching opportunities are returned.")
-class GetV1OpportunityRequest(StrictModel):
-    """Retrieve and filter opportunities with optional filtering by lead, user, status, and dates. Returns aggregated metrics for all matching opportunities."""
-    query: GetV1OpportunityRequestQuery | None = None
+class GetOpportunityRequestQuery(StrictModel):
+    status_type: Literal["active", "won", "lost"] | None = Field(default=None, description="Filter opportunities by status. Accepts one or multiple values: active, won, or lost.")
+    date_won__lte: str | None = Field(default=None, description="Filter to opportunities won on or before a specific date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
+    date_won__gte: str | None = Field(default=None, description="Filter to opportunities won on or after a specific date (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
+    value_period: Literal["one_time", "monthly", "annual"] | None = Field(default=None, description="Filter opportunities by value period type. Accepts one or multiple values: one_time, monthly, or annual.")
+    order_by: Literal["date_won", "-date_won", "date_updated", "-date_updated", "date_created", "-date_created", "confidence", "-confidence", "user_name", "-user_name", "value", "-value", "annualized_value", "-annualized_value", "annualized_expected_value", "-annualized_expected_value"] | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by a specified field. Supported fields: date_won, date_updated, date_created, confidence, user_name, value, annualized_value, or annualized_expected_value. Prepend a minus sign for descending order.")
+    group_by: Literal["user_id", "-user_id", "date_won__week", "-date_won__week", "date_won__month", "-date_won__month", "date_won__quarter", "-date_won__quarter", "date_won__year", "-date_won__year"] | None = Field(default=None, validation_alias="_group_by", serialization_alias="_group_by", description="Group results by the specified criteria: user_id, or date_won by week, month, quarter, or year. Prepend a minus sign to reverse the group order.")
+    lead_saved_search_id: str | None = Field(default=None, description="Filter opportunities by a saved lead search (Smart View) ID.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response.")
+class GetOpportunityRequest(StrictModel):
+    """Retrieve and filter opportunities with optional filtering by status, dates, value period, and lead. Returns aggregated metrics for all matching opportunities, with support for sorting and grouping."""
+    query: GetOpportunityRequestQuery | None = None
+
+# Operation: create_opportunity
+class PostOpportunityRequestBody(StrictModel):
+    date_won: str | None = Field(default=None, description="The date when the opportunity was successfully closed and won, specified in date format (YYYY-MM-DD).", json_schema_extra={'format': 'date'})
+    confidence: int | None = Field(default=None, description="The likelihood of winning this opportunity, expressed as a percentage between 0 and 100.")
+    value_period: Literal["one_time", "monthly", "annual"] | None = Field(default=None, description="The billing frequency for the opportunity value: one-time payment, monthly recurring, or annual recurring.")
+class PostOpportunityRequest(StrictModel):
+    """Create a new sales opportunity. If no lead is associated, a new lead will be automatically created for this opportunity."""
+    body: PostOpportunityRequestBody | None = None
 
 # Operation: get_opportunity
-class GetV1OpportunityIdRequestPath(StrictModel):
+class GetOpportunityIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the opportunity to retrieve.")
-class GetV1OpportunityIdRequest(StrictModel):
+class GetOpportunityIdRequest(StrictModel):
     """Retrieve a single opportunity by its unique identifier. Use this to fetch detailed information about a specific opportunity."""
-    path: GetV1OpportunityIdRequestPath
+    path: GetOpportunityIdRequestPath
 
 # Operation: update_opportunity
-class PutV1OpportunityIdRequestPath(StrictModel):
+class PutOpportunityIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the opportunity to update.")
-class PutV1OpportunityIdRequestBody(StrictModel):
-    date_won: str | None = Field(default=None, description="The date when the opportunity was won, specified in ISO 8601 date-time format. If omitted and the opportunity status is set to won, this will be automatically set to the current date.", json_schema_extra={'format': 'date-time'})
-class PutV1OpportunityIdRequest(StrictModel):
-    """Update an opportunity's details. Automatically sets the win date to today if the opportunity status is changed to won and no win date is explicitly provided."""
-    path: PutV1OpportunityIdRequestPath
-    body: PutV1OpportunityIdRequestBody | None = None
+class PutOpportunityIdRequestBody(StrictModel):
+    date_won: str | None = Field(default=None, description="The date when the opportunity was won, specified in date format. If not provided and the status is set to won, this will automatically be set to today's date.", json_schema_extra={'format': 'date'})
+    confidence: int | None = Field(default=None, description="The confidence level for this opportunity, expressed as a percentage between 0 and 100.")
+    value_period: Literal["one_time", "monthly", "annual"] | None = Field(default=None, description="The billing period for the opportunity value. Choose from one-time, monthly, or annual.")
+class PutOpportunityIdRequest(StrictModel):
+    """Update an existing opportunity's details. When the status is set to a won status, the date_won will automatically be set to today if not explicitly provided."""
+    path: PutOpportunityIdRequestPath
+    body: PutOpportunityIdRequestBody | None = None
 
 # Operation: delete_opportunity
-class DeleteV1OpportunityIdRequestPath(StrictModel):
+class DeleteOpportunityIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the opportunity to delete.")
-class DeleteV1OpportunityIdRequest(StrictModel):
-    """Permanently delete an opportunity from the system by its ID. This action cannot be undone."""
-    path: DeleteV1OpportunityIdRequestPath
+class DeleteOpportunityIdRequest(StrictModel):
+    """Permanently remove an opportunity from the system. This action cannot be undone and will delete all associated data."""
+    path: DeleteOpportunityIdRequestPath
 
 # Operation: list_tasks
-class GetV1TaskRequestQuery(StrictModel):
+class GetTaskRequestQuery(StrictModel):
     id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="Filter results to a specific task by its unique identifier.")
-    date__lt: str | None = Field(default=None, description="Return only tasks with a due date before the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date__gt: str | None = Field(default=None, description="Return only tasks with a due date after the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date__lte: str | None = Field(default=None, description="Return only tasks with a due date on or before the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date__gte: str | None = Field(default=None, description="Return only tasks with a due date on or after the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_created__lte: str | None = Field(default=None, description="Return only tasks created on or before the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_created__gte: str | None = Field(default=None, description="Return only tasks created on or after the specified date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    view: Literal["inbox", "future", "archive"] | None = Field(default=None, description="Use a predefined view to quickly access common task categories: 'inbox' for incomplete tasks through end of day, 'future' for incomplete tasks starting tomorrow, or 'archive' for completed tasks only.")
-    order_by: str | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by 'date' (due date) or 'date_created' (creation date). Prepend a minus sign for descending order (e.g., '-date' for newest first).")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return. Must be at least 1.", ge=1)
-class GetV1TaskRequest(StrictModel):
-    """Retrieve and filter tasks with flexible viewing options. Use convenience views (inbox, future, archive) for quick access to common task categories, or apply custom date-based filters and sorting."""
-    query: GetV1TaskRequestQuery | None = None
+    view: Literal["inbox", "future", "archive"] | None = Field(default=None, description="Use a convenience view to quickly access tasks by status: inbox for incomplete tasks due by end of day, future for incomplete tasks starting tomorrow, or archive for completed tasks only.")
+    order_by: Literal["date", "-date", "date_created", "-date_created"] | None = Field(default=None, validation_alias="_order_by", serialization_alias="_order_by", description="Sort results by task date or creation date in ascending or descending order. Prepend a minus sign for descending order (e.g., -date for newest first).")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Limit the number of results returned. Must be at least 1.", ge=1)
+class GetTaskRequest(StrictModel):
+    """Retrieve and filter tasks with support for convenient views and sorting. By default, only lead-type tasks are returned unless filtering by a specific task type."""
+    query: GetTaskRequestQuery | None = None
 
 # Operation: create_task
-class PostV1TaskRequestBody(StrictModel):
-    type_: Literal["lead", "outgoing_call"] = Field(default=..., validation_alias="_type", serialization_alias="_type", description="The category of task to create. Choose 'lead' for lead-related tasks or 'outgoing_call' for call tracking tasks.")
-class PostV1TaskRequest(StrictModel):
-    """Create a new task in the system. Supports task types for lead management and outgoing call tracking."""
-    body: PostV1TaskRequestBody
+class PostTaskRequestBody(StrictModel):
+    type_: Literal["lead", "outgoing_call"] = Field(default=..., validation_alias="_type", serialization_alias="_type", description="The category of task to create. Choose either 'lead' for lead follow-up tasks or 'outgoing_call' for call scheduling tasks.")
+    date: str | None = Field(default=None, description="Optional date or date-time when this task should become actionable. Accepts dates in ISO 8601 format (e.g., YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss±HH:mm).")
+class PostTaskRequest(StrictModel):
+    """Create a new task for follow-up actions. Supports lead and outgoing call task types, with optional scheduling for when the task becomes actionable."""
+    body: PostTaskRequestBody
 
-# Operation: bulk_update_tasks
-class PutV1TaskRequestBody(StrictModel):
-    is_complete: bool | None = Field(default=None, description="Mark the task as complete or incomplete.")
-    assigned_to: str | None = Field(default=None, description="The user ID to assign the task to.")
-    date: str | None = Field(default=None, description="The task date in ISO 8601 format, either as a date only (YYYY-MM-DD) or as a full timestamp with timezone information.", json_schema_extra={'format': 'date-time'})
-class PutV1TaskRequest(StrictModel):
-    """Update multiple tasks at once by applying changes to tasks matching specified filter criteria. Supports bulk modifications of completion status, task assignment, and task dates."""
-    body: PutV1TaskRequestBody | None = None
+# Operation: update_tasks
+class PutTaskRequestQuery(StrictModel):
+    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="Filter tasks by their unique identifier. Only tasks matching this ID will be updated.")
+class PutTaskRequestBody(StrictModel):
+    is_complete: bool | None = Field(default=None, description="Mark the task as complete or incomplete. Set to true to mark as done, false to mark as pending.")
+    assigned_to: str | None = Field(default=None, description="Reassign the task to a different user by specifying their user ID.")
+    date: str | None = Field(default=None, description="Set when the task becomes actionable. Accepts a date or full date-time value in ISO 8601 format.")
+class PutTaskRequest(StrictModel):
+    """Bulk-update multiple tasks matching specified filters. Allows updating task completion status, assignment, and actionable date across matching records in a single operation."""
+    query: PutTaskRequestQuery | None = None
+    body: PutTaskRequestBody | None = None
 
 # Operation: get_task
-class GetV1TaskIdRequestPath(StrictModel):
+class GetTaskIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the task to retrieve.")
-class GetV1TaskIdRequest(StrictModel):
-    """Retrieve detailed information about a specific task, including its current status, metadata, and associated data."""
-    path: GetV1TaskIdRequestPath
+class GetTaskIdRequest(StrictModel):
+    """Retrieve detailed information about a specific task by its unique identifier."""
+    path: GetTaskIdRequestPath
 
 # Operation: update_task
-class PutV1TaskIdRequestPath(StrictModel):
+class PutTaskIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the task to update.")
-class PutV1TaskIdRequestBody(StrictModel):
-    date: str | None = Field(default=None, description="The task date in either date-only format (YYYY-MM-DD) or ISO 8601 date-time format with timezone information.", json_schema_extra={'format': 'date-time'})
-class PutV1TaskIdRequest(StrictModel):
-    """Update an existing task by ID. You can modify the assignee, date, and completion status on any task. For lead-type tasks, you can also update the task text."""
-    path: PutV1TaskIdRequestPath
-    body: PutV1TaskIdRequestBody | None = None
+class PutTaskIdRequestBody(StrictModel):
+    date: str | None = Field(default=None, description="The date or date-time when the task becomes actionable, specified in ISO 8601 format (e.g., YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss±HH:mm).")
+class PutTaskIdRequest(StrictModel):
+    """Update an existing task's properties. You can modify the assignee, due date, and completion status on any task. For lead-type tasks, you can also update the task description text."""
+    path: PutTaskIdRequestPath
+    body: PutTaskIdRequestBody | None = None
 
 # Operation: delete_task
-class DeleteV1TaskIdRequestPath(StrictModel):
+class DeleteTaskIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the task to delete.")
-class DeleteV1TaskIdRequest(StrictModel):
-    """Permanently delete a task by its ID. This action cannot be undone."""
-    path: DeleteV1TaskIdRequestPath
+class DeleteTaskIdRequest(StrictModel):
+    """Permanently delete a task by its ID. This action cannot be undone and will remove all associated data."""
+    path: DeleteTaskIdRequestPath
 
 # Operation: create_outcome
-class PostV1OutcomeRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for this outcome. This is what users will see when viewing or assigning outcomes.")
-    applies_to: list[Literal["calls", "meetings"]] = Field(default=..., description="An array specifying which object types this outcome can be assigned to. Each item defines a valid target for this outcome.")
-    description: str | None = Field(default=None, description="An optional explanation of what this outcome represents and the circumstances under which it should be used.")
-class PostV1OutcomeRequest(StrictModel):
-    """Create a new outcome for your organization. Outcomes define measurable results that can be assigned to specific object types to track progress and success."""
-    body: PostV1OutcomeRequestBody
+class PostOutcomeRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for this outcome, shown to users whenever they can select or assign outcomes to interactions.")
+    applies_to: list[Literal["calls", "meetings"]] = Field(default=..., description="Specifies which interaction types this outcome can be assigned to. Include 'calls', 'meetings', or both as an array of values.")
+    description: str | None = Field(default=None, description="Optional explanation of what this outcome represents and the circumstances under which it should be used, helping users apply it correctly.")
+class PostOutcomeRequest(StrictModel):
+    """Create a new outcome for your organization that can be assigned to calls, meetings, or both. Outcomes help track and categorize interactions, with optional automatic assignment for voicemail drops."""
+    body: PostOutcomeRequestBody
 
 # Operation: get_outcome
-class GetV1OutcomeIdRequestPath(StrictModel):
+class GetOutcomeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the outcome to retrieve.")
-class GetV1OutcomeIdRequest(StrictModel):
-    """Retrieve a specific outcome by its unique identifier. Use this to fetch detailed information about a single outcome."""
-    path: GetV1OutcomeIdRequestPath
+class GetOutcomeIdRequest(StrictModel):
+    """Retrieve a single outcome by its unique identifier. Use this to fetch detailed information about a specific outcome."""
+    path: GetOutcomeIdRequestPath
 
 # Operation: update_outcome
-class PutV1OutcomeIdRequestPath(StrictModel):
+class PutOutcomeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the outcome to update.")
-class PutV1OutcomeIdRequestBody(StrictModel):
+class PutOutcomeIdRequestBody(StrictModel):
     name: str | None = Field(default=None, description="The new name for the outcome.")
-    description: str | None = Field(default=None, description="The new description providing details about the outcome.")
-    applies_to: list[Literal["calls", "meetings"]] | None = Field(default=None, description="An updated list of objects or entities that this outcome applies to, specified as an array of objects.")
-class PutV1OutcomeIdRequest(StrictModel):
-    """Update an existing outcome by modifying its name, description, applicable scope, or type classification."""
-    path: PutV1OutcomeIdRequestPath
-    body: PutV1OutcomeIdRequestBody | None = None
+    description: str | None = Field(default=None, description="The new description for the outcome.")
+class PutOutcomeIdRequest(StrictModel):
+    """Update an existing outcome by modifying its name, description, applicable channels, or type. Specify which channels the outcome applies to (calls, meetings) and choose between a predefined vm-dropped type or a custom type."""
+    path: PutOutcomeIdRequestPath
+    body: PutOutcomeIdRequestBody | None = None
 
 # Operation: delete_outcome
-class DeleteV1OutcomeIdRequestPath(StrictModel):
+class DeleteOutcomeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the outcome to delete.")
-class DeleteV1OutcomeIdRequest(StrictModel):
-    """Delete an existing outcome. Associated calls and meetings will retain their outcome references, but the outcome will no longer be available for assignment to new calls and meetings."""
-    path: DeleteV1OutcomeIdRequestPath
+class DeleteOutcomeIdRequest(StrictModel):
+    """Delete an existing outcome from the system. Associated calls and meetings will retain their references to this outcome, but it will no longer be available for assignment to new calls or meetings."""
+    path: DeleteOutcomeIdRequestPath
 
 # Operation: update_membership
-class PutV1MembershipIdRequestPath(StrictModel):
+class PutMembershipIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the membership to update.")
-class PutV1MembershipIdRequestBody(StrictModel):
-    role_id: Literal["admin", "superuser", "user", "restricteduser"] | None = Field(default=None, description="The role to assign to this membership. Can be a predefined role ('admin', 'superuser', 'user', or 'restricteduser') or a custom Role ID.")
-    auto_record_calls: Literal["unset", "disabled", "enabled"] | None = Field(default=None, description="Controls automatic call recording behavior. Set to 'enabled' to record calls automatically, 'disabled' to prevent automatic recording, or 'unset' to use default settings.")
-class PutV1MembershipIdRequest(StrictModel):
-    """Update a membership's role and automatic call recording settings. Allows modification of user permissions through role assignment and control over whether calls are automatically recorded."""
-    path: PutV1MembershipIdRequestPath
-    body: PutV1MembershipIdRequestBody | None = None
+class PutMembershipIdRequestBody(StrictModel):
+    role_id: Literal["admin", "superuser", "user", "restricteduser"] | None = Field(default=None, description="The role to assign to this membership. Choose from predefined roles (admin, superuser, user, restricteduser) or provide a custom Role ID.")
+    auto_record_calls: Literal["unset", "disabled", "enabled"] | None = Field(default=None, description="Automatic call recording preference. Set to 'enabled' to record calls automatically, 'disabled' to prevent recording, or 'unset' to use the default behavior.")
+class PutMembershipIdRequest(StrictModel):
+    """Update a membership's role and call recording settings. Modify the assigned role (admin, superuser, user, restricteduser, or custom) and configure whether calls are automatically recorded."""
+    path: PutMembershipIdRequestPath
+    body: PutMembershipIdRequestBody | None = None
 
 # Operation: provision_membership
-class PostV1MembershipRequestBody(StrictModel):
+class PostMembershipRequestBody(StrictModel):
     email: str = Field(default=..., description="The email address of the user to provision. Must be a valid email format.", json_schema_extra={'format': 'email'})
-    role_id: Literal["admin", "superuser", "user", "restricteduser"] = Field(default=..., description="The role to assign to the user. Use one of the predefined roles ('admin', 'superuser', 'user', 'restricteduser') or provide a custom Role ID.")
-class PostV1MembershipRequest(StrictModel):
-    """Provision or activate a membership for a user by email address. Creates a new user if they don't exist, or adds an existing user to your organization with the specified role. Requires 'Manage Organization' permissions and OAuth authentication."""
-    body: PostV1MembershipRequestBody
+    role_id: str = Field(default=..., description="The role to assign to the user. Use one of the predefined roles ('admin', 'superuser', 'user', 'restricteduser') or provide a custom Role ID.")
+class PostMembershipRequest(StrictModel):
+    """Provision or activate a membership for a user by email address. If the user exists, they are added to your organization; if new, a user account is created. Requires 'Manage Organization' permissions and OAuth authentication."""
+    body: PostMembershipRequestBody
 
 # Operation: bulk_update_memberships
-class PutV1MembershipRequestQuery(StrictModel):
-    id__in: str = Field(default=..., description="Comma-separated list of membership IDs to update. All specified memberships will receive the same updates.")
-class PutV1MembershipRequestBody(StrictModel):
-    role_id: Literal["admin", "superuser", "user", "restricteduser"] | None = Field(default=None, description="Role to assign to the memberships. Can be a specific role ID or one of the predefined roles: admin, superuser, user, or restricteduser.")
-    auto_record_calls: Literal["unset", "disabled", "enabled"] | None = Field(default=None, description="Automatic call recording setting for the memberships. Choose unset to clear the setting, disabled to turn off recording, or enabled to turn on recording.")
-class PutV1MembershipRequest(StrictModel):
-    """Update multiple memberships in bulk with the same settings. Apply role assignments or call recording preferences across multiple membership IDs simultaneously."""
-    query: PutV1MembershipRequestQuery
-    body: PutV1MembershipRequestBody | None = None
+class PutMembershipRequestQuery(StrictModel):
+    id__in: str = Field(default=..., description="Comma-separated list of membership IDs to update. All specified memberships will be modified with the provided field values.")
+class PutMembershipRequestBody(StrictModel):
+    role_id: Literal["admin", "superuser", "user", "restricteduser"] | None = Field(default=None, description="Assign a role to the memberships. Valid roles are: admin, superuser, user, or restricteduser.")
+    auto_record_calls: Literal["unset", "disabled", "enabled"] | None = Field(default=None, description="Control automatic call recording for the memberships. Set to enabled to record calls automatically, disabled to prevent recording, or unset to use default behavior.")
+class PutMembershipRequest(StrictModel):
+    """Bulk update multiple memberships at once by specifying their IDs and the fields to modify. Supports updating role assignments and call recording settings across multiple memberships in a single request."""
+    query: PutMembershipRequestQuery
+    body: PutMembershipRequestBody | None = None
 
 # Operation: list_pinned_views
-class GetV1MembershipIdPinnedViewsRequestPath(StrictModel):
+class GetMembershipIdPinnedViewsRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the membership whose pinned views should be retrieved.")
-class GetV1MembershipIdPinnedViewsRequest(StrictModel):
-    """Retrieve the ordered list of pinned views for a specific membership. Pinned views are displayed in a user-defined sequence for quick access."""
-    path: GetV1MembershipIdPinnedViewsRequestPath
+class GetMembershipIdPinnedViewsRequest(StrictModel):
+    """Retrieve the ordered list of pinned views for a specific membership. The views are returned in their pinned order."""
+    path: GetMembershipIdPinnedViewsRequestPath
 
 # Operation: set_membership_pinned_views
-class PutV1MembershipIdPinnedViewsRequestPath(StrictModel):
+class PutMembershipIdPinnedViewsRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the membership whose pinned views should be updated.")
-class PutV1MembershipIdPinnedViewsRequestBody(StrictModel):
-    body: list[dict[str, Any]] = Field(default=..., description="An ordered array of view identifiers to pin for this membership. The order determines the display sequence, and providing this list will completely replace any existing pinned views.")
-class PutV1MembershipIdPinnedViewsRequest(StrictModel):
+class PutMembershipIdPinnedViewsRequestBody(StrictModel):
+    body: list[dict[str, Any]] = Field(default=..., description="An ordered list of view identifiers to pin for this membership. The order determines the display sequence, and providing this list will completely replace any existing pinned views.")
+class PutMembershipIdPinnedViewsRequest(StrictModel):
     """Update the pinned views for a membership by providing an ordered list that completely replaces the current pinned views configuration."""
-    path: PutV1MembershipIdPinnedViewsRequestPath
-    body: PutV1MembershipIdPinnedViewsRequestBody
+    path: PutMembershipIdPinnedViewsRequestPath
+    body: PutMembershipIdPinnedViewsRequestBody
 
 # Operation: get_user
-class GetV1UserIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the user to retrieve.")
-class GetV1UserIdRequest(StrictModel):
-    """Retrieve a single user by their unique identifier. Returns the complete user profile for the specified ID."""
-    path: GetV1UserIdRequestPath
+class GetUserIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier that corresponds to the user record you want to retrieve.")
+class GetUserIdRequest(StrictModel):
+    """Retrieve a single user by their unique identifier. Returns the user's profile information and details."""
+    path: GetUserIdRequestPath
 
 # Operation: list_users
-class GetV1UserRequestQuery(StrictModel):
+class GetUserRequestQuery(StrictModel):
     limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of user records to return in the response. Use this to control pagination and response size.")
-class GetV1UserRequest(StrictModel):
+class GetUserRequest(StrictModel):
     """Retrieve all users who are members of your organizations. This returns a filtered list based on your organization memberships."""
-    query: GetV1UserRequestQuery | None = None
+    query: GetUserRequestQuery | None = None
 
 # Operation: list_user_availability
-class GetV1UserAvailabilityRequestQuery(StrictModel):
-    organization_id: str | None = Field(default=None, description="Filter the availability results to a specific organization. If not provided, returns availability for all accessible users.")
-class GetV1UserAvailabilityRequest(StrictModel):
+class GetUserAvailabilityRequestQuery(StrictModel):
+    organization_id: str | None = Field(default=None, description="Filter availability results to a specific organization. When omitted, returns availability for all accessible organizations.")
+class GetUserAvailabilityRequest(StrictModel):
     """Retrieve the current availability status of all users in an organization, including details about any active calls they are participating in."""
-    query: GetV1UserAvailabilityRequestQuery | None = None
+    query: GetUserAvailabilityRequestQuery | None = None
 
 # Operation: get_organization
-class GetV1OrganizationIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the organization to retrieve.")
-class GetV1OrganizationIdRequest(StrictModel):
-    """Retrieve detailed information about an organization, including its current members, inactive members, and configured lead and opportunity statuses. By default, membership data includes user information with a user_ prefix; use the _expand parameter to nest full user objects instead."""
-    path: GetV1OrganizationIdRequestPath
+class GetOrganizationIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier for the organization to retrieve.")
+class GetOrganizationIdRequest(StrictModel):
+    """Retrieve detailed information about an organization, including its members, inactive members, and associated lead and opportunity statuses. User data is flattened by default but can be nested using query expansion parameters."""
+    path: GetOrganizationIdRequestPath
 
 # Operation: update_organization
-class PutV1OrganizationIdRequestPath(StrictModel):
+class PutOrganizationIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the organization to update.")
-class PutV1OrganizationIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the organization. If provided, replaces the current organization name.")
-    currency: str | None = Field(default=None, description="The currency code for the organization (e.g., USD, EUR, GBP). If provided, updates the organization's default currency.")
-    lead_statuses: list[dict[str, Any]] | None = Field(default=None, description="An ordered array of lead status identifiers to reorder how statuses appear in the organization. The order in this array determines the sequence of lead statuses.")
-class PutV1OrganizationIdRequest(StrictModel):
-    """Update an organization's profile including its name, currency, and the ordering of lead statuses. Changes are applied immediately to the organization."""
-    path: PutV1OrganizationIdRequestPath
-    body: PutV1OrganizationIdRequestBody | None = None
+class PutOrganizationIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new name for the organization.")
+    currency: str | None = Field(default=None, description="The currency code for the organization (e.g., USD, EUR, GBP).")
+    lead_statuses: list[dict[str, Any]] | None = Field(default=None, description="An ordered list of existing lead status identifiers to reorder the organization's lead pipeline. The order in this array determines the sequence of statuses in the workflow.")
+class PutOrganizationIdRequest(StrictModel):
+    """Update an organization's basic settings including name and currency, and reorder its lead status pipeline."""
+    path: PutOrganizationIdRequestPath
+    body: PutOrganizationIdRequestBody | None = None
 
 # Operation: get_role
-class GetV1RoleIdRequestPath(StrictModel):
+class GetRoleIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the role to retrieve.")
-class GetV1RoleIdRequest(StrictModel):
-    """Retrieve a specific role by its unique identifier. Use this to fetch detailed information about a single role."""
-    path: GetV1RoleIdRequestPath
+class GetRoleIdRequest(StrictModel):
+    """Retrieve a single role by its unique identifier. Use this to fetch detailed information about a specific role."""
+    path: GetRoleIdRequestPath
 
 # Operation: create_role
-class PostV1RoleRequestBody(StrictModel):
-    visibility_user_lcf_behavior: Literal["require_assignment", "allow_unassigned"] | None = Field(default=None, description="Controls lead visibility behavior for unassigned leads when the role does not have view_all_leads permission. Choose 'require_assignment' to restrict visibility to assigned leads only, or 'allow_unassigned' to permit access to leads without assigned users. Leave empty if the role has view_all_leads permission.")
-class PostV1RoleRequest(StrictModel):
-    """Create a new role with configurable lead visibility settings. Use this to define a new role and specify how users with this role can access leads that lack assigned users."""
-    body: PostV1RoleRequestBody | None = None
+class PostRoleRequestBody(StrictModel):
+    visibility_user_lcf_ids: list[str] | None = Field(default=None, description="List of Lead Custom Field IDs that determine which leads users with this role can access. Leave empty if the role has the view_all_leads permission.")
+    visibility_user_lcf_behavior: Literal["require_assignment", "allow_unassigned"] | None = Field(default=None, description="Determines how lead visibility is handled for leads without assigned users. Choose 'require_assignment' to hide unassigned leads or 'allow_unassigned' to show them. Leave empty if the role has the view_all_leads permission.")
+    name: str = Field(default=..., description="The display name for this role.")
+    permissions: list[str] | None = Field(default=None, description="List of permission strings that define what actions users with this role can perform.")
+class PostRoleRequest(StrictModel):
+    """Create a new role with customizable permissions and lead visibility settings. Lead visibility can be restricted to specific custom fields or granted universally based on role permissions."""
+    body: PostRoleRequestBody
 
 # Operation: update_role
-class PutV1RoleRoleIdRequestPath(StrictModel):
+class PutRoleRoleIdRequestPath(StrictModel):
     role_id: str = Field(default=..., description="The unique identifier of the role to update.")
-class PutV1RoleRoleIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The role configuration object containing the properties to update, such as name, description, permissions, and other role attributes.")
-class PutV1RoleRoleIdRequest(StrictModel):
-    """Update an existing role with new configuration and properties. Specify the role to modify using its ID and provide the updated role details in the request body."""
-    path: PutV1RoleRoleIdRequestPath
-    body: PutV1RoleRoleIdRequestBody
+class PutRoleRoleIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The display name for the role.")
+    visibility_user_lcf_ids: list[str] | None = Field(default=None, description="A list of Lead Custom Field IDs that determine which leads are visible to users with this role. The order of IDs may affect visibility logic based on the configured behavior.")
+    visibility_user_lcf_behavior: Literal["require_assignment", "allow_unassigned"] | None = Field(default=None, description="Controls how lead visibility is handled for leads without assigned users. Use 'require_assignment' to hide unassigned leads, or 'allow_unassigned' to show them regardless of assignment status.")
+class PutRoleRoleIdRequest(StrictModel):
+    """Update an existing role's properties, including its name and lead visibility settings based on custom field criteria."""
+    path: PutRoleRoleIdRequestPath
+    body: PutRoleRoleIdRequestBody | None = None
 
 # Operation: delete_role
-class DeleteV1RoleRoleIdRequestPath(StrictModel):
+class DeleteRoleRoleIdRequestPath(StrictModel):
     role_id: str = Field(default=..., description="The unique identifier of the role to delete.")
-class DeleteV1RoleRoleIdRequest(StrictModel):
-    """Permanently delete a role from the system. Ensure all users assigned to this role are reassigned to a different role before deletion, as roles cannot be deleted while users are still associated with them."""
-    path: DeleteV1RoleRoleIdRequestPath
+class DeleteRoleRoleIdRequest(StrictModel):
+    """Permanently remove a role from the system. All users currently assigned to this role must be reassigned to another role before deletion can proceed."""
+    path: DeleteRoleRoleIdRequestPath
 
 # Operation: create_lead_status
-class PostV1StatusLeadRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the lead status. This name will appear in lead management interfaces and status selection dropdowns.")
-class PostV1StatusLeadRequest(StrictModel):
-    """Create a new custom status that can be assigned to leads in your pipeline. This allows you to define custom workflow stages beyond default statuses."""
-    body: PostV1StatusLeadRequestBody
+class PostStatusLeadRequestBody(StrictModel):
+    label: str = Field(default=..., description="The display name for this lead status, shown in the UI and status selection dropdowns throughout the system.")
+class PostStatusLeadRequest(StrictModel):
+    """Create a new custom status that can be assigned to leads in your pipeline. This allows you to define custom workflow stages beyond the default statuses."""
+    body: PostStatusLeadRequestBody
 
 # Operation: rename_lead_status
-class PutV1StatusLeadStatusIdRequestPath(StrictModel):
+class PutStatusLeadStatusIdRequestPath(StrictModel):
     status_id: str = Field(default=..., description="The unique identifier of the lead status to rename.")
-class PutV1StatusLeadStatusIdRequestBody(StrictModel):
+class PutStatusLeadStatusIdRequestBody(StrictModel):
     name: str = Field(default=..., description="The new display name for the lead status.")
-class PutV1StatusLeadStatusIdRequest(StrictModel):
-    """Rename an existing lead status. This updates the display name of a status category used to organize leads in your pipeline."""
-    path: PutV1StatusLeadStatusIdRequestPath
-    body: PutV1StatusLeadStatusIdRequestBody
+class PutStatusLeadStatusIdRequest(StrictModel):
+    """Rename an existing lead status to update its display name. This operation modifies the status label itself, not the status of individual leads."""
+    path: PutStatusLeadStatusIdRequestPath
+    body: PutStatusLeadStatusIdRequestBody
 
 # Operation: delete_lead_status
-class DeleteV1StatusLeadStatusIdRequestPath(StrictModel):
+class DeleteStatusLeadStatusIdRequestPath(StrictModel):
     status_id: str = Field(default=..., description="The unique identifier of the lead status to delete.")
-class DeleteV1StatusLeadStatusIdRequest(StrictModel):
-    """Delete a lead status from your system. Ensure no leads are currently assigned this status before deletion, as the operation will fail if the status is in use."""
-    path: DeleteV1StatusLeadStatusIdRequestPath
+class DeleteStatusLeadStatusIdRequest(StrictModel):
+    """Delete a lead status from the system. Ensure no leads are currently assigned to this status before deletion, as the operation will fail if leads depend on it."""
+    path: DeleteStatusLeadStatusIdRequestPath
 
 # Operation: create_opportunity_status
-class PostV1StatusOpportunityRequestBody(StrictModel):
-    label: str = Field(default=..., description="The display name for this opportunity status.")
-    status_type: Literal["active", "won", "lost"] = Field(default=..., description="The category of this status: active for ongoing opportunities, won for successfully closed deals, or lost for unsuccessful deals.")
-    pipeline_id: str | None = Field(default=None, description="Optional pipeline identifier to create this status within a specific pipeline. If omitted, the status is created at the account level.")
-class PostV1StatusOpportunityRequest(StrictModel):
-    """Create a new opportunity status for tracking deal progression. Statuses can be classified as active (ongoing), won (closed successfully), or lost (closed unsuccessfully), and can optionally be scoped to a specific pipeline."""
-    body: PostV1StatusOpportunityRequestBody
+class PostStatusOpportunityRequestBody(StrictModel):
+    label: str = Field(default=..., description="The display name for this opportunity status, used to identify it in the UI and reports.")
+    status_type: Literal["active", "won", "lost"] = Field(default=..., description="The classification type for this status: active for ongoing opportunities, won for closed deals, or lost for deals that did not close.")
+    pipeline_id: str | None = Field(default=None, description="Optional pipeline ID to scope this status to a specific pipeline; if omitted, the status will be available globally.")
+class PostStatusOpportunityRequest(StrictModel):
+    """Create a new opportunity status to track deal progression. Statuses can be classified as active, won, or lost, and can optionally be associated with a specific pipeline."""
+    body: PostStatusOpportunityRequestBody
 
 # Operation: rename_opportunity_status
-class PutV1StatusOpportunityStatusIdRequestPath(StrictModel):
+class PutStatusOpportunityStatusIdRequestPath(StrictModel):
     status_id: str = Field(default=..., description="The unique identifier of the opportunity status to rename.")
-class PutV1StatusOpportunityStatusIdRequestBody(StrictModel):
-    label: str = Field(default=..., description="The new display label for the opportunity status.")
-class PutV1StatusOpportunityStatusIdRequest(StrictModel):
-    """Rename an existing opportunity status by providing its ID and the new label. This updates the display name of the status in your opportunity pipeline."""
-    path: PutV1StatusOpportunityStatusIdRequestPath
-    body: PutV1StatusOpportunityStatusIdRequestBody
+class PutStatusOpportunityStatusIdRequestBody(StrictModel):
+    label: str = Field(default=..., description="The new display name for the opportunity status that will be shown in the system.")
+class PutStatusOpportunityStatusIdRequest(StrictModel):
+    """Update the display name of an existing opportunity status. This allows you to change how a status appears throughout the system."""
+    path: PutStatusOpportunityStatusIdRequestPath
+    body: PutStatusOpportunityStatusIdRequestBody
 
 # Operation: delete_opportunity_status
-class DeleteV1StatusOpportunityStatusIdRequestPath(StrictModel):
+class DeleteStatusOpportunityStatusIdRequestPath(StrictModel):
     status_id: str = Field(default=..., description="The unique identifier of the opportunity status to delete.")
-class DeleteV1StatusOpportunityStatusIdRequest(StrictModel):
+class DeleteStatusOpportunityStatusIdRequest(StrictModel):
     """Delete an opportunity status from the system. Ensure no opportunities are currently assigned this status before deletion."""
-    path: DeleteV1StatusOpportunityStatusIdRequestPath
+    path: DeleteStatusOpportunityStatusIdRequestPath
 
 # Operation: create_pipeline
-class PostV1PipelineRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name identifier for the pipeline. Used to reference and organize the pipeline within your workspace.")
-class PostV1PipelineRequest(StrictModel):
-    """Create a new pipeline with the specified name. Pipelines serve as containers for organizing and executing workflows."""
-    body: PostV1PipelineRequestBody
+class PostPipelineRequestBody(StrictModel):
+    name: str = Field(default=..., description="A unique identifier for the pipeline. This name is used to reference and manage the pipeline in subsequent operations.")
+class PostPipelineRequest(StrictModel):
+    """Create a new pipeline with the specified name. The pipeline serves as a container for organizing and executing workflow operations."""
+    body: PostPipelineRequestBody
 
 # Operation: update_pipeline
-class PutV1PipelinePipelineIdRequestPath(StrictModel):
+class PutPipelinePipelineIdRequestPath(StrictModel):
     pipeline_id: str = Field(default=..., description="The unique identifier of the pipeline to update.")
-class PutV1PipelinePipelineIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the pipeline. Provide a descriptive name to identify the pipeline.")
-    statuses: list[PutV1PipelinePipelineIdBodyStatusesItem] | None = Field(default=None, description="An ordered array of opportunity statuses for this pipeline. Each status should include its ID; to move a status from another pipeline, include an object with the status ID from the source pipeline. The order of statuses in the array determines their display sequence.")
-class PutV1PipelinePipelineIdRequest(StrictModel):
+class PutPipelinePipelineIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new name to assign to the pipeline.")
+    statuses: list[PutPipelinePipelineIdBodyStatusesItem] | None = Field(default=None, description="An ordered list of opportunity status objects that defines the pipeline's status workflow. Each object must include an 'id' field referencing the status. The order of items in this list determines the sequence of statuses in the pipeline. You can reorder existing statuses or include statuses from other pipelines by their ID to move them into this pipeline.")
+class PutPipelinePipelineIdRequest(StrictModel):
     """Update an existing pipeline by modifying its name, reordering opportunity statuses, or moving statuses from other pipelines into this one."""
-    path: PutV1PipelinePipelineIdRequestPath
-    body: PutV1PipelinePipelineIdRequestBody | None = None
+    path: PutPipelinePipelineIdRequestPath
+    body: PutPipelinePipelineIdRequestBody | None = None
 
 # Operation: delete_pipeline
-class DeleteV1PipelinePipelineIdRequestPath(StrictModel):
+class DeletePipelinePipelineIdRequestPath(StrictModel):
     pipeline_id: str = Field(default=..., description="The unique identifier of the pipeline to delete.")
-class DeleteV1PipelinePipelineIdRequest(StrictModel):
-    """Delete a pipeline from your workspace. The pipeline must be empty of all opportunity statuses before deletion—migrate or remove any existing opportunity statuses first."""
-    path: DeleteV1PipelinePipelineIdRequestPath
+class DeletePipelinePipelineIdRequest(StrictModel):
+    """Permanently delete a pipeline from your workspace. The pipeline must be empty of all opportunity statuses before deletion—migrate or remove any existing opportunity statuses first."""
+    path: DeletePipelinePipelineIdRequestPath
 
 # Operation: list_groups
-class GetV1GroupRequestQuery(StrictModel):
-    fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of fields to include in the response. Must include at least 'name' and 'members' to retrieve group information.")
-class GetV1GroupRequest(StrictModel):
-    """Retrieve all groups in your organization. Use this endpoint for a complete group listing; for detailed member information, query individual groups separately."""
-    query: GetV1GroupRequestQuery
+class GetGroupRequestQuery(StrictModel):
+    fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of group attributes to return in the response. Must include at least 'name' and 'members' to retrieve group membership data.")
+class GetGroupRequest(StrictModel):
+    """Retrieve all groups in your organization. Use the _fields parameter to specify which group attributes to return; to retrieve group members, include 'members' in your field selection."""
+    query: GetGroupRequestQuery
 
 # Operation: create_group
-class PostV1GroupRequestQuery(StrictModel):
+class PostGroupRequestQuery(StrictModel):
     fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of fields to include in the response. Must include at least 'name' and 'members'.")
-class PostV1GroupRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the group to create.")
-class PostV1GroupRequest(StrictModel):
-    """Create a new empty group. Use the member endpoint to add or remove users from the group after creation."""
-    query: PostV1GroupRequestQuery
-    body: PostV1GroupRequestBody
+class PostGroupRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the new group.")
+class PostGroupRequest(StrictModel):
+    """Create a new empty group with a specified name. Members can be added or removed after creation using the member endpoint."""
+    query: PostGroupRequestQuery
+    body: PostGroupRequestBody
 
 # Operation: get_group
-class GetV1GroupGroupIdRequestPath(StrictModel):
+class GetGroupGroupIdRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group to retrieve.")
-class GetV1GroupGroupIdRequestQuery(StrictModel):
-    fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of fields to include in the response. Must include at least 'name' and 'members' to retrieve group details and membership information.")
-class GetV1GroupGroupIdRequest(StrictModel):
-    """Retrieve a specific group by its ID, including group name and member information."""
-    path: GetV1GroupGroupIdRequestPath
-    query: GetV1GroupGroupIdRequestQuery
+class GetGroupGroupIdRequestQuery(StrictModel):
+    fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of fields to include in the response. Must include at least 'name' and 'members' to retrieve group name and member data.")
+class GetGroupGroupIdRequest(StrictModel):
+    """Retrieve a single group by its ID with specified fields. Returns group details including name and member information."""
+    path: GetGroupGroupIdRequestPath
+    query: GetGroupGroupIdRequestQuery
 
-# Operation: update_group
-class PutV1GroupGroupIdRequestPath(StrictModel):
+# Operation: rename_group
+class PutGroupGroupIdRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group to update.")
-class PutV1GroupGroupIdRequestQuery(StrictModel):
-    fields: str = Field(default=..., validation_alias="_fields", serialization_alias="_fields", description="Comma-separated list of fields to include in the response. Must include at least 'name' and 'members' to retrieve the updated group information.")
-class PutV1GroupGroupIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the group. Must be unique across all groups in the system.")
-class PutV1GroupGroupIdRequest(StrictModel):
-    """Update an existing group's properties, such as renaming it. Group names must be unique within the system."""
-    path: PutV1GroupGroupIdRequestPath
-    query: PutV1GroupGroupIdRequestQuery
-    body: PutV1GroupGroupIdRequestBody | None = None
+class PutGroupGroupIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new name for the group. Must be unique and cannot duplicate existing group names.")
+class PutGroupGroupIdRequest(StrictModel):
+    """Update a group's name. The new name must be unique across all groups in the system."""
+    path: PutGroupGroupIdRequestPath
+    body: PutGroupGroupIdRequestBody | None = None
 
 # Operation: delete_group
-class DeleteV1GroupGroupIdRequestPath(StrictModel):
+class DeleteGroupGroupIdRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group to delete.")
-class DeleteV1GroupGroupIdRequest(StrictModel):
-    """Delete a group from the system. This operation is only permitted if the group is not currently referenced by any saved reports or smart views."""
-    path: DeleteV1GroupGroupIdRequestPath
+class DeleteGroupGroupIdRequest(StrictModel):
+    """Delete a group from the system. This operation is only permitted if the group is not referenced by any saved reports or smart views."""
+    path: DeleteGroupGroupIdRequestPath
 
 # Operation: add_user_to_group
-class PostV1GroupGroupIdMemberRequestPath(StrictModel):
-    group_id: str = Field(default=..., description="The unique identifier of the group to which the user will be added.")
-class PostV1GroupGroupIdMemberRequestBody(StrictModel):
+class PostGroupGroupIdMemberRequestPath(StrictModel):
+    group_id: str = Field(default=..., description="The unique identifier of the group where the user will be added.")
+class PostGroupGroupIdMemberRequestBody(StrictModel):
     user_id: str = Field(default=..., description="The unique identifier of the user to add to the group.")
-class PostV1GroupGroupIdMemberRequest(StrictModel):
-    """Add a user to a group. If the user is already a member, the operation completes without making changes."""
-    path: PostV1GroupGroupIdMemberRequestPath
-    body: PostV1GroupGroupIdMemberRequestBody
+class PostGroupGroupIdMemberRequest(StrictModel):
+    """Add a user to a group. If the user is already a member, the operation completes without changes."""
+    path: PostGroupGroupIdMemberRequestPath
+    body: PostGroupGroupIdMemberRequestBody
 
 # Operation: remove_group_member
-class DeleteV1GroupGroupIdMemberUserIdRequestPath(StrictModel):
+class DeleteGroupGroupIdMemberUserIdRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group from which the user will be removed.")
     user_id: str = Field(default=..., description="The unique identifier of the user to remove from the group.")
-class DeleteV1GroupGroupIdMemberUserIdRequest(StrictModel):
-    """Remove a user from a group. If the user is not a member of the group, the operation completes without error."""
-    path: DeleteV1GroupGroupIdMemberUserIdRequestPath
+class DeleteGroupGroupIdMemberUserIdRequest(StrictModel):
+    """Remove a user from a group. If the user is not currently a member, the operation completes without error."""
+    path: DeleteGroupGroupIdMemberUserIdRequestPath
 
 # Operation: generate_activity_report
-class PostV1ReportActivityRequestBodyQuery(StrictModel):
-    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="The ID of a saved search to apply as a filter for the report results.")
-class PostV1ReportActivityRequestBody(StrictModel):
-    relative_range: Literal["today", "this-week", "this-month", "this-quarter", "this-year", "yesterday", "last-week", "last-month", "last-quarter", "last-year", "all-time"] | None = Field(default=None, description="A relative time range for the report data. Choose from predefined ranges like 'today', 'this-week', 'this-month', or 'all-time'. Either this or a specific datetime range must be provided.")
-    type_: Literal["overview", "comparison"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The report format: 'overview' for organization-wide metrics by time period, or 'comparison' for metrics broken down by individual users.")
-    users: list[str] | None = Field(default=None, description="A list of user IDs to filter the report to specific users. When provided, the report will only include data for these users.")
-    metrics: list[str] = Field(default=..., description="A list of metric names to include in the report. Specify which metrics you want calculated and returned in the results.")
-    query: PostV1ReportActivityRequestBodyQuery | None = None
-class PostV1ReportActivityRequest(StrictModel):
-    """Generate an activity report showing organizational metrics aggregated by time period (overview) or broken down by user (comparison). Specify the time range and metrics to include in the report."""
-    body: PostV1ReportActivityRequestBody
+class PostReportActivityRequestHeader(StrictModel):
+    accept: Literal["application/json", "text/csv"] | None = Field(default=None, validation_alias="Accept", serialization_alias="Accept", description="Desired response format: JSON for structured data or CSV for spreadsheet export.")
+class PostReportActivityRequestBodyQuery(StrictModel):
+    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="ID of a previously saved search configuration to apply filters and settings to this report.")
+class PostReportActivityRequestBody(StrictModel):
+    type_: Literal["overview", "comparison"] = Field(default=..., validation_alias="type", serialization_alias="type", description="Report structure type: 'overview' aggregates metrics across the organization by time period, while 'comparison' breaks down metrics by individual users.")
+    metrics: list[str] = Field(default=..., description="List of metric names to include in the report. Specify which data points should be calculated and returned.")
+    relative_range: Literal["today", "this-week", "this-month", "this-quarter", "this-year", "yesterday", "last-week", "last-month", "last-quarter", "last-year", "all-time"] | None = Field(default=None, description="Relative time range for the report data, such as 'today', 'this-week', 'last-month', or 'all-time'. Use this or datetime_range, but not both.")
+    users: list[str] | None = Field(default=None, description="List of user IDs to filter report results to specific users. When provided, only data for these users will be included.")
+    query: PostReportActivityRequestBodyQuery | None = None
+class PostReportActivityRequest(StrictModel):
+    """Generate an activity report showing organizational metrics aggregated by time period (overview) or broken down by user (comparison). Reports can be returned as JSON or CSV format."""
+    header: PostReportActivityRequestHeader | None = None
+    body: PostReportActivityRequestBody
 
 # Operation: list_sent_emails_report
-class GetV1ReportSentEmailsOrganizationIdRequestPath(StrictModel):
+class GetReportSentEmailsOrganizationIdRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization for which to retrieve the sent emails report.")
-class GetV1ReportSentEmailsOrganizationIdRequestQuery(StrictModel):
-    date_start: str | None = Field(default=None, description="The start date for filtering the report results, specified in date format (YYYY-MM-DD). If provided, only emails sent on or after this date will be included.", json_schema_extra={'format': 'date'})
-    date_end: str | None = Field(default=None, description="The end date for filtering the report results, specified in date format (YYYY-MM-DD). If provided, only emails sent on or before this date will be included.", json_schema_extra={'format': 'date'})
-class GetV1ReportSentEmailsOrganizationIdRequest(StrictModel):
-    """Retrieve a report of sent emails grouped by template for an organization, optionally filtered by a date range."""
-    path: GetV1ReportSentEmailsOrganizationIdRequestPath
-    query: GetV1ReportSentEmailsOrganizationIdRequestQuery | None = None
+class GetReportSentEmailsOrganizationIdRequestQuery(StrictModel):
+    date_start: str | None = Field(default=None, description="The start date for filtering the report period, specified in date format (YYYY-MM-DD). If provided, only emails sent on or after this date will be included.", json_schema_extra={'format': 'date'})
+    date_end: str | None = Field(default=None, description="The end date for filtering the report period, specified in date format (YYYY-MM-DD). If provided, only emails sent on or before this date will be included.", json_schema_extra={'format': 'date'})
+class GetReportSentEmailsOrganizationIdRequest(StrictModel):
+    """Retrieve a report of sent emails grouped by template for a specific organization, optionally filtered by a date range."""
+    path: GetReportSentEmailsOrganizationIdRequestPath
+    query: GetReportSentEmailsOrganizationIdRequestQuery | None = None
 
 # Operation: get_lead_status_report
-class GetV1ReportStatusesLeadOrganizationIdRequestPath(StrictModel):
+class GetReportStatusesLeadOrganizationIdRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier for the organization whose lead status changes should be reported.")
-class GetV1ReportStatusesLeadOrganizationIdRequestQuery(StrictModel):
-    date_start: str | None = Field(default=None, description="The start date for the report period in date format. If omitted, the report begins from the earliest available data.", json_schema_extra={'format': 'date'})
-    date_end: str | None = Field(default=None, description="The end date for the report period in date format. If omitted, the report extends to the most recent data.", json_schema_extra={'format': 'date'})
-class GetV1ReportStatusesLeadOrganizationIdRequest(StrictModel):
-    """Retrieve a report of lead status changes for an organization, optionally filtered by a specific date range. If no dates are specified, the report covers all historical data."""
-    path: GetV1ReportStatusesLeadOrganizationIdRequestPath
-    query: GetV1ReportStatusesLeadOrganizationIdRequestQuery | None = None
+class GetReportStatusesLeadOrganizationIdRequestQuery(StrictModel):
+    date_start: str | None = Field(default=None, description="The start date for the report period in date format. If provided, only status changes on or after this date will be included.", json_schema_extra={'format': 'date'})
+    date_end: str | None = Field(default=None, description="The end date for the report period in date format. If provided, only status changes on or before this date will be included.", json_schema_extra={'format': 'date'})
+class GetReportStatusesLeadOrganizationIdRequest(StrictModel):
+    """Retrieve a report of lead status changes for a specific organization, with optional filtering by date range to analyze lead progression over time."""
+    path: GetReportStatusesLeadOrganizationIdRequestPath
+    query: GetReportStatusesLeadOrganizationIdRequestQuery | None = None
 
 # Operation: get_opportunity_status_report
-class GetV1ReportStatusesOpportunityOrganizationIdRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier for the organization whose opportunity status changes should be reported.")
-class GetV1ReportStatusesOpportunityOrganizationIdRequestQuery(StrictModel):
-    date_start: str | None = Field(default=None, description="The start date for the reporting period in date format (YYYY-MM-DD). Only status changes on or after this date will be included.", json_schema_extra={'format': 'date'})
-    date_end: str | None = Field(default=None, description="The end date for the reporting period in date format (YYYY-MM-DD). Only status changes on or before this date will be included.", json_schema_extra={'format': 'date'})
-    smart_view_id: str | None = Field(default=None, description="Filter the report to include only opportunities within a specific smart view, identified by its unique ID.")
-class GetV1ReportStatusesOpportunityOrganizationIdRequest(StrictModel):
-    """Retrieve a status change report for opportunities within an organization, showing how opportunities transitioned between different statuses over a specified time period. Results can be filtered by smart view to focus on specific opportunity subsets."""
-    path: GetV1ReportStatusesOpportunityOrganizationIdRequestPath
-    query: GetV1ReportStatusesOpportunityOrganizationIdRequestQuery | None = None
+class GetReportStatusesOpportunityOrganizationIdRequestPath(StrictModel):
+    organization_id: str = Field(default=..., description="The unique identifier of the organization for which to retrieve the opportunity status report.")
+class GetReportStatusesOpportunityOrganizationIdRequestQuery(StrictModel):
+    date_start: str | None = Field(default=None, description="The start date for the report period in date format (YYYY-MM-DD). If omitted, the report begins from the earliest available data.", json_schema_extra={'format': 'date'})
+    date_end: str | None = Field(default=None, description="The end date for the report period in date format (YYYY-MM-DD). If omitted, the report extends to the current date.", json_schema_extra={'format': 'date'})
+class GetReportStatusesOpportunityOrganizationIdRequest(StrictModel):
+    """Retrieve a report of opportunity status changes for an organization over a specified period. Use this to track how opportunities progress through different stages."""
+    path: GetReportStatusesOpportunityOrganizationIdRequestPath
+    query: GetReportStatusesOpportunityOrganizationIdRequestQuery | None = None
 
 # Operation: generate_custom_report
-class GetV1ReportCustomOrganizationIdRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier for the organization whose data will be included in the report.")
-class GetV1ReportCustomOrganizationIdRequestQuery(StrictModel):
-    y: str | None = Field(default=None, description="The metric to display on the Y axis, such as lead.count, call.duration, or opportunity.value. Defaults to lead.count if not specified.")
-    x: str | None = Field(default=None, description="The field to display on the X axis, such as lead.custom.MRR or opportunity.date_created. Can be time-based or numeric.")
-    interval: str | None = Field(default=None, description="The granularity for bucketing data. For time-based X axes, use auto, hour, day, week, month, quarter, or year. For numeric X axes, specify an integer interval. Defaults to auto.")
-    group_by: str | None = Field(default=None, description="Optional field name to segment the report data into separate series or groups.")
-    transform_y: Literal["sum", "avg", "min", "max"] | None = Field(default=None, description="The aggregation function applied to Y-axis values. Choose from sum, avg, min, or max. Defaults to sum.")
-    start: str | None = Field(default=None, description="The start of the X-axis range as a date or integer value. For dates, defaults to your organization's creation date if not provided.")
-    end: str | None = Field(default=None, description="The end of the X-axis range as a date or integer value. For dates, defaults to the current date and time if not provided.")
-class GetV1ReportCustomOrganizationIdRequest(StrictModel):
-    """Generate a custom analytics report for any Close object with flexible metrics, grouping, and time-based or numeric axis configuration. Powers the Explorer visualization in the UI."""
-    path: GetV1ReportCustomOrganizationIdRequestPath
-    query: GetV1ReportCustomOrganizationIdRequestQuery | None = None
+class GetReportCustomOrganizationIdRequestPath(StrictModel):
+    organization_id: str = Field(default=..., description="The organization ID for which to generate the report.")
+class GetReportCustomOrganizationIdRequestQuery(StrictModel):
+    x: str | None = Field(default=None, description="The field to display on the X axis, using dot notation (e.g., 'lead.custom.MRR' or 'opportunity.date_created'). Can be a date field for time-based graphs or numeric field for numeric binning.")
+    y: str | None = Field(default=None, description="The metric to display on the Y axis using dot notation (e.g., 'lead.count', 'call.duration', 'opportunity.value'). Must be a numeric field. Defaults to counting leads.")
+    interval: Literal["auto", "hour", "day", "week", "month", "quarter", "year"] | None = Field(default=None, description="Controls how the X axis is divided into buckets. For time-based X fields, choose from hourly, daily, weekly, monthly, quarterly, or yearly intervals; 'auto' automatically selects the best interval. For numeric X fields, specify an integer interval size. Defaults to automatic selection.")
+    transform_y: Literal["sum", "avg", "min", "max"] | None = Field(default=None, description="Aggregation function applied to Y values within each bucket: sum (total), avg (average), min (minimum), or max (maximum). Defaults to sum.")
+    group_by: str | None = Field(default=None, description="Optional field name to split the report into separate series, one per unique value of this field.")
+    start: str | None = Field(default=None, description="Start of the X axis range. For date fields, use ISO 8601 format; defaults to the organization's creation date. For numeric fields, provide the numeric start value.")
+    end: str | None = Field(default=None, description="End of the X axis range. For date fields, use ISO 8601 format; defaults to the current date/time. For numeric fields, provide the numeric end value.")
+class GetReportCustomOrganizationIdRequest(StrictModel):
+    """Generate a custom report with arbitrary metrics for data visualization. Returns aggregated data suitable for graphing, supporting flexible field selection, time-based or numeric binning, and optional grouping by category."""
+    path: GetReportCustomOrganizationIdRequestPath
+    query: GetReportCustomOrganizationIdRequestQuery | None = None
 
 # Operation: get_funnel_opportunity_totals
-class PostV1ReportFunnelOpportunityTotalsRequestBodyQuery(StrictModel):
-    type_: Literal["saved_search"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The query type for filtering opportunities; use 'saved_search' to apply a predefined search filter.")
-    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="The ID of a saved search to apply as a filter when query.type is set to 'saved_search'.")
-class PostV1ReportFunnelOpportunityTotalsRequestBody(StrictModel):
-    pipeline: str = Field(default=..., description="The pipeline ID that defines the funnel stages used to categorize opportunities.")
-    type_: Literal["created-cohort", "active-stage-cohort"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The report type determining how opportunities are grouped: either by creation cohort or by their current active stage.")
-    report_datetime_range: dict[str, Any] | None = Field(default=None, description="The time range for which to fetch report data, specified as a date range object.")
-    cohort_datetime_range: dict[str, Any] | None = Field(default=None, description="The time range defining which opportunities to include in the cohort, specified as a date range object.")
-    compared_custom_range: dict[str, Any] | None = Field(default=None, description="An optional time range for fetching comparison data to analyze trends across different periods.")
-    users: list[str] | None = Field(default=None, description="A list of user IDs or group IDs to limit report results to specific team members or groups.")
-    query: PostV1ReportFunnelOpportunityTotalsRequestBodyQuery | None = None
-class PostV1ReportFunnelOpportunityTotalsRequest(StrictModel):
-    """Retrieve aggregated pipeline funnel metrics for opportunities, with support for cohort analysis and optional per-user breakdowns. Results can be filtered by time ranges, saved searches, and specific users or groups."""
-    body: PostV1ReportFunnelOpportunityTotalsRequestBody
+class PostReportFunnelOpportunityTotalsRequestHeader(StrictModel):
+    accept: Literal["application/json", "text/csv"] | None = Field(default=None, description="Response format for the report data. Use application/json to receive both aggregated totals and per-user metrics, or text/csv to receive per-user data only.")
+class PostReportFunnelOpportunityTotalsRequestBodyQuery(StrictModel):
+    type_: Literal["saved_search"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The query type for filtering opportunities. Currently supports 'saved_search' to use a predefined saved search query.")
+    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="ID of a saved search to use for filtering opportunities in the report. Used when query.type is set to 'saved_search'.")
+class PostReportFunnelOpportunityTotalsRequestBody(StrictModel):
+    pipeline: str = Field(default=..., description="The pipeline ID that defines the funnel stages used to categorize and aggregate the opportunity data.")
+    type_: Literal["created-cohort", "active-stage-cohort"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The report type determines how opportunities are grouped. Use 'created-cohort' to analyze opportunities by creation date, or 'active-stage-cohort' to analyze opportunities currently in specific pipeline stages.")
+    report_datetime_range: dict[str, Any] | None = Field(default=None, description="Optional time range to filter the report data. Specify the period for which funnel metrics should be calculated.")
+    cohort_datetime_range: dict[str, Any] | None = Field(default=None, description="Time range defining which opportunities to include in the cohort. Required when using 'created-cohort' report type (or provide cohort_relative_range instead). Ignored for 'active-stage-cohort' reports.")
+    compared_datetime_range: Literal["same-days-last-week", "same-days-last-month", "same-days-last-quarter", "same-days-last-year"] | None = Field(default=None, description="Relative time range for comparison data, such as same period from previous week, month, quarter, or year. Only applicable when report_datetime_range or cohort_datetime_range is specified.")
+    compared_custom_range: dict[str, Any] | None = Field(default=None, description="Custom absolute time range for comparison data. Use as an alternative to compared_datetime_range for specific comparison periods.")
+    users: list[str] | None = Field(default=None, description="List of user IDs or group IDs to limit report results to specific team members or groups. Leave empty to include all available users in the aggregation.")
+    query: PostReportFunnelOpportunityTotalsRequestBodyQuery | None = None
+class PostReportFunnelOpportunityTotalsRequest(StrictModel):
+    """Retrieve aggregated and per-user pipeline funnel metrics for selected opportunities. Returns totals data in JSON format with optional per-user breakdown, or CSV format for per-user data only."""
+    header: PostReportFunnelOpportunityTotalsRequestHeader | None = None
+    body: PostReportFunnelOpportunityTotalsRequestBody
 
 # Operation: get_opportunity_funnel_stages_report
-class PostV1ReportFunnelOpportunityStagesRequestBodyQuery(StrictModel):
-    type_: Literal["saved_search"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Optional query type; when set to 'saved_search', applies a saved search filter to the report data.")
-    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="The ID of a saved search to apply as a filter; used when query.type is set to 'saved_search'.")
-class PostV1ReportFunnelOpportunityStagesRequestBody(StrictModel):
+class PostReportFunnelOpportunityStagesRequestBodyQuery(StrictModel):
+    type_: Literal["saved_search"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The query type for filtering; currently supports 'saved_search' to apply a predefined search filter.")
+    saved_search_id: str | None = Field(default=None, validation_alias="saved_search_id", serialization_alias="saved_search_id", description="The ID of a saved search to filter report results. When specified, only opportunities matching the saved search criteria are included.")
+class PostReportFunnelOpportunityStagesRequestBody(StrictModel):
     pipeline: str = Field(default=..., description="The pipeline ID that defines the funnel stages to report on.")
-    type_: Literal["created-cohort", "active-stage-cohort"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The report type: either 'created-cohort' to analyze opportunities by creation date, or 'active-stage-cohort' to analyze opportunities by their current stage.")
-    report_datetime_range: dict[str, Any] | None = Field(default=None, description="Optional time range for fetching the report data. Specify as a date range object to limit results to a specific period.")
-    cohort_datetime_range: dict[str, Any] | None = Field(default=None, description="Optional time range defining which opportunities to include in the cohort based on their creation date.")
-    compared_custom_range: dict[str, Any] | None = Field(default=None, description="Optional time range for fetching comparison data to analyze trends or changes over different periods.")
-    users: list[str] | None = Field(default=None, description="Optional list of user IDs or group IDs to segment the report results by specific team members or groups.")
-    query: PostV1ReportFunnelOpportunityStagesRequestBodyQuery | None = None
-class PostV1ReportFunnelOpportunityStagesRequest(StrictModel):
-    """Generate a funnel report analyzing pipeline stage metrics for opportunities. Returns aggregated metrics in JSON format, with optional per-user breakdowns available in JSON or CSV formats."""
-    body: PostV1ReportFunnelOpportunityStagesRequestBody
+    type_: Literal["created-cohort", "active-stage-cohort"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The report type: 'created-cohort' tracks opportunities created within a cohort period, while 'active-stage-cohort' tracks opportunities currently in each stage.")
+    report_datetime_range: dict[str, Any] | None = Field(default=None, description="The primary time range for the report data. Required for active-stage-cohort reports unless using a comparison range.")
+    cohort_datetime_range: dict[str, Any] | None = Field(default=None, description="The time range defining which opportunities to include in the cohort. Required for created-cohort reports unless using a relative range. Ignored for active-stage-cohort reports.")
+    compared_datetime_range: Literal["same-days-last-week", "same-days-last-month", "same-days-last-quarter", "same-days-last-year"] | None = Field(default=None, description="A relative time period to compare against the primary range: same days from the previous week, month, quarter, or year. Only valid when paired with report_datetime_range or cohort_datetime_range.")
+    compared_custom_range: dict[str, Any] | None = Field(default=None, description="A custom time range for comparison data. Allows comparing against any specific period, not just relative ranges.")
+    users: list[str] | None = Field(default=None, description="A list of user IDs or group IDs to limit results to. When empty or omitted, the report includes all available users.")
+    query: PostReportFunnelOpportunityStagesRequestBodyQuery | None = None
+class PostReportFunnelOpportunityStagesRequest(StrictModel):
+    """Retrieve a funnel report showing pipeline metrics for opportunities aggregated by stage or per-user. Supports comparison against previous time periods and filtering by saved searches or specific users."""
+    body: PostReportFunnelOpportunityStagesRequestBody
 
 # Operation: list_email_templates
-class GetV1EmailTemplateRequestQuery(StrictModel):
+class GetEmailTemplateRequestQuery(StrictModel):
     is_archived: bool | None = Field(default=None, description="Filter results to show only archived templates (true), only active templates (false), or all templates regardless of status (omit parameter). Useful for managing template lifecycle.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Limit the number of results returned in a single response. Must be at least 1. Use pagination to retrieve large template collections efficiently.", ge=1)
-class GetV1EmailTemplateRequest(StrictModel):
-    """Retrieve all email templates with optional filtering by archive status and pagination support. Use this to browse available templates for sending or management purposes."""
-    query: GetV1EmailTemplateRequestQuery | None = None
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Limit the number of templates returned in the response. Helps with pagination and controlling response size for large template collections.")
+class GetEmailTemplateRequest(StrictModel):
+    """Retrieve a list of email templates with optional filtering by archived status and pagination support. Use this to browse available templates for sending emails or managing template collections."""
+    query: GetEmailTemplateRequestQuery | None = None
 
 # Operation: create_email_template
-class PostV1EmailTemplateRequestBody(StrictModel):
+class PostEmailTemplateRequestBody(StrictModel):
     body: dict[str, Any] = Field(default=..., description="Email template configuration object containing template name, subject, body content, and any variable placeholders for dynamic content insertion.")
-class PostV1EmailTemplateRequest(StrictModel):
-    """Create a new email template that can be used for sending emails. Define the template structure, content, and variables for reuse across email communications."""
-    body: PostV1EmailTemplateRequestBody
+class PostEmailTemplateRequest(StrictModel):
+    """Create a new email template that can be used for sending standardized emails. Define the template structure, content, and variables for reuse across email communications."""
+    body: PostEmailTemplateRequestBody
 
 # Operation: get_email_template
-class GetV1EmailTemplateIdRequestPath(StrictModel):
+class GetEmailTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email template to retrieve.")
-class GetV1EmailTemplateIdRequest(StrictModel):
-    """Retrieve a specific email template by its unique identifier. Use this to fetch template details for viewing or further processing."""
-    path: GetV1EmailTemplateIdRequestPath
+class GetEmailTemplateIdRequest(StrictModel):
+    """Retrieve a specific email template by its unique identifier. Use this to fetch the full details of an email template for viewing or further processing."""
+    path: GetEmailTemplateIdRequestPath
 
 # Operation: update_email_template
-class PutV1EmailTemplateIdRequestPath(StrictModel):
+class PutEmailTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email template to update.")
-class PutV1EmailTemplateIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The email template data to update, including fields such as subject, body, variables, and other template configuration.")
-class PutV1EmailTemplateIdRequest(StrictModel):
-    """Update an existing email template with new content, settings, or configuration. Specify the template ID and provide the updated template data in the request body."""
-    path: PutV1EmailTemplateIdRequestPath
-    body: PutV1EmailTemplateIdRequestBody
+class PutEmailTemplateIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The display name for the email template.")
+    subject: str | None = Field(default=None, description="The subject line that will appear in emails sent using this template.")
+    body: str | None = Field(default=None, description="The HTML or plain text content of the email body.")
+    is_shared: bool | None = Field(default=None, description="Whether this template is accessible to other members of your organization.")
+    is_archived: bool | None = Field(default=None, description="Whether this template is archived and hidden from active template lists.")
+class PutEmailTemplateIdRequest(StrictModel):
+    """Update an existing email template by modifying its content, metadata, or organizational settings. Specify the template ID and provide any fields you want to change; omitted fields remain unchanged."""
+    path: PutEmailTemplateIdRequestPath
+    body: PutEmailTemplateIdRequestBody | None = None
 
 # Operation: delete_email_template
-class DeleteV1EmailTemplateIdRequestPath(StrictModel):
+class DeleteEmailTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email template to delete.")
-class DeleteV1EmailTemplateIdRequest(StrictModel):
-    """Permanently delete an email template by its ID. This action cannot be undone."""
-    path: DeleteV1EmailTemplateIdRequestPath
+class DeleteEmailTemplateIdRequest(StrictModel):
+    """Permanently delete an email template by its ID. This action cannot be undone and will remove the template from all systems."""
+    path: DeleteEmailTemplateIdRequestPath
 
 # Operation: render_email_template
-class GetV1EmailTemplateIdRenderRequestPath(StrictModel):
+class GetEmailTemplateIdRenderRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the email template to render.")
-class GetV1EmailTemplateIdRenderRequestQuery(StrictModel):
-    mode: Literal["lead", "contact"] | None = Field(default=None, description="Specifies which contact data to use for rendering: 'lead' renders the first contact associated with the lead (default), or 'contact' to render a specific contact by index.")
-class GetV1EmailTemplateIdRenderRequest(StrictModel):
-    """Render an email template with actual data from a lead or contact to preview the final formatted output. Use this to see how the template will appear before sending."""
-    path: GetV1EmailTemplateIdRenderRequestPath
-    query: GetV1EmailTemplateIdRenderRequestQuery | None = None
+class GetEmailTemplateIdRenderRequestQuery(StrictModel):
+    entry: int | None = Field(default=None, description="When rendering from search query results, the zero-based index of the lead/contact to use (0-99). Omit this parameter when rendering for a specific lead/contact.", ge=0, le=99)
+class GetEmailTemplateIdRenderRequest(StrictModel):
+    """Render an email template with actual data for a specific lead or contact. Supports rendering against a single lead/contact or previewing from a search query result."""
+    path: GetEmailTemplateIdRenderRequestPath
+    query: GetEmailTemplateIdRenderRequestQuery | None = None
 
 # Operation: list_sms_templates
-class GetV1SmsTemplateRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of SMS templates to return in the response. Useful for pagination or controlling result set size.")
-class GetV1SmsTemplateRequest(StrictModel):
-    """Retrieve a list of SMS templates available in your account. Use the limit parameter to control the number of results returned."""
-    query: GetV1SmsTemplateRequestQuery | None = None
+class GetSmsTemplateRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of SMS templates to return in a single response. Useful for controlling result set size in paginated requests.")
+class GetSmsTemplateRequest(StrictModel):
+    """Retrieve a paginated list of SMS templates available in your account. Use the limit parameter to control the number of results returned."""
+    query: GetSmsTemplateRequestQuery | None = None
 
 # Operation: create_sms_template
-class PostV1SmsTemplateRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="Template configuration object containing the SMS template details such as name, content, and any variable placeholders for dynamic content.")
-class PostV1SmsTemplateRequest(StrictModel):
-    """Create a new SMS template that can be used for sending templated SMS messages. Define the template content and configuration for reuse across multiple SMS campaigns."""
-    body: PostV1SmsTemplateRequestBody
+class PostSmsTemplateRequestBody(StrictModel):
+    body: dict[str, Any] = Field(default=..., description="Template configuration object containing the SMS template details such as name, content, and any variable placeholders for personalization.")
+class PostSmsTemplateRequest(StrictModel):
+    """Create a new SMS template that can be used for sending standardized text messages. Define the template content and configuration for reuse across SMS campaigns."""
+    body: PostSmsTemplateRequestBody
 
 # Operation: get_sms_template
-class GetV1SmsTemplateIdRequestPath(StrictModel):
+class GetSmsTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS template to retrieve.")
-class GetV1SmsTemplateIdRequest(StrictModel):
+class GetSmsTemplateIdRequest(StrictModel):
     """Retrieve a specific SMS template by its unique identifier. Use this to fetch template details for viewing or further processing."""
-    path: GetV1SmsTemplateIdRequestPath
+    path: GetSmsTemplateIdRequestPath
 
 # Operation: update_sms_template
-class PutV1SmsTemplateIdRequestPath(StrictModel):
+class PutSmsTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS template to update.")
-class PutV1SmsTemplateIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The updated SMS template configuration and content.")
-class PutV1SmsTemplateIdRequest(StrictModel):
-    """Update an existing SMS template by ID. Modify the template content and configuration to reflect your current messaging needs."""
-    path: PutV1SmsTemplateIdRequestPath
-    body: PutV1SmsTemplateIdRequestBody
+class PutSmsTemplateIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The display name for the SMS template.")
+    body: str | None = Field(default=None, description="The message content of the SMS template.")
+class PutSmsTemplateIdRequest(StrictModel):
+    """Update an existing SMS template by modifying its name and/or body content. Provide the template ID and specify which fields to update."""
+    path: PutSmsTemplateIdRequestPath
+    body: PutSmsTemplateIdRequestBody | None = None
 
 # Operation: delete_sms_template
-class DeleteV1SmsTemplateIdRequestPath(StrictModel):
+class DeleteSmsTemplateIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SMS template to delete.")
-class DeleteV1SmsTemplateIdRequest(StrictModel):
-    """Permanently delete an SMS template by its ID. This action cannot be undone."""
-    path: DeleteV1SmsTemplateIdRequestPath
+class DeleteSmsTemplateIdRequest(StrictModel):
+    """Permanently delete an SMS template by its ID. This action cannot be undone and will remove the template from your account."""
+    path: DeleteSmsTemplateIdRequestPath
 
 # Operation: get_connected_account
-class GetV1ConnectedAccountIdRequestPath(StrictModel):
+class GetConnectedAccountIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the connected account to retrieve.")
-class GetV1ConnectedAccountIdRequest(StrictModel):
-    """Retrieve details for a specific connected account by its unique identifier. Use this to fetch account information such as authentication status, configuration, and metadata."""
-    path: GetV1ConnectedAccountIdRequestPath
+class GetConnectedAccountIdRequest(StrictModel):
+    """Retrieve detailed information about a specific connected account using its unique identifier."""
+    path: GetConnectedAccountIdRequestPath
 
 # Operation: list_send_as_associations
-class GetV1SendAsRequestQuery(StrictModel):
-    allowing_user_id: str | None = Field(default=None, description="Filter associations by the user ID who is granting Send As permission. Must be your own user ID if provided.")
-    allowed_user_id: str | None = Field(default=None, description="Filter associations by the user ID who is receiving Send As permission. Must be your own user ID if provided.")
-class GetV1SendAsRequest(StrictModel):
-    """Retrieve all Send As associations for the authenticated user. You can filter by either the user granting permission (allowing_user_id) or the user receiving permission (allowed_user_id), and at least one must match your user ID."""
-    query: GetV1SendAsRequestQuery | None = None
+class GetSendAsRequestQuery(StrictModel):
+    allowing_user_id: str | None = Field(default=None, description="Filter associations where this user is granting Send As permission. Must match your own user ID if provided.")
+    allowed_user_id: str | None = Field(default=None, description="Filter associations where this user is receiving Send As permission. Must match your own user ID if provided.")
+class GetSendAsRequest(StrictModel):
+    """Retrieve all Send As associations for the authenticated user, either as the user granting permission or receiving it. At least one filter parameter should be provided to scope results to your user ID."""
+    query: GetSendAsRequestQuery | None = None
 
-# Operation: create_send_as_association
-class PostV1SendAsRequestBody(StrictModel):
-    allowing_user_id: str = Field(default=..., description="Your user ID that will grant send-as permission to another user. This must match your own user ID.")
-    allowed_user_id: str = Field(default=..., description="The user ID of the person who will be granted permission to send messages as the allowing user.")
-class PostV1SendAsRequest(StrictModel):
-    """Grant another user permission to send messages on your behalf by creating a Send As Association. The allowing_user_id must match your own user ID."""
-    body: PostV1SendAsRequestBody
+# Operation: grant_send_as_permission
+class PostSendAsRequestBody(StrictModel):
+    allowing_user_id: str = Field(default=..., description="Your user ID that will grant send-as permission. This must match your own user ID to authorize the delegation.")
+    allowed_user_id: str = Field(default=..., description="The user ID of the person who will receive permission to send messages as you.")
+class PostSendAsRequest(StrictModel):
+    """Grant another user permission to send messages on your behalf by creating a Send As Association. The allowing user ID must be your own user ID."""
+    body: PostSendAsRequestBody
 
 # Operation: revoke_send_as_permission
-class DeleteV1SendAsRequestQuery(StrictModel):
-    allowing_user_id: str = Field(default=..., description="The user ID of the person who granted send-as permission. This must match your own user ID.")
-    allowed_user_id: str = Field(default=..., description="The user ID of the person whose send-as permission is being revoked.")
-class DeleteV1SendAsRequest(StrictModel):
-    """Revoke a user's permission to send emails on behalf of another user. Both the authorizing user and the authorized user must be specified to remove the association."""
-    query: DeleteV1SendAsRequestQuery
+class DeleteSendAsRequestQuery(StrictModel):
+    allowing_user_id: str = Field(default=..., description="Your user ID — the user who originally granted Send As permission. This must match your authenticated user ID.")
+    allowed_user_id: str = Field(default=..., description="The user ID of the user whose Send As permission is being revoked.")
+class DeleteSendAsRequest(StrictModel):
+    """Revoke Send As permission that was previously granted to another user. The requesting user must be the one who originally granted the permission."""
+    query: DeleteSendAsRequestQuery
 
 # Operation: get_send_as
-class GetV1SendAsIdRequestPath(StrictModel):
+class GetSendAsIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Send As Association to retrieve.")
-class GetV1SendAsIdRequest(StrictModel):
-    """Retrieve a single Send As Association by its unique identifier. Use this to fetch details about a specific email sending configuration."""
-    path: GetV1SendAsIdRequestPath
+class GetSendAsIdRequest(StrictModel):
+    """Retrieve a specific Send As Association by its unique identifier to view its configuration and details."""
+    path: GetSendAsIdRequestPath
 
 # Operation: delete_send_as
-class DeleteV1SendAsIdRequestPath(StrictModel):
+class DeleteSendAsIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Send As Association to delete.")
-class DeleteV1SendAsIdRequest(StrictModel):
-    """Remove a Send As Association by its ID, preventing further use of that sender identity."""
-    path: DeleteV1SendAsIdRequestPath
+class DeleteSendAsIdRequest(StrictModel):
+    """Remove a Send As Association by its unique identifier. This operation permanently deletes the specified Send As Association, preventing further use of that sending identity."""
+    path: DeleteSendAsIdRequestPath
 
-# Operation: update_send_as_permissions_bulk
-class PostV1SendAsBulkRequestBody(StrictModel):
-    allow: list[str] | None = Field(default=None, description="List of user IDs to grant Send As permission to. These users will be able to send messages as you.")
-    disallow: list[str] | None = Field(default=None, description="List of user IDs to revoke Send As permission from. These users will no longer be able to send messages as you.")
-class PostV1SendAsBulkRequest(StrictModel):
-    """Manage multiple Send As permissions in a single request by granting or revoking the ability for other users to send messages on your behalf. Returns all current Send As associations after the update is complete."""
-    body: PostV1SendAsBulkRequestBody | None = None
+# Operation: update_send_as_permissions
+class PostSendAsBulkRequestBody(StrictModel):
+    allow: list[str] | None = Field(default=None, description="List of user IDs to grant Send As permission to. Each ID must be a valid user identifier in your organization.")
+    disallow: list[str] | None = Field(default=None, description="List of user IDs to revoke Send As permission from. Each ID must be a valid user identifier in your organization.")
+class PostSendAsBulkRequest(StrictModel):
+    """Grant or revoke Send As permissions for multiple users in a single request. Returns all current Send As associations where you are the allowing user."""
+    body: PostSendAsBulkRequestBody | None = None
 
 # Operation: list_sequences
-class GetV1SequenceRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of sequences to return in a single request. Useful for controlling response size and implementing pagination.")
-class GetV1SequenceRequest(StrictModel):
-    """Retrieve a paginated list of all sequences. Use the limit parameter to control the maximum number of results returned."""
-    query: GetV1SequenceRequestQuery | None = None
+class GetSequenceRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of sequences to return in a single request. Allows you to control pagination size for efficient data retrieval.")
+class GetSequenceRequest(StrictModel):
+    """Retrieve a paginated list of all sequences. Use the limit parameter to control the number of results returned per request."""
+    query: GetSequenceRequestQuery | None = None
 
 # Operation: create_sequence
-class PostV1SequenceRequestBody(StrictModel):
+class PostSequenceRequestBody(StrictModel):
     body: dict[str, Any] = Field(default=..., description="The sequence configuration object containing all required properties to define the new sequence.")
-class PostV1SequenceRequest(StrictModel):
+class PostSequenceRequest(StrictModel):
     """Create a new sequence with the specified configuration. This operation initializes a sequence resource that can be used for ordered processing or workflow management."""
-    body: PostV1SequenceRequestBody
+    body: PostSequenceRequestBody
 
 # Operation: get_sequence
-class GetV1SequenceIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the sequence to retrieve.")
-class GetV1SequenceIdRequest(StrictModel):
-    """Retrieve a specific sequence by its unique identifier. Use this operation to fetch detailed information about a sequence."""
-    path: GetV1SequenceIdRequestPath
+class GetSequenceIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier that specifies which sequence to retrieve.")
+class GetSequenceIdRequest(StrictModel):
+    """Retrieve a single sequence by its unique identifier. Use this operation to fetch detailed information about a specific sequence."""
+    path: GetSequenceIdRequestPath
 
 # Operation: update_sequence
-class PutV1SequenceIdRequestPath(StrictModel):
+class PutSequenceIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the sequence to update.")
-class PutV1SequenceIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The sequence configuration object containing the fields to update, including an optional steps array that defines the sequence's workflow steps.")
-class PutV1SequenceIdRequest(StrictModel):
-    """Update an existing sequence by modifying its configuration. Any steps included in the request will replace the sequence's current steps; steps not included will be removed."""
-    path: PutV1SequenceIdRequestPath
-    body: PutV1SequenceIdRequestBody
+class PutSequenceIdRequestBody(StrictModel):
+    steps: list[dict[str, Any]] | None = Field(default=None, description="An ordered array of steps that defines the sequence workflow. When provided, this completely replaces all existing steps; any steps not included in the request will be removed from the sequence.")
+class PutSequenceIdRequest(StrictModel):
+    """Update an existing sequence by modifying its configuration. The steps array, if provided, will completely replace all current steps in the sequence."""
+    path: PutSequenceIdRequestPath
+    body: PutSequenceIdRequestBody | None = None
 
 # Operation: delete_sequence
-class DeleteV1SequenceIdRequestPath(StrictModel):
+class DeleteSequenceIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the sequence to delete.")
-class DeleteV1SequenceIdRequest(StrictModel):
-    """Permanently delete a sequence by its ID. This action cannot be undone."""
-    path: DeleteV1SequenceIdRequestPath
+class DeleteSequenceIdRequest(StrictModel):
+    """Permanently delete a sequence by its unique identifier. This action cannot be undone."""
+    path: DeleteSequenceIdRequestPath
 
 # Operation: list_sequence_subscriptions
-class GetV1SequenceSubscriptionRequestQuery(StrictModel):
-    sequence_id: str | None = Field(default=None, description="Filter results to show subscriptions for a specific sequence. Use the sequence's unique identifier.")
-class GetV1SequenceSubscriptionRequest(StrictModel):
-    """Retrieve a list of sequence subscriptions filtered by sequence, contact, or lead. At least one filter parameter is required to execute this operation."""
-    query: GetV1SequenceSubscriptionRequestQuery | None = None
+class GetSequenceSubscriptionRequestQuery(StrictModel):
+    sequence_id: str | None = Field(default=None, description="Filter results by sequence ID. At least one of sequence_id, contact_id, or lead_id must be specified.")
+class GetSequenceSubscriptionRequest(StrictModel):
+    """Retrieve a list of sequence subscriptions filtered by sequence, contact, or lead. At least one filter criterion must be provided."""
+    query: GetSequenceSubscriptionRequestQuery | None = None
 
 # Operation: subscribe_contact_to_sequence
-class PostV1SequenceSubscriptionRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The subscription details including the contact identifier and sequence to subscribe them to. This object should contain the necessary identifiers and configuration for the sequence subscription.")
-class PostV1SequenceSubscriptionRequest(StrictModel):
-    """Subscribe a contact to an automation sequence. This creates a new sequence subscription that will trigger the contact to receive the sequence's automated messages and actions."""
-    body: PostV1SequenceSubscriptionRequestBody
+class PostSequenceSubscriptionRequestBody(StrictModel):
+    body: dict[str, Any] = Field(default=..., description="Request body containing the contact ID and sequence ID. Specify which contact to subscribe and which sequence to enroll them in.")
+class PostSequenceSubscriptionRequest(StrictModel):
+    """Subscribe a contact to an automation sequence. This enrolls the contact in the specified sequence, triggering any configured automation workflows."""
+    body: PostSequenceSubscriptionRequestBody
 
 # Operation: get_sequence_subscription
-class GetV1SequenceSubscriptionIdRequestPath(StrictModel):
+class GetSequenceSubscriptionIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the sequence subscription to retrieve.")
-class GetV1SequenceSubscriptionIdRequest(StrictModel):
-    """Retrieve a specific sequence subscription by its unique identifier. Use this to fetch details about an individual sequence subscription."""
-    path: GetV1SequenceSubscriptionIdRequestPath
+class GetSequenceSubscriptionIdRequest(StrictModel):
+    """Retrieve a specific sequence subscription by its unique identifier to view its configuration and status."""
+    path: GetSequenceSubscriptionIdRequestPath
 
 # Operation: update_sequence_subscription
-class PutV1SequenceSubscriptionIdRequestPath(StrictModel):
+class PutSequenceSubscriptionIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the sequence subscription to update.")
-class PutV1SequenceSubscriptionIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The subscription data to update. Include the fields you want to modify in the request body.")
-class PutV1SequenceSubscriptionIdRequest(StrictModel):
-    """Update an existing sequence subscription with new configuration or settings. Modify subscription parameters such as status, frequency, or other subscription-specific properties."""
-    path: PutV1SequenceSubscriptionIdRequestPath
-    body: PutV1SequenceSubscriptionIdRequestBody
+class PutSequenceSubscriptionIdRequestBody(StrictModel):
+    body: dict[str, Any] = Field(default=..., description="The updated configuration and settings for the sequence subscription. Include only the fields you want to modify.")
+class PutSequenceSubscriptionIdRequest(StrictModel):
+    """Update an existing sequence subscription with new configuration, settings, or other properties. Modifies the subscription identified by the provided ID."""
+    path: PutSequenceSubscriptionIdRequestPath
+    body: PutSequenceSubscriptionIdRequestBody
 
 # Operation: list_dialer_sessions
-class GetV1DialerRequestQuery(StrictModel):
-    source_value: str | None = Field(default=None, description="Filter results by the source identifier, which can be either a Smart View ID or Shared Entry ID depending on the source type.")
-    source_type: Literal["saved-search", "shared-entry"] | None = Field(default=None, description="Filter results by source type. Must be either 'saved-search' for Smart View sources or 'shared-entry' for Shared Entry sources.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of dialer sessions to return in the response. Use this to control result set size.")
-class GetV1DialerRequest(StrictModel):
-    """Retrieve and filter dialer sessions with details about their source, type, and associated users. Use optional filters to narrow results by source value or type."""
-    query: GetV1DialerRequestQuery | None = None
+class GetDialerRequestQuery(StrictModel):
+    source_value: str | None = Field(default=None, description="Filter results by the source identifier, which can be either a Smart View ID or Shared Entry ID.")
+    source_type: Literal["saved-search", "shared-entry"] | None = Field(default=None, description="Filter results by source type. Valid options are 'saved-search' for saved search sources or 'shared-entry' for shared entry sources.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of dialer sessions to return in the results.")
+class GetDialerRequest(StrictModel):
+    """Retrieve and filter dialer sessions to view their source, type, and associated user information. Use filters to narrow results by source identifier or type."""
+    query: GetDialerRequestQuery | None = None
 
-# Operation: get_dialer_session
-class GetV1DialerIdRequestPath(StrictModel):
+# Operation: get_dialer
+class GetDialerIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the dialer session to retrieve.")
-class GetV1DialerIdRequest(StrictModel):
-    """Retrieve details of a specific dialer session by its unique identifier. Use this to fetch current status, configuration, and activity information for an active or completed dialing session."""
-    path: GetV1DialerIdRequestPath
+class GetDialerIdRequest(StrictModel):
+    """Retrieve detailed information about a specific dialer session using its unique identifier."""
+    path: GetDialerIdRequestPath
+
+# Operation: list_smart_views
+class GetSavedSearchRequestQuery(StrictModel):
+    type__in: str | None = Field(default=None, description="Filter results by one or more record types using comma-separated values (e.g., lead,contact). Omit this parameter to retrieve Smart Views for all types.")
+class GetSavedSearchRequest(StrictModel):
+    """Retrieve all Smart Views with optional filtering by record type. Use this to display available saved searches for leads, contacts, or both."""
+    query: GetSavedSearchRequestQuery | None = None
 
 # Operation: create_smart_view
-class PostV1SavedSearchRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the Smart View. This is the label users will see when accessing their saved views.")
-    query: dict[str, Any] = Field(default=..., description="A filter query object that defines which records appear in the Smart View. Must include an object_type clause specifying either 'Lead' or 'Contact' to determine the record type being filtered.")
-class PostV1SavedSearchRequest(StrictModel):
-    """Create a new Smart View for organizing and filtering Leads or Contacts. Smart Views use advanced filtering queries to automatically group records based on specified criteria."""
-    body: PostV1SavedSearchRequestBody
+class PostSavedSearchRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the Smart View. This is the label users will see when accessing the saved search.")
+    query: dict[str, Any] = Field(default=..., description="A filter query object that defines which records appear in the Smart View. Must include an `object_type` clause specifying either 'Lead' or 'Contact' to determine the record type for this Smart View.")
+class PostSavedSearchRequest(StrictModel):
+    """Create a Smart View (saved search) for Leads or Contacts. The Smart View uses a filter query to automatically populate with matching records based on your specified criteria."""
+    body: PostSavedSearchRequestBody
 
 # Operation: get_smart_view
-class GetV1SavedSearchIdRequestPath(StrictModel):
+class GetSavedSearchIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Smart View to retrieve.")
-class GetV1SavedSearchIdRequest(StrictModel):
-    """Retrieve a specific Smart View by its unique identifier. Use this to fetch detailed information about a saved search view."""
-    path: GetV1SavedSearchIdRequestPath
+class GetSavedSearchIdRequest(StrictModel):
+    """Retrieve a single Smart View by its unique identifier. Use this to fetch detailed information about a saved search view."""
+    path: GetSavedSearchIdRequestPath
 
 # Operation: update_smart_view
-class PutV1SavedSearchIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Smart View to update.")
-class PutV1SavedSearchIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the Smart View. Provide a descriptive name to help identify this saved search.")
-class PutV1SavedSearchIdRequest(StrictModel):
-    """Update an existing Smart View by modifying its name or other properties. Use the Smart View ID to identify which view to update."""
-    path: PutV1SavedSearchIdRequestPath
-    body: PutV1SavedSearchIdRequestBody | None = None
+class PutSavedSearchIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Smart View to update. This ID is assigned when the Smart View is created and is used to reference it in subsequent operations.")
+class PutSavedSearchIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The display name for the Smart View. This is the human-readable label shown in the user interface to identify the Smart View.")
+class PutSavedSearchIdRequest(StrictModel):
+    """Update an existing Smart View by modifying its properties such as the display name. Use this operation to rename or reconfigure a Smart View that you've previously created."""
+    path: PutSavedSearchIdRequestPath
+    body: PutSavedSearchIdRequestBody | None = None
 
 # Operation: delete_smart_view
-class DeleteV1SavedSearchIdRequestPath(StrictModel):
+class DeleteSavedSearchIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Smart View to delete.")
-class DeleteV1SavedSearchIdRequest(StrictModel):
-    """Delete a Smart View by its unique identifier. This operation permanently removes the saved search and cannot be undone."""
-    path: DeleteV1SavedSearchIdRequestPath
+class DeleteSavedSearchIdRequest(StrictModel):
+    """Permanently delete a Smart View by its unique identifier. This action cannot be undone and will remove all saved search criteria and filters associated with the Smart View."""
+    path: DeleteSavedSearchIdRequestPath
 
 # Operation: send_bulk_email
-class PostV1BulkActionEmailRequestBody(StrictModel):
-    s_query: dict[str, Any] = Field(default=..., description="Structured query object defining which leads to target, using the same filtering syntax as the Advanced Filtering API.")
-    results_limit: int | None = Field(default=None, description="Maximum number of leads to include in this bulk email action. If not specified, all matching leads will be affected.")
-    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort order for the leads, specified as an array of sort criteria. Order matters and determines which leads are prioritized when results_limit is applied.")
-    contact_preference: Literal["lead", "contact"] | None = Field(default=None, description="Determines email recipient scope: 'lead' sends to only the primary contact email of each lead, while 'contact' sends to the first contact email of each contact associated with the lead.")
-    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email upon completion of the bulk email action. Enabled by default.")
-class PostV1BulkActionEmailRequest(StrictModel):
-    """Send bulk emails to leads matching specified criteria. Choose whether to email the primary lead contact or all contacts associated with each lead."""
-    body: PostV1BulkActionEmailRequestBody
+class PostBulkActionEmailRequestBody(StrictModel):
+    s_query: dict[str, Any] = Field(default=..., description="Structured query to filter which leads receive the email, using the same query syntax as the Advanced Filtering API.")
+    results_limit: int | None = Field(default=None, description="Optional limit on the number of leads to affect. If not specified, all leads matching the query will be included.")
+    sort: list[dict[str, Any]] | None = Field(default=None, description="Optional sort criteria to order the filtered leads. Specify as an array of sort expressions.")
+    contact_preference: Literal["lead", "contact"] | None = Field(default=None, description="Determines email recipient scope: use 'lead' to email only the primary contact of each lead, or 'contact' to email the first contact email of each individual contact associated with the lead.")
+    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email after the bulk action completes. Enabled by default.")
+class PostBulkActionEmailRequest(StrictModel):
+    """Send bulk emails to leads matching specified criteria. Choose whether to email the primary lead contact or each individual contact associated with the leads."""
+    body: PostBulkActionEmailRequestBody
 
 # Operation: get_bulk_email
-class GetV1BulkActionEmailIdRequestPath(StrictModel):
+class GetBulkActionEmailIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk email action to retrieve.")
-class GetV1BulkActionEmailIdRequest(StrictModel):
-    """Retrieve details of a specific bulk email action by its ID. Returns the complete configuration and status information for the bulk email operation."""
-    path: GetV1BulkActionEmailIdRequestPath
+class GetBulkActionEmailIdRequest(StrictModel):
+    """Retrieve the details and status of a specific bulk email action by its unique identifier."""
+    path: GetBulkActionEmailIdRequestPath
 
-# Operation: bulk_subscribe_sequence
-class PostV1BulkActionSequenceSubscriptionRequestBody(StrictModel):
-    s_query: dict[str, Any] = Field(default=..., description="Structured query object that defines which leads or contacts to affect. Uses the same query format as the Advanced Filtering API to specify filtering, matching, and selection criteria.")
-    results_limit: int | None = Field(default=None, description="Maximum number of leads to process in this bulk action. If not specified, all matching leads will be affected.")
-    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort order for the results. Specify as an array of sort criteria to control which leads are prioritized when a results_limit is applied.")
-    action_type: Literal["subscribe", "resume", "resume_finished", "pause"] = Field(default=..., description="The subscription action to perform: 'subscribe' to add leads to a sequence, 'resume' to restart paused sequences, 'resume_finished' to restart completed sequences, or 'pause' to pause active sequences.")
-    sequence_id: str | None = Field(default=None, description="The ID of the sequence to subscribe leads to. Required when action_type is 'subscribe'.")
-    sender_account_id: str | None = Field(default=None, description="The account ID of the sender who will be associated with the sequence. Required when action_type is 'subscribe'.")
-    contact_preference: Literal["lead", "contact"] | None = Field(default=None, description="Subscription scope: 'lead' to subscribe only the primary/first contact email, or 'contact' to subscribe the primary email of each contact in the lead record. Required when action_type is 'subscribe'.")
-    sender_name: dict | None = Field(default=None, description="Sender name (required if action_type is 'subscribe')")
-    sender_email: str | None = Field(default=None, description="Sender email (required if action_type is 'subscribe')", json_schema_extra={'format': 'email'})
-class PostV1BulkActionSequenceSubscriptionRequest(StrictModel):
-    """Bulk subscribe, resume, or pause contacts in a sequence. Use this operation to perform subscription actions on multiple leads or contacts matching your query criteria, such as subscribing them to a new sequence, resuming paused sequences, or pausing active sequences."""
-    body: PostV1BulkActionSequenceSubscriptionRequestBody
+# Operation: apply_sequence_subscription_bulk_action
+class PostBulkActionSequenceSubscriptionRequestBody(StrictModel):
+    s_query: dict[str, Any] = Field(default=..., description="Structured query object that defines which leads to target with the bulk action. This filter determines the lead set before applying the subscription action.")
+    results_limit: int | None = Field(default=None, description="Maximum number of leads to affect with this bulk action. If not specified, all matching leads will be included.")
+    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort criteria to order the filtered leads. Specify as an array where order matters for determining which leads are processed first when combined with results_limit.")
+    action_type: Literal["subscribe", "resume", "resume_finished", "pause"] = Field(default=..., description="The subscription action to perform: 'subscribe' (enroll leads in a sequence), 'resume' (restart paused sequences), 'resume_finished' (restart completed sequences), or 'pause' (pause active sequences).")
+    sequence_id: str | None = Field(default=None, description="ID of the sequence to target. Required when action_type is 'subscribe'; optional for resume and pause actions to target all sequences for matching leads.")
+    sender_account_id: str | None = Field(default=None, description="Account ID of the sender. Required when action_type is 'subscribe' to identify which account will send the sequence messages.")
+    sender_name: str | None = Field(default=None, description="Display name of the sender. Required when action_type is 'subscribe' to personalize outgoing sequence messages.")
+    sender_email: str | None = Field(default=None, description="Email address of the sender. Required when action_type is 'subscribe' as the reply-to and from address for sequence messages. Must be a valid email format.", json_schema_extra={'format': 'email'})
+    contact_preference: Literal["lead", "contact"] | None = Field(default=None, description="Determines subscription scope when action_type is 'subscribe': 'lead' subscribes the primary lead contact, or 'contact' subscribes each contact's individual email address. Required when action_type is 'subscribe'.")
+    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email after the bulk action completes. Defaults to true if not specified.")
+class PostBulkActionSequenceSubscriptionRequest(StrictModel):
+    """Apply a bulk subscription action (subscribe, resume, pause, or resume finished) to leads matching specified criteria. Use structured queries to filter leads and optionally limit the number affected."""
+    body: PostBulkActionSequenceSubscriptionRequestBody
 
-# Operation: get_bulk_sequence_subscription
-class GetV1BulkActionSequenceSubscriptionIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk sequence subscription action to retrieve.")
-class GetV1BulkActionSequenceSubscriptionIdRequest(StrictModel):
-    """Retrieve details of a specific bulk sequence subscription, including its configuration and status."""
-    path: GetV1BulkActionSequenceSubscriptionIdRequestPath
+# Operation: get_sequence_subscription_bulk_action
+class GetBulkActionSequenceSubscriptionIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk sequence subscription to retrieve.")
+class GetBulkActionSequenceSubscriptionIdRequest(StrictModel):
+    """Retrieve a single bulk sequence subscription by its ID. Use this to fetch details about a specific sequence subscription object."""
+    path: GetBulkActionSequenceSubscriptionIdRequestPath
 
 # Operation: delete_leads_bulk
-class PostV1BulkActionDeleteRequestBody(StrictModel):
-    s_query: dict[str, Any] = Field(default=..., description="Structured query object defining which leads to delete, using the same format as the Advanced Filtering API query field.")
-    results_limit: int | None = Field(default=None, description="Maximum number of leads to delete in this operation; if not specified, all matching leads will be affected.")
-    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort specification to order results before deletion; order matters and determines which leads are affected when combined with results_limit.")
-    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email upon completion; defaults to true if not specified.")
-class PostV1BulkActionDeleteRequest(StrictModel):
-    """Initiate a bulk delete operation to remove multiple leads matching specified criteria. Optionally receive a confirmation email when the operation completes."""
-    body: PostV1BulkActionDeleteRequestBody
+class PostBulkActionDeleteRequestBody(StrictModel):
+    s_query: dict[str, Any] = Field(default=..., description="Structured query object that defines which leads to delete based on filter conditions.")
+    results_limit: int | None = Field(default=None, description="Maximum number of leads to delete in this bulk action. If not specified, all matching leads will be deleted.")
+    sort: list[dict[str, Any]] | None = Field(default=None, description="Array of sort criteria to order the leads before deletion. Order matters and determines which leads are processed first if a results limit is applied.")
+    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email after the bulk delete completes. Defaults to true if not specified.")
+class PostBulkActionDeleteRequest(StrictModel):
+    """Initiate a bulk delete action to remove multiple leads matching specified criteria. Optionally receive a confirmation email when the deletion completes."""
+    body: PostBulkActionDeleteRequestBody
 
-# Operation: get_bulk_delete_action
-class GetV1BulkActionDeleteIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk delete action to retrieve.")
-class GetV1BulkActionDeleteIdRequest(StrictModel):
-    """Retrieve details of a specific bulk delete action, including its status, progress, and configuration."""
-    path: GetV1BulkActionDeleteIdRequestPath
+# Operation: get_bulk_delete
+class GetBulkActionDeleteIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk delete operation to retrieve.")
+class GetBulkActionDeleteIdRequest(StrictModel):
+    """Retrieve details of a specific bulk delete operation by its ID. Use this to check the status and configuration of a previously initiated bulk deletion."""
+    path: GetBulkActionDeleteIdRequestPath
 
 # Operation: bulk_edit_leads
-class PostV1BulkActionEditRequestBody(StrictModel):
-    s_query: dict[str, Any] = Field(default=..., description="Structured query object that defines which leads to target, using the same format as the Advanced Filtering API.")
-    results_limit: int | None = Field(default=None, description="Maximum number of leads to affect with this bulk edit action. If not specified, all matching leads will be updated.")
-    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort specification to order the leads before applying the bulk edit. Specify as an array of sort criteria.")
-    type_: Literal["set_lead_status", "clear_custom_field", "set_custom_field"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The type of bulk edit to perform: 'set_lead_status' to change lead status, 'clear_custom_field' to remove a custom field value, or 'set_custom_field' to update a custom field value.")
+class PostBulkActionEditRequestBody(StrictModel):
+    s_query: dict[str, Any] = Field(default=..., description="Structured query object that defines which leads to include in the bulk edit operation.")
+    results_limit: int | None = Field(default=None, description="Maximum number of leads to affect with this bulk edit action. If not specified, all matching leads will be included.")
+    sort: list[dict[str, Any]] | None = Field(default=None, description="Array of sort criteria to order the leads before applying the bulk edit. Order matters and determines which leads are prioritized if results_limit is applied.")
+    type_: Literal["set_lead_status", "clear_custom_field", "set_custom_field"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The type of bulk edit operation to perform: set_lead_status updates lead status, clear_custom_field removes a custom field value, or set_custom_field assigns a custom field value.")
     lead_status_id: str | None = Field(default=None, description="The ID of the Lead Status to assign. Required when type is 'set_lead_status'.")
-    custom_field_name: str | None = Field(default=None, description="The name of the custom field to modify. Required when type is 'clear_custom_field' or 'set_custom_field', unless you provide custom_field_id instead.")
-    custom_field_values: list[Any] | None = Field(default=None, description="Array of values to set for custom fields that support multiple values. Use with 'set_custom_field' type.")
-    custom_field_operation: Literal["replace", "add", "remove"] | None = Field(default=None, description="How to apply values to multi-value custom fields: 'replace' to overwrite existing values, 'add' to append new values, or 'remove' to delete specific values. Defaults to 'replace'.")
-    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email when the bulk edit completes. Defaults to true; set to false to skip the notification.")
-class PostV1BulkActionEditRequest(StrictModel):
-    """Initiate a bulk edit action on leads matching your query criteria. Choose from updating lead status, clearing a custom field, or setting custom field values across multiple leads."""
-    body: PostV1BulkActionEditRequestBody
+    custom_field_name: str | None = Field(default=None, description="The exact name of the custom field to modify. Required when type is 'clear_custom_field' or 'set_custom_field' (unless custom_field_id is provided instead).")
+    custom_field_values: list[str] | None = Field(default=None, description="Array of values to set for custom fields that support multiple values. Used only when type is 'set_custom_field'.")
+    custom_field_operation: Literal["replace", "add", "remove"] | None = Field(default=None, description="How to apply values to multi-value custom fields: 'replace' overwrites existing values, 'add' appends new values, or 'remove' deletes specified values. Defaults to 'replace' and only applies when type is 'set_custom_field'.")
+    send_done_email: bool | None = Field(default=None, description="Whether to send a confirmation email after the bulk edit completes. Defaults to true; set to false to skip the notification.")
+class PostBulkActionEditRequest(StrictModel):
+    """Execute a bulk edit action on leads matching specified criteria. Supports updating lead status, clearing custom fields, or setting custom field values across multiple leads."""
+    body: PostBulkActionEditRequestBody
 
 # Operation: get_bulk_edit
-class GetV1BulkActionEditIdRequestPath(StrictModel):
+class GetBulkActionEditIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the bulk edit action to retrieve.")
-class GetV1BulkActionEditIdRequest(StrictModel):
-    """Retrieve the details and status of a specific bulk edit action by its ID."""
-    path: GetV1BulkActionEditIdRequestPath
+class GetBulkActionEditIdRequest(StrictModel):
+    """Retrieve the details and current status of a specific bulk edit action by its unique identifier."""
+    path: GetBulkActionEditIdRequestPath
 
 # Operation: create_integration_link
-class PostV1IntegrationLinkRequestBody(StrictModel):
+class PostIntegrationLinkRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name for this integration link, shown as clickable link text to users.")
-    url: str = Field(default=..., description="The URL template that defines where this integration link directs to. Use this to specify dynamic routing based on the integration type.")
     type_: Literal["lead", "contact", "opportunity"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The entity type this integration link applies to. Must be one of: lead, contact, or opportunity.")
-class PostV1IntegrationLinkRequest(StrictModel):
-    """Create a new integration link for your organization. This operation is restricted to organization administrators only."""
-    body: PostV1IntegrationLinkRequestBody
+    url: str = Field(default=..., description="The URL template that defines where this integration link directs to. Use template variables to dynamically construct URLs based on entity data.")
+class PostIntegrationLinkRequest(StrictModel):
+    """Create a new integration link for your organization to connect entities to external systems. This operation is restricted to organization administrators only."""
+    body: PostIntegrationLinkRequestBody
 
 # Operation: get_integration_link
-class GetV1IntegrationLinkIdRequestPath(StrictModel):
+class GetIntegrationLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration link to retrieve.")
-class GetV1IntegrationLinkIdRequest(StrictModel):
+class GetIntegrationLinkIdRequest(StrictModel):
     """Retrieve a specific integration link by its unique identifier. Use this to fetch details about a configured integration connection."""
-    path: GetV1IntegrationLinkIdRequestPath
+    path: GetIntegrationLinkIdRequestPath
 
 # Operation: update_integration_link
-class PutV1IntegrationLinkIdRequestPath(StrictModel):
+class PutIntegrationLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration link to update.")
-class PutV1IntegrationLinkIdRequestBody(StrictModel):
+class PutIntegrationLinkIdRequestBody(StrictModel):
     name: str | None = Field(default=None, description="The text displayed as the clickable link in the user interface.")
-    url: str | None = Field(default=None, description="The URL template that defines the target destination, supporting dynamic variable substitution.")
-class PutV1IntegrationLinkIdRequest(StrictModel):
+    url: str | None = Field(default=None, description="The URL template that defines the target destination, supporting dynamic variable substitution (e.g., using placeholders for dynamic values).")
+class PutIntegrationLinkIdRequest(StrictModel):
     """Update an existing integration link's display name and URL template. Requires organization admin privileges."""
-    path: PutV1IntegrationLinkIdRequestPath
-    body: PutV1IntegrationLinkIdRequestBody | None = None
+    path: PutIntegrationLinkIdRequestPath
+    body: PutIntegrationLinkIdRequestBody | None = None
 
 # Operation: delete_integration_link
-class DeleteV1IntegrationLinkIdRequestPath(StrictModel):
+class DeleteIntegrationLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration link to delete.")
-class DeleteV1IntegrationLinkIdRequest(StrictModel):
-    """Delete an integration link from your organization. This action is restricted to organization administrators only."""
-    path: DeleteV1IntegrationLinkIdRequestPath
+class DeleteIntegrationLinkIdRequest(StrictModel):
+    """Permanently delete an integration link from your organization. This action is restricted to organization administrators only and cannot be undone."""
+    path: DeleteIntegrationLinkIdRequestPath
 
-# Operation: export_records
-class PostV1ExportLeadRequestQuery(StrictModel):
-    s_query: str | None = Field(default=None, description="Advanced search query to filter which records to export. Uses the Advanced Filtering API syntax to narrow results.")
-    results_limit: int | None = Field(default=None, description="Maximum number of records to include in the export. Limits the result set size.")
-    sort: str | None = Field(default=None, description="Field and direction to sort results by. Uses the Advanced Filtering API syntax (e.g., field name with optional sort order).")
-    format_: Literal["csv", "json"] = Field(default=..., validation_alias="format", serialization_alias="format", description="Output file format for the export. Choose between CSV or JSON.")
-    type_: Literal["leads", "contacts", "lead_opps"] = Field(default=..., validation_alias="type", serialization_alias="type", description="Category of records to export: leads, contacts, or opportunities associated with leads.")
-    date_format: Literal["original", "iso8601", "excel"] | None = Field(default=None, description="Date format for exported date fields in CSV exports. Choose original format, ISO 8601 standard, or Excel-compatible format. Only applies to CSV format.")
-    fields: list[str] | None = Field(default=None, description="Specific fields to include in the export. If not specified, all available fields are included. Provide as a list of field names.")
-    include_activities: bool | None = Field(default=None, description="Include activity records in the export. Only applies when exporting leads in JSON format.")
-    include_smart_fields: bool | None = Field(default=None, description="Include smart fields (computed/derived fields) in the export. Supported for leads in JSON format or any record type in CSV format.")
-    send_done_email: bool = Field(default=..., description="Send a confirmation email when the export completes. Set to false to skip the notification email.")
-class PostV1ExportLeadRequest(StrictModel):
-    """Export leads, contacts, or opportunities from Close as a compressed file. The export is processed asynchronously and delivered via email with a download link."""
-    query: PostV1ExportLeadRequestQuery
+# Operation: export_leads
+class PostExportLeadRequestBody(StrictModel):
+    s_query: dict[str, Any] | None = Field(default=None, description="Advanced query filter to narrow the exported results. If omitted, all records of the specified type are exported.")
+    results_limit: int | None = Field(default=None, description="Maximum number of records to include in the export. If not specified, all matching records are exported.")
+    sort: list[dict[str, Any]] | None = Field(default=None, description="Sort order for the exported results. Specify as an array of sort criteria to control result ordering.")
+    format_: Literal["csv", "json"] = Field(default=..., validation_alias="format", serialization_alias="format", description="Output file format. Choose CSV for spreadsheet compatibility or JSON for raw data backups and migrations. JSON is recommended for data preservation.")
+    type_: Literal["leads", "contacts", "lead_opps"] = Field(default=..., validation_alias="type", serialization_alias="type", description="Record type to export: leads (one row per lead or complete JSON structure), contacts (one row per contact), or lead_opps (one row per opportunity).")
+    date_format: Literal["original", "iso8601", "excel"] | None = Field(default=None, description="Date format for CSV exports only. Choose original (as-is), ISO 8601 (standardized format), or excel (spreadsheet-compatible format). Defaults to original format.")
+    fields: list[str] | None = Field(default=None, description="Specific fields to include in the export. If omitted, all available fields are exported.")
+    include_activities: bool | None = Field(default=None, description="Include associated activities in the export. Only applies when exporting leads in JSON format.")
+    include_smart_fields: bool | None = Field(default=None, description="Include smart fields in the export. Works with leads in JSON format or any record type in CSV format.")
+    send_done_email: bool | None = Field(default=None, description="Send a confirmation email when the export completes. Set to false to skip the notification email.")
+class PostExportLeadRequest(StrictModel):
+    """Export leads, contacts, or opportunities to a compressed file based on search criteria. The generated file will be sent to your email once the export completes."""
+    body: PostExportLeadRequestBody
 
 # Operation: export_opportunities
-class PostV1ExportOpportunityRequestQuery(StrictModel):
-    params: dict[str, Any] | None = Field(default=None, description="Filter criteria to narrow down which opportunities to export, using the same filter parameters supported by the opportunities endpoint.")
-    format_: Literal["csv", "json"] = Field(default=..., validation_alias="format", serialization_alias="format", description="File format for the exported data. Choose between CSV or JSON format.")
-    date_format: Literal["original", "iso8601", "excel"] | None = Field(default=None, description="Date format for exported dates in CSV files only. Choose from original format, ISO 8601 standard format, or Excel-compatible format. Defaults to original format.")
-    fields: list[str] | None = Field(default=None, description="Specific fields to include in the export. If not specified, all available fields are included in the export.")
-    send_done_email: bool = Field(default=..., description="Whether to send a confirmation email when the export completes. Defaults to true; set to false to skip the notification email.")
-class PostV1ExportOpportunityRequest(StrictModel):
-    """Export opportunities from Close as a file in your chosen format, with optional filtering and field selection. Optionally receive a confirmation email when the export completes."""
-    query: PostV1ExportOpportunityRequestQuery
+class PostExportOpportunityRequestBody(StrictModel):
+    params: dict[str, Any] | None = Field(default=None, description="Filter criteria to select which opportunities to export, using the same filter options available in the opportunities endpoint.")
+    format_: Literal["csv", "json"] = Field(default=..., validation_alias="format", serialization_alias="format", description="File format for the exported data. Choose between CSV for spreadsheet compatibility or JSON for structured data interchange.")
+    date_format: Literal["original", "iso8601", "excel"] | None = Field(default=None, description="Date formatting style for CSV exports only. Choose 'original' to preserve the source format, 'iso8601' for standardized date-time strings, or 'excel' for Excel-compatible date values.")
+    fields: list[str] | None = Field(default=None, description="Specific fields to include in the export. If not specified, all available data fields are included. Provide as an ordered list of field names.")
+    send_done_email: bool | None = Field(default=None, description="Set to false to skip the confirmation email after the export completes. By default, a confirmation email is sent.")
+class PostExportOpportunityRequest(StrictModel):
+    """Export opportunities matching specified filters to a file in your chosen format. A confirmation email is sent upon completion unless explicitly disabled."""
+    body: PostExportOpportunityRequestBody
 
 # Operation: get_export
-class GetV1ExportIdRequestPath(StrictModel):
+class GetExportIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the export to retrieve.")
-class GetV1ExportIdRequest(StrictModel):
-    """Retrieve a single export by ID to check its current status or obtain a download URL for the exported data."""
-    path: GetV1ExportIdRequestPath
+class GetExportIdRequest(StrictModel):
+    """Retrieve a single export by its unique identifier to check its current processing status or obtain a download URL once completed. Status values include: created, started, in_progress, done, and error."""
+    path: GetExportIdRequestPath
 
 # Operation: list_exports
-class GetV1ExportRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of exports to return in the response. Useful for pagination or reducing payload size.")
-class GetV1ExportRequest(StrictModel):
-    """Retrieve a list of all exports. Use the limit parameter to control the number of results returned."""
-    query: GetV1ExportRequestQuery | None = None
+class GetExportRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of exports to return in the response. Useful for pagination and controlling response size.")
+class GetExportRequest(StrictModel):
+    """Retrieve a list of all exports with optional pagination control. Use the limit parameter to restrict the number of results returned."""
+    query: GetExportRequestQuery | None = None
 
 # Operation: list_phone_numbers
-class GetV1PhoneNumberRequestQuery(StrictModel):
-    number: str | None = Field(default=None, description="Filter results to phone numbers matching this specific number value.")
-    is_group_number: bool | None = Field(default=None, description="Filter results by group number status—set to true to show only group numbers, false to show only individual numbers.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in the response. Limits the result set size.")
-class GetV1PhoneNumberRequest(StrictModel):
-    """Retrieve a list of phone numbers in your organization, with optional filtering by number value or group status."""
-    query: GetV1PhoneNumberRequestQuery | None = None
+class GetPhoneNumberRequestQuery(StrictModel):
+    number: str | None = Field(default=None, description="Filter results to phone numbers matching this specific value. Leave empty to include all numbers regardless of their value.")
+    is_group_number: bool | None = Field(default=None, description="Filter results to show only group numbers (true) or non-group numbers (false). Omit to include both types.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of phone numbers to return in the response. Useful for pagination or limiting large result sets.")
+class GetPhoneNumberRequest(StrictModel):
+    """Retrieve phone numbers from your organization with optional filtering by number value, group status, or result limit. Use this to search for specific phone numbers or get an overview of all numbers in your system."""
+    query: GetPhoneNumberRequestQuery | None = None
 
 # Operation: get_phone_number
-class GetV1PhoneNumberIdRequestPath(StrictModel):
+class GetPhoneNumberIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the phone number to retrieve.")
-class GetV1PhoneNumberIdRequest(StrictModel):
-    """Retrieve a single phone number by its ID. Use this operation to fetch detailed information about a specific phone number in your account."""
-    path: GetV1PhoneNumberIdRequestPath
+class GetPhoneNumberIdRequest(StrictModel):
+    """Retrieve detailed information for a specific phone number by its unique identifier."""
+    path: GetPhoneNumberIdRequestPath
 
 # Operation: update_phone_number
-class PutV1PhoneNumberIdRequestPath(StrictModel):
+class PutPhoneNumberIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the phone number to update.")
-class PutV1PhoneNumberIdRequestBody(StrictModel):
-    label: str | None = Field(default=None, description="A descriptive label or name for this phone number.")
+class PutPhoneNumberIdRequestBody(StrictModel):
+    label: str | None = Field(default=None, description="A custom label or name for this phone number to help identify it.")
     forward_to: str | None = Field(default=None, description="The phone number to forward incoming calls to when call forwarding is enabled.")
-    forward_to_enabled: bool | None = Field(default=None, description="Enable or disable call forwarding to the specified phone number.")
-    voicemail_greeting_url: str | None = Field(default=None, description="HTTPS URL pointing to an MP3 file to use as the voicemail greeting message.", json_schema_extra={'format': 'uri'})
-class PutV1PhoneNumberIdRequest(StrictModel):
-    """Update phone number settings including label, call forwarding configuration, and voicemail greeting. Requires 'Manage Group Phone Numbers' permission for group numbers; personal numbers can only be updated by their owner."""
-    path: PutV1PhoneNumberIdRequestPath
-    body: PutV1PhoneNumberIdRequestBody | None = None
+    forward_to_enabled: bool | None = Field(default=None, description="Enable or disable call forwarding for this phone number.")
+    voicemail_greeting_url: str | None = Field(default=None, description="HTTPS URL pointing to an MP3 audio file to play as the voicemail greeting when callers reach voicemail.", json_schema_extra={'format': 'uri'})
+class PutPhoneNumberIdRequest(StrictModel):
+    """Update settings for a phone number including its label, call forwarding configuration, and voicemail greeting. Personal numbers can only be updated by their owner, while group numbers require 'Manage Group Phone Numbers' permission."""
+    path: PutPhoneNumberIdRequestPath
+    body: PutPhoneNumberIdRequestBody | None = None
 
 # Operation: delete_phone_number
-class DeleteV1PhoneNumberIdRequestPath(StrictModel):
+class DeletePhoneNumberIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the phone number to delete.")
-class DeleteV1PhoneNumberIdRequest(StrictModel):
-    """Delete a phone number from your account. Deleting group phone numbers requires the 'Manage Group Phone Numbers' permission, while personal numbers can only be deleted by their owner."""
-    path: DeleteV1PhoneNumberIdRequestPath
+class DeletePhoneNumberIdRequest(StrictModel):
+    """Delete a phone number from your account or group. Requires 'Manage Group Phone Numbers' permission to delete group numbers; personal numbers can only be deleted by their owner."""
+    path: DeletePhoneNumberIdRequestPath
 
 # Operation: rent_phone_number
-class PostV1PhoneNumberRequestInternalRequestBody(StrictModel):
-    country: str = Field(default=..., description="Two-letter ISO country code indicating where the phone number should be rented (e.g., US, GB, DE).")
-    sharing: Literal["personal", "group"] = Field(default=..., description="Determines whether the phone number is assigned to an individual user (personal) or shared across a group (group). Group numbers require 'Manage Group Phone Numbers' permission.")
-    prefix: str | None = Field(default=None, description="Optional phone number prefix or area code, excluding the country code. Allows you to request a number from a specific region or area.")
-    with_sms: bool | None = Field(default=None, description="Optional flag to request SMS capability for the phone number. Defaults based on country support if not specified.")
-    with_mms: bool | None = Field(default=None, description="Optional flag to request MMS capability for the phone number. Defaults based on country support if not specified.")
-class PostV1PhoneNumberRequestInternalRequest(StrictModel):
-    """Rent an internal phone number for personal or group use. Renting a phone number incurs a cost and requires appropriate permissions for group numbers."""
-    body: PostV1PhoneNumberRequestInternalRequestBody
+class PostPhoneNumberRequestInternalRequestBody(StrictModel):
+    country: str = Field(default=..., description="Two-letter ISO country code indicating where the phone number should be rented (e.g., US for United States).")
+    sharing: Literal["personal", "group"] = Field(default=..., description="Scope of the phone number: 'personal' for an individual user or 'group' for a shared group number.")
+    prefix: str | None = Field(default=None, description="Optional phone number prefix or area code, excluding the country code.")
+    with_sms: bool | None = Field(default=None, description="Optional flag to control SMS capability. When true, forces an SMS-capable number; when false, allows non-SMS-capable numbers. By default, SMS-capable numbers are rented if supported in the country.")
+    with_mms: bool | None = Field(default=None, description="Optional flag to control MMS capability. When true, forces an MMS-capable number; when false, allows non-MMS-capable numbers. By default, MMS-capable numbers are rented if supported in the country.")
+class PostPhoneNumberRequestInternalRequest(StrictModel):
+    """Rent an internal phone number for personal or group use. Renting incurs a cost and requires appropriate permissions for group numbers."""
+    body: PostPhoneNumberRequestInternalRequestBody
 
 # Operation: generate_file_upload_credentials
-class PostV1FilesUploadRequestBody(StrictModel):
-    filename: str = Field(default=..., description="The name of the file being uploaded, including its extension (e.g., image.jpg, document.pdf).")
+class PostFilesUploadRequestBody(StrictModel):
+    filename: str = Field(default=..., description="The name of the file being uploaded, including its file extension (e.g., image.jpg, document.pdf).")
     content_type: str = Field(default=..., description="The MIME type of the file being uploaded (e.g., image/jpeg, application/pdf, text/plain).")
-class PostV1FilesUploadRequest(StrictModel):
-    """Generate signed S3 upload credentials for storing a file. Returns a pre-signed upload URL, form fields for multipart upload, and a download URL for referencing the file in subsequent API calls."""
-    body: PostV1FilesUploadRequestBody
+class PostFilesUploadRequest(StrictModel):
+    """Generate signed S3 upload credentials and a download URL for storing a file. Use the returned credentials to upload your file directly to S3, then reference the download URL in other API endpoints."""
+    body: PostFilesUploadRequestBody
 
 # Operation: list_comment_threads
-class GetV1CommentThreadRequestQuery(StrictModel):
+class GetCommentThreadRequestQuery(StrictModel):
     object_ids: list[str] | None = Field(default=None, description="Filter results to include only threads associated with specific object IDs. Provide as an array of object identifiers.")
     ids: list[str] | None = Field(default=None, description="Filter results to include only threads with specific thread IDs. Provide as an array of thread identifiers.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of comment threads to return in the response. Must be a positive integer.")
-class GetV1CommentThreadRequest(StrictModel):
-    """Retrieve multiple comment threads with optional filtering by the objects they reference or by specific thread identifiers."""
-    query: GetV1CommentThreadRequestQuery | None = None
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of comment threads to return in the response. Limits the result set size.")
+class GetCommentThreadRequest(StrictModel):
+    """Retrieve multiple comment threads with optional filtering by associated objects or specific thread identifiers. Useful for fetching discussions related to particular items or retrieving known threads."""
+    query: GetCommentThreadRequestQuery | None = None
 
 # Operation: get_comment_thread
-class GetV1CommentThreadThreadIdRequestPath(StrictModel):
-    thread_id: str = Field(default=..., description="The unique identifier of the comment thread to retrieve.")
-class GetV1CommentThreadThreadIdRequest(StrictModel):
-    """Retrieve a specific comment thread by its ID. Use this to fetch the full details and content of an individual discussion thread."""
-    path: GetV1CommentThreadThreadIdRequestPath
+class GetCommentThreadThreadIdRequestPath(StrictModel):
+    thread_id: str = Field(default=..., description="The unique identifier that specifies which comment thread to retrieve.")
+class GetCommentThreadThreadIdRequest(StrictModel):
+    """Retrieve a specific comment thread by its unique identifier. Use this to fetch the full details of a single comment thread including all associated metadata."""
+    path: GetCommentThreadThreadIdRequestPath
 
 # Operation: list_comments
-class GetV1CommentRequestQuery(StrictModel):
-    object_id: str | None = Field(default=None, description="Filter comments by the ID of the object that was commented on. Mutually exclusive with thread_id.")
-    thread_id: str | None = Field(default=None, description="Filter comments by the ID of the discussion thread. Mutually exclusive with object_id.")
-class GetV1CommentRequest(StrictModel):
-    """Retrieve a list of comments filtered by either the object being commented on or the discussion thread. Provide exactly one filter to retrieve relevant comments."""
-    query: GetV1CommentRequestQuery | None = None
+class GetCommentRequestQuery(StrictModel):
+    object_id: str | None = Field(default=None, description="Filter comments by the ID of the object that was commented on. Cannot be used together with thread_id.")
+    thread_id: str | None = Field(default=None, description="Filter comments by the discussion thread ID. Cannot be used together with object_id.")
+class GetCommentRequest(StrictModel):
+    """Retrieve comments filtered by either the object being commented on or the discussion thread. Provide exactly one filter to retrieve the relevant comments."""
+    query: GetCommentRequestQuery | None = None
 
 # Operation: create_comment
-class PostV1CommentRequestBody(StrictModel):
-    object_type: str = Field(default=..., description="The type of object being commented on (e.g., task, document, issue). This determines where the comment will be attached.")
-    object_id: str = Field(default=..., description="The unique identifier of the object being commented on. Must correspond to an existing object of the specified type.")
-    body: str = Field(default=..., description="The comment text formatted as rich text. This is the content that will be displayed in the comment thread.")
-class PostV1CommentRequest(StrictModel):
-    """Create a comment on an object. If a comment thread already exists on that object, a new comment is added to the existing thread; otherwise, a new thread is created automatically."""
-    body: PostV1CommentRequestBody
+class PostCommentRequestBody(StrictModel):
+    object_type: str = Field(default=..., description="The type of object being commented on (e.g., task, document, issue).")
+    object_id: str = Field(default=..., description="The unique identifier of the object being commented on.")
+    body: str = Field(default=..., description="The comment text formatted as rich text.")
+class PostCommentRequest(StrictModel):
+    """Create a comment on an object, automatically creating a comment thread if one doesn't already exist, or adding to an existing thread if it does."""
+    body: PostCommentRequestBody
 
 # Operation: get_comment
-class GetV1CommentCommentIdRequestPath(StrictModel):
+class GetCommentCommentIdRequestPath(StrictModel):
     comment_id: str = Field(default=..., description="The unique identifier of the comment to retrieve.")
-class GetV1CommentCommentIdRequest(StrictModel):
+class GetCommentCommentIdRequest(StrictModel):
     """Retrieve a specific comment by its unique identifier. Use this to fetch the full details of an individual comment."""
-    path: GetV1CommentCommentIdRequestPath
+    path: GetCommentCommentIdRequestPath
 
 # Operation: update_comment
-class PutV1CommentCommentIdRequestPath(StrictModel):
-    comment_id: str = Field(default=..., description="The unique identifier of the comment to update.")
-class PutV1CommentCommentIdRequestBody(StrictModel):
-    body: str = Field(default=..., description="The new comment content formatted as rich text.")
-class PutV1CommentCommentIdRequest(StrictModel):
+class PutCommentCommentIdRequestPath(StrictModel):
+    comment_id: str = Field(default=..., description="The unique identifier of the comment you want to update.")
+class PutCommentCommentIdRequestBody(StrictModel):
+    body: str = Field(default=..., description="The new comment text formatted as rich text.")
+class PutCommentCommentIdRequest(StrictModel):
     """Edit the body of a comment. You can only update comments that you created."""
-    path: PutV1CommentCommentIdRequestPath
-    body: PutV1CommentCommentIdRequestBody
+    path: PutCommentCommentIdRequestPath
+    body: PutCommentCommentIdRequestBody
 
 # Operation: delete_comment
-class DeleteV1CommentCommentIdRequestPath(StrictModel):
+class DeleteCommentCommentIdRequestPath(StrictModel):
     comment_id: str = Field(default=..., description="The unique identifier of the comment to delete.")
-class DeleteV1CommentCommentIdRequest(StrictModel):
-    """Remove a comment from a thread. The comment body is deleted but the comment object persists until all comments in the thread are removed, at which point the entire thread is deleted. Deletion permissions are based on the user's ability to delete their own or other users' activities."""
-    path: DeleteV1CommentCommentIdRequestPath
+class DeleteCommentCommentIdRequest(StrictModel):
+    """Remove a comment from a thread. The comment content is deleted but the comment object remains until all comments in the thread are removed, at which point the entire thread is deleted. Deletion permissions are based on the user's ability to delete their own or other users' activities."""
+    path: DeleteCommentCommentIdRequestPath
 
 # Operation: get_event
-class GetV1EventIdRequestPath(StrictModel):
+class GetEventIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the event to retrieve.")
-class GetV1EventIdRequest(StrictModel):
-    """Retrieve a single event by its unique identifier. Returns event details in the standard event format."""
-    path: GetV1EventIdRequestPath
+class GetEventIdRequest(StrictModel):
+    """Retrieve a single event by its unique identifier. Returns a dictionary containing the event details."""
+    path: GetEventIdRequestPath
 
 # Operation: list_events
-class GetV1EventRequestQuery(StrictModel):
-    date_updated__lte: str | None = Field(default=None, description="Filter to events updated on or before this date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    date_updated__gte: str | None = Field(default=None, description="Filter to events updated on or after this date and time (ISO 8601 format).", json_schema_extra={'format': 'date-time'})
-    object_type: str | None = Field(default=None, description="Filter to events for objects of a specific type (e.g., lead, contact, deal).")
-    object_id: str | None = Field(default=None, description="Filter to events for a specific object by its ID. Only events directly related to this object are returned, excluding related object events.")
-    action: str | None = Field(default=None, description="Filter to events of a specific action type (e.g., created, updated, deleted).")
-    request_id: str | None = Field(default=None, description="Filter to events emitted during the processing of a specific API request.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of events to return per request. Must be between 1 and 50; defaults to 50.", ge=1, le=50)
-class GetV1EventRequest(StrictModel):
-    """Retrieve a paginated list of events from the event log, filtered by object type, action, timing, and other criteria. Events are always ordered by date with the latest first."""
-    query: GetV1EventRequestQuery | None = None
+class GetEventRequestQuery(StrictModel):
+    object_type: str | None = Field(default=None, description="Filter results to events for objects of a specific type (e.g., lead). When specified, only events matching this object type are returned.")
+    object_id: str | None = Field(default=None, description="Filter results to events for a specific object by its ID (e.g., lead_123). Returns only direct events for this object, excluding related object events.")
+    action: str | None = Field(default=None, description="Filter results to events of specific action types (e.g., deleted). Only events matching the specified action are returned.")
+    request_id: str | None = Field(default=None, description="Filter results to events emitted during processing of a specific API request. Use this to trace all events generated by a single request.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of events to return in the response. Limited to a maximum of 50 events; defaults to 50 if not specified.", le=50)
+class GetEventRequest(StrictModel):
+    """Retrieve a paginated list of events from the event log, ordered by date with the most recent first. Supports filtering by object type, object ID, action, lead ID, user ID, and request ID to narrow results to specific events of interest."""
+    query: GetEventRequestQuery | None = None
 
 # Operation: create_webhook
-class PostV1WebhookRequestBody(StrictModel):
+class PostWebhookRequestBody(StrictModel):
     url: str = Field(default=..., description="The destination URL where webhook events will be sent. Must be a valid URI (e.g., https://example.com/webhook).", json_schema_extra={'format': 'uri'})
-    events: list[PostV1WebhookBodyEventsItem] = Field(default=..., description="List of events to subscribe to. Each event specifies an object_type and an action to monitor. Events are processed in the order provided.")
-    verify_ssl: bool | None = Field(default=None, description="Whether to verify the SSL certificate of the destination webhook URL. Defaults to true for secure connections.")
-class PostV1WebhookRequest(StrictModel):
-    """Create a new webhook subscription to receive event notifications at a specified URL. The webhook will send POST requests for each subscribed event."""
-    body: PostV1WebhookRequestBody
+    events: list[PostWebhookBodyEventsItem] = Field(default=..., description="List of events to subscribe to. Each event specifies an object type and action to monitor (e.g., user.created, order.updated). Only events matching these subscriptions will be sent to your webhook URL.")
+    verify_ssl: bool | None = Field(default=None, description="Whether to verify the SSL certificate when sending events to your webhook URL. Enabled by default for security; disable only if using self-signed certificates in development.")
+class PostWebhookRequest(StrictModel):
+    """Create a new webhook subscription to receive event notifications at a specified URL. The webhook will automatically send POST requests to your endpoint whenever subscribed events occur."""
+    body: PostWebhookRequestBody
 
 # Operation: get_webhook
-class GetV1WebhookIdRequestPath(StrictModel):
+class GetWebhookIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the webhook subscription to retrieve.")
-class GetV1WebhookIdRequest(StrictModel):
-    """Retrieve the details of a specific webhook subscription, including its configuration and status."""
-    path: GetV1WebhookIdRequestPath
+class GetWebhookIdRequest(StrictModel):
+    """Retrieve the details of a specific webhook subscription by its unique identifier. Returns configuration, status, and event settings for the webhook."""
+    path: GetWebhookIdRequestPath
 
 # Operation: update_webhook
-class PutV1WebhookIdRequestPath(StrictModel):
+class PutWebhookIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the webhook subscription to update.")
-class PutV1WebhookIdRequestBody(StrictModel):
-    url: str | None = Field(default=None, description="The destination URL where webhook events will be sent. Must be a valid URI format.", json_schema_extra={'format': 'uri'})
-    events: list[PutV1WebhookIdBodyEventsItem] | None = Field(default=None, description="A list of events to subscribe to. Each event specifies an object type and an action to trigger the webhook notification.")
-    verify_ssl: bool | None = Field(default=None, description="Whether to verify the SSL certificate when sending webhook requests to the destination URL. Enable for production environments to ensure secure connections.")
-class PutV1WebhookIdRequest(StrictModel):
-    """Update an existing webhook subscription with new configuration. Only provided parameters will be modified, allowing partial updates to the webhook's URL, subscribed events, or SSL verification settings."""
-    path: PutV1WebhookIdRequestPath
-    body: PutV1WebhookIdRequestBody | None = None
+class PutWebhookIdRequestBody(StrictModel):
+    url: str | None = Field(default=None, description="The destination URL where webhook events will be sent. Must be a valid URI.", json_schema_extra={'format': 'uri'})
+    events: list[PutWebhookIdBodyEventsItem] | None = Field(default=None, description="List of events to subscribe to. Each event specifies an object type and an action to trigger the webhook.")
+    verify_ssl: bool | None = Field(default=None, description="Whether to verify the SSL certificate of the destination webhook URL. Set to true for production environments to ensure secure connections.")
+class PutWebhookIdRequest(StrictModel):
+    """Update an existing webhook subscription with new configuration. Only the parameters you provide will be updated; omitted parameters retain their current values."""
+    path: PutWebhookIdRequestPath
+    body: PutWebhookIdRequestBody | None = None
 
 # Operation: delete_webhook
-class DeleteV1WebhookIdRequestPath(StrictModel):
+class DeleteWebhookIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the webhook subscription to delete.")
-class DeleteV1WebhookIdRequest(StrictModel):
-    """Remove a webhook subscription to stop receiving event notifications at the configured endpoint."""
-    path: DeleteV1WebhookIdRequestPath
+class DeleteWebhookIdRequest(StrictModel):
+    """Delete a webhook subscription to stop receiving event notifications at the configured endpoint."""
+    path: DeleteWebhookIdRequestPath
 
 # Operation: create_scheduling_link
-class PostV1SchedulingLinkRequestBody(StrictModel):
-    name: str = Field(default=..., description="A descriptive name for the scheduling link to help identify its purpose or audience.")
-    url: str = Field(default=..., description="The external URL where the scheduling link points to, typically a calendar or booking platform URL.")
+class PostSchedulingLinkRequestBody(StrictModel):
+    name: str = Field(default=..., description="A descriptive name for the scheduling link to help identify it among your other scheduling links.")
+    url: str = Field(default=..., description="The external URL where the scheduling link points to. Must be a valid URI format.", json_schema_extra={'format': 'uri'})
     description: str | None = Field(default=None, description="An optional description providing additional context or details about the scheduling link's purpose.")
-class PostV1SchedulingLinkRequest(StrictModel):
-    """Create a new scheduling link that can be shared with users to access your availability and book meetings. This generates a unique scheduling link with a custom name and optional description."""
-    body: PostV1SchedulingLinkRequestBody
+class PostSchedulingLinkRequest(StrictModel):
+    """Create a new scheduling link that can be shared with users to access your availability and book meetings."""
+    body: PostSchedulingLinkRequestBody
 
 # Operation: get_scheduling_link
-class GetV1SchedulingLinkIdRequestPath(StrictModel):
+class GetSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the scheduling link to retrieve.")
-class GetV1SchedulingLinkIdRequest(StrictModel):
-    """Retrieve a scheduling link by its unique identifier. Use this to fetch details about a specific user's scheduling link."""
-    path: GetV1SchedulingLinkIdRequestPath
+class GetSchedulingLinkIdRequest(StrictModel):
+    """Retrieve a scheduling link by its unique identifier to access its configuration and sharing details."""
+    path: GetSchedulingLinkIdRequestPath
 
 # Operation: update_scheduling_link
-class PutV1SchedulingLinkIdRequestPath(StrictModel):
+class PutSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the scheduling link to update.")
-class PutV1SchedulingLinkIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="A display name for the scheduling link to help identify it.")
-    url: str | None = Field(default=None, description="The external URL where the scheduling link is hosted or accessible.")
-    description: str | None = Field(default=None, description="A detailed description explaining the purpose or details of the scheduling link.")
-    source_id: str | None = Field(default=None, description="The identifier for this scheduling link at its source system or origin.")
-    source_type: str | None = Field(default=None, description="A short descriptor categorizing the type or source of the scheduling link (e.g., 'calendly', 'acuity', 'custom').")
-    duration_in_minutes: int | None = Field(default=None, description="The default duration in minutes for meetings scheduled through this link.")
-class PutV1SchedulingLinkIdRequest(StrictModel):
-    """Update an existing user scheduling link with new details such as name, URL, description, and meeting duration. This allows you to modify the properties of a scheduling link that users can access to book meetings."""
-    path: PutV1SchedulingLinkIdRequestPath
-    body: PutV1SchedulingLinkIdRequestBody | None = None
+class PutSchedulingLinkIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="A display name for the scheduling link as shown in the Close application.")
+    url: str | None = Field(default=None, description="The external URL for the scheduling link. Must be a valid URI format.", json_schema_extra={'format': 'uri'})
+    description: str | None = Field(default=None, description="A description for the scheduling link displayed in the Close application.")
+    source_id: str | None = Field(default=None, description="The identifier for this scheduling link in the source or integrating application.")
+    source_type: str | None = Field(default=None, description="A short descriptor identifying the type or category of the scheduling link.")
+    duration_in_minutes: int | None = Field(default=None, description="The duration of meetings scheduled with this link, specified in minutes.")
+class PutSchedulingLinkIdRequest(StrictModel):
+    """Update an existing scheduling link by its unique identifier. Modify scheduling link details such as name, URL, description, and meeting duration."""
+    path: PutSchedulingLinkIdRequestPath
+    body: PutSchedulingLinkIdRequestBody | None = None
 
 # Operation: delete_scheduling_link
-class DeleteV1SchedulingLinkIdRequestPath(StrictModel):
+class DeleteSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the scheduling link to delete.")
-class DeleteV1SchedulingLinkIdRequest(StrictModel):
-    """Delete a scheduling link by its ID. This removes the user's scheduling link and makes it unavailable for scheduling."""
-    path: DeleteV1SchedulingLinkIdRequestPath
+class DeleteSchedulingLinkIdRequest(StrictModel):
+    """Remove a scheduling link by its unique identifier. This permanently deletes the scheduling link and prevents further access to it."""
+    path: DeleteSchedulingLinkIdRequestPath
 
-# Operation: create_or_update_scheduling_link
-class PostV1SchedulingLinkIntegrationRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="Display name for the scheduling link.")
-    url: str | None = Field(default=None, description="Public-facing URL where users can access the scheduling link.")
-    description: str | None = Field(default=None, description="Additional details or context about the scheduling link's purpose.")
-    source_id: str = Field(default=..., description="Unique identifier from your integrating application used to identify and deduplicate this scheduling link.")
-    source_type: str | None = Field(default=None, description="Category or type classification for the scheduling link (e.g., 'meeting', 'consultation', 'demo').")
-    duration_in_minutes: int | None = Field(default=None, description="Default meeting duration in minutes for appointments scheduled through this link.")
-class PostV1SchedulingLinkIntegrationRequest(StrictModel):
-    """Create a new scheduling link or update an existing one through your OAuth application. The source_id field is used to identify and merge duplicate resources across integrations."""
-    body: PostV1SchedulingLinkIntegrationRequestBody
+# Operation: upsert_scheduling_link
+class PostSchedulingLinkIntegrationRequestBody(StrictModel):
+    source_id: str = Field(default=..., description="Your OAuth application's unique identifier for this scheduling link. Used to identify and deduplicate resources created by your app.")
+    name: str | None = Field(default=None, description="Human-readable name displayed to users for this scheduling link.")
+    url: str | None = Field(default=None, description="Public-facing URL where users can access and interact with this scheduling link. Must be a valid URI.", json_schema_extra={'format': 'uri'})
+    description: str | None = Field(default=None, description="Additional context or explanation about the scheduling link's purpose and usage.")
+    source_type: str | None = Field(default=None, description="Category or classification type for organizing and filtering scheduling links.")
+    duration_in_minutes: int | None = Field(default=None, description="Default meeting duration in minutes for scheduling sessions created through this link.")
+class PostSchedulingLinkIntegrationRequest(StrictModel):
+    """Create a new scheduling link or update an existing one using your OAuth application's unique identifier. The system uses the source_id to detect and merge duplicate resources, ensuring only one scheduling link exists per source_id."""
+    body: PostSchedulingLinkIntegrationRequestBody
 
-# Operation: delete_scheduling_link_integration
-class DeleteV1SchedulingLinkIntegrationSourceIdRequestPath(StrictModel):
-    source_id: str = Field(default=..., description="The unique source identifier of the scheduling link to delete. This ID was assigned when the scheduling link was originally created by your OAuth application.")
-class DeleteV1SchedulingLinkIntegrationSourceIdRequest(StrictModel):
-    """Delete a scheduling link that was created by your OAuth application using its source ID. This operation requires OAuth authentication and will permanently remove the scheduling link."""
-    path: DeleteV1SchedulingLinkIntegrationSourceIdRequestPath
+# Operation: delete_scheduling_link_oauth
+class DeleteSchedulingLinkIntegrationSourceIdRequestPath(StrictModel):
+    source_id: str = Field(default=..., description="The unique source identifier of the scheduling link to delete, as assigned by your OAuth application when the link was created.")
+class DeleteSchedulingLinkIntegrationSourceIdRequest(StrictModel):
+    """Delete a scheduling link by its source identifier. This operation is only available to OAuth applications and uses the source_id assigned by your OAuth app to identify and remove the scheduling link."""
+    path: DeleteSchedulingLinkIntegrationSourceIdRequestPath
 
 # Operation: create_scheduling_link_shared
-class PostV1SharedSchedulingLinkRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="Configuration object for the scheduling link, including settings such as availability, duration, and access permissions.")
-class PostV1SharedSchedulingLinkRequest(StrictModel):
-    """Create a new shared scheduling link that allows others to view and book time slots on your calendar."""
-    body: PostV1SharedSchedulingLinkRequestBody
+class PostSharedSchedulingLinkRequestBody(StrictModel):
+    body: dict[str, Any] = Field(default=..., description="Configuration object for the shared scheduling link, including settings such as availability windows, booking constraints, and link customization options.")
+class PostSharedSchedulingLinkRequest(StrictModel):
+    """Create a shared scheduling link that allows others to view your available time slots and book meetings directly on your calendar without needing direct access to your calendar."""
+    body: PostSharedSchedulingLinkRequestBody
 
 # Operation: get_scheduling_link_shared
-class GetV1SharedSchedulingLinkIdRequestPath(StrictModel):
+class GetSharedSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the shared scheduling link to retrieve.")
-class GetV1SharedSchedulingLinkIdRequest(StrictModel):
-    """Retrieve a shared scheduling link by its unique identifier. Use this to fetch the details and configuration of a previously created scheduling link."""
-    path: GetV1SharedSchedulingLinkIdRequestPath
+class GetSharedSchedulingLinkIdRequest(StrictModel):
+    """Retrieve a specific shared scheduling link by its unique identifier to access its configuration and sharing details."""
+    path: GetSharedSchedulingLinkIdRequestPath
 
 # Operation: update_scheduling_link_shared
-class PutV1SharedSchedulingLinkIdRequestPath(StrictModel):
+class PutSharedSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the shared scheduling link to update.")
-class PutV1SharedSchedulingLinkIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The updated scheduling link configuration containing the properties to modify.")
-class PutV1SharedSchedulingLinkIdRequest(StrictModel):
-    """Update the configuration and settings of an existing shared scheduling link. Modify properties such as availability, restrictions, or metadata associated with the link."""
-    path: PutV1SharedSchedulingLinkIdRequestPath
-    body: PutV1SharedSchedulingLinkIdRequestBody
+class PutSharedSchedulingLinkIdRequestBody(StrictModel):
+    body: dict[str, Any] | None = Field(default=None, description="An object containing the scheduling link properties to modify. Only provided fields will be updated; omitted fields remain unchanged.")
+class PutSharedSchedulingLinkIdRequest(StrictModel):
+    """Modify the configuration and settings of an existing shared scheduling link, such as availability windows, meeting duration, or access permissions."""
+    path: PutSharedSchedulingLinkIdRequestPath
+    body: PutSharedSchedulingLinkIdRequestBody | None = None
 
 # Operation: delete_scheduling_link_shared
-class DeleteV1SharedSchedulingLinkIdRequestPath(StrictModel):
+class DeleteSharedSchedulingLinkIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the shared scheduling link to delete.")
-class DeleteV1SharedSchedulingLinkIdRequest(StrictModel):
-    """Delete a shared scheduling link by its ID. This removes the link and prevents further access to the associated scheduling interface."""
-    path: DeleteV1SharedSchedulingLinkIdRequestPath
+class DeleteSharedSchedulingLinkIdRequest(StrictModel):
+    """Permanently delete a shared scheduling link by its ID. This action cannot be undone and will immediately revoke access to the scheduling link for all users."""
+    path: DeleteSharedSchedulingLinkIdRequestPath
 
-# Operation: map_shared_scheduling_link
-class PostV1SharedSchedulingLinkAssociationRequestBody(StrictModel):
-    shared_scheduling_link_id: str = Field(default=..., description="The unique identifier of the shared scheduling link to be mapped.")
-    user_scheduling_link_id: str | None = Field(default=None, description="The unique identifier of a user scheduling link to map the shared link to. Either this or a URL must be provided.")
-    url: str | None = Field(default=None, description="A valid URI to map the shared link to. Either this or a user scheduling link ID must be provided.", json_schema_extra={'format': 'uri'})
-class PostV1SharedSchedulingLinkAssociationRequest(StrictModel):
-    """Associate a shared scheduling link with either a user scheduling link or a custom URL to enable scheduling access through the mapped destination."""
-    body: PostV1SharedSchedulingLinkAssociationRequestBody
+# Operation: associate_shared_scheduling_link
+class PostSharedSchedulingLinkAssociationRequestBody(StrictModel):
+    shared_scheduling_link_id: str = Field(default=..., description="The unique identifier of the shared scheduling link to associate.")
+    user_scheduling_link_id: str | None = Field(default=None, description="The unique identifier of the user scheduling link to associate with the shared link. Either this parameter or url must be provided.")
+    url: str | None = Field(default=None, description="A valid URI to associate with the shared link. Either this parameter or user_scheduling_link_id must be provided.", json_schema_extra={'format': 'uri'})
+class PostSharedSchedulingLinkAssociationRequest(StrictModel):
+    """Associate a shared scheduling link with either a user scheduling link or a custom URL to enable scheduling access through the shared link."""
+    body: PostSharedSchedulingLinkAssociationRequestBody
 
-# Operation: unmap_shared_scheduling_link
-class PostV1SharedSchedulingLinkAssociationUnmapRequestBody(StrictModel):
-    shared_scheduling_link_id: str = Field(default=..., description="The unique identifier of the shared scheduling link to unmap from its current association.")
-class PostV1SharedSchedulingLinkAssociationUnmapRequest(StrictModel):
-    """Remove the association between a shared scheduling link and its mapped user scheduling link or URL, effectively disabling the shared link's access."""
-    body: PostV1SharedSchedulingLinkAssociationUnmapRequestBody
+# Operation: disable_shared_scheduling_link
+class PostSharedSchedulingLinkAssociationUnmapRequestBody(StrictModel):
+    shared_scheduling_link_id: str = Field(default=..., description="The unique identifier of the shared scheduling link to disable.")
+class PostSharedSchedulingLinkAssociationUnmapRequest(StrictModel):
+    """Disable a shared scheduling link by removing its association with a user scheduling link or URL, preventing further access through that shared link."""
+    body: PostSharedSchedulingLinkAssociationUnmapRequestBody
 
 # Operation: list_lead_custom_fields
-class GetV1CustomFieldLeadRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of lead custom fields to return in the response. Omit to retrieve all available custom fields.")
-class GetV1CustomFieldLeadRequest(StrictModel):
+class GetCustomFieldLeadRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom fields to return in the response. Omit to retrieve all available custom fields.")
+class GetCustomFieldLeadRequest(StrictModel):
     """Retrieve all custom fields configured for leads in your organization. Use the optional limit parameter to control the number of results returned."""
-    query: GetV1CustomFieldLeadRequestQuery | None = None
+    query: GetCustomFieldLeadRequestQuery | None = None
 
 # Operation: create_lead_custom_field
-class PostV1CustomFieldLeadRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the custom field that will appear in the lead interface.")
-    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the custom field (e.g., text, number, date, choice) that determines how the field stores and validates data.")
-    accepts_multiple_values: bool | None = Field(default=None, description="When enabled, allows the field to store multiple values instead of a single value.")
-    editable_roles: list[str] | None = Field(default=None, description="A list of user roles that have permission to edit this custom field. If not specified, defaults to all roles or system defaults.")
-    options: list[dict[str, Any]] | None = Field(default=None, description="An array of predefined choices available for selection-type fields. Each option represents a selectable value in the field.")
-class PostV1CustomFieldLeadRequest(StrictModel):
-    """Create a new custom field for leads with configurable type, multi-value support, and role-based edit permissions."""
-    body: PostV1CustomFieldLeadRequestBody
+class PostCustomFieldLeadRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field that will appear in the UI and API responses.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the custom field (e.g., text, number, date, choice). This determines how the field stores and validates data.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values simultaneously. Useful for fields like tags or multi-select options.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="Predefined options available for choice-type fields. Each option becomes a selectable value when the field type supports choices.")
+    editable_roles: list[str] | None = Field(default=None, description="List of user roles that have permission to edit this custom field. If not specified, defaults to system defaults or all roles.")
+class PostCustomFieldLeadRequest(StrictModel):
+    """Create a new custom field for leads with configurable data type, multiple value support, and role-based edit permissions."""
+    body: PostCustomFieldLeadRequestBody
 
 # Operation: get_lead_custom_field
-class GetV1CustomFieldLeadIdRequestPath(StrictModel):
+class GetCustomFieldLeadIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the lead custom field to retrieve.")
-class GetV1CustomFieldLeadIdRequest(StrictModel):
-    """Retrieve the details of a specific custom field associated with a lead. Use this to access custom field configuration and values for a particular lead."""
-    path: GetV1CustomFieldLeadIdRequestPath
+class GetCustomFieldLeadIdRequest(StrictModel):
+    """Retrieve the details of a specific custom field associated with a lead, including its configuration and current values."""
+    path: GetCustomFieldLeadIdRequestPath
 
 # Operation: update_lead_custom_field
-class PutV1CustomFieldLeadCustomFieldIdRequestPath(StrictModel):
+class PutCustomFieldLeadCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the Lead custom field to update.")
-class PutV1CustomFieldLeadCustomFieldIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the custom field.")
-    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field should accept multiple values (true) or a single value (false).")
-    editable_roles: list[str] | None = Field(default=None, description="Array of role identifiers that are permitted to edit this field's values. If specified, only users with these roles can modify the field.")
-    options: list[dict[str, Any]] | None = Field(default=None, description="Array of updated choice options for fields with a choice/select type. Each option should include the option identifier and label.")
-class PutV1CustomFieldLeadCustomFieldIdRequest(StrictModel):
-    """Update an existing Lead Custom Field by modifying its name, value acceptance settings, role-based edit permissions, or choice options."""
-    path: PutV1CustomFieldLeadCustomFieldIdRequestPath
-    body: PutV1CustomFieldLeadCustomFieldIdRequestBody | None = None
+class PutCustomFieldLeadCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new display name for the custom field.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field should accept multiple values simultaneously.")
+    editable_roles: list[str] | None = Field(default=None, description="List of role identifiers that are permitted to edit this field's values. Only users with these roles can modify the field.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="Array of choice options for fields with choice/select type. Each option represents a selectable value in the field.")
+class PutCustomFieldLeadCustomFieldIdRequest(StrictModel):
+    """Update a Lead custom field's configuration including its name, type, multi-value support, role-based edit permissions, and choice options. Changes take effect immediately in the Close UI."""
+    path: PutCustomFieldLeadCustomFieldIdRequestPath
+    body: PutCustomFieldLeadCustomFieldIdRequestBody | None = None
 
 # Operation: delete_lead_custom_field
-class DeleteV1CustomFieldLeadCustomFieldIdRequestPath(StrictModel):
-    custom_field_id: str = Field(default=..., description="The unique identifier of the lead custom field to delete.")
-class DeleteV1CustomFieldLeadCustomFieldIdRequest(StrictModel):
+class DeleteCustomFieldLeadCustomFieldIdRequestPath(StrictModel):
+    custom_field_id: str = Field(default=..., description="The unique identifier of the Lead custom field to delete.")
+class DeleteCustomFieldLeadCustomFieldIdRequest(StrictModel):
     """Permanently delete a custom field from your Lead records. The field will be immediately removed from all Lead API responses and cannot be recovered."""
-    path: DeleteV1CustomFieldLeadCustomFieldIdRequestPath
+    path: DeleteCustomFieldLeadCustomFieldIdRequestPath
 
 # Operation: list_contact_custom_fields
-class GetV1CustomFieldContactRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom fields to return in the response. Omit to retrieve all available custom fields.")
-class GetV1CustomFieldContactRequest(StrictModel):
-    """Retrieve all custom fields configured for contacts in your organization. Use the optional limit parameter to control the number of results returned."""
-    query: GetV1CustomFieldContactRequestQuery | None = None
+class GetCustomFieldContactRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom fields to return in the response. Useful for pagination or limiting result set size.")
+class GetCustomFieldContactRequest(StrictModel):
+    """Retrieve all custom fields configured for contacts in your organization. Use the limit parameter to control the number of results returned."""
+    query: GetCustomFieldContactRequestQuery | None = None
 
 # Operation: create_contact_custom_field
-class PostV1CustomFieldContactRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the custom field that will appear in contact forms and records.")
-    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the custom field (e.g., text, number, date, choice), which determines how values are stored and validated.")
-    accepts_multiple_values: bool | None = Field(default=None, description="When enabled, allows a single contact to have multiple values for this field; when disabled, only one value is permitted.")
-    restricted_to_roles: bool | None = Field(default=None, description="When enabled, restricts editing permissions to users with specific roles; when disabled, all users with contact access can edit the field.")
-    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined values available for selection when the field type is choice-based. Order is preserved for display purposes.")
-class PostV1CustomFieldContactRequest(StrictModel):
-    """Create a new custom field for contacts with configurable type, value constraints, and role-based access controls. This allows you to extend contact records with domain-specific attributes."""
-    body: PostV1CustomFieldContactRequestBody
+class PostCustomFieldContactRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field. This is the label users will see when viewing or editing contact records.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type for the custom field. Supported types include text, number, date, and choice. The type determines how the field stores and validates data.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Enable this to allow the field to store multiple values. Useful for fields like tags, skills, or other multi-select attributes.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined options for choice-type fields. Each option becomes a selectable value when users interact with the field. Only applicable when type is set to choice.")
+    restricted_to_roles: bool | None = Field(default=None, description="Enable this to restrict field editing permissions to users with specific roles. When enabled, only authorized users can modify values in this field.")
+class PostCustomFieldContactRequest(StrictModel):
+    """Create a new custom field for contacts with configurable data types and optional multi-value support. Use this to extend contact records with additional attributes tailored to your business needs."""
+    body: PostCustomFieldContactRequestBody
 
 # Operation: get_contact_custom_field
-class GetV1CustomFieldContactIdRequestPath(StrictModel):
+class GetCustomFieldContactIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the contact custom field to retrieve.")
-class GetV1CustomFieldContactIdRequest(StrictModel):
-    """Retrieve the details of a specific custom field associated with a contact. Use this to access custom field configuration and values for a contact record."""
-    path: GetV1CustomFieldContactIdRequestPath
+class GetCustomFieldContactIdRequest(StrictModel):
+    """Retrieve the details of a specific custom field associated with a contact. Use this to access custom field configuration and values for a particular contact."""
+    path: GetCustomFieldContactIdRequestPath
 
 # Operation: update_contact_custom_field
-class PutV1CustomFieldContactCustomFieldIdRequestPath(StrictModel):
+class PutCustomFieldContactCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the contact custom field to update.")
-class PutV1CustomFieldContactCustomFieldIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the custom field.")
-    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field should accept multiple values (true) or a single value (false).")
-    restricted_to_roles: bool | None = Field(default=None, description="Whether editing this field's values should be restricted to users with specific roles (true) or available to all users (false).")
-    options: list[dict[str, Any]] | None = Field(default=None, description="Array of available options for choice-type fields. Each option represents a selectable value that users can assign to this field.")
-class PutV1CustomFieldContactCustomFieldIdRequest(StrictModel):
-    """Update an existing contact custom field by modifying its name, type configuration, multi-value support, role-based access restrictions, or choice options."""
-    path: PutV1CustomFieldContactCustomFieldIdRequestPath
-    body: PutV1CustomFieldContactCustomFieldIdRequestBody | None = None
+class PutCustomFieldContactCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new display name for the custom field as it will appear in the Close UI.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values simultaneously.")
+    restricted_to_roles: bool | None = Field(default=None, description="Whether editing this field's values should be restricted to users with specific roles.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined values available for selection when the field type is choice-based. Order and format should match the field's expected choice structure.")
+class PutCustomFieldContactCustomFieldIdRequest(StrictModel):
+    """Update a contact custom field's configuration including its display name, value multiplicity, role-based access restrictions, and available options for choice-based fields. Changes take effect immediately in the Close UI."""
+    path: PutCustomFieldContactCustomFieldIdRequestPath
+    body: PutCustomFieldContactCustomFieldIdRequestBody | None = None
 
 # Operation: delete_contact_custom_field
-class DeleteV1CustomFieldContactCustomFieldIdRequestPath(StrictModel):
+class DeleteCustomFieldContactCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the custom field to delete.")
-class DeleteV1CustomFieldContactCustomFieldIdRequest(StrictModel):
-    """Permanently delete a custom field from your Contact records. The field will be immediately removed from all Contact API responses."""
-    path: DeleteV1CustomFieldContactCustomFieldIdRequestPath
+class DeleteCustomFieldContactCustomFieldIdRequest(StrictModel):
+    """Permanently delete a custom field from your Contact system. The field will be immediately removed from all Contact API responses and cannot be recovered."""
+    path: DeleteCustomFieldContactCustomFieldIdRequestPath
 
 # Operation: list_opportunity_custom_fields
-class GetV1CustomFieldOpportunityRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom field records to return in the response. Useful for pagination or limiting result set size.")
-class GetV1CustomFieldOpportunityRequest(StrictModel):
-    """Retrieve all custom fields configured for opportunities in your organization. Use the limit parameter to control the number of results returned."""
-    query: GetV1CustomFieldOpportunityRequestQuery | None = None
+class GetCustomFieldOpportunityRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom fields to return in the response. Useful for pagination when dealing with large numbers of custom fields.")
+class GetCustomFieldOpportunityRequest(StrictModel):
+    """Retrieve all custom fields configured for opportunities in your organization. Use this to understand the custom data structure available for opportunity records."""
+    query: GetCustomFieldOpportunityRequestQuery | None = None
 
 # Operation: create_opportunity_custom_field
-class PostV1CustomFieldOpportunityRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The custom field configuration object containing the field definition, name, type, and any applicable settings for the new Opportunity custom field.")
-class PostV1CustomFieldOpportunityRequest(StrictModel):
-    """Create a new custom field for Opportunity records. Custom fields allow you to extend the standard Opportunity data model with additional attributes tailored to your business needs."""
-    body: PostV1CustomFieldOpportunityRequestBody
+class PostCustomFieldOpportunityRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field. This is how the field will be identified throughout the system.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type that determines how the field stores and validates data (e.g., text, number, date, choice).")
+    accepts_multiple_values: bool | None = Field(default=None, description="When enabled, allows the field to store multiple values simultaneously rather than a single value.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that have permission to edit this field. If not specified, default role permissions apply.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined choices available for selection when the field type is set to choice or similar selection-based types. Order may be significant for display purposes.")
+class PostCustomFieldOpportunityRequest(StrictModel):
+    """Create a new custom field for Opportunity records. Define the field's name, data type, and optionally configure multi-value support, role-based editing permissions, and predefined options for choice fields."""
+    body: PostCustomFieldOpportunityRequestBody
 
 # Operation: get_opportunity_custom_field
-class GetV1CustomFieldOpportunityIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom field to retrieve. This ID specifies which custom field's details should be fetched.")
-class GetV1CustomFieldOpportunityIdRequest(StrictModel):
-    """Retrieve detailed information about a specific custom field associated with an opportunity. Use this to access custom field configurations and values linked to a particular opportunity record."""
-    path: GetV1CustomFieldOpportunityIdRequestPath
+class GetCustomFieldOpportunityIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom field to retrieve. This ID must correspond to an existing custom field in the opportunity.")
+class GetCustomFieldOpportunityIdRequest(StrictModel):
+    """Retrieve detailed information about a specific custom field associated with an opportunity. Use this to fetch custom field values and metadata for a given opportunity."""
+    path: GetCustomFieldOpportunityIdRequestPath
 
 # Operation: update_opportunity_custom_field
-class PutV1CustomFieldOpportunityCustomFieldIdRequestPath(StrictModel):
+class PutCustomFieldOpportunityCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the custom field to update.")
-class PutV1CustomFieldOpportunityCustomFieldIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The updated custom field configuration, including name, type, multi-value setting, role restrictions, and choice options if applicable.")
-class PutV1CustomFieldOpportunityCustomFieldIdRequest(StrictModel):
-    """Update an existing Opportunity custom field, including its name, data type, multi-value support, role-based editing restrictions, and choice options."""
-    path: PutV1CustomFieldOpportunityCustomFieldIdRequestPath
-    body: PutV1CustomFieldOpportunityCustomFieldIdRequestBody
+class PutCustomFieldOpportunityCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new display name for the custom field.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether the field should accept multiple values simultaneously.")
+    restricted_to_roles: bool | None = Field(default=None, description="Whether editing this field's values should be restricted to users with specific roles.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="Updated list of available options for a choices field type. Order is preserved and determines the display sequence in the UI.")
+class PutCustomFieldOpportunityCustomFieldIdRequest(StrictModel):
+    """Update an Opportunity Custom Field by modifying its name, type, value acceptance settings, role restrictions, or choice options. Changes take effect immediately in the Close UI, and type conversions are handled automatically when required."""
+    path: PutCustomFieldOpportunityCustomFieldIdRequestPath
+    body: PutCustomFieldOpportunityCustomFieldIdRequestBody | None = None
 
 # Operation: delete_opportunity_custom_field
-class DeleteV1CustomFieldOpportunityCustomFieldIdRequestPath(StrictModel):
+class DeleteCustomFieldOpportunityCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the custom field to delete.")
-class DeleteV1CustomFieldOpportunityCustomFieldIdRequest(StrictModel):
-    """Permanently delete a custom field from Opportunities. The field will be immediately removed from all Opportunity API responses and cannot be recovered."""
-    path: DeleteV1CustomFieldOpportunityCustomFieldIdRequestPath
+class DeleteCustomFieldOpportunityCustomFieldIdRequest(StrictModel):
+    """Permanently delete a custom field from Opportunities. The field will be immediately removed from all Opportunity records and API responses, and this action cannot be undone."""
+    path: DeleteCustomFieldOpportunityCustomFieldIdRequestPath
 
 # Operation: list_activity_custom_fields
-class GetV1CustomFieldActivityRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of results to return in a single response for pagination purposes.")
-class GetV1CustomFieldActivityRequest(StrictModel):
-    """Retrieve all Activity Custom Fields configured for your organization. Supports optional pagination to control the number of results returned."""
-    query: GetV1CustomFieldActivityRequestQuery | None = None
+class GetCustomFieldActivityRequestQuery(StrictModel):
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Maximum number of custom fields to return in the response. Limits the result set size for pagination or performance optimization.")
+class GetCustomFieldActivityRequest(StrictModel):
+    """Retrieve all custom fields configured for activities in your organization. Use the limit parameter to control the number of results returned."""
+    query: GetCustomFieldActivityRequestQuery | None = None
 
 # Operation: create_activity_custom_field
-class PostV1CustomFieldActivityRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the custom field.")
-    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the field, such as text, number, date, or choices. The type determines how the field stores and validates data.")
-    custom_activity_type_id: str = Field(default=..., description="The unique identifier of the Custom Activity Type that this field belongs to.")
-    required: bool | None = Field(default=None, description="Whether this field must be populated before the activity can be published.")
-    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values simultaneously.")
-    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined options for choice-type fields. Required when the field type is set to choices.")
-class PostV1CustomFieldActivityRequest(StrictModel):
-    """Create a new custom field for Activity types. The field will be associated with a specific Custom Activity Type and can be configured as required or to accept multiple values."""
-    body: PostV1CustomFieldActivityRequestBody
+class PostCustomFieldActivityRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field. This is the label shown to users when interacting with the field.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the field, which determines what kind of values it can store (e.g., text, number, date, choice).")
+    custom_activity_type_id: str = Field(default=..., description="The ID of the Custom Activity Type this field belongs to. The field will be associated with and available only for activities of this type.")
+    required: bool | None = Field(default=None, description="Whether this field must be populated before an activity can be published. When enabled, the field becomes mandatory for activity creation.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values simultaneously. When enabled, the field can hold a collection of values instead of a single value.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined options available for selection in choice-type fields. Each option represents a valid value users can select from.")
+class PostCustomFieldActivityRequest(StrictModel):
+    """Create a new custom field for a specific Custom Activity Type. Custom fields extend activity records with additional data attributes and can be configured as required or optional."""
+    body: PostCustomFieldActivityRequestBody
 
 # Operation: get_activity_custom_field
-class GetV1CustomFieldActivityIdRequestPath(StrictModel):
+class GetCustomFieldActivityIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Activity Custom Field to retrieve.")
-class GetV1CustomFieldActivityIdRequest(StrictModel):
-    """Retrieve the details of a specific Activity Custom Field by its ID. Use this to fetch configuration and metadata for a custom field associated with activities."""
-    path: GetV1CustomFieldActivityIdRequestPath
+class GetCustomFieldActivityIdRequest(StrictModel):
+    """Retrieve the details of a specific Activity Custom Field by its unique identifier. Use this to access configuration, metadata, and settings for a custom field associated with activities."""
+    path: GetCustomFieldActivityIdRequestPath
 
 # Operation: update_activity_custom_field
-class PutV1CustomFieldActivityCustomFieldIdRequestPath(StrictModel):
+class PutCustomFieldActivityCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the Activity Custom Field to update.")
-class PutV1CustomFieldActivityCustomFieldIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the custom field.")
-    required: bool | None = Field(default=None, description="Whether this field must be populated when creating or editing activities.")
-    accepts_multiple_values: bool | None = Field(default=None, description="Whether users can assign multiple values to this field.")
+class PutCustomFieldActivityCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="New display name for the custom field.")
+    required: bool | None = Field(default=None, description="Whether this field must be populated before publishing an activity.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field allows users to select or enter multiple values.")
     restricted_to_roles: list[str] | None = Field(default=None, description="List of role identifiers that are permitted to edit this field. If specified, only users with these roles can modify the field value.")
-    options: list[dict[str, Any]] | None = Field(default=None, description="Updated list of available options for choice-type fields. Each option should include its identifier and display label.")
-class PutV1CustomFieldActivityCustomFieldIdRequest(StrictModel):
-    """Update an existing Activity Custom Field by modifying its name, required status, multi-value acceptance, role-based editing restrictions, or choice field options. The field type and associated activity type cannot be changed."""
-    path: PutV1CustomFieldActivityCustomFieldIdRequestPath
-    body: PutV1CustomFieldActivityCustomFieldIdRequestBody | None = None
+    options: list[dict[str, Any]] | None = Field(default=None, description="Updated list of available choices for a choices-type field. Each option should include its identifier and display label.")
+class PutCustomFieldActivityCustomFieldIdRequest(StrictModel):
+    """Update an existing Activity Custom Field by modifying its name, requirements, multi-value support, role-based access restrictions, or choice options. The field type and associated activity type cannot be changed."""
+    path: PutCustomFieldActivityCustomFieldIdRequestPath
+    body: PutCustomFieldActivityCustomFieldIdRequestBody | None = None
 
 # Operation: delete_activity_custom_field
-class DeleteV1CustomFieldActivityCustomFieldIdRequestPath(StrictModel):
+class DeleteCustomFieldActivityCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the Activity Custom Field to delete.")
-class DeleteV1CustomFieldActivityCustomFieldIdRequest(StrictModel):
+class DeleteCustomFieldActivityCustomFieldIdRequest(StrictModel):
     """Permanently delete an Activity Custom Field. The field will be immediately removed from all Custom Activity API responses and cannot be recovered."""
-    path: DeleteV1CustomFieldActivityCustomFieldIdRequestPath
+    path: DeleteCustomFieldActivityCustomFieldIdRequestPath
 
 # Operation: create_custom_object_field
-class PostV1CustomFieldCustomObjectTypeRequestBody(StrictModel):
-    custom_object_type_id: str = Field(default=..., description="The unique identifier of the Custom Object Type that this field will belong to.")
-    required: bool | None = Field(default=None, description="Whether this field must be populated when saving a custom object instance. When enabled, the field becomes mandatory for object creation and updates.")
-class PostV1CustomFieldCustomObjectTypeRequest(StrictModel):
-    """Create a new custom field for a specific Custom Object Type. Custom fields extend the data structure of custom objects with additional attributes and validation rules."""
-    body: PostV1CustomFieldCustomObjectTypeRequestBody
+class PostCustomFieldCustomObjectTypeRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field, shown in the user interface.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type that defines what kind of values this field accepts (e.g., text, number, date, choice).")
+    custom_object_type_id: str = Field(default=..., description="The unique identifier of the Custom Object Type that this field belongs to.")
+    required: bool | None = Field(default=None, description="Whether this field must have a value before the custom object can be saved.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values instead of a single value.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit this field. If not specified, all roles may edit the field.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="A list of predefined options available for selection when the field type is set to choice. Each option should be formatted as specified by the field type.")
+class PostCustomFieldCustomObjectTypeRequest(StrictModel):
+    """Create a new custom field for a specific Custom Object Type. The field will be added to the object type's schema and can be configured as required or optional, with support for multiple values and role-based edit permissions."""
+    body: PostCustomFieldCustomObjectTypeRequestBody
 
 # Operation: get_custom_field
-class GetV1CustomFieldCustomObjectTypeIdRequestPath(StrictModel):
+class GetCustomFieldCustomObjectTypeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom field to retrieve.")
-class GetV1CustomFieldCustomObjectTypeIdRequest(StrictModel):
-    """Retrieve detailed information about a specific custom field associated with a custom object type."""
-    path: GetV1CustomFieldCustomObjectTypeIdRequestPath
+class GetCustomFieldCustomObjectTypeIdRequest(StrictModel):
+    """Retrieve the details of a specific custom field associated with a custom object type. This includes field configuration, type, and metadata."""
+    path: GetCustomFieldCustomObjectTypeIdRequestPath
 
-# Operation: update_custom_object_field
-class PutV1CustomFieldCustomObjectTypeCustomFieldIdRequestPath(StrictModel):
+# Operation: update_custom_field
+class PutCustomFieldCustomObjectTypeCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the custom field to update.")
-class PutV1CustomFieldCustomObjectTypeCustomFieldIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The field configuration updates to apply, including name, multi-value flag, required flag, role restrictions, and choice options.")
-class PutV1CustomFieldCustomObjectTypeCustomFieldIdRequest(StrictModel):
-    """Update an existing custom field for a custom object type. Modify field properties such as name, multi-value support, required status, role-based editing restrictions, or choice options. The custom object type and field type cannot be changed after creation."""
-    path: PutV1CustomFieldCustomObjectTypeCustomFieldIdRequestPath
-    body: PutV1CustomFieldCustomObjectTypeCustomFieldIdRequestBody
+class PutCustomFieldCustomObjectTypeCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new display name for the custom field.")
+    required: bool | None = Field(default=None, description="Whether this field must be populated to save the custom object.")
+    accepts_multiple_values: bool | None = Field(default=None, description="Whether this field can store multiple values simultaneously.")
+    editable_with_roles: list[str] | None = Field(default=None, description="List of role identifiers that are permitted to edit this field's values. If specified, only users with these roles can modify the field.")
+    options: list[dict[str, Any]] | None = Field(default=None, description="Updated list of available choices for a choices-type field. Each item represents a selectable option.")
+class PutCustomFieldCustomObjectTypeCustomFieldIdRequest(StrictModel):
+    """Update a custom object field's configuration, including its name, requirement status, multi-value support, role-based edit restrictions, and choice options. The field type and custom object type cannot be modified."""
+    path: PutCustomFieldCustomObjectTypeCustomFieldIdRequestPath
+    body: PutCustomFieldCustomObjectTypeCustomFieldIdRequestBody | None = None
 
-# Operation: delete_custom_object_field
-class DeleteV1CustomFieldCustomObjectTypeCustomFieldIdRequestPath(StrictModel):
+# Operation: delete_custom_field
+class DeleteCustomFieldCustomObjectTypeCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the custom field to delete.")
-class DeleteV1CustomFieldCustomObjectTypeCustomFieldIdRequest(StrictModel):
-    """Permanently delete a custom field from your Custom Object schema. The field will be immediately removed from all Custom Object API responses."""
-    path: DeleteV1CustomFieldCustomObjectTypeCustomFieldIdRequestPath
+class DeleteCustomFieldCustomObjectTypeCustomFieldIdRequest(StrictModel):
+    """Permanently delete a custom field from a custom object type. The field will be immediately removed from all Custom Object API responses."""
+    path: DeleteCustomFieldCustomObjectTypeCustomFieldIdRequestPath
 
 # Operation: create_shared_custom_field
-class PostV1CustomFieldSharedRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the custom field. This name will be visible when applying the field to objects.")
-    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type of the custom field, which determines what kind of values it can store (e.g., text, number, date, dropdown).")
-    associations: list[dict[str, Any]] | None = Field(default=None, description="A list of object types this custom field can be applied to. Specify which objects in your system should have access to this field.")
-class PostV1CustomFieldSharedRequest(StrictModel):
-    """Create a new shared custom field that can be reused across your organization. Shared custom fields are available for use on specified object types throughout your workspace."""
-    body: PostV1CustomFieldSharedRequestBody
+class PostCustomFieldSharedRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for the custom field. This is the label users will see when interacting with this field.")
+    type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The data type that defines how values in this custom field are stored and validated (e.g., text, number, date, dropdown).")
+    associations: list[dict[str, Any]] | None = Field(default=None, description="A list of object types this custom field can be applied to. Specifies which entities in your workspace can use this shared custom field.")
+class PostCustomFieldSharedRequest(StrictModel):
+    """Create a new shared custom field that can be reused across multiple object types in your workspace. Shared custom fields provide consistent data structure and validation across associated objects."""
+    body: PostCustomFieldSharedRequestBody
 
 # Operation: update_shared_custom_field
-class PutV1CustomFieldSharedCustomFieldIdRequestPath(StrictModel):
+class PutCustomFieldSharedCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the shared custom field to update.")
-class PutV1CustomFieldSharedCustomFieldIdRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="The new name for the custom field. If provided, replaces the current name.")
-    choices: list[str] | None = Field(default=None, description="Updated list of options for a choices field type. Each item represents a selectable choice option. Only applicable to fields with type 'choices'.")
-class PutV1CustomFieldSharedCustomFieldIdRequest(StrictModel):
-    """Update a shared custom field by renaming it or modifying its choice options. The field type cannot be changed after creation."""
-    path: PutV1CustomFieldSharedCustomFieldIdRequestPath
-    body: PutV1CustomFieldSharedCustomFieldIdRequestBody | None = None
+class PutCustomFieldSharedCustomFieldIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The new name for the custom field. Provide a descriptive name to identify the field's purpose.")
+    choices: list[str] | None = Field(default=None, description="Updated list of options for a choices field type. Each item represents an available choice that users can select. Only applicable for fields with a choices type.")
+class PutCustomFieldSharedCustomFieldIdRequest(StrictModel):
+    """Update a shared custom field by modifying its name or the available options for a choices field type. The field type itself cannot be changed after creation."""
+    path: PutCustomFieldSharedCustomFieldIdRequestPath
+    body: PutCustomFieldSharedCustomFieldIdRequestBody | None = None
 
-# Operation: delete_shared_custom_field
-class DeleteV1CustomFieldSharedCustomFieldIdRequestPath(StrictModel):
+# Operation: delete_custom_field_shared
+class DeleteCustomFieldSharedCustomFieldIdRequestPath(StrictModel):
     custom_field_id: str = Field(default=..., description="The unique identifier of the shared custom field to delete.")
-class DeleteV1CustomFieldSharedCustomFieldIdRequest(StrictModel):
+class DeleteCustomFieldSharedCustomFieldIdRequest(StrictModel):
     """Permanently delete a shared custom field. The field will be immediately removed from all objects it was assigned to."""
-    path: DeleteV1CustomFieldSharedCustomFieldIdRequestPath
+    path: DeleteCustomFieldSharedCustomFieldIdRequestPath
 
 # Operation: associate_shared_custom_field
-class PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequestPath(StrictModel):
-    shared_custom_field_id: str = Field(default=..., description="The unique identifier of the Shared Custom Field to associate.")
-class PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequestBody(StrictModel):
+class PostCustomFieldSharedSharedCustomFieldIdAssociationRequestPath(StrictModel):
+    shared_custom_field_id: str = Field(default=..., description="The unique identifier of the Shared Custom Field to associate with an object type.")
+class PostCustomFieldSharedSharedCustomFieldIdAssociationRequestBody(StrictModel):
     object_type: Literal["lead", "contact", "opportunity", "custom_activity_type", "custom_object_type"] = Field(default=..., description="The object type to associate the field with. Must be one of: lead, contact, opportunity, custom_activity_type, or custom_object_type.")
-    custom_activity_type_id: str | None = Field(default=None, description="The ID of the Custom Activity Type being associated. Required only when object_type is set to custom_activity_type.")
-    custom_object_type_id: str | None = Field(default=None, description="The ID of the Custom Object Type being associated. Required only when object_type is set to custom_object_type.")
-    editable_with_roles: list[str] | None = Field(default=None, description="A list of Role IDs that are permitted to edit the values of this field on the associated object type. If not specified, all roles may edit the field.")
+    custom_activity_type_id: str | None = Field(default=None, description="The ID of the Custom Activity Type. Required only when object_type is set to custom_activity_type.")
+    custom_object_type_id: str | None = Field(default=None, description="The ID of the Custom Object Type. Required only when object_type is set to custom_object_type.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of Role IDs that are permitted to edit the values of this field on the associated object. Roles not included in this list will have read-only access.")
     required: bool | None = Field(default=None, description="Whether a value must be provided for this field on the associated object. Only applicable when object_type is custom_activity_type or custom_object_type.")
-class PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequest(StrictModel):
-    """Associate a Shared Custom Field with a specific object type (Lead, Contact, Opportunity, or custom types) to enable the field for use on that object type. Once associated, the field can be set and managed on instances of that object type."""
-    path: PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequestPath
-    body: PostV1CustomFieldSharedSharedCustomFieldIdAssociationRequestBody
+class PostCustomFieldSharedSharedCustomFieldIdAssociationRequest(StrictModel):
+    """Associates a Shared Custom Field with a specific object type (Lead, Contact, Opportunity, Custom Activity Type, or Custom Object Type), optionally configuring edit permissions and field requirements."""
+    path: PostCustomFieldSharedSharedCustomFieldIdAssociationRequestPath
+    body: PostCustomFieldSharedSharedCustomFieldIdAssociationRequestBody
 
 # Operation: update_shared_custom_field_association
-class PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestPath(StrictModel):
-    shared_custom_field_id: str = Field(default=..., description="The unique identifier of the shared custom field being updated.")
-    object_type: str = Field(default=..., description="The type of object this association applies to: standard types (lead, contact, opportunity) or custom types using the format custom_activity_type/{id} or custom_object_type/{id}.")
-class PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestBody(StrictModel):
-    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit this custom field. Omit to leave unchanged.")
-    required: bool | None = Field(default=None, description="Whether this custom field must be completed for the specified object type. Omit to leave unchanged.")
-class PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequest(StrictModel):
-    """Update an existing Shared Custom Field Association by modifying its editability permissions and requirement status. Specify which roles can edit the field and whether it should be required for the given object type."""
-    path: PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestPath
-    body: PutV1CustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestBody | None = None
+class PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestPath(StrictModel):
+    shared_custom_field_id: str = Field(default=..., description="The unique identifier of the Shared Custom Field being associated.")
+    object_type: str = Field(default=..., description="The object type to associate with this field. Valid values are: lead, contact, opportunity, custom_activity_type/<catype_id>, or custom_object_type/<cotype_id>.")
+class PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestBody(StrictModel):
+    editable_with_roles: list[str] | None = Field(default=None, description="List of Role IDs that are permitted to edit the values of this field. Roles not included in this list cannot modify the field value.")
+    required: bool | None = Field(default=None, description="Whether a value is mandatory for this field on the specified object type. When true, users must provide a value; when false, the field is optional.")
+class PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequest(StrictModel):
+    """Update an existing Shared Custom Field Association by modifying its required status and role-based edit permissions. Specify the object type (lead, contact, opportunity, or custom types) to target the correct association."""
+    path: PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestPath
+    body: PutCustomFieldSharedSharedCustomFieldIdAssociationObjectTypeRequestBody | None = None
 
-# Operation: remove_custom_field_association
-class DeleteV1CustomFieldSharedCustomFieldIdAssociationObjectTypeRequestPath(StrictModel):
-    custom_field_id: str = Field(default=..., description="The unique identifier of the shared custom field to disassociate.")
-    object_type: str = Field(default=..., description="The object type to disassociate from, specified as either a standard type (lead, contact, opportunity, custom_activity_type) or a custom type reference (custom_object_type/<cotype_id>).")
-class DeleteV1CustomFieldSharedCustomFieldIdAssociationObjectTypeRequest(StrictModel):
-    """Remove a shared custom field from a specific object type (Lead, Contact, Opportunity, Custom Activity Type, or Custom Object Type). The field will be immediately removed from all objects of that type."""
-    path: DeleteV1CustomFieldSharedCustomFieldIdAssociationObjectTypeRequestPath
+# Operation: remove_shared_custom_field_association
+class DeleteCustomFieldSharedCustomFieldIdAssociationObjectTypeRequestPath(StrictModel):
+    custom_field_id: str = Field(default=..., description="The unique identifier of the Shared Custom Field to disassociate.")
+    object_type: str = Field(default=..., description="The object type to disassociate from. Valid values are: lead, contact, opportunity, custom_activity_type/<catype_id>, or custom_object_type/<cotype_id>, where <catype_id> and <cotype_id> are the respective type identifiers.")
+class DeleteCustomFieldSharedCustomFieldIdAssociationObjectTypeRequest(StrictModel):
+    """Remove a Shared Custom Field association from a specific object type (Lead, Contact, Opportunity, Custom Activity Type, or Custom Object Type). This disassociates the custom field from the target object type."""
+    path: DeleteCustomFieldSharedCustomFieldIdAssociationObjectTypeRequestPath
 
 # Operation: get_custom_field_schema
-class GetV1CustomFieldSchemaObjectTypeRequestPath(StrictModel):
-    object_type: Literal["lead", "contact", "opportunity"] = Field(default=..., description="The type of object for which to retrieve the custom field schema. Must be one of: lead, contact, or opportunity.")
-class GetV1CustomFieldSchemaObjectTypeRequest(StrictModel):
-    """Retrieve the custom field schema for a specified object type, including all regular and shared custom fields in their defined order."""
-    path: GetV1CustomFieldSchemaObjectTypeRequestPath
+class GetCustomFieldSchemaObjectTypeRequestPath(StrictModel):
+    object_type: str = Field(default=..., description="The object type to fetch the schema for. Use standard types (lead, contact, opportunity), activity with a category ID (activity/<cat_id>), or custom object with a type ID (custom_object/<cotype_id>).")
+class GetCustomFieldSchemaObjectTypeRequest(StrictModel):
+    """Retrieve the custom field schema for a specific object type, including all regular and shared custom fields in their defined order. Supports standard objects (lead, contact, opportunity) and dynamic objects (activities and custom objects)."""
+    path: GetCustomFieldSchemaObjectTypeRequestPath
 
 # Operation: reorder_custom_fields
-class PutV1CustomFieldSchemaObjectTypeRequestPath(StrictModel):
-    object_type: Literal["lead", "contact", "opportunity"] = Field(default=..., description="The object type for which to reorder custom fields. Must be one of: lead, contact, or opportunity.")
-class PutV1CustomFieldSchemaObjectTypeRequestBody(StrictModel):
-    fields: list[PutV1CustomFieldSchemaObjectTypeBodyFieldsItem] = Field(default=..., description="An ordered list of field objects containing their IDs. The order of this list determines the new field sequence; any fields omitted from this list will be appended after the specified fields.")
-class PutV1CustomFieldSchemaObjectTypeRequest(StrictModel):
-    """Reorder custom fields within a schema by specifying field IDs in the desired order. Fields not included in the list are automatically appended to the end."""
-    path: PutV1CustomFieldSchemaObjectTypeRequestPath
-    body: PutV1CustomFieldSchemaObjectTypeRequestBody
+class PutCustomFieldSchemaObjectTypeRequestPath(StrictModel):
+    object_type: str = Field(default=..., description="The object type whose custom field schema should be reordered. Valid values include lead, contact, opportunity, activity with a category ID, or custom_object with a custom object type ID.")
+class PutCustomFieldSchemaObjectTypeRequestBody(StrictModel):
+    fields: list[PutCustomFieldSchemaObjectTypeBodyFieldsItem] = Field(default=..., description="An ordered array of field ID objects that defines the new field sequence. Each item should contain an id property; fields not included in this list will be automatically appended to the end.")
+class PutCustomFieldSchemaObjectTypeRequest(StrictModel):
+    """Reorder custom fields within a schema by specifying the desired field order. Fields omitted from the list will be appended at the end; to remove fields, delete them or disassociate shared custom fields instead."""
+    path: PutCustomFieldSchemaObjectTypeRequestPath
+    body: PutCustomFieldSchemaObjectTypeRequestBody
 
 # Operation: enrich_field
-class PostV1EnrichFieldRequestQuery(StrictModel):
+class PostEnrichFieldRequestBody(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier for your organization.")
-    object_type: Literal["lead", "contact"] = Field(default=..., description="The type of object to enrich, either a lead or contact.")
+    object_type: Literal["lead", "contact"] = Field(default=..., description="The type of object to enrich: either 'lead' or 'contact'.")
     object_id: str = Field(default=..., description="The unique identifier of the lead or contact record to enrich.")
     field_id: str = Field(default=..., description="The unique identifier of the custom field to enrich.")
-    set_new_value: bool | None = Field(default=None, description="Whether to automatically update the field with the enriched value. Defaults to true.")
-    overwrite_existing_value: bool | None = Field(default=None, description="Whether to overwrite the field if it already contains a value. Defaults to false, preserving existing data.")
-class PostV1EnrichFieldRequest(StrictModel):
-    """Enrich a specific field on a lead or contact using AI analysis. The operation intelligently populates or enhances the field by analyzing existing data and external sources, then returns the enriched value."""
-    query: PostV1EnrichFieldRequestQuery
+    set_new_value: bool | None = Field(default=None, description="Whether to persist the enriched value to the field. Defaults to true if not specified.")
+    overwrite_existing_value: bool | None = Field(default=None, description="Whether to replace any existing field value with the enriched result. Defaults to false, preserving existing data unless explicitly overwritten.")
+class PostEnrichFieldRequest(StrictModel):
+    """Intelligently enrich a specific field on a lead or contact by analyzing existing data and external sources. The operation completes synchronously and optionally updates the field with the enriched value."""
+    body: PostEnrichFieldRequestBody
 
 # Operation: create_custom_activity_type
-class PostV1CustomActivityRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the custom activity type. This identifies the type throughout the system.")
-    description: str | None = Field(default=None, description="A detailed explanation of the custom activity type's purpose and usage.")
-    api_create_only: bool | None = Field(default=None, description="When enabled, restricts creation of this activity type to API requests only, preventing creation through the user interface.")
-    editable_with_roles: list[str] | None = Field(default=None, description="A list of user roles that have permission to edit this activity type. Roles are specified as strings in the array.")
-    is_archived: bool | None = Field(default=None, description="When enabled, marks the activity type as archived, making it unavailable for new activities while preserving existing data.")
-class PostV1CustomActivityRequest(StrictModel):
-    """Create a new custom activity type that serves as a foundation for adding custom fields to activities. The type must be established before any custom fields can be associated with it."""
-    body: PostV1CustomActivityRequestBody
+class PostCustomActivityRequestBody(StrictModel):
+    name: str = Field(default=..., description="The display name for this custom activity type. This name identifies the activity type throughout the system.")
+    description: str | None = Field(default=None, description="A detailed explanation of what this custom activity type is used for and its purpose.")
+    api_create_only: bool | None = Field(default=None, description="When enabled, activity instances of this type can only be created through API calls, preventing creation through the user interface.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit activities of this type. If not specified, default role permissions apply.")
+    is_archived: bool | None = Field(default=None, description="When enabled, this activity type is marked as archived and will not appear in active selections, though existing instances remain accessible.")
+class PostCustomActivityRequest(StrictModel):
+    """Create a new custom activity type that serves as a template for activity instances. Custom activity types must be created before you can add custom fields to activities of that type."""
+    body: PostCustomActivityRequestBody
 
 # Operation: get_custom_activity
-class GetV1CustomActivityIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom activity type to retrieve.")
-class GetV1CustomActivityIdRequest(StrictModel):
-    """Retrieve a specific custom activity type by its ID, including detailed custom field metadata and configuration."""
-    path: GetV1CustomActivityIdRequestPath
+class GetCustomActivityIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Activity Type to retrieve.")
+class GetCustomActivityIdRequest(StrictModel):
+    """Retrieve a specific Custom Activity Type by its ID, including detailed metadata about associated custom fields."""
+    path: GetCustomActivityIdRequestPath
 
 # Operation: update_custom_activity
-class PutV1CustomActivityIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom activity type to update.")
-class PutV1CustomActivityIdRequestBody(StrictModel):
+class PutCustomActivityIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Activity Type to update.")
+class PutCustomActivityIdRequestBody(StrictModel):
     name: str | None = Field(default=None, description="The display name for the custom activity type.")
-    description: str | None = Field(default=None, description="A detailed description of the custom activity type's purpose and usage.")
-    api_create_only: bool | None = Field(default=None, description="When enabled, restricts creation of this activity type to API requests only, preventing creation through the user interface.")
-    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit this activity type. Roles not included in this list will have read-only access.")
-    is_archived: bool | None = Field(default=None, description="When enabled, archives the activity type and prevents it from being used for new activities while preserving existing data.")
-    field_order: list[str] | None = Field(default=None, description="An ordered array of field identifiers that determines the sequence in which fields are displayed in the user interface and API responses.")
-class PutV1CustomActivityIdRequest(StrictModel):
-    """Update an existing custom activity type's metadata including name, description, creation restrictions, edit permissions, and field display order. Field management (adding, modifying, or removing fields) must be done separately using the Custom Field API."""
-    path: PutV1CustomActivityIdRequestPath
-    body: PutV1CustomActivityIdRequestBody | None = None
+    description: str | None = Field(default=None, description="A detailed explanation of the custom activity type's purpose and usage.")
+    api_create_only: bool | None = Field(default=None, description="When enabled, instances of this activity type can only be created through API calls, preventing creation via the user interface.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit instances of this activity type. Roles not included will be unable to modify activities of this type.")
+    is_archived: bool | None = Field(default=None, description="When enabled, this activity type is marked as archived and becomes unavailable for new instance creation.")
+    field_order: list[str] | None = Field(default=None, description="An ordered array of field IDs that determines the display sequence of fields in the user interface. The order specified here controls how fields appear to users.")
+class PutCustomActivityIdRequest(StrictModel):
+    """Update an existing Custom Activity Type's metadata including name, description, creation restrictions, editor permissions, archive status, and field display order. Field structure changes require the Custom Field API."""
+    path: PutCustomActivityIdRequestPath
+    body: PutCustomActivityIdRequestBody | None = None
 
 # Operation: delete_custom_activity
-class DeleteV1CustomActivityIdRequestPath(StrictModel):
+class DeleteCustomActivityIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the custom activity type to delete.")
-class DeleteV1CustomActivityIdRequest(StrictModel):
-    """Permanently delete a custom activity type by its ID. This action cannot be undone."""
-    path: DeleteV1CustomActivityIdRequestPath
+class DeleteCustomActivityIdRequest(StrictModel):
+    """Permanently delete a custom activity type by its ID. This action cannot be undone and will remove the activity type from your system."""
+    path: DeleteCustomActivityIdRequestPath
 
-# Operation: list_custom_activities
-class GetV1ActivityCustomRequestQuery(StrictModel):
-    custom_activity_type_id: str | None = Field(default=None, description="Filter results to a specific custom activity type. When using this filter, the lead_id parameter is required.")
-class GetV1ActivityCustomRequest(StrictModel):
-    """Retrieve and filter custom activity instances. Use custom_activity_type_id to narrow results by activity type; note that filtering by activity type requires the lead_id parameter to be specified."""
-    query: GetV1ActivityCustomRequestQuery | None = None
+# Operation: list_custom_activities_instances
+class GetActivityCustomRequestQuery(StrictModel):
+    custom_activity_type_id: str | None = Field(default=None, description="Filter results to a specific custom activity type. When using this filter, the lead_id parameter is required to scope the results appropriately.")
+class GetActivityCustomRequest(StrictModel):
+    """Retrieve and filter custom activity instances. Supports filtering by custom activity type, with results including custom fields formatted as custom.{custom_field_id}."""
+    query: GetActivityCustomRequestQuery | None = None
 
 # Operation: create_custom_activity
-class PostV1ActivityCustomRequestBody(StrictModel):
-    custom_activity_type_id: str = Field(default=..., description="The unique identifier of the custom activity type to instantiate.")
-    lead_id: str = Field(default=..., description="The unique identifier of the lead associated with this activity.")
-    pinned: bool | None = Field(default=None, description="Set to true to pin this activity, making it more prominent in the activity list.")
-class PostV1ActivityCustomRequest(StrictModel):
-    """Create a new custom activity instance for a lead. Activities are published by default with all required fields validated, or can be created as drafts to defer validation. Optionally pin the activity for visibility."""
-    body: PostV1ActivityCustomRequestBody
+class PostActivityCustomRequestBody(StrictModel):
+    custom_activity_type_id: str = Field(default=..., description="The unique identifier of the Custom Activity Type to instantiate.")
+    lead_id: str = Field(default=..., description="The unique identifier of the lead to associate with this activity.")
+    pinned: bool | None = Field(default=None, description="Whether to pin this activity for increased visibility. Defaults to unpinned if not specified.")
+class PostActivityCustomRequest(StrictModel):
+    """Create a new Custom Activity instance for a lead. Activities are published by default with all required fields validated, or can be created as drafts to defer validation. Optionally pin the activity for visibility."""
+    body: PostActivityCustomRequestBody
 
 # Operation: get_custom_activity_instance
-class GetV1ActivityCustomIdRequestPath(StrictModel):
+class GetActivityCustomIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Activity instance to retrieve.")
-class GetV1ActivityCustomIdRequest(StrictModel):
-    """Retrieve a specific Custom Activity instance by its unique identifier. Use this to fetch details about a single custom activity."""
-    path: GetV1ActivityCustomIdRequestPath
+class GetActivityCustomIdRequest(StrictModel):
+    """Retrieve a specific Custom Activity instance by its unique identifier. Use this to fetch detailed information about a single custom activity."""
+    path: GetActivityCustomIdRequestPath
 
 # Operation: update_custom_activity_instance
-class PutV1ActivityCustomIdRequestPath(StrictModel):
+class PutActivityCustomIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Activity instance to update.")
-class PutV1ActivityCustomIdRequestBody(StrictModel):
-    pinned: bool | None = Field(default=None, description="Whether to pin or unpin the activity. Set to true to pin the activity or false to unpin it.")
-class PutV1ActivityCustomIdRequest(StrictModel):
-    """Update a Custom Activity instance by modifying custom fields, changing its status between draft and published, or toggling its pinned state."""
-    path: PutV1ActivityCustomIdRequestPath
-    body: PutV1ActivityCustomIdRequestBody | None = None
+class PutActivityCustomIdRequestBody(StrictModel):
+    pinned: bool | None = Field(default=None, description="Set to true to pin the activity or false to unpin it. Omit to leave the pinned status unchanged.")
+class PutActivityCustomIdRequest(StrictModel):
+    """Update an existing Custom Activity instance by modifying custom fields, changing its status between draft and published states, or adjusting its pinned status."""
+    path: PutActivityCustomIdRequestPath
+    body: PutActivityCustomIdRequestBody | None = None
 
 # Operation: delete_custom_activity_instance
-class DeleteV1ActivityCustomIdRequestPath(StrictModel):
+class DeleteActivityCustomIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Activity instance to delete.")
-class DeleteV1ActivityCustomIdRequest(StrictModel):
-    """Delete a Custom Activity instance by its unique identifier. This operation permanently removes the specified custom activity from the system."""
-    path: DeleteV1ActivityCustomIdRequestPath
+class DeleteActivityCustomIdRequest(StrictModel):
+    """Permanently delete a Custom Activity instance by its ID. This action cannot be undone."""
+    path: DeleteActivityCustomIdRequestPath
 
 # Operation: create_custom_object_type
-class PostV1CustomObjectTypeRequestBody(StrictModel):
+class PostCustomObjectTypeRequestBody(StrictModel):
     name: str = Field(default=..., description="The display name of the Custom Object Type. This is used to identify the type throughout the system.")
-    name_plural: str = Field(default=..., description="The plural form of the Custom Object Type name. This is used in UI elements and lists where multiple instances are displayed.")
-    description: str | None = Field(default=None, description="An optional longer description that provides additional context about the purpose and use of this Custom Object Type.")
-    api_create_only: bool | None = Field(default=None, description="When enabled, only API clients can create new instances of this type. UI-based creation is disabled. Defaults to false, allowing any user to create instances.")
-    editable_with_roles: list[str] | None = Field(default=None, description="An optional list of user roles that are permitted to edit instances of this type. When specified, only users with at least one of these roles can make changes. If not specified, any user in your organization can edit instances.")
-class PostV1CustomObjectTypeRequest(StrictModel):
-    """Create a new Custom Object Type that serves as a blueprint for custom objects in your organization. Custom Object Types must be created before you can add custom fields to instances."""
-    body: PostV1CustomObjectTypeRequestBody
+    name_plural: str = Field(default=..., description="The plural form of the Custom Object Type name. This is used in UI displays and lists where multiple instances are shown.")
+    description: str | None = Field(default=None, description="An optional longer description that provides additional context or details about the purpose and use of this Custom Object Type.")
+    api_create_only: bool | None = Field(default=None, description="When enabled, instances of this Custom Object Type can only be created through API clients. UI-based creation will be restricted. Defaults to false, allowing creation through all available interfaces.")
+    editable_with_roles: list[str] | None = Field(default=None, description="An optional list of user roles that are permitted to edit instances of this Custom Object Type. If specified, only users with one of these roles can modify instances. If not specified, default role-based permissions apply.")
+class PostCustomObjectTypeRequest(StrictModel):
+    """Create a new Custom Object Type that serves as a blueprint for custom objects in your system. Custom Object Types must be created before you can add custom fields or create instances of that type."""
+    body: PostCustomObjectTypeRequestBody
 
 # Operation: get_custom_object_type
-class GetV1CustomObjectTypeIdRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object Type to retrieve.")
-class GetV1CustomObjectTypeIdRequest(StrictModel):
-    """Retrieve a specific Custom Object Type by its ID, including detailed metadata about all associated Custom Fields."""
-    path: GetV1CustomObjectTypeIdRequestPath
+class GetCustomObjectTypeIdRequestPath(StrictModel):
+    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier that specifies which Custom Object Type to retrieve.")
+class GetCustomObjectTypeIdRequest(StrictModel):
+    """Retrieve a specific Custom Object Type by its unique identifier, including comprehensive Custom Field metadata associated with it."""
+    path: GetCustomObjectTypeIdRequestPath
 
 # Operation: update_custom_object_type
-class PutV1CustomObjectTypeIdRequestPath(StrictModel):
+class PutCustomObjectTypeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object Type to update.")
-class PutV1CustomObjectTypeIdRequestBody(StrictModel):
+class PutCustomObjectTypeIdRequestBody(StrictModel):
     name: str | None = Field(default=None, description="The display name of the Custom Object Type.")
-    name_plural: str | None = Field(default=None, description="The plural form of the Custom Object Type name, used in API responses and UI contexts.")
+    name_plural: str | None = Field(default=None, description="The pluralized form of the Custom Object Type name, used in API responses and UI contexts.")
     description: str | None = Field(default=None, description="A detailed description explaining the purpose and use of this Custom Object Type.")
-    api_create_only: bool | None = Field(default=None, description="When enabled, instances of this type can only be created through API clients, preventing creation through the user interface.")
-    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers that are permitted to edit instances of this Custom Object Type. Order is not significant.")
-class PutV1CustomObjectTypeIdRequest(StrictModel):
-    """Update an existing Custom Object Type's metadata including name, description, and access controls. Field management must be handled separately through the Custom Object Custom Fields API."""
-    path: PutV1CustomObjectTypeIdRequestPath
-    body: PutV1CustomObjectTypeIdRequestBody | None = None
+    api_create_only: bool | None = Field(default=None, description="When enabled, only API clients can create new instances of this type; UI-based creation is disabled.")
+    editable_with_roles: list[str] | None = Field(default=None, description="A list of role identifiers whose members are permitted to edit instances of this type. If empty or omitted, all users with general edit permissions can modify instances.")
+class PutCustomObjectTypeIdRequest(StrictModel):
+    """Update an existing Custom Object Type's metadata including name, description, and access controls. Field structure cannot be modified through this operation."""
+    path: PutCustomObjectTypeIdRequestPath
+    body: PutCustomObjectTypeIdRequestBody | None = None
 
 # Operation: delete_custom_object_type
-class DeleteV1CustomObjectTypeIdRequestPath(StrictModel):
+class DeleteCustomObjectTypeIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object Type to delete.")
-class DeleteV1CustomObjectTypeIdRequest(StrictModel):
-    """Permanently delete a Custom Object Type by its ID. This action removes the custom object type definition and cannot be undone."""
-    path: DeleteV1CustomObjectTypeIdRequestPath
+class DeleteCustomObjectTypeIdRequest(StrictModel):
+    """Permanently delete a Custom Object Type and remove it from your system. This action cannot be undone."""
+    path: DeleteCustomObjectTypeIdRequestPath
 
 # Operation: list_custom_objects
-class GetV1CustomObjectRequestQuery(StrictModel):
-    lead_id: str = Field(default=..., description="The unique identifier of the lead whose Custom Object instances should be retrieved. This parameter is required to filter results to a specific lead.")
-    custom_object_type_id: str | None = Field(default=None, description="Optional filter to retrieve only Custom Object instances of a specific type. When omitted, all Custom Object types for the lead are returned.")
-class GetV1CustomObjectRequest(StrictModel):
-    """Retrieve all Custom Object instances associated with a specific lead. Use Advanced Filtering to retrieve Custom Objects across multiple leads. Custom field values are returned in the format custom.{custom_field_id}."""
-    query: GetV1CustomObjectRequestQuery
+class GetCustomObjectRequestQuery(StrictModel):
+    lead_id: str = Field(default=..., description="The unique identifier of the lead whose Custom Object instances you want to retrieve.")
+    custom_object_type_id: str | None = Field(default=None, description="Optional filter to narrow results to a specific Custom Object Type by its unique identifier.")
+class GetCustomObjectRequest(StrictModel):
+    """Retrieve all Custom Object instances associated with a specific lead, with optional filtering by Custom Object Type. Custom field values are returned using the format custom.{custom_field_id}."""
+    query: GetCustomObjectRequestQuery
 
 # Operation: create_custom_object
-class PostV1CustomObjectRequestBody(StrictModel):
-    custom_object_type_id: str = Field(default=..., description="The identifier of the Custom Object type being created, which determines which Custom Fields are available for this instance.")
-    lead_id: str = Field(default=..., description="The identifier of the lead that this Custom Object instance will be associated with.")
+class PostCustomObjectRequestBody(StrictModel):
+    custom_object_type_id: str = Field(default=..., description="The type identifier for the Custom Object being created, which determines which Custom Fields are available for this instance.")
+    lead_id: str = Field(default=..., description="The Lead identifier that this Custom Object instance will be associated with.")
     name: str = Field(default=..., description="A display name for this Custom Object instance.")
-class PostV1CustomObjectRequest(StrictModel):
-    """Create a new Custom Object instance linked to a specific lead. Custom Field values can be set using the custom.{custom_field_id} format."""
-    body: PostV1CustomObjectRequestBody
+class PostCustomObjectRequest(StrictModel):
+    """Create a new Custom Object instance linked to a lead. Custom Field values can be set using the custom.{custom_field_id} format."""
+    body: PostCustomObjectRequestBody
 
 # Operation: get_custom_object
-class GetV1CustomObjectIdRequestPath(StrictModel):
+class GetCustomObjectIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object instance to retrieve.")
-class GetV1CustomObjectIdRequest(StrictModel):
-    """Retrieve a single Custom Object instance by its unique identifier. Use this operation to fetch detailed information about a specific custom object."""
-    path: GetV1CustomObjectIdRequestPath
+class GetCustomObjectIdRequest(StrictModel):
+    """Retrieve a single Custom Object instance by its unique identifier. Returns the complete object data for the specified Custom Object."""
+    path: GetCustomObjectIdRequestPath
 
 # Operation: update_custom_object
-class PutV1CustomObjectIdRequestPath(StrictModel):
+class PutCustomObjectIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object instance to update.")
-class PutV1CustomObjectIdRequestBody(StrictModel):
-    body: dict[str, Any] = Field(default=..., description="The update payload containing the custom fields and/or name property to modify on the Custom Object instance.")
-class PutV1CustomObjectIdRequest(StrictModel):
-    """Update an existing Custom Object instance by modifying its custom fields or name property. Supports adding, changing, or removing any custom fields associated with the object."""
-    path: PutV1CustomObjectIdRequestPath
-    body: PutV1CustomObjectIdRequestBody
+class PutCustomObjectIdRequestBody(StrictModel):
+    name: str | None = Field(default=None, description="The display name for this Custom Object instance.")
+class PutCustomObjectIdRequest(StrictModel):
+    """Update a Custom Object instance by modifying its custom fields and display name. Use this operation to add, change, or remove custom field values and update the instance's name property."""
+    path: PutCustomObjectIdRequestPath
+    body: PutCustomObjectIdRequestBody | None = None
 
 # Operation: delete_custom_object
-class DeleteV1CustomObjectIdRequestPath(StrictModel):
+class DeleteCustomObjectIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Custom Object instance to delete.")
-class DeleteV1CustomObjectIdRequest(StrictModel):
-    """Permanently delete a Custom Object instance by its ID. This action cannot be undone."""
-    path: DeleteV1CustomObjectIdRequestPath
+class DeleteCustomObjectIdRequest(StrictModel):
+    """Permanently delete a Custom Object instance by its unique identifier. This action cannot be undone."""
+    path: DeleteCustomObjectIdRequestPath
 
 # Operation: unsubscribe_email
-class PostV1UnsubscribeEmailRequestBody(StrictModel):
-    email: str = Field(default=..., description="The email address to unsubscribe from Close messages. Must be a valid email format.", json_schema_extra={'format': 'email'})
-class PostV1UnsubscribeEmailRequest(StrictModel):
-    """Remove an email address from Close's messaging system. Use this operation when an email has unsubscribed through another channel and you need to sync that status with Close."""
-    body: PostV1UnsubscribeEmailRequestBody
+class PostUnsubscribeEmailRequestBody(StrictModel):
+    email: str = Field(default=..., description="The email address to unsubscribe from Close's messaging system. Must be a valid email format.", json_schema_extra={'format': 'email'})
+class PostUnsubscribeEmailRequest(StrictModel):
+    """Remove an email address from Close's messaging system. Use this when an email has unsubscribed through external channels (such as a mailing list) and needs to be marked as unsubscribed in Close."""
+    body: PostUnsubscribeEmailRequestBody
 
 # Operation: resubscribe_email
-class DeleteV1UnsubscribeEmailEmailAddressRequestPath(StrictModel):
+class DeleteUnsubscribeEmailEmailAddressRequestPath(StrictModel):
     email_address: str = Field(default=..., description="The email address to resubscribe. Must be a valid email format.", json_schema_extra={'format': 'email'})
-class DeleteV1UnsubscribeEmailEmailAddressRequest(StrictModel):
-    """Resubscribe an email address to receive messages from Close. Use this operation to restore messaging delivery for previously unsubscribed email addresses."""
-    path: DeleteV1UnsubscribeEmailEmailAddressRequestPath
+class DeleteUnsubscribeEmailEmailAddressRequest(StrictModel):
+    """Resubscribe an email address to receive messages from Close. Use this operation to restore messaging delivery for an email that was previously unsubscribed."""
+    path: DeleteUnsubscribeEmailEmailAddressRequestPath
 
 # Operation: search_contacts_and_leads
 class PostApiV1DataSearchRequestBodyQueryField(StrictModel):
-    type_: Literal["regular_field", "custom_field"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Specifies whether the field is a standard system field or a custom field defined for your organization.")
-    object_type: str | None = Field(default=None, validation_alias="object_type", serialization_alias="object_type", description="The object type that contains the field being filtered, used when querying fields from related objects.")
-    field_name: str | None = Field(default=None, validation_alias="field_name", serialization_alias="field_name", description="The name of the regular (system) field to filter by. Use this when filtering standard fields like name, email, or phone.")
+    type_: Literal["regular_field", "custom_field"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Specifies whether the field is a standard built-in field or a custom field defined for your organization.")
+    object_type: str | None = Field(default=None, validation_alias="object_type", serialization_alias="object_type", description="The object type that contains the field being filtered on (e.g., 'contact' or 'lead').")
+    field_name: str | None = Field(default=None, validation_alias="field_name", serialization_alias="field_name", description="The name of the field to filter on when using 'field_condition' query type.")
 class PostApiV1DataSearchRequestBodyQueryCondition(StrictModel):
-    type_: Literal["boolean", "current_user", "exists", "text", "term", "reference", "number_range"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The type of condition to apply when filtering by field value. Choose 'boolean' for true/false fields, 'current_user' to match the authenticated user, 'exists' to check field presence, 'text' for text matching, 'term' for exact value matching, 'reference' for related record matching, or 'number_range' for numeric comparisons.")
-    value: dict[str, Any] | None = Field(default=None, validation_alias="value", serialization_alias="value", description="The condition value to match against. Structure depends on the condition type: for 'boolean' use true/false, for 'term' use a single value, for 'number_range' use an object with comparison operators, for 'reference' use object IDs.")
-    values: list[str] | None = Field(default=None, validation_alias="values", serialization_alias="values", description="Array of values to match against for 'term' conditions. Results include records where the field matches any value in this list.")
-    gt: int | None = Field(default=None, validation_alias="gt", serialization_alias="gt", description="Numeric lower bound (exclusive) for 'number_range' conditions. Use to filter fields with values greater than this number.")
-    reference_type: str | None = Field(default=None, validation_alias="reference_type", serialization_alias="reference_type", description="The type of object being referenced in a 'reference' condition, such as 'user' for user-related filters.")
-    object_ids: list[str] | None = Field(default=None, validation_alias="object_ids", serialization_alias="object_ids", description="Array of object IDs to match in 'reference' conditions. Results include records that reference any of these objects.")
+    type_: Literal["boolean", "current_user", "exists", "text", "term", "reference", "number_range"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The type of condition to apply: 'boolean' for true/false values, 'current_user' to reference the authenticated user, 'exists' to check field presence, 'text' for text matching, 'term' for exact value matching, 'reference' for linked objects, or 'number_range' for numeric comparisons.")
+    value: str | None = Field(default=None, validation_alias="value", serialization_alias="value", description="The value to match against for boolean or text-based conditions.")
+    mode: Literal["full_words", "phrase"] | None = Field(default=None, validation_alias="mode", serialization_alias="mode", description="Text matching strategy: 'full_words' matches complete words only, 'phrase' matches the exact phrase as entered.")
+    values: list[str] | None = Field(default=None, validation_alias="values", serialization_alias="values", description="Array of values to match against for 'term' conditions; returns objects where the field matches any value in the list.")
+    reference_type: str | None = Field(default=None, validation_alias="reference_type", serialization_alias="reference_type", description="The type of object being referenced in a 'reference' condition (e.g., 'user', 'company').")
+    object_ids: list[str] | None = Field(default=None, validation_alias="object_ids", serialization_alias="object_ids", description="Array of object IDs to match against in a 'reference' condition; returns objects linked to any of these IDs.")
+    gt: float | None = Field(default=None, validation_alias="gt", serialization_alias="gt", description="Lower bound (exclusive) for numeric range filtering; matches values strictly greater than this number.")
+    gte: float | None = Field(default=None, validation_alias="gte", serialization_alias="gte", description="Lower bound (inclusive) for numeric range filtering; matches values greater than or equal to this number.")
+    lt: float | None = Field(default=None, validation_alias="lt", serialization_alias="lt", description="Upper bound (exclusive) for numeric range filtering; matches values strictly less than this number.")
+    lte: float | None = Field(default=None, validation_alias="lte", serialization_alias="lte", description="Upper bound (inclusive) for numeric range filtering; matches values less than or equal to this number.")
 class PostApiV1DataSearchRequestBodyQuery(StrictModel):
-    type_: Literal["and", "or", "id", "object_type", "text", "has_related", "field_condition"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The root query type that determines how to interpret the query structure. Use 'and' or 'or' for combining multiple sub-queries, 'id' to search by object identifier, 'object_type' to filter by record type, 'text' for full-text search, 'has_related' to find records with related objects, or 'field_condition' to filter by specific field values.")
-    queries: list[dict[str, Any]] | None = Field(default=None, validation_alias="queries", serialization_alias="queries", description="Array of nested query objects used with 'and' or 'or' query types to combine multiple filter conditions. Each sub-query follows the same structure as the parent query.")
-    object_type: Literal["contact", "lead", "contact_phone", "contact_email", "contact_url", "address"] | None = Field(default=None, validation_alias="object_type", serialization_alias="object_type", description="Filter results to a specific object type: 'contact' or 'lead' for primary records, or 'contact_phone', 'contact_email', 'contact_url', 'address' for related contact details.")
-    value: str | None = Field(default=None, validation_alias="value", serialization_alias="value", description="The value to match for 'id' queries (object identifier) or 'text' queries (search term). For text queries, matching behavior is controlled by the 'mode' parameter.")
-    mode: Literal["full_words", "phrase"] | None = Field(default=None, validation_alias="mode", serialization_alias="mode", description="Controls text search matching behavior: 'full_words' matches complete words only, 'phrase' matches the exact phrase as entered.")
-    negate: bool | None = Field(default=None, validation_alias="negate", serialization_alias="negate", description="When true, inverts the query logic to return records that do NOT match the specified conditions.")
-    this_object_type: str | None = Field(default=None, validation_alias="this_object_type", serialization_alias="this_object_type", description="The primary object type for 'has_related' queries. Specifies which object type you're searching (e.g., 'contact').")
-    related_object_type: str | None = Field(default=None, validation_alias="related_object_type", serialization_alias="related_object_type", description="The related object type to check for in 'has_related' queries. Specifies what related records to look for (e.g., 'contact_email').")
-    related_query: dict[str, Any] | None = Field(default=None, validation_alias="related_query", serialization_alias="related_query", description="A query object defining conditions to apply to the related objects in 'has_related' queries. Only primary records with related objects matching this query are returned.")
+    type_: Literal["and", "or", "id", "object_type", "text", "has_related", "field_condition"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The type of query to execute: 'and'/'or' for combining multiple conditions, 'id' to search by object ID, 'object_type' to filter by entity type, 'text' for full-text search, 'has_related' to find objects with related entities, or 'field_condition' for attribute-based filtering.")
+    queries: list[dict[str, Any]] | None = Field(default=None, validation_alias="queries", serialization_alias="queries", description="Array of nested query objects used with 'and'/'or' query types to combine multiple filter conditions.")
+    object_type: Literal["contact", "lead", "contact_phone", "contact_email", "contact_url", "address"] | None = Field(default=None, validation_alias="object_type", serialization_alias="object_type", description="The entity type to filter by: 'contact', 'lead', 'contact_phone', 'contact_email', 'contact_url', or 'address'.")
+    this_object_type: str | None = Field(default=None, validation_alias="this_object_type", serialization_alias="this_object_type", description="The primary object type being queried in a 'has_related' query (e.g., 'contact' or 'lead').")
+    related_object_type: str | None = Field(default=None, validation_alias="related_object_type", serialization_alias="related_object_type", description="The related object type to check for existence in a 'has_related' query (e.g., 'contact_email' or 'contact_phone').")
+    related_query: dict[str, Any] | None = Field(default=None, validation_alias="related_query", serialization_alias="related_query", description="A query object defining conditions that related objects must satisfy in a 'has_related' query.")
+    negate: bool | None = Field(default=None, validation_alias="negate", serialization_alias="negate", description="When enabled, inverts the query logic to return objects that do NOT match the specified conditions.")
     field: PostApiV1DataSearchRequestBodyQueryField | None = None
     condition: PostApiV1DataSearchRequestBodyQueryCondition | None = None
 class PostApiV1DataSearchRequestBody(StrictModel):
-    fields: dict[str, Any] | None = Field(default=None, validation_alias="_fields", serialization_alias="_fields", description="Specify which fields to include in results for each object type. Use an object with object type keys (e.g., 'contact', 'lead') and arrays of field names as values to customize response data.")
-    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Number of results to return per page. Defaults to 10 results. Use with 'cursor' for pagination through large result sets.")
-    cursor: str | None = Field(default=None, description="Pagination cursor from a previous response to retrieve the next page of results. Omit for the first request.")
-    results_limit: int | None = Field(default=None, description="Maximum total number of results to return across all pages. Limits the overall result set size regardless of pagination.")
-    include_counts: bool | None = Field(default=None, description="When true, the response includes counts of total matching results for each object type, useful for understanding result scope before fetching all records.")
-    sort: list[PostApiV1DataSearchBodySortItem] | None = Field(default=None, description="Array of sort specifications to order results. Each entry specifies a field name and sort direction (ascending or descending) to organize results by your preferred criteria.")
+    fields: dict[str, Any] | None = Field(default=None, validation_alias="_fields", serialization_alias="_fields", description="Specify which fields to include in results for each object type. Provide as an object where keys are object type names (e.g., 'contact', 'lead') and values are arrays of field names to return.")
+    results_limit: int | None = Field(default=None, description="Maximum total number of results to return across all pages. Set to 0 with include_counts enabled to retrieve only the result count without fetching records.", ge=0)
+    include_counts: bool | None = Field(default=None, description="When enabled, the response includes a count object showing both the limited count (results returned) and total count (all matching records).")
+    sort: list[PostApiV1DataSearchBodySortItem] | None = Field(default=None, description="Array of sort specifications to order results. Only numeric, date, and text fields directly on the object can be sorted; specify field name and direction for each sort criterion.")
+    limit: int | None = Field(default=None, validation_alias="_limit", serialization_alias="_limit", description="Number of results to return per page for pagination; must be at least 1.", ge=1)
     query: PostApiV1DataSearchRequestBodyQuery
 class PostApiV1DataSearchRequest(StrictModel):
-    """Search for Leads or Contacts using advanced filtering with support for complex query conditions, relationships, and pagination. Construct queries with logical operators (and/or), field conditions, text search, and related object filters to find records matching your criteria."""
+    """Search and filter contacts and leads using advanced query logic with support for complex conditions, text search, and related object queries. Returns paginated results with optional field selection and sorting."""
     body: PostApiV1DataSearchRequestBody
 
 # ============================================================================
 # Component Models
 # ============================================================================
 
+class PostActivityEmailBodyAttachmentsItem(PermissiveModel):
+    url: str = Field(..., description="URL from Files API download.url field. Must begin with https://app.close.com/go/file/", json_schema_extra={'format': 'uri'})
+    filename: str = Field(..., description="Filename of the attachment.")
+    content_type: str = Field(..., description="MIME type of the attachment.")
+    size: int = Field(..., description="Size of the attachment in bytes.")
+
+class PostActivityNoteBodyAttachmentsItem(PermissiveModel):
+    url: str = Field(..., description="URL from the Files API download.url field. Must begin with https://app.close.com/go/file/.")
+    filename: str = Field(..., description="Name of the attachment file.")
+    content_type: str = Field(..., description="MIME type of the attachment.")
+
+class PostActivityWhatsappMessageBodyAttachmentsItem(PermissiveModel):
+    url: str = Field(..., description="URL from the Files API download.url field. Must begin with https://app.close.com/go/file/.", json_schema_extra={'format': 'uri'})
+    filename: str = Field(..., description="The filename of the attachment.")
+    content_type: str = Field(..., description="The MIME content type of the attachment.")
+
 class PostApiV1DataSearchBodySortItemField(PermissiveModel):
     """Field to sort by"""
     object_type: str | None = None
-    type_: str | None = Field(None, validation_alias="type", serialization_alias="type")
+    type_: Literal["regular_field", "custom_field"] | None = Field(None, validation_alias="type", serialization_alias="type")
     field_name: str | None = None
 
 class PostApiV1DataSearchBodySortItem(PermissiveModel):
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction")
     field: PostApiV1DataSearchBodySortItemField | None = Field(None, description="Field to sort by")
 
-class PostV1ActivityEmailBodyAttachmentsItem(PermissiveModel):
-    url: str = Field(..., description="File URL from Files API")
-    filename: str = Field(..., description="Attachment filename")
-    content_type: str = Field(..., description="MIME type")
-    size: int = Field(..., description="File size in bytes")
+class PostContactBodyEmailsItem(PermissiveModel):
+    email: str | None = None
+    type_: Literal["office", "direct", "mobile", "home", "other"] | None = Field(None, validation_alias="type", serialization_alias="type")
 
-class PostV1ActivityNoteBodyAttachmentsItem(PermissiveModel):
-    url: str | None = Field(None, description="URL from Files API download.url field, must begin https://app.close.com/go/file/")
-    filename: str | None = Field(None, description="Filename of the attachment")
-    content_type: str | None = Field(None, description="MIME type of the attachment")
+class PostContactBodyPhonesItem(PermissiveModel):
+    phone: str | None = None
+    type_: Literal["office", "direct", "mobile", "home", "fax", "other"] | None = Field(None, validation_alias="type", serialization_alias="type")
 
-class PostV1ActivityWhatsappMessageBodyAttachmentsItem(PermissiveModel):
-    url: str = Field(..., description="URL from Files API download.url response, must begin with https://app.close.com/go/file/")
-    filename: str = Field(..., description="Filename of the attachment")
-    content_type: str = Field(..., description="MIME type of the attachment")
+class PostWebhookBodyEventsItem(PermissiveModel):
+    object_type: str = Field(..., description="The type of object for this event")
+    action: str = Field(..., description="The action for this event")
 
-class PostV1WebhookBodyEventsItem(PermissiveModel):
+class PutActivityNoteIdBodyAttachmentsItem(PermissiveModel):
+    url: str = Field(..., description="URL from the Files API download.url field. Must begin with https://app.close.com/go/file/.")
+    filename: str = Field(..., description="Name of the attachment file.")
+    content_type: str = Field(..., description="MIME type of the attachment.")
+
+class PutActivityWhatsappMessageIdBodyAttachmentsItem(PermissiveModel):
+    url: str | None = Field(None, json_schema_extra={'format': 'uri'})
+    filename: str | None = None
+    content_type: str | None = None
+
+class PutCustomFieldSchemaObjectTypeBodyFieldsItem(PermissiveModel):
+    id_: str = Field(..., validation_alias="id", serialization_alias="id", description="The ID of the Custom Field.")
+
+class PutPipelinePipelineIdBodyStatusesItem(PermissiveModel):
+    id_: str | None = Field(None, validation_alias="id", serialization_alias="id", description="The ID of the opportunity status.")
+
+class PutWebhookIdBodyEventsItem(PermissiveModel):
     object_type: str
     action: str
 
-class PutV1CustomFieldSchemaObjectTypeBodyFieldsItem(PermissiveModel):
-    id_: str = Field(..., validation_alias="id", serialization_alias="id", description="Custom field ID")
-
-class PutV1PipelinePipelineIdBodyStatusesItem(PermissiveModel):
-    id_: str | None = Field(None, validation_alias="id", serialization_alias="id", description="Opportunity status ID")
-
-class PutV1WebhookIdBodyEventsItem(PermissiveModel):
-    object_type: str | None = None
-    action: str | None = None
-
 
 # Rebuild models to resolve forward references (required for circular refs)
+PostActivityEmailBodyAttachmentsItem.model_rebuild()
+PostActivityNoteBodyAttachmentsItem.model_rebuild()
+PostActivityWhatsappMessageBodyAttachmentsItem.model_rebuild()
 PostApiV1DataSearchBodySortItem.model_rebuild()
 PostApiV1DataSearchBodySortItemField.model_rebuild()
-PostV1ActivityEmailBodyAttachmentsItem.model_rebuild()
-PostV1ActivityNoteBodyAttachmentsItem.model_rebuild()
-PostV1ActivityWhatsappMessageBodyAttachmentsItem.model_rebuild()
-PostV1WebhookBodyEventsItem.model_rebuild()
-PutV1CustomFieldSchemaObjectTypeBodyFieldsItem.model_rebuild()
-PutV1PipelinePipelineIdBodyStatusesItem.model_rebuild()
-PutV1WebhookIdBodyEventsItem.model_rebuild()
+PostContactBodyEmailsItem.model_rebuild()
+PostContactBodyPhonesItem.model_rebuild()
+PostWebhookBodyEventsItem.model_rebuild()
+PutActivityNoteIdBodyAttachmentsItem.model_rebuild()
+PutActivityWhatsappMessageIdBodyAttachmentsItem.model_rebuild()
+PutCustomFieldSchemaObjectTypeBodyFieldsItem.model_rebuild()
+PutPipelinePipelineIdBodyStatusesItem.model_rebuild()
+PutWebhookIdBodyEventsItem.model_rebuild()
