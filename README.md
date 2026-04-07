@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://wjxawmrpsfuivlicnepc.supabase.co/storage/v1/object/public/newsletter/logo-blacksmith.png" alt="MCP Armory" height="64">
+  <img src="logo.png" alt="MCP Armory" height="64">
 </p>
 
 <h1 align="center">MCP Armory Registry</h1>
