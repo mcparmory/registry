@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ip2location-geolocation": {
+      "command": "python",
+      "args": ["<SERVER_DIR>/server.py"]
+    }
+  }
+}
