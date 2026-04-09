@@ -5,7 +5,7 @@ Airtable MCP Server
 API Info:
 - Terms of Service: https://www.airtable.com/tos
 
-Generated: 2026-04-05 20:13:51 UTC
+Generated: 2026-04-09 17:12:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -490,11 +490,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -536,7 +540,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -780,15 +787,19 @@ def build_sort_array(sort_fields: list[str] | None = None, sort_directions: list
     return sort_array
 
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -813,10 +824,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -951,9 +967,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -997,6 +1013,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -1009,7 +1026,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -1021,16 +1038,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1051,12 +1072,6 @@ mcp = FastMCP("Airtable", middleware=[_JsonCoercionMiddleware()])
 async def get_current_user() -> dict[str, Any]:
     """Retrieve the current authenticated user's identity and account information. Returns the user ID, associated OAuth scopes (if applicable), and email address (if the token has user.email:read scope)."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_current_user", "GET", "/v0/meta/whoami", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v0/meta/whoami"
     _http_headers = {}
@@ -1064,6 +1079,9 @@ async def get_current_user() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_current_user")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_current_user", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1091,7 +1109,7 @@ async def list_table_records(
     cell_format: Literal["json", "string"] | None = Field(None, alias="cellFormat", description="Format for cell values: 'json' returns type-specific JSON representations, 'string' returns user-facing formatted strings. When using 'string', timeZone and userLocale are required."),
     record_metadata: list[Literal["commentCount"]] | None = Field(None, alias="recordMetadata", description="Optional metadata to include with each record. When specified, adds commentCount to the record metadata."),
     sort_fields: list[str] | None = Field(None, description="List of field names to sort by, in order of precedence"),
-    sort_directions: list[str] | None = Field(None, description="List of sort directions corresponding to sort_fields. Each value must be 'asc' or 'desc'. If shorter than sort_fields, remaining fields default to 'asc'.")
+    sort_directions: list[str] | None = Field(None, description="List of sort directions corresponding to sort_fields. Each value must be 'asc' or 'desc'. If shorter than sort_fields, remaining fields default to 'asc'."),
 ) -> dict[str, Any]:
     """Retrieve paginated records from a table with optional filtering, formatting, and view selection. Results are returned one page at a time (up to 100 records per page by default), with pagination support via offset tokens."""
 
@@ -1108,12 +1126,6 @@ async def list_table_records(
         logging.error(f"Parameter validation failed for list_table_records: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_table_records", "GET", "/v0/{baseId}/{tableIdOrName}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1122,6 +1134,9 @@ async def list_table_records(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_table_records")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_table_records", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1141,7 +1156,7 @@ async def create_records(
     base_id: str = Field(..., alias="baseId", description="The unique identifier for the base containing the target table."),
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name. Table IDs are recommended to avoid needing request updates when table names change."),
     records: list[_models.PostV0BaseidTableidornameBodyRecordsItem] | None = Field(None, description="Array of up to 10 record objects to create. Each record object should contain a single key with an inner object of cell values, keyed by field name or field ID."),
-    typecast: bool | None = Field(None, description="Enable automatic type conversion from string values to appropriate field types. Disabled by default to preserve data integrity; enable when integrating with third-party data sources that may require conversion.")
+    typecast: bool | None = Field(None, description="Enable automatic type conversion from string values to appropriate field types. Disabled by default to preserve data integrity; enable when integrating with third-party data sources that may require conversion."),
 ) -> dict[str, Any]:
     """Create multiple records in a table. Submit up to 10 record objects in a single request, with cell values keyed by field name or field ID. Returns an array of newly created record IDs."""
 
@@ -1155,12 +1170,6 @@ async def create_records(
         logging.error(f"Parameter validation failed for create_records: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_records", "POST", "/v0/{baseId}/{tableIdOrName}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1169,6 +1178,9 @@ async def create_records(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_records")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_records", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1189,7 +1201,7 @@ async def replace_records(
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The unique identifier or name of the table to update."),
     fields_to_merge_on: list[str] = Field(..., alias="fieldsToMergeOn", description="One to three field names or IDs used to match and identify records for replacement. Field IDs must uniquely identify a single record."),
     records: list[_models.PutV0BaseidTableidornameBodyRecordsItem] = Field(..., description="Array of up to 10 records to replace or upsert, with each record containing field values to apply."),
-    typecast: bool | None = Field(None, description="When enabled, Airtable will attempt to convert string values to appropriate cell types (e.g., numbers, dates). Defaults to false.")
+    typecast: bool | None = Field(None, description="When enabled, Airtable will attempt to convert string values to appropriate cell types (e.g., numbers, dates). Defaults to false."),
 ) -> dict[str, Any]:
     """Replace multiple records in a table with a destructive update that clears all unincluded cell values. Supports upserting up to 10 records by matching on specified field(s)."""
 
@@ -1204,12 +1216,6 @@ async def replace_records(
         logging.error(f"Parameter validation failed for replace_records: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("replace_records", "PUT", "/v0/{baseId}/{tableIdOrName}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1218,6 +1224,9 @@ async def replace_records(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("replace_records")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("replace_records", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1238,7 +1247,7 @@ async def update_records(
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The unique identifier or name of the table to update records in."),
     fields_to_merge_on: list[str] = Field(..., alias="fieldsToMergeOn", description="One to three field names or IDs used to identify which records to update or upsert. Field IDs must uniquely identify a single record. When multiple fields are specified, all must match for a record to be identified."),
     records: list[_models.PatchV0BaseidTableidornameBodyRecordsItem] = Field(..., description="Array of record objects to update or upsert, with a maximum of 10 records per request. Each record should include the merge-on fields and any fields to be updated."),
-    typecast: bool | None = Field(None, description="When enabled, Airtable will automatically convert string values to appropriate cell types (e.g., '123' to number, 'true' to checkbox). Defaults to false.")
+    typecast: bool | None = Field(None, description="When enabled, Airtable will automatically convert string values to appropriate cell types (e.g., '123' to number, 'true' to checkbox). Defaults to false."),
 ) -> dict[str, Any]:
     """Update or upsert up to 10 records in a table. When performUpsert is enabled, records matching the specified merge fields are updated; non-matching records are created. Only fields included in the request are modified; all other fields remain unchanged."""
 
@@ -1253,12 +1262,6 @@ async def update_records(
         logging.error(f"Parameter validation failed for update_records: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_records", "PATCH", "/v0/{baseId}/{tableIdOrName}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1267,6 +1270,9 @@ async def update_records(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_records")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_records", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1285,7 +1291,7 @@ async def update_records(
 async def delete_records(
     base_id: str = Field(..., alias="baseId", description="The unique identifier for the base containing the table."),
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name where records will be deleted."),
-    records: list[str] | None = Field(None, description="Array of record IDs to delete. Accepts up to 10 record IDs per request. Each ID should be a valid record identifier string.")
+    records: list[str] | None = Field(None, description="Array of record IDs to delete. Accepts up to 10 record IDs per request. Each ID should be a valid record identifier string."),
 ) -> dict[str, Any]:
     """Delete multiple records from a table by their record IDs. Supports batch deletion of up to 10 records in a single request."""
 
@@ -1299,12 +1305,6 @@ async def delete_records(
         logging.error(f"Parameter validation failed for delete_records: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_records", "DELETE", "/v0/{baseId}/{tableIdOrName}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1313,6 +1313,9 @@ async def delete_records(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_records")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_records", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1332,7 +1335,7 @@ async def get_record(
     base_id: str = Field(..., alias="baseId", description="The unique identifier of the base containing the record."),
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name where the record is located."),
     record_id: str = Field(..., alias="recordId", description="The unique identifier of the record to retrieve."),
-    cell_format: Literal["json", "string"] | None = Field(None, alias="cellFormat", description="The format for cell values in the response. Use 'json' to format cells according to their field type, or 'string' to format all cells as user-facing strings (requires timeZone and userLocale parameters). Defaults to 'json'.")
+    cell_format: Literal["json", "string"] | None = Field(None, alias="cellFormat", description="The format for cell values in the response. Use 'json' to format cells according to their field type, or 'string' to format all cells as user-facing strings (requires timeZone and userLocale parameters). Defaults to 'json'."),
 ) -> dict[str, Any]:
     """Retrieve a single record by its ID from a specified table. If the record is not found in the table, the system automatically searches across the entire base and returns the record if located."""
 
@@ -1346,12 +1349,6 @@ async def get_record(
         logging.error(f"Parameter validation failed for get_record: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_record", "GET", "/v0/{baseId}/{tableIdOrName}/{recordId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}/{recordId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}/{recordId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1360,6 +1357,9 @@ async def get_record(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_record")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_record", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1380,7 +1380,7 @@ async def replace_record(
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name. Both formats are accepted interchangeably."),
     record_id: str = Field(..., alias="recordId", description="The unique identifier of the record to update."),
     fields: dict[str, Any] = Field(..., description="An object containing the cell values for the record, keyed by field name or field ID. Any fields omitted from this object will be cleared during the update."),
-    typecast: bool | None = Field(None, description="Enable automatic data type conversion from string values when integrating with third-party data sources. Disabled by default to maintain data integrity.")
+    typecast: bool | None = Field(None, description="Enable automatic data type conversion from string values when integrating with third-party data sources. Disabled by default to maintain data integrity."),
 ) -> dict[str, Any]:
     """Destructively update a single record in a table, clearing all unspecified cell values. Use this operation when you want to replace the entire record content with new values."""
 
@@ -1394,12 +1394,6 @@ async def replace_record(
         logging.error(f"Parameter validation failed for replace_record: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("replace_record", "PUT", "/v0/{baseId}/{tableIdOrName}/{recordId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}/{recordId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}/{recordId}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1408,6 +1402,9 @@ async def replace_record(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("replace_record")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("replace_record", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1428,7 +1425,7 @@ async def update_record(
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name where the record is located. Both table IDs and table names are accepted."),
     record_id: str = Field(..., alias="recordId", description="The unique identifier of the record to update."),
     fields: dict[str, Any] = Field(..., description="An object containing the field values to update, keyed by field name or field ID. Only specified fields will be updated; all other fields remain unchanged."),
-    typecast: bool | None = Field(None, description="Enable automatic data type conversion from string values when updating fields. Disabled by default to preserve data integrity, but useful when integrating with third-party data sources.")
+    typecast: bool | None = Field(None, description="Enable automatic data type conversion from string values when updating fields. Disabled by default to preserve data integrity, but useful when integrating with third-party data sources."),
 ) -> dict[str, Any]:
     """Partially update a single record in a table by specifying only the fields you want to change. Unspecified fields remain unchanged. Table names and IDs can be used interchangeably."""
 
@@ -1442,12 +1439,6 @@ async def update_record(
         logging.error(f"Parameter validation failed for update_record: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_record", "PATCH", "/v0/{baseId}/{tableIdOrName}/{recordId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}/{recordId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}/{recordId}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1456,6 +1447,9 @@ async def update_record(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_record")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_record", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1474,7 +1468,7 @@ async def update_record(
 async def delete_record(
     base_id: str = Field(..., alias="baseId", description="The unique identifier of the base containing the table and record to delete."),
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name where the record is located. Can be specified by either the table's unique ID or its display name."),
-    record_id: str = Field(..., alias="recordId", description="The unique identifier of the record to delete.")
+    record_id: str = Field(..., alias="recordId", description="The unique identifier of the record to delete."),
 ) -> dict[str, Any]:
     """Permanently deletes a single record from a table. This action cannot be undone."""
 
@@ -1487,12 +1481,6 @@ async def delete_record(
         logging.error(f"Parameter validation failed for delete_record: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_record", "DELETE", "/v0/{baseId}/{tableIdOrName}/{recordId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}/{recordId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}/{recordId}"
     _http_headers = {}
@@ -1500,6 +1488,9 @@ async def delete_record(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_record")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_record", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1518,7 +1509,7 @@ async def sync_table_data(
     base_id: str = Field(..., alias="baseId", description="The unique identifier for the base containing the table to sync."),
     table_id_or_name: str = Field(..., alias="tableIdOrName", description="The table identifier or name where the CSV data will be synced."),
     api_endpoint_sync_id: str = Field(..., alias="apiEndpointSyncId", description="The API endpoint sync identifier, obtained from the Sync API table setup flow or the synced table settings."),
-    body: str = Field(..., description="Raw CSV data to sync into the table. Supports up to 10,000 rows and 500 columns, with a total request size not exceeding 2 MB.")
+    body: str = Field(..., description="Raw CSV data to sync into the table. Supports up to 10,000 rows and 500 columns, with a total request size not exceeding 2 MB."),
 ) -> dict[str, Any]:
     """Syncs CSV data into a Sync API table. The CSV can contain up to 10,000 rows and 500 columns, with a maximum HTTP request size of 2 MB per sync run."""
 
@@ -1532,12 +1523,6 @@ async def sync_table_data(
         logging.error(f"Parameter validation failed for sync_table_data: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("sync_table_data", "POST", "/v0/{baseId}/{tableIdOrName}/sync/{apiEndpointSyncId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{tableIdOrName}/sync/{apiEndpointSyncId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{tableIdOrName}/sync/{apiEndpointSyncId}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1548,6 +1533,9 @@ async def sync_table_data(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("sync_table_data")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("sync_table_data", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1570,7 +1558,7 @@ async def upload_attachment(
     attachment_field_id_or_name: str = Field(..., alias="attachmentFieldIdOrName", description="The ID or name of the attachment field where the file will be uploaded."),
     content_type: str = Field(..., alias="contentType", description="The MIME type of the file being uploaded (e.g., image/jpeg, application/pdf, text/plain)."),
     file_: str = Field(..., alias="file", description="The file content encoded as a base64 string. The decoded file size must not exceed 5 MB."),
-    filename: str = Field(..., description="The name of the file including its extension (e.g., document.pdf, photo.jpg).")
+    filename: str = Field(..., description="The name of the file including its extension (e.g., document.pdf, photo.jpg)."),
 ) -> dict[str, Any]:
     """Upload a file attachment (up to 5 MB) directly to an attachment field in a record. The file must be provided as base64-encoded bytes along with its content type and filename."""
 
@@ -1584,12 +1572,6 @@ async def upload_attachment(
         logging.error(f"Parameter validation failed for upload_attachment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("upload_attachment", "POST", "/v0/{baseId}/{recordId}/{attachmentFieldIdOrName}/uploadAttachment", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v0/{baseId}/{recordId}/{attachmentFieldIdOrName}/uploadAttachment", _request.path.model_dump(by_alias=True)) if _request.path else "/v0/{baseId}/{recordId}/{attachmentFieldIdOrName}/uploadAttachment"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1598,6 +1580,9 @@ async def upload_attachment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_attachment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("upload_attachment", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(

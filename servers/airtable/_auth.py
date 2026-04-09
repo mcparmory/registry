@@ -1,7 +1,7 @@
 """
 Authentication module for Airtable MCP server.
 
-Generated: 2026-04-05 20:13:51 UTC
+Generated: 2026-04-09 17:12:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

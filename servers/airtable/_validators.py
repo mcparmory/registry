@@ -1,7 +1,7 @@
 """
 Airtable MCP Server - Validators
 
-Generated: 2026-04-05 20:13:51 UTC
+Generated: 2026-04-09 17:12:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -97,10 +97,10 @@ def _validate_binary(value):
     raise ValueError(f"Invalid binary: expected string or bytes, got {type(value).__name__}")
 
 def _validate_date_time(value):
-    """Validate RFC 3339 date-time: YYYY-MM-DDTHH:MM:SS[.fraction][Z|+/-HH:MM]"""
+    """Validate RFC 3339 / ISO 8601 date-time: YYYY-MM-DDTHH:MM:SS[.fraction][Z|+/-HH:MM|+/-HHMM]"""
     if not isinstance(value, str):
         raise ValueError("Invalid date-time: expected string")
-    pattern = r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$'
+    pattern = r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$'
     if not re.match(pattern, value):
         raise ValueError(f"'{value}' is not valid RFC 3339 date-time")
     return value
