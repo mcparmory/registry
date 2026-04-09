@@ -1,7 +1,6 @@
-# Browserbase API MCP Server
+# Browserbase MCP Server
 
 Base URL: https://www.browserbase.com
-
 ---
 
 ## Install

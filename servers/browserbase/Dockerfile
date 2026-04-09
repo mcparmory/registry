@@ -1,4 +1,4 @@
-# Browserbase API MCP Server
+# Browserbase MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-browserbase .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Browserbase API MCP Server" \
+LABEL org.opencontainers.image.title="Browserbase MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
