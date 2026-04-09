@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 🎨 NFT API MCP Server
-Generated: 2026-04-06 14:27:39 UTC
+Generated: 2026-04-09 17:13:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -487,11 +487,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -533,7 +537,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -797,10 +804,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -1319,47 +1331,6 @@ async def get_collection_metadata(
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_collection_metadata",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-    )
-
-    return _response_data
-
-# Tags: NFT Metadata Endpoints
-@mcp.tool()
-async def invalidate_contract_cache(
-    network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
-    contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract to invalidate. Supports ERC721 and ERC1155 contract standards."),
-) -> dict[str, Any]:
-    """Clear all cached token data for an NFT contract, forcing the next query to fetch fresh live data. Supported on Ethereum, Polygon, Arbitrum, Optimism, and Base networks."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.InvalidateContractV3Request(
-            query=_models.InvalidateContractV3RequestQuery(contract_address=contract_address)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for invalidate_contract_cache: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/v3/{apiKey}/invalidateContract"
-    _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("invalidate_contract_cache")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
-
-    _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("invalidate_contract_cache", "GET", _http_path, _request_id, _redact)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="invalidate_contract_cache",
         method="GET",
         path=_http_path,
         request_id=_request_id,

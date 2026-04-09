@@ -1,7 +1,7 @@
 """
 Authentication module for 🎨 NFT API MCP server.
 
-Generated: 2026-04-06 14:27:39 UTC
+Generated: 2026-04-09 17:13:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -114,7 +114,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "batch_retrieve_nft_metadata": [["api_key"]],
     "get_nft_contract_metadata": [["api_key"]],
     "get_collection_metadata": [["api_key"]],
-    "invalidate_contract_cache": [["api_key"]],
     "batch_get_contract_metadata": [["api_key"]],
     "get_nft_owners": [["api_key"]],
     "list_nft_contract_owners": [["api_key"]],

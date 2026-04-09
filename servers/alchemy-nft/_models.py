@@ -1,7 +1,7 @@
 """
 🎨 Nft Api MCP Server - Pydantic Models
 
-Generated: 2026-04-06 14:27:39 UTC
+Generated: 2026-04-09 17:13:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -31,7 +31,6 @@ __all__ = [
     "GetOwnersForContractV3Request",
     "GetOwnersForNftV3Request",
     "GetOwnersForTokenRequest",
-    "InvalidateContractV3Request",
     "IsAirdropNftV3Request",
     "IsAirdropRequest",
     "IsHolderOfCollectionRequest",
@@ -110,13 +109,6 @@ class GetCollectionMetadataV3RequestQuery(StrictModel):
 class GetCollectionMetadataV3Request(StrictModel):
     """Retrieve high-level metadata and contract information for an NFT collection using its OpenSea slug. Supported across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
     query: GetCollectionMetadataV3RequestQuery
-
-# Operation: invalidate_contract_cache
-class InvalidateContractV3RequestQuery(StrictModel):
-    contract_address: str = Field(default=..., validation_alias="contractAddress", serialization_alias="contractAddress", description="The blockchain address of the NFT contract to invalidate. Supports ERC721 and ERC1155 contract standards.")
-class InvalidateContractV3Request(StrictModel):
-    """Clear all cached token data for an NFT contract, forcing the next query to fetch fresh live data. Supported on Ethereum, Polygon, Arbitrum, Optimism, and Base networks."""
-    query: InvalidateContractV3RequestQuery
 
 # Operation: batch_get_contract_metadata
 class GetContractMetadataBatchV3RequestBody(StrictModel):
