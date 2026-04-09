@@ -1,4 +1,4 @@
-# Datadog API V2 Collection MCP Server
+# Datadog MCP Server
 
 Base URL: https://api.datadoghq.com
 ## API Info
@@ -14,7 +14,7 @@ Base URL: https://api.datadoghq.com
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
-API_KEY_AUTH_API_KEY=YOUR_API_KEY_AUTH_API_KEY \
+API_KEY_AUTH=YOUR_API_KEY_AUTH \
 APP_KEY_AUTH_API_KEY=YOUR_APP_KEY_AUTH_API_KEY \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 uvx mcparmory-datadog
@@ -27,7 +27,7 @@ pip install mcparmory-datadog
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
-API_KEY_AUTH_API_KEY=YOUR_API_KEY_AUTH_API_KEY \
+API_KEY_AUTH=YOUR_API_KEY_AUTH \
 APP_KEY_AUTH_API_KEY=YOUR_APP_KEY_AUTH_API_KEY \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 mcparmory-datadog
@@ -47,7 +47,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
         "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
         "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
         "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
-        "API_KEY_AUTH_API_KEY": "YOUR_API_KEY_AUTH_API_KEY",
+        "API_KEY_AUTH": "YOUR_API_KEY_AUTH",
         "APP_KEY_AUTH_API_KEY": "YOUR_APP_KEY_AUTH_API_KEY",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
@@ -67,7 +67,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
-- `API_KEY_AUTH_API_KEY` — API Key Authentication (DD-API-KEY)
+- `API_KEY_AUTH` — API Key Authentication (DD-API-KEY)
 - `APP_KEY_AUTH_API_KEY` — API Key Authentication (DD-APPLICATION-KEY)
 - `BEARER_TOKEN` — Bearer token
 Do not commit credentials to version control.
