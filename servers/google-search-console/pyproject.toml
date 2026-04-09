@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-google-search-console"
-version = "1.0.0"
+version = "1.0.1"
 description = "MCP server for Google Search Console API"
 readme = "README.md"
 license = "MIT"
