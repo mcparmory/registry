@@ -1,4 +1,4 @@
-# Bitbucket API MCP Server
+# Bitbucket MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-bitbucket .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Bitbucket API MCP Server" \
+LABEL org.opencontainers.image.title="Bitbucket MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

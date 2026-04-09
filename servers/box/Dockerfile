@@ -1,4 +1,4 @@
-# Box Platform API MCP Server
+# Box MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-box .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Box Platform API MCP Server" \
+LABEL org.opencontainers.image.title="Box MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
