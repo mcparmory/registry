@@ -1,7 +1,7 @@
 """
 Github MCP Server - Pydantic Models
 
-Generated: 2026-04-06 14:24:48 UTC
+Generated: 2026-04-09 17:23:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -35,11 +35,8 @@ __all__ = [
     "ActionsCreateEnvironmentVariableRequest",
     "ActionsCreateHostedRunnerForOrgRequest",
     "ActionsCreateOrgVariableRequest",
-    "ActionsCreateOrUpdateEnvironmentSecretRequest",
     "ActionsCreateOrUpdateOrgSecretRequest",
-    "ActionsCreateOrUpdateRepoSecretRequest",
     "ActionsCreateRegistrationTokenForOrgRequest",
-    "ActionsCreateRegistrationTokenForRepoRequest",
     "ActionsCreateRemoveTokenForOrgRequest",
     "ActionsCreateRemoveTokenForRepoRequest",
     "ActionsCreateRepoVariableRequest",
@@ -62,22 +59,15 @@ __all__ = [
     "ActionsDeleteSelfHostedRunnerGroupFromOrgRequest",
     "ActionsDeleteWorkflowRunLogsRequest",
     "ActionsDeleteWorkflowRunRequest",
-    "ActionsDisableSelectedRepositoryGithubActionsOrganizationRequest",
     "ActionsDisableSelectedRepositorySelfHostedRunnersOrganizationRequest",
     "ActionsDisableWorkflowRequest",
     "ActionsDownloadArtifactRequest",
     "ActionsDownloadJobLogsForWorkflowRunRequest",
     "ActionsDownloadWorkflowRunAttemptLogsRequest",
     "ActionsDownloadWorkflowRunLogsRequest",
-    "ActionsEnableSelectedRepositoryGithubActionsOrganizationRequest",
-    "ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequest",
     "ActionsEnableWorkflowRequest",
     "ActionsForceCancelWorkflowRunRequest",
-    "ActionsGenerateRunnerJitconfigForOrgRequest",
-    "ActionsGenerateRunnerJitconfigForRepoRequest",
     "ActionsGetActionsCacheListRequest",
-    "ActionsGetActionsCacheRetentionLimitForEnterpriseRequest",
-    "ActionsGetActionsCacheRetentionLimitForOrganizationRequest",
     "ActionsGetActionsCacheRetentionLimitForRepositoryRequest",
     "ActionsGetActionsCacheStorageLimitForEnterpriseRequest",
     "ActionsGetActionsCacheStorageLimitForOrganizationRequest",
@@ -85,10 +75,6 @@ __all__ = [
     "ActionsGetActionsCacheUsageByRepoForOrgRequest",
     "ActionsGetActionsCacheUsageForOrgRequest",
     "ActionsGetActionsCacheUsageRequest",
-    "ActionsGetAllowedActionsOrganizationRequest",
-    "ActionsGetAllowedActionsRepositoryRequest",
-    "ActionsGetArtifactAndLogRetentionSettingsOrganizationRequest",
-    "ActionsGetArtifactAndLogRetentionSettingsRepositoryRequest",
     "ActionsGetArtifactRequest",
     "ActionsGetCustomImageForOrgRequest",
     "ActionsGetCustomImageVersionForOrgRequest",
@@ -96,12 +82,6 @@ __all__ = [
     "ActionsGetEnvironmentPublicKeyRequest",
     "ActionsGetEnvironmentSecretRequest",
     "ActionsGetEnvironmentVariableRequest",
-    "ActionsGetForkPrContributorApprovalPermissionsOrganizationRequest",
-    "ActionsGetForkPrContributorApprovalPermissionsRepositoryRequest",
-    "ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequest",
-    "ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequest",
-    "ActionsGetGithubActionsPermissionsOrganizationRequest",
-    "ActionsGetGithubActionsPermissionsRepositoryRequest",
     "ActionsGetHostedRunnerForOrgRequest",
     "ActionsGetHostedRunnersGithubOwnedImagesForOrgRequest",
     "ActionsGetHostedRunnersLimitsForOrgRequest",
@@ -113,8 +93,6 @@ __all__ = [
     "ActionsGetOrgSecretRequest",
     "ActionsGetOrgVariableRequest",
     "ActionsGetPendingDeploymentsForRunRequest",
-    "ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest",
-    "ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest",
     "ActionsGetRepoPublicKeyRequest",
     "ActionsGetRepoSecretRequest",
     "ActionsGetRepoVariableRequest",
@@ -122,13 +100,10 @@ __all__ = [
     "ActionsGetSelfHostedRunnerForOrgRequest",
     "ActionsGetSelfHostedRunnerForRepoRequest",
     "ActionsGetSelfHostedRunnerGroupForOrgRequest",
-    "ActionsGetSelfHostedRunnersPermissionsOrganizationRequest",
-    "ActionsGetWorkflowAccessToRepositoryRequest",
     "ActionsGetWorkflowRequest",
     "ActionsGetWorkflowRunAttemptRequest",
     "ActionsGetWorkflowRunRequest",
     "ActionsGetWorkflowRunUsageRequest",
-    "ActionsGetWorkflowUsageRequest",
     "ActionsListArtifactsForRepoRequest",
     "ActionsListCustomImagesForOrgRequest",
     "ActionsListCustomImageVersionsForOrgRequest",
@@ -174,35 +149,12 @@ __all__ = [
     "ActionsReRunWorkflowRequest",
     "ActionsReviewCustomGatesForRunRequest",
     "ActionsReviewPendingDeploymentsForRunRequest",
-    "ActionsSetActionsCacheRetentionLimitForEnterpriseRequest",
-    "ActionsSetActionsCacheRetentionLimitForOrganizationRequest",
-    "ActionsSetActionsCacheRetentionLimitForRepositoryRequest",
-    "ActionsSetActionsCacheStorageLimitForEnterpriseRequest",
-    "ActionsSetActionsCacheStorageLimitForOrganizationRequest",
-    "ActionsSetActionsCacheStorageLimitForRepositoryRequest",
-    "ActionsSetAllowedActionsOrganizationRequest",
-    "ActionsSetAllowedActionsRepositoryRequest",
-    "ActionsSetArtifactAndLogRetentionSettingsOrganizationRequest",
-    "ActionsSetArtifactAndLogRetentionSettingsRepositoryRequest",
     "ActionsSetCustomLabelsForSelfHostedRunnerForOrgRequest",
     "ActionsSetCustomLabelsForSelfHostedRunnerForRepoRequest",
-    "ActionsSetCustomOidcSubClaimForRepoRequest",
-    "ActionsSetForkPrContributorApprovalPermissionsOrganizationRequest",
-    "ActionsSetForkPrContributorApprovalPermissionsRepositoryRequest",
-    "ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequest",
-    "ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequest",
-    "ActionsSetGithubActionsPermissionsOrganizationRequest",
-    "ActionsSetGithubActionsPermissionsRepositoryRequest",
-    "ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest",
-    "ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest",
     "ActionsSetRepoAccessToSelfHostedRunnerGroupInOrgRequest",
     "ActionsSetSelectedReposForOrgSecretRequest",
     "ActionsSetSelectedReposForOrgVariableRequest",
-    "ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequest",
-    "ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequest",
     "ActionsSetSelfHostedRunnersInGroupForOrgRequest",
-    "ActionsSetSelfHostedRunnersPermissionsOrganizationRequest",
-    "ActionsSetWorkflowAccessToRepositoryRequest",
     "ActionsUpdateEnvironmentVariableRequest",
     "ActionsUpdateHostedRunnerForOrgRequest",
     "ActionsUpdateOrgVariableRequest",
@@ -237,23 +189,17 @@ __all__ = [
     "ActivitySetThreadSubscriptionRequest",
     "ActivityStarRepoForAuthenticatedUserRequest",
     "ActivityUnstarRepoForAuthenticatedUserRequest",
-    "ApiInsightsGetRouteStatsByActorRequest",
     "ApiInsightsGetSubjectStatsRequest",
     "ApiInsightsGetSummaryStatsByActorRequest",
-    "ApiInsightsGetSummaryStatsByUserRequest",
     "ApiInsightsGetSummaryStatsRequest",
     "ApiInsightsGetTimeStatsByActorRequest",
     "ApiInsightsGetTimeStatsByUserRequest",
     "ApiInsightsGetTimeStatsRequest",
     "ApiInsightsGetUserStatsRequest",
     "AppsAddRepoToInstallationForAuthenticatedUserRequest",
-    "AppsCheckTokenRequest",
-    "AppsCreateFromManifestRequest",
-    "AppsCreateInstallationAccessTokenRequest",
     "AppsDeleteAuthorizationRequest",
     "AppsDeleteInstallationRequest",
     "AppsDeleteTokenRequest",
-    "AppsGetBySlugRequest",
     "AppsGetInstallationRequest",
     "AppsGetOrgInstallationRequest",
     "AppsGetRepoInstallationRequest",
@@ -261,17 +207,12 @@ __all__ = [
     "AppsGetSubscriptionPlanForAccountStubbedRequest",
     "AppsGetUserInstallationRequest",
     "AppsGetWebhookDeliveryRequest",
-    "AppsListAccountsForPlanRequest",
-    "AppsListAccountsForPlanStubbedRequest",
-    "AppsListInstallationReposForAuthenticatedUserRequest",
     "AppsListInstallationsRequest",
     "AppsRedeliverWebhookDeliveryRequest",
     "AppsRemoveRepoFromInstallationForAuthenticatedUserRequest",
-    "AppsResetTokenRequest",
     "AppsScopeTokenRequest",
     "AppsSuspendInstallationRequest",
     "AppsUnsuspendInstallationRequest",
-    "AppsUpdateWebhookConfigForAppRequest",
     "BillingDeleteBudgetOrgRequest",
     "BillingGetAllBudgetsOrgRequest",
     "BillingGetBudgetOrgRequest",
@@ -297,7 +238,6 @@ __all__ = [
     "ChecksListSuitesForRefRequest",
     "ChecksRerequestRunRequest",
     "ChecksRerequestSuiteRequest",
-    "ChecksSetSuitesPreferencesRequest",
     "ChecksUpdateRequest",
     "ClassroomGetAClassroomRequest",
     "ClassroomGetAnAssignmentRequest",
@@ -323,12 +263,9 @@ __all__ = [
     "CodeScanningListCodeqlDatabasesRequest",
     "CodeScanningListRecentAnalysesRequest",
     "CodeScanningUpdateAlertRequest",
-    "CodeScanningUpdateDefaultSetupRequest",
     "CodeScanningUploadSarifRequest",
     "CodeSecurityAttachConfigurationRequest",
     "CodeSecurityAttachEnterpriseConfigurationRequest",
-    "CodeSecurityCreateConfigurationForEnterpriseRequest",
-    "CodeSecurityCreateConfigurationRequest",
     "CodeSecurityDeleteConfigurationForEnterpriseRequest",
     "CodeSecurityDeleteConfigurationRequest",
     "CodeSecurityDetachConfigurationRequest",
@@ -341,14 +278,10 @@ __all__ = [
     "CodeSecurityGetRepositoriesForConfigurationRequest",
     "CodeSecurityGetRepositoriesForEnterpriseConfigurationRequest",
     "CodeSecurityGetSingleConfigurationForEnterpriseRequest",
-    "CodeSecuritySetConfigurationAsDefaultForEnterpriseRequest",
-    "CodeSecuritySetConfigurationAsDefaultRequest",
     "CodeSecurityUpdateConfigurationRequest",
-    "CodeSecurityUpdateEnterpriseConfigurationRequest",
     "CodesOfConductGetConductCodeRequest",
     "CodespacesAddRepositoryForSecretForAuthenticatedUserRequest",
     "CodespacesAddSelectedRepoToOrgSecretRequest",
-    "CodespacesCheckPermissionsForDevcontainerRequest",
     "CodespacesCodespaceMachinesForAuthenticatedUserRequest",
     "CodespacesCreateForAuthenticatedUserRequest",
     "CodespacesCreateOrUpdateOrgSecretRequest",
@@ -365,7 +298,6 @@ __all__ = [
     "CodespacesGetCodespacesForUserInOrgRequest",
     "CodespacesGetExportDetailsForAuthenticatedUserRequest",
     "CodespacesGetForAuthenticatedUserRequest",
-    "CodespacesGetOrgPublicKeyRequest",
     "CodespacesGetOrgSecretRequest",
     "CodespacesGetRepoPublicKeyRequest",
     "CodespacesGetRepoSecretRequest",
@@ -396,17 +328,12 @@ __all__ = [
     "CopilotCopilotContentExclusionForOrganizationRequest",
     "CopilotCopilotMetricsForOrganizationRequest",
     "CopilotCopilotMetricsForTeamRequest",
-    "CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequest",
     "CopilotEnableCopilotCodingAgentForRepositoryInOrganizationRequest",
     "CopilotGetCopilotCodingAgentPermissionsOrganizationRequest",
     "CopilotGetCopilotOrganizationDetailsRequest",
     "CopilotGetCopilotSeatDetailsForUserRequest",
     "CopilotListCopilotCodingAgentSelectedRepositoriesForOrganizationRequest",
     "CopilotListCopilotSeatsRequest",
-    "CopilotSetCopilotCodingAgentPermissionsOrganizationRequest",
-    "CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequest",
-    "CopilotSetCopilotContentExclusionForOrganizationRequest",
-    "CredentialsRevokeRequest",
     "DependabotAddSelectedRepoToOrgSecretRequest",
     "DependabotCreateOrUpdateOrgSecretRequest",
     "DependabotCreateOrUpdateRepoSecretRequest",
@@ -425,7 +352,6 @@ __all__ = [
     "DependabotListSelectedReposForOrgSecretRequest",
     "DependabotRemoveSelectedRepoFromOrgSecretRequest",
     "DependabotRepositoryAccessForOrgRequest",
-    "DependabotSetRepositoryAccessDefaultLevelRequest",
     "DependabotSetSelectedReposForOrgSecretRequest",
     "DependabotUpdateAlertRequest",
     "DependabotUpdateRepositoryAccessForOrgRequest",
@@ -483,7 +409,6 @@ __all__ = [
     "GitignoreGetTemplateRequest",
     "GitListMatchingRefsRequest",
     "GitUpdateRefRequest",
-    "HostedComputeCreateNetworkConfigurationForOrgRequest",
     "HostedComputeDeleteNetworkConfigurationFromOrgRequest",
     "HostedComputeGetNetworkConfigurationForOrgRequest",
     "HostedComputeGetNetworkSettingsForOrgRequest",
@@ -491,11 +416,7 @@ __all__ = [
     "HostedComputeUpdateNetworkConfigurationForOrgRequest",
     "InteractionsGetRestrictionsForOrgRequest",
     "InteractionsGetRestrictionsForRepoRequest",
-    "InteractionsRemoveRestrictionsForOrgRequest",
     "InteractionsRemoveRestrictionsForRepoRequest",
-    "InteractionsSetRestrictionsForAuthenticatedUserRequest",
-    "InteractionsSetRestrictionsForOrgRequest",
-    "InteractionsSetRestrictionsForRepoRequest",
     "IssuesAddAssigneesRequest",
     "IssuesAddBlockedByDependencyRequest",
     "IssuesAddIssueFieldValuesRequest",
@@ -553,9 +474,6 @@ __all__ = [
     "LicensesGetAllCommonlyUsedRequest",
     "LicensesGetForRepoRequest",
     "LicensesGetRequest",
-    "MarkdownRenderRawRequest",
-    "MarkdownRenderRequest",
-    "MetaGetOctocatRequest",
     "MigrationsDeleteArchiveForAuthenticatedUserRequest",
     "MigrationsDeleteArchiveForOrgRequest",
     "MigrationsDownloadArchiveForOrgRequest",
@@ -565,21 +483,14 @@ __all__ = [
     "MigrationsListForOrgRequest",
     "MigrationsListReposForAuthenticatedUserRequest",
     "MigrationsListReposForOrgRequest",
-    "MigrationsStartForAuthenticatedUserRequest",
-    "MigrationsStartForOrgRequest",
     "MigrationsUnlockRepoForAuthenticatedUserRequest",
     "MigrationsUnlockRepoForOrgRequest",
     "OidcCreateOidcCustomPropertyInclusionForEnterpriseRequest",
     "OidcCreateOidcCustomPropertyInclusionForOrgRequest",
-    "OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequest",
-    "OidcDeleteOidcCustomPropertyInclusionForOrgRequest",
-    "OidcGetOidcCustomSubTemplateForOrgRequest",
     "OidcListOidcCustomPropertyInclusionsForEnterpriseRequest",
     "OidcListOidcCustomPropertyInclusionsForOrgRequest",
-    "OidcUpdateOidcCustomSubTemplateForOrgRequest",
     "OrgsAssignTeamToOrgRoleRequest",
     "OrgsAssignUserToOrgRoleRequest",
-    "OrgsBlockUserRequest",
     "OrgsCancelInvitationRequest",
     "OrgsCheckBlockedUserRequest",
     "OrgsCheckMembershipForUserRequest",
@@ -591,10 +502,7 @@ __all__ = [
     "OrgsCreateIssueFieldRequest",
     "OrgsCreateIssueTypeRequest",
     "OrgsCreateWebhookRequest",
-    "OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequest",
-    "OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequest",
     "OrgsCustomPropertiesForReposCreateOrUpdateOrganizationValuesRequest",
-    "OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequest",
     "OrgsCustomPropertiesForReposGetOrganizationDefinitionRequest",
     "OrgsCustomPropertiesForReposGetOrganizationDefinitionsRequest",
     "OrgsCustomPropertiesForReposGetOrganizationValuesRequest",
@@ -608,7 +516,6 @@ __all__ = [
     "OrgsDisableSelectedRepositoryImmutableReleasesOrganizationRequest",
     "OrgsEnableSelectedRepositoryImmutableReleasesOrganizationRequest",
     "OrgsGetImmutableReleasesSettingsRepositoriesRequest",
-    "OrgsGetImmutableReleasesSettingsRequest",
     "OrgsGetMembershipForAuthenticatedUserRequest",
     "OrgsGetMembershipForUserRequest",
     "OrgsGetOrgRoleRequest",
@@ -645,9 +552,7 @@ __all__ = [
     "OrgsListRequest",
     "OrgsListWebhookDeliveriesRequest",
     "OrgsListWebhooksRequest",
-    "OrgsPingWebhookRequest",
     "OrgsRedeliverWebhookDeliveryRequest",
-    "OrgsRemoveMemberRequest",
     "OrgsRemoveMembershipForUserRequest",
     "OrgsRemoveOutsideCollaboratorRequest",
     "OrgsRemovePublicMembershipForAuthenticatedUserRequest",
@@ -658,13 +563,9 @@ __all__ = [
     "OrgsRevokeOrgRoleTeamRequest",
     "OrgsRevokeOrgRoleUserRequest",
     "OrgsSetClusterDeploymentRecordsRequest",
-    "OrgsSetImmutableReleasesSettingsRepositoriesRequest",
-    "OrgsSetImmutableReleasesSettingsRequest",
     "OrgsSetMembershipForUserRequest",
     "OrgsSetPublicMembershipForAuthenticatedUserRequest",
     "OrgsUnblockUserRequest",
-    "OrgsUpdateIssueFieldRequest",
-    "OrgsUpdateIssueTypeRequest",
     "OrgsUpdateMembershipForAuthenticatedUserRequest",
     "OrgsUpdatePatAccessesRequest",
     "OrgsUpdatePatAccessRequest",
@@ -771,9 +672,7 @@ __all__ = [
     "ReactionsListForPullRequestReviewCommentRequest",
     "ReactionsListForReleaseRequest",
     "ReposAcceptInvitationForAuthenticatedUserRequest",
-    "ReposAddAppAccessRestrictionsRequest",
     "ReposAddCollaboratorRequest",
-    "ReposAddStatusCheckContextsRequest",
     "ReposAddTeamAccessRestrictionsRequest",
     "ReposAddUserAccessRestrictionsRequest",
     "ReposCancelPagesDeploymentRequest",
@@ -787,24 +686,19 @@ __all__ = [
     "ReposCreateAttestationRequest",
     "ReposCreateAutolinkRequest",
     "ReposCreateCommitCommentRequest",
-    "ReposCreateCommitSignatureProtectionRequest",
     "ReposCreateCommitStatusRequest",
     "ReposCreateDeployKeyRequest",
     "ReposCreateDeploymentBranchPolicyRequest",
-    "ReposCreateDeploymentProtectionRuleRequest",
     "ReposCreateDeploymentRequest",
     "ReposCreateDeploymentStatusRequest",
-    "ReposCreateDispatchEventRequest",
     "ReposCreateForAuthenticatedUserRequest",
     "ReposCreateForkRequest",
     "ReposCreateInOrgRequest",
-    "ReposCreateOrgRulesetRequest",
     "ReposCreateOrUpdateEnvironmentRequest",
     "ReposCreateOrUpdateFileContentsRequest",
     "ReposCreatePagesDeploymentRequest",
     "ReposCreatePagesSiteRequest",
     "ReposCreateReleaseRequest",
-    "ReposCreateRepoRulesetRequest",
     "ReposCreateUsingTemplateRequest",
     "ReposCreateWebhookRequest",
     "ReposCustomPropertiesForReposCreateOrUpdateRepositoryValuesRequest",
@@ -824,22 +718,16 @@ __all__ = [
     "ReposDeleteInvitationRequest",
     "ReposDeleteOrgRulesetRequest",
     "ReposDeletePagesSiteRequest",
-    "ReposDeletePullRequestReviewProtectionRequest",
     "ReposDeleteReleaseAssetRequest",
     "ReposDeleteReleaseRequest",
-    "ReposDeleteRepoRulesetRequest",
     "ReposDeleteRequest",
     "ReposDeleteWebhookRequest",
     "ReposDisableAutomatedSecurityFixesRequest",
     "ReposDisableDeploymentProtectionRuleRequest",
-    "ReposDisableImmutableReleasesRequest",
-    "ReposDisablePrivateVulnerabilityReportingRequest",
     "ReposDisableVulnerabilityAlertsRequest",
     "ReposDownloadTarballArchiveRequest",
     "ReposDownloadZipballArchiveRequest",
     "ReposEnableAutomatedSecurityFixesRequest",
-    "ReposEnableImmutableReleasesRequest",
-    "ReposEnablePrivateVulnerabilityReportingRequest",
     "ReposEnableVulnerabilityAlertsRequest",
     "ReposGenerateReleaseNotesRequest",
     "ReposGetAccessRestrictionsRequest",
@@ -878,10 +766,8 @@ __all__ = [
     "ReposGetOrgRuleSuitesRequest",
     "ReposGetPagesBuildRequest",
     "ReposGetPagesDeploymentRequest",
-    "ReposGetPagesHealthCheckRequest",
     "ReposGetPagesRequest",
     "ReposGetParticipationStatsRequest",
-    "ReposGetPullRequestReviewProtectionRequest",
     "ReposGetPunchCardStatsRequest",
     "ReposGetReadmeInDirectoryRequest",
     "ReposGetReadmeRequest",
@@ -890,7 +776,6 @@ __all__ = [
     "ReposGetReleaseRequest",
     "ReposGetRepoRulesetHistoryRequest",
     "ReposGetRepoRulesetRequest",
-    "ReposGetRepoRulesetsRequest",
     "ReposGetRepoRulesetVersionRequest",
     "ReposGetRepoRuleSuiteRequest",
     "ReposGetRepoRuleSuitesRequest",
@@ -898,7 +783,6 @@ __all__ = [
     "ReposGetStatusChecksProtectionRequest",
     "ReposGetTeamsWithAccessToProtectedBranchRequest",
     "ReposGetTopPathsRequest",
-    "ReposGetTopReferrersRequest",
     "ReposGetUsersWithAccessToProtectedBranchRequest",
     "ReposGetViewsRequest",
     "ReposGetWebhookConfigForRepoRequest",
@@ -950,9 +834,7 @@ __all__ = [
     "ReposRequestPagesBuildRequest",
     "ReposSetAdminBranchProtectionRequest",
     "ReposSetAppAccessRestrictionsRequest",
-    "ReposSetStatusCheckContextsRequest",
     "ReposSetTeamAccessRestrictionsRequest",
-    "ReposSetUserAccessRestrictionsRequest",
     "ReposTestPushWebhookRequest",
     "ReposTransferRequest",
     "ReposUpdateBranchProtectionRequest",
@@ -960,13 +842,9 @@ __all__ = [
     "ReposUpdateDeploymentBranchPolicyRequest",
     "ReposUpdateInformationAboutPagesSiteRequest",
     "ReposUpdateInvitationRequest",
-    "ReposUpdateOrgRulesetRequest",
-    "ReposUpdatePullRequestReviewProtectionRequest",
     "ReposUpdateReleaseAssetRequest",
     "ReposUpdateReleaseRequest",
-    "ReposUpdateRepoRulesetRequest",
     "ReposUpdateRequest",
-    "ReposUpdateStatusCheckProtectionRequest",
     "ReposUpdateWebhookConfigForRepoRequest",
     "ReposUpdateWebhookRequest",
     "ReposUploadReleaseAssetRequest",
@@ -985,7 +863,6 @@ __all__ = [
     "SecretScanningListLocationsForAlertRequest",
     "SecretScanningListOrgPatternConfigsRequest",
     "SecretScanningUpdateAlertRequest",
-    "SecretScanningUpdateOrgPatternConfigsRequest",
     "SecurityAdvisoriesCreateForkRequest",
     "SecurityAdvisoriesCreatePrivateVulnerabilityReportRequest",
     "SecurityAdvisoriesCreateRepositoryAdvisoryCveRequest",
@@ -1048,16 +925,11 @@ __all__ = [
     "CampaignsCreateCampaignBodyCodeScanningAlertsItem",
     "ChecksCreateBodyV0",
     "ChecksCreateBodyV1",
-    "ChecksSetSuitesPreferencesBodyAutoTriggerChecksItem",
     "ChecksUpdateBodyV0",
     "ChecksUpdateBodyV1",
-    "CodeSecurityCreateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem",
     "CodeSecurityUpdateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem",
     "CodespacesCreateForAuthenticatedUserBodyV0",
     "CodespacesCreateForAuthenticatedUserBodyV1",
-    "CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV1",
-    "CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV2",
-    "CustomProperty",
     "CustomPropertyValue",
     "GistsCreateBodyFilesValue",
     "GistsUpdateBodyFilesValue",
@@ -1075,7 +947,6 @@ __all__ = [
     "OrgsDeleteAttestationsBulkBodyV0",
     "OrgsDeleteAttestationsBulkBodyV1",
     "OrgsSetClusterDeploymentRecordsBodyDeploymentsItem",
-    "OrgsUpdateIssueFieldBodyOptionsItem",
     "ProjectsAddFieldForOrgBodyV0",
     "ProjectsAddFieldForOrgBodyV1",
     "ProjectsAddFieldForOrgBodyV2",
@@ -1083,46 +954,13 @@ __all__ = [
     "ProjectsAddFieldForUserBodyIterationConfiguration",
     "ProjectsUpdateItemForOrgBodyFieldsItem",
     "ProjectsUpdateItemForUserBodyFieldsItem",
-    "ReposAddStatusCheckContextsBodyV0",
     "ReposAddTeamAccessRestrictionsBodyV0",
-    "ReposCreateOrgRulesetBodyConditionsV0",
-    "ReposCreateOrgRulesetBodyConditionsV1",
-    "ReposCreateOrgRulesetBodyConditionsV2",
     "ReposCreateOrUpdateEnvironmentBodyReviewersItem",
-    "RepositoryRule",
-    "RepositoryRuleBranchNamePattern",
-    "RepositoryRuleCodeScanning",
-    "RepositoryRuleCommitAuthorEmailPattern",
-    "RepositoryRuleCommitMessagePattern",
-    "RepositoryRuleCommitterEmailPattern",
-    "RepositoryRuleCreation",
-    "RepositoryRuleDeletion",
-    "RepositoryRuleFileExtensionRestriction",
-    "RepositoryRuleFilePathRestriction",
-    "RepositoryRuleMaxFilePathLength",
-    "RepositoryRuleMaxFileSize",
-    "RepositoryRuleNonFastForward",
-    "RepositoryRulePullRequest",
-    "RepositoryRuleRequiredDeployments",
-    "RepositoryRuleRequiredLinearHistory",
-    "RepositoryRuleRequiredSignatures",
-    "RepositoryRuleRequiredStatusChecks",
-    "RepositoryRulesetBypassActor",
-    "RepositoryRuleTagNamePattern",
-    "RepositoryRuleUpdate",
-    "RepositoryRuleWorkflows",
     "ReposRemoveStatusCheckContextsBodyV0",
     "ReposRemoveTeamAccessRestrictionsBodyV0",
-    "ReposSetStatusCheckContextsBodyV0",
     "ReposSetTeamAccessRestrictionsBodyV0",
     "ReposUpdateBodySecurityAndAnalysisSecretScanningDelegatedBypassOptionsReviewersItem",
     "ReposUpdateBranchProtectionBodyRequiredStatusChecksChecksItem",
-    "ReposUpdateOrgRulesetBodyConditionsV0",
-    "ReposUpdateOrgRulesetBodyConditionsV1",
-    "ReposUpdateOrgRulesetBodyConditionsV2",
-    "ReposUpdateStatusCheckProtectionBodyChecksItem",
-    "SecretScanningUpdateOrgPatternConfigsBodyCustomPatternSettingsItem",
-    "SecretScanningUpdateOrgPatternConfigsBodyProviderPatternSettingsItem",
     "SecurityAdvisoriesCreatePrivateVulnerabilityReportBodyVulnerabilitiesItem",
     "SecurityAdvisoriesCreateRepositoryAdvisoryBodyCreditsItem",
     "SecurityAdvisoriesCreateRepositoryAdvisoryBodyVulnerabilitiesItem",
@@ -1154,22 +992,6 @@ class SecurityAdvisoriesListGlobalAdvisoriesRequestQuery(StrictModel):
 class SecurityAdvisoriesListGlobalAdvisoriesRequest(StrictModel):
     """Retrieve global security advisories filtered by various criteria such as identifier, type, ecosystem, and vulnerability metrics. By default, returns only GitHub-reviewed advisories excluding malware."""
     query: SecurityAdvisoriesListGlobalAdvisoriesRequestQuery | None = None
-
-# Operation: complete_github_app_manifest
-class AppsCreateFromManifestRequestPath(StrictModel):
-    code: str = Field(default=..., description="The temporary code received during the GitHub App manifest flow setup. This code is exchanged for the app's credentials and configuration.")
-class AppsCreateFromManifestRequest(StrictModel):
-    """Complete the GitHub App manifest flow handshake by exchanging a temporary code for the app's credentials. This endpoint returns the app's ID, private key (pem), and webhook secret needed to finalize GitHub App creation."""
-    path: AppsCreateFromManifestRequestPath
-
-# Operation: configure_app_webhook
-class AppsUpdateWebhookConfigForAppRequestBody(StrictModel):
-    url: str | None = Field(default=None, description="The URL endpoint where webhook payloads will be delivered. Must be a valid URI.", json_schema_extra={'format': 'uri'})
-    content_type: str | None = Field(default=None, description="The media type format for serializing webhook payloads. Defaults to form-encoded if not specified.")
-    secret: str | None = Field(default=None, description="An optional secret string used to generate HMAC signatures for verifying webhook delivery authenticity in request headers.")
-class AppsUpdateWebhookConfigForAppRequest(StrictModel):
-    """Update the webhook configuration for a GitHub App, including the delivery URL, payload format, and optional signature secret. Requires JWT authentication."""
-    body: AppsUpdateWebhookConfigForAppRequestBody | None = None
 
 # Operation: get_webhook_delivery_app
 class AppsGetWebhookDeliveryRequestPath(StrictModel):
@@ -1206,16 +1028,6 @@ class AppsDeleteInstallationRequest(StrictModel):
     """Uninstall a GitHub App from a user, organization, or enterprise account. Requires JWT authentication as the GitHub App."""
     path: AppsDeleteInstallationRequestPath
 
-# Operation: create_installation_access_token
-class AppsCreateInstallationAccessTokenRequestPath(StrictModel):
-    installation_id: int = Field(default=..., description="The unique identifier of the GitHub App installation for which to create the access token.", examples=[1])
-class AppsCreateInstallationAccessTokenRequestBody(StrictModel):
-    permissions: AppPermissions | None = Field(default=None, description="GitHub App permissions to grant the installation access token. Each key is a permission scope (e.g. actions, contents, issues) with value 'read' or 'write'.")
-class AppsCreateInstallationAccessTokenRequest(StrictModel):
-    """Creates a short-lived access token (expires in 1 hour) that allows a GitHub App to make authenticated API requests for a specific installation. You can optionally restrict the token to specific repositories and/or permissions using the request body parameters."""
-    path: AppsCreateInstallationAccessTokenRequestPath
-    body: AppsCreateInstallationAccessTokenRequestBody | None = None
-
 # Operation: suspend_app_installation
 class AppsSuspendInstallationRequestPath(StrictModel):
     installation_id: int = Field(default=..., description="The unique identifier of the app installation to suspend.", examples=[1])
@@ -1240,26 +1052,6 @@ class AppsDeleteAuthorizationRequest(StrictModel):
     path: AppsDeleteAuthorizationRequestPath
     body: AppsDeleteAuthorizationRequestBody
 
-# Operation: validate_token
-class AppsCheckTokenRequestPath(StrictModel):
-    client_id: str = Field(default=..., description="The client ID of the GitHub application requesting token validation.", examples=['Iv1.8a61f9b3a7aba766'])
-class AppsCheckTokenRequestBody(StrictModel):
-    access_token: str = Field(default=..., description="The OAuth or GitHub application access token to validate.")
-class AppsCheckTokenRequest(StrictModel):
-    """Validate an OAuth or GitHub application token without triggering rate limits for failed login attempts. Returns 404 if the token is invalid."""
-    path: AppsCheckTokenRequestPath
-    body: AppsCheckTokenRequestBody
-
-# Operation: reset_application_token
-class AppsResetTokenRequestPath(StrictModel):
-    client_id: str = Field(default=..., description="The client ID of the GitHub or OAuth application.", examples=['Iv1.8a61f9b3a7aba766'])
-class AppsResetTokenRequestBody(StrictModel):
-    access_token: str = Field(default=..., description="The current access token of the OAuth or GitHub application to be reset.")
-class AppsResetTokenRequest(StrictModel):
-    """Reset an OAuth or GitHub application token, invalidating the current token and issuing a new one without requiring end-user interaction. The new token takes effect immediately and must be saved by the application."""
-    path: AppsResetTokenRequestPath
-    body: AppsResetTokenRequestBody
-
 # Operation: revoke_application_token
 class AppsDeleteTokenRequestPath(StrictModel):
     client_id: str = Field(default=..., description="The client ID of the GitHub application whose token should be revoked.", examples=['Iv1.8a61f9b3a7aba766'])
@@ -1281,13 +1073,6 @@ class AppsScopeTokenRequest(StrictModel):
     """Create a repository-scoped and/or permission-scoped access token from an existing non-scoped user access token. Specify which repositories the token can access and which permissions are granted."""
     path: AppsScopeTokenRequestPath
     body: AppsScopeTokenRequestBody
-
-# Operation: get_app
-class AppsGetBySlugRequestPath(StrictModel):
-    app_slug: str = Field(default=..., description="The URL-friendly slug identifier for the GitHub App, found on the app's settings page (e.g., the slug in https://github.com/settings/apps/:app_slug).")
-class AppsGetBySlugRequest(StrictModel):
-    """Retrieve details about a GitHub App using its URL-friendly slug identifier. The slug can be found on the app's settings page."""
-    path: AppsGetBySlugRequestPath
 
 # Operation: get_assignment
 class ClassroomGetAnAssignmentRequestPath(StrictModel):
@@ -1331,46 +1116,12 @@ class CodesOfConductGetConductCodeRequest(StrictModel):
     """Retrieve detailed information about a specific GitHub code of conduct. Use this to fetch the full content and metadata for a code of conduct by its unique identifier."""
     path: CodesOfConductGetConductCodeRequestPath
 
-# Operation: revoke_credentials
-class CredentialsRevokeRequestBody(StrictModel):
-    credentials: list[str] = Field(default=..., description="List of credentials to revoke. Each credential should be specified as a token string. Revocation is permanent and cannot be undone; new credentials must be generated after revocation.", min_length=1, max_length=1000)
-class CredentialsRevokeRequest(StrictModel):
-    """Revoke exposed or compromised credentials including personal access tokens. This unauthenticated endpoint allows you to revoke credentials you don't own (found on GitHub or elsewhere) or credentials associated with old accounts you no longer have access to. Credential owners will be notified of the revocation."""
-    body: CredentialsRevokeRequestBody
-
-# Operation: get_enterprise_actions_cache_retention_limit
-class ActionsGetActionsCacheRetentionLimitForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name. Used to identify which enterprise's cache retention limit to retrieve.")
-class ActionsGetActionsCacheRetentionLimitForEnterpriseRequest(StrictModel):
-    """Retrieve the GitHub Actions cache retention limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache retention settings."""
-    path: ActionsGetActionsCacheRetentionLimitForEnterpriseRequestPath
-
-# Operation: set_actions_cache_retention_limit
-class ActionsSetActionsCacheRetentionLimitForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name.")
-class ActionsSetActionsCacheRetentionLimitForEnterpriseRequestBody(StrictModel):
-    max_cache_retention_days: int | None = Field(default=None, description="The maximum number of days that caches in repositories under this enterprise may be retained.")
-class ActionsSetActionsCacheRetentionLimitForEnterpriseRequest(StrictModel):
-    """Set the maximum cache retention limit for GitHub Actions across an enterprise. All organizations and repositories within the enterprise are constrained by this limit and cannot exceed it."""
-    path: ActionsSetActionsCacheRetentionLimitForEnterpriseRequestPath
-    body: ActionsSetActionsCacheRetentionLimitForEnterpriseRequestBody | None = None
-
 # Operation: get_enterprise_actions_cache_storage_limit
 class ActionsGetActionsCacheStorageLimitForEnterpriseRequestPath(StrictModel):
     enterprise: str = Field(default=..., description="The slug version of the enterprise name. This is the URL-friendly identifier used to reference the enterprise in API requests.")
 class ActionsGetActionsCacheStorageLimitForEnterpriseRequest(StrictModel):
     """Retrieve the GitHub Actions cache storage limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache storage configurations."""
     path: ActionsGetActionsCacheStorageLimitForEnterpriseRequestPath
-
-# Operation: set_actions_cache_storage_limit
-class ActionsSetActionsCacheStorageLimitForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name. Used to identify which enterprise's cache storage limit should be configured.")
-class ActionsSetActionsCacheStorageLimitForEnterpriseRequestBody(StrictModel):
-    max_cache_size_gb: int | None = Field(default=None, description="The maximum total cache storage size in gigabytes for repositories and organizations within the enterprise. All child organizations and repositories must respect this limit.")
-class ActionsSetActionsCacheStorageLimitForEnterpriseRequest(StrictModel):
-    """Set the maximum GitHub Actions cache storage limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache storage configurations."""
-    path: ActionsSetActionsCacheStorageLimitForEnterpriseRequestPath
-    body: ActionsSetActionsCacheStorageLimitForEnterpriseRequestBody | None = None
 
 # Operation: list_oidc_custom_property_inclusions
 class OidcListOidcCustomPropertyInclusionsForEnterpriseRequestPath(StrictModel):
@@ -1389,47 +1140,12 @@ class OidcCreateOidcCustomPropertyInclusionForEnterpriseRequest(StrictModel):
     path: OidcCreateOidcCustomPropertyInclusionForEnterpriseRequestPath
     body: OidcCreateOidcCustomPropertyInclusionForEnterpriseRequestBody
 
-# Operation: remove_oidc_custom_property
-class OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The enterprise slug identifier. This is the URL-friendly version of the enterprise name used in API paths.")
-    custom_property_name: str = Field(default=..., description="The name of the custom property to remove from OIDC token inclusion. Once removed, this property will no longer be included in OIDC tokens for repository actions.")
-class OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequest(StrictModel):
-    """Remove a repository custom property from OIDC token inclusion for an enterprise. This prevents the specified custom property from being included in OIDC tokens generated for repository actions."""
-    path: OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequestPath
-
 # Operation: list_code_security_configurations
 class CodeSecurityGetConfigurationsForEnterpriseRequestPath(StrictModel):
     enterprise: str = Field(default=..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")
 class CodeSecurityGetConfigurationsForEnterpriseRequest(StrictModel):
     """Lists all code security configurations available in an enterprise. The authenticated user must be an administrator of the enterprise to access this endpoint."""
     path: CodeSecurityGetConfigurationsForEnterpriseRequestPath
-
-# Operation: create_enterprise_code_security_configuration
-class CodeSecurityCreateConfigurationForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name.")
-class CodeSecurityCreateConfigurationForEnterpriseRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the code security configuration. Must be unique within the enterprise.")
-    description: str = Field(default=..., description="A description of the code security configuration.", max_length=255)
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of GitHub Code Security features.")
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependency Graph.")
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of automatic dependency submission for detected dependencies.")
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot alerts for vulnerable dependencies.")
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot security updates to automatically fix vulnerabilities.")
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of code scanning default setup for automated vulnerability detection.")
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated alert dismissal for code scanning alerts.")
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning to detect exposed credentials.")
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning push protection to block commits with exposed secrets.")
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning validity checks to verify detected secrets.")
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning for non-provider patterns and custom secrets.")
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Copilot secret scanning for generic secrets detection.")
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated alert dismissal for secret scanning alerts.")
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning extended metadata for additional context on detected secrets.")
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of private vulnerability reporting for coordinated disclosure.")
-    enforcement: Literal["enforced", "unenforced"] | None = Field(default=None, description="The enforcement status for this security configuration. Enforced configurations are mandatory; unenforced are optional.")
-class CodeSecurityCreateConfigurationForEnterpriseRequest(StrictModel):
-    """Creates a code security configuration for an enterprise to standardize security settings across repositories. The authenticated user must be an enterprise administrator with the `admin:enterprise` scope."""
-    path: CodeSecurityCreateConfigurationForEnterpriseRequestPath
-    body: CodeSecurityCreateConfigurationForEnterpriseRequestBody
 
 # Operation: list_enterprise_code_security_default_configurations
 class CodeSecurityGetDefaultConfigurationsForEnterpriseRequestPath(StrictModel):
@@ -1445,33 +1161,6 @@ class CodeSecurityGetSingleConfigurationForEnterpriseRequestPath(StrictModel):
 class CodeSecurityGetSingleConfigurationForEnterpriseRequest(StrictModel):
     """Retrieve a specific code security configuration for an enterprise. The authenticated user must be an enterprise administrator to access this endpoint."""
     path: CodeSecurityGetSingleConfigurationForEnterpriseRequestPath
-
-# Operation: update_code_security_configuration_enterprise
-class CodeSecurityUpdateEnterpriseConfigurationRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name.")
-    configuration_id: int = Field(default=..., description="The unique identifier of the code security configuration to update.")
-class CodeSecurityUpdateEnterpriseConfigurationRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="A description of the code security configuration.", max_length=255)
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of GitHub Code Security features.")
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependency Graph.")
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of automatic dependency submission.")
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot alerts.")
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot security updates.")
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of code scanning default setup.")
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of code scanning delegated alert dismissal.")
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning.")
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning push protection.")
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning validity checks.")
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning non-provider patterns.")
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Copilot secret scanning for generic secrets.")
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning delegated alert dismissal.")
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning extended metadata.")
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of private vulnerability reporting.")
-    enforcement: Literal["enforced", "unenforced"] | None = Field(default=None, description="The enforcement status for this security configuration across the enterprise.")
-class CodeSecurityUpdateEnterpriseConfigurationRequest(StrictModel):
-    """Update a custom code security configuration for an enterprise. Allows administrators to modify security feature enablement settings and enforcement status across the organization."""
-    path: CodeSecurityUpdateEnterpriseConfigurationRequestPath
-    body: CodeSecurityUpdateEnterpriseConfigurationRequestBody | None = None
 
 # Operation: delete_code_security_configuration_enterprise
 class CodeSecurityDeleteConfigurationForEnterpriseRequestPath(StrictModel):
@@ -1491,17 +1180,6 @@ class CodeSecurityAttachEnterpriseConfigurationRequest(StrictModel):
     """Attach an enterprise code security configuration to repositories within the specified scope. Repositories already attached to a configuration will be re-attached to the provided configuration, with free features enabled if insufficient GHAS licenses are available."""
     path: CodeSecurityAttachEnterpriseConfigurationRequestPath
     body: CodeSecurityAttachEnterpriseConfigurationRequestBody
-
-# Operation: set_code_security_configuration_as_default
-class CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestPath(StrictModel):
-    enterprise: str = Field(default=..., description="The slug version of the enterprise name.")
-    configuration_id: int = Field(default=..., description="The unique identifier of the code security configuration to set as default.")
-class CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestBody(StrictModel):
-    default_for_new_repos: Literal["all", "none", "private_and_internal", "public"] | None = Field(default=None, description="Specifies which repository types this security configuration should apply to by default.")
-class CodeSecuritySetConfigurationAsDefaultForEnterpriseRequest(StrictModel):
-    """Set a code security configuration as the default for an enterprise. This configuration will automatically apply to new repositories of matching types created within organizations that don't already have a default configuration set."""
-    path: CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestPath
-    body: CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestBody | None = None
 
 # Operation: list_code_security_configuration_repositories
 class CodeSecurityGetRepositoriesForEnterpriseConfigurationRequestPath(StrictModel):
@@ -1875,22 +1553,6 @@ class LicensesGetRequest(StrictModel):
     """Retrieve detailed information about a specific open source license. This is useful for understanding license terms and requirements when licensing a repository."""
     path: LicensesGetRequestPath
 
-# Operation: render_markdown
-class MarkdownRenderRequestBody(StrictModel):
-    text: str = Field(default=..., description="The Markdown text to render as HTML.")
-    mode: Literal["markdown", "gfm"] | None = Field(default=None, description="The rendering mode that determines Markdown syntax support. Use `markdown` for standard Markdown or `gfm` for GitHub Flavored Markdown with enhanced syntax features.")
-    context: str | None = Field(default=None, description="The repository context in `owner/repo` format for resolving references in GFM mode. When provided, shorthand references like `#42` are converted to links pointing to the specified repository.")
-class MarkdownRenderRequest(StrictModel):
-    """Convert Markdown text to HTML, with support for GitHub Flavored Markdown (GFM) and repository-aware reference linking. Additional token scopes may be required depending on referenced content types (e.g., `issues:read` for issue references)."""
-    body: MarkdownRenderRequestBody
-
-# Operation: render_markdown_raw
-class MarkdownRenderRawRequestBody(StrictModel):
-    body: str | None = Field(default=None, description="The Markdown content to render as plain text. Must be sent with Content-Type header of text/plain or text/x-markdown, not JSON format.")
-class MarkdownRenderRawRequest(StrictModel):
-    """Render a Markdown document using plain text input. Supports standard Markdown syntax (GitHub Flavored Markdown not supported) with a maximum content size of 400 KB."""
-    body: MarkdownRenderRawRequestBody | None = None
-
 # Operation: get_subscription_plan
 class AppsGetSubscriptionPlanForAccountRequestPath(StrictModel):
     account_id: int = Field(default=..., description="The unique identifier of the user or organization account to retrieve subscription information for.")
@@ -1898,32 +1560,12 @@ class AppsGetSubscriptionPlanForAccountRequest(StrictModel):
     """Retrieve the active subscription plan for a user or organization account on a GitHub App marketplace listing. Returns current subscription status and any pending plan changes scheduled for the next billing cycle."""
     path: AppsGetSubscriptionPlanForAccountRequestPath
 
-# Operation: list_plan_accounts
-class AppsListAccountsForPlanRequestPath(StrictModel):
-    plan_id: int = Field(default=..., description="The unique identifier of the marketplace plan for which to retrieve associated accounts.")
-class AppsListAccountsForPlanRequestQuery(StrictModel):
-    direction: Literal["asc", "desc"] | None = Field(default=None, description="Sort order for the returned accounts list. Use 'asc' to return oldest accounts first, or 'desc' for newest first. Only applies when used with a sort parameter.")
-class AppsListAccountsForPlanRequest(StrictModel):
-    """Retrieve all user and organization accounts associated with a marketplace plan, including seat counts for per-seat pricing and any pending plan changes awaiting the next billing cycle."""
-    path: AppsListAccountsForPlanRequestPath
-    query: AppsListAccountsForPlanRequestQuery | None = None
-
 # Operation: get_subscription_plan_stubbed
 class AppsGetSubscriptionPlanForAccountStubbedRequestPath(StrictModel):
     account_id: int = Field(default=..., description="The unique identifier of the account (user or organization) to check subscription status for.")
 class AppsGetSubscriptionPlanForAccountStubbedRequest(StrictModel):
     """Retrieve the active subscription plan for a GitHub account. Returns the current subscription status and any pending plan changes scheduled for the next billing cycle."""
     path: AppsGetSubscriptionPlanForAccountStubbedRequestPath
-
-# Operation: list_plan_accounts_stubbed
-class AppsListAccountsForPlanStubbedRequestPath(StrictModel):
-    plan_id: int = Field(default=..., description="The unique identifier of the marketplace plan for which to retrieve associated accounts.")
-class AppsListAccountsForPlanStubbedRequestQuery(StrictModel):
-    direction: Literal["asc", "desc"] | None = Field(default=None, description="Sort order for the returned accounts list. Use 'asc' to return oldest accounts first, or 'desc' for newest first. Only applies when used with a sort parameter.")
-class AppsListAccountsForPlanStubbedRequest(StrictModel):
-    """Retrieve all repository and organization accounts associated with a marketplace plan, including seat counts for per-seat pricing models and any pending plan changes. Requires JWT authentication for GitHub Apps or basic authentication for OAuth apps."""
-    path: AppsListAccountsForPlanStubbedRequestPath
-    query: AppsListAccountsForPlanStubbedRequestQuery | None = None
 
 # Operation: list_network_events
 class ActivityListPublicEventsForRepoNetworkRequestPath(StrictModel):
@@ -1994,13 +1636,6 @@ class ActivityDeleteThreadSubscriptionRequest(StrictModel):
     """Mute all future notifications for a thread until you comment or receive an @mention. Repository watching settings remain unaffected by this operation."""
     path: ActivityDeleteThreadSubscriptionRequestPath
 
-# Operation: get_octocat
-class MetaGetOctocatRequestQuery(StrictModel):
-    s: str | None = Field(default=None, description="Custom text to display in Octocat's speech bubble. If omitted, a default message is shown.")
-class MetaGetOctocatRequest(StrictModel):
-    """Retrieve an ASCII art representation of Octocat, GitHub's mascot. Optionally customize the speech bubble with your own text."""
-    query: MetaGetOctocatRequestQuery | None = None
-
 # Operation: list_organizations
 class OrgsListRequestQuery(StrictModel):
     since: int | None = Field(default=None, description="Organization ID cursor for pagination. Returns only organizations with an ID greater than this value to fetch the next page of results.")
@@ -2008,39 +1643,12 @@ class OrgsListRequest(StrictModel):
     """Retrieve all organizations ordered by creation date. Pagination is cursor-based using the `since` parameter to fetch subsequent pages via Link headers."""
     query: OrgsListRequestQuery | None = None
 
-# Operation: get_actions_cache_retention_limit
-class ActionsGetActionsCacheRetentionLimitForOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class ActionsGetActionsCacheRetentionLimitForOrganizationRequest(StrictModel):
-    """Retrieve the GitHub Actions cache retention limit for an organization. This limit applies to all repositories within the organization and prevents them from setting higher retention periods."""
-    path: ActionsGetActionsCacheRetentionLimitForOrganizationRequestPath
-
-# Operation: set_actions_cache_retention_limit_for_organization
-class ActionsSetActionsCacheRetentionLimitForOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetActionsCacheRetentionLimitForOrganizationRequestBody(StrictModel):
-    max_cache_retention_days: int | None = Field(default=None, description="The maximum number of days that caches in repositories under this organization may be retained.")
-class ActionsSetActionsCacheRetentionLimitForOrganizationRequest(StrictModel):
-    """Set the maximum cache retention limit for GitHub Actions across all repositories in an organization. This limit applies organization-wide and individual repositories cannot exceed it."""
-    path: ActionsSetActionsCacheRetentionLimitForOrganizationRequestPath
-    body: ActionsSetActionsCacheRetentionLimitForOrganizationRequestBody | None = None
-
 # Operation: get_actions_cache_storage_limit
 class ActionsGetActionsCacheStorageLimitForOrganizationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Organization names are case-insensitive.")
 class ActionsGetActionsCacheStorageLimitForOrganizationRequest(StrictModel):
     """Retrieve the GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
     path: ActionsGetActionsCacheStorageLimitForOrganizationRequestPath
-
-# Operation: configure_actions_cache_storage_limit
-class ActionsSetActionsCacheStorageLimitForOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetActionsCacheStorageLimitForOrganizationRequestBody(StrictModel):
-    max_cache_size_gb: int | None = Field(default=None, description="The maximum total cache storage size allowed for all caches in a repository, measured in gigabytes. This limit applies organization-wide and cannot be overridden at the repository level.")
-class ActionsSetActionsCacheStorageLimitForOrganizationRequest(StrictModel):
-    """Configure the maximum GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
-    path: ActionsSetActionsCacheStorageLimitForOrganizationRequestPath
-    body: ActionsSetActionsCacheStorageLimitForOrganizationRequestBody | None = None
 
 # Operation: list_dependabot_repository_access
 class DependabotRepositoryAccessForOrgRequestPath(StrictModel):
@@ -2059,16 +1667,6 @@ class DependabotUpdateRepositoryAccessForOrgRequest(StrictModel):
     """Updates Dependabot's repository access permissions for an organization by adding and removing repositories from its authorized list. This operation allows organization admins to control which repositories Dependabot can access when managing dependencies."""
     path: DependabotUpdateRepositoryAccessForOrgRequestPath
     body: DependabotUpdateRepositoryAccessForOrgRequestBody | None = None
-
-# Operation: configure_dependabot_default_repository_access
-class DependabotSetRepositoryAccessDefaultLevelRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class DependabotSetRepositoryAccessDefaultLevelRequestBody(StrictModel):
-    default_level: Literal["public", "internal"] = Field(default=..., description="The default repository access level for Dependabot updates. 'public' restricts access to public repositories only, while 'internal' allows access to public and internal repositories.")
-class DependabotSetRepositoryAccessDefaultLevelRequest(StrictModel):
-    """Configure the default repository access level that Dependabot will have when performing updates across the organization. This setting applies to all repositories unless explicitly overridden."""
-    path: DependabotSetRepositoryAccessDefaultLevelRequestPath
-    body: DependabotSetRepositoryAccessDefaultLevelRequestBody
 
 # Operation: list_organization_budgets
 class BillingGetAllBudgetsOrgRequestPath(StrictModel):
@@ -2362,172 +1960,12 @@ class OidcCreateOidcCustomPropertyInclusionForOrgRequest(StrictModel):
     path: OidcCreateOidcCustomPropertyInclusionForOrgRequestPath
     body: OidcCreateOidcCustomPropertyInclusionForOrgRequestBody
 
-# Operation: remove_oidc_custom_property_for_org
-class OidcDeleteOidcCustomPropertyInclusionForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    custom_property_name: str = Field(default=..., description="The name of the custom property to remove from OIDC token inclusion.")
-class OidcDeleteOidcCustomPropertyInclusionForOrgRequest(StrictModel):
-    """Remove a repository custom property from OIDC token inclusion for an organization. This prevents the specified custom property from being included in OpenID Connect tokens generated for repository actions."""
-    path: OidcDeleteOidcCustomPropertyInclusionForOrgRequestPath
-
-# Operation: get_oidc_subject_claim_template
-class OidcGetOidcCustomSubTemplateForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to scope the OIDC customization template.")
-class OidcGetOidcCustomSubTemplateForOrgRequest(StrictModel):
-    """Retrieves the customization template for an organization's OpenID Connect (OIDC) subject claim. Requires `read:org` scope for OAuth app tokens and personal access tokens (classic)."""
-    path: OidcGetOidcCustomSubTemplateForOrgRequestPath
-
-# Operation: configure_oidc_subject_claim_template
-class OidcUpdateOidcCustomSubTemplateForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Organization names are case-insensitive.")
-class OidcUpdateOidcCustomSubTemplateForOrgRequestBody(StrictModel):
-    include_claim_keys: list[str] = Field(default=..., description="Array of claim keys to include in the OIDC subject claim template. Each key must contain only alphanumeric characters and underscores. The order of keys in the array determines their order in the subject claim assertion.")
-class OidcUpdateOidcCustomSubTemplateForOrgRequest(StrictModel):
-    """Configure the customization template for OIDC subject claim assertions in an organization. This operation creates or updates the template that defines which claim keys are included in the subject claim."""
-    path: OidcUpdateOidcCustomSubTemplateForOrgRequestPath
-    body: OidcUpdateOidcCustomSubTemplateForOrgRequestBody
-
-# Operation: get_organization_actions_permissions
-class ActionsGetGithubActionsPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsGetGithubActionsPermissionsOrganizationRequest(StrictModel):
-    """Retrieve the GitHub Actions permissions policy for an organization, including repository permissions and allowed actions and reusable workflows. Requires `admin:org` scope."""
-    path: ActionsGetGithubActionsPermissionsOrganizationRequestPath
-
-# Operation: configure_organization_actions_permissions
-class ActionsSetGithubActionsPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class ActionsSetGithubActionsPermissionsOrganizationRequestBody(StrictModel):
-    enabled_repositories: Literal["all", "none", "selected"] = Field(default=..., description="The policy controlling which repositories in the organization are allowed to run GitHub Actions.")
-    allowed_actions: Literal["all", "local_only", "selected"] | None = Field(default=None, description="The permissions policy controlling which actions and reusable workflows are allowed to run in the organization.")
-    sha_pinning_required: bool | None = Field(default=None, description="Whether actions must be pinned to a full-length commit SHA for security enforcement.")
-class ActionsSetGithubActionsPermissionsOrganizationRequest(StrictModel):
-    """Configure GitHub Actions permissions for an organization, including which repositories can run actions and which actions or reusable workflows are allowed. Requires admin:org scope."""
-    path: ActionsSetGithubActionsPermissionsOrganizationRequestPath
-    body: ActionsSetGithubActionsPermissionsOrganizationRequestBody
-
-# Operation: get_artifact_and_log_retention_settings
-class ActionsGetArtifactAndLogRetentionSettingsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class ActionsGetArtifactAndLogRetentionSettingsOrganizationRequest(StrictModel):
-    """Retrieve the artifact and log retention settings configured for an organization. Requires admin:org scope or Actions policies fine-grained permission."""
-    path: ActionsGetArtifactAndLogRetentionSettingsOrganizationRequestPath
-
-# Operation: configure_artifact_and_log_retention
-class ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestBody(StrictModel):
-    days: int = Field(default=..., description="The number of days to retain artifacts and logs. Determines how long GitHub Actions stores workflow artifacts and logs before automatic deletion.")
-class ActionsSetArtifactAndLogRetentionSettingsOrganizationRequest(StrictModel):
-    """Configure how long artifacts and logs are retained for GitHub Actions workflows in an organization. Requires admin:org scope or Actions policies permission."""
-    path: ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestPath
-    body: ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestBody
-
-# Operation: get_fork_pull_request_contributor_approval_policy
-class ActionsGetForkPrContributorApprovalPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class ActionsGetForkPrContributorApprovalPermissionsOrganizationRequest(StrictModel):
-    """Retrieve the fork pull request contributor approval policy for an organization. This policy determines whether contributors can approve pull requests created from forks."""
-    path: ActionsGetForkPrContributorApprovalPermissionsOrganizationRequestPath
-
-# Operation: configure_fork_pr_approval_policy
-class ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestBody(StrictModel):
-    approval_policy: Literal["first_time_contributors_new_to_github", "first_time_contributors", "all_external_contributors"] = Field(default=..., description="The approval policy that determines when fork pull request workflows require maintainer approval before execution.")
-class ActionsSetForkPrContributorApprovalPermissionsOrganizationRequest(StrictModel):
-    """Configure the approval policy for fork pull request workflows in an organization. This controls whether maintainer approval is required before fork PR workflows can run."""
-    path: ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestPath
-    body: ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestBody
-
-# Operation: get_fork_pr_workflow_settings_organization
-class ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest(StrictModel):
-    """Retrieve the organization's settings for whether workflows from fork pull requests are permitted to run on private repositories. This controls security policies for automated workflows triggered by external contributors."""
-    path: ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath
-
-# Operation: configure_fork_pull_request_workflows_for_private_repos
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestBody(StrictModel):
-    run_workflows_from_fork_pull_requests: bool = Field(default=..., description="Allow workflows triggered by pull requests from forks to run on private repositories in this organization.")
-    send_write_tokens_to_workflows: bool | None = Field(default=None, description="Allow workflows triggered by fork pull requests to create pull requests or submit approving pull request reviews.")
-    send_secrets_and_variables: bool | None = Field(default=None, description="Make secrets and variables available to workflows triggered by pull requests from forks.")
-    require_approval_for_fork_pr_workflows: bool | None = Field(default=None, description="Require approval from a repository administrator before workflows triggered by fork pull requests can execute.")
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest(StrictModel):
-    """Configure GitHub Actions workflow permissions for pull requests from forks on private repositories within an organization. This controls whether fork PR workflows can execute and what access they have to tokens, secrets, and variables."""
-    path: ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath
-    body: ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestBody
-
 # Operation: list_organization_github_actions_repositories
 class ActionsListSelectedRepositoriesEnabledGithubActionsOrganizationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
 class ActionsListSelectedRepositoriesEnabledGithubActionsOrganizationRequest(StrictModel):
     """Lists the selected repositories that are enabled for GitHub Actions within an organization. This endpoint requires the organization's GitHub Actions permission policy to be configured for selected repositories."""
     path: ActionsListSelectedRepositoriesEnabledGithubActionsOrganizationRequestPath
-
-# Operation: enable_actions_repositories
-class ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestBody(StrictModel):
-    selected_repository_ids: list[int] = Field(default=..., description="List of repository IDs to enable for GitHub Actions. Order is not significant. Each ID must be a valid repository identifier within the organization.")
-class ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequest(StrictModel):
-    """Replace the list of repositories enabled for GitHub Actions in an organization. Requires the organization's `enabled_repositories` permission policy to be set to `selected`."""
-    path: ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestPath
-    body: ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestBody
-
-# Operation: enable_repository_github_actions
-class ActionsEnableSelectedRepositoryGithubActionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    repository_id: int = Field(default=..., description="The unique identifier of the repository to enable for GitHub Actions.")
-class ActionsEnableSelectedRepositoryGithubActionsOrganizationRequest(StrictModel):
-    """Enable GitHub Actions for a specific repository within an organization. The organization must have its GitHub Actions policy configured to allow selected repositories."""
-    path: ActionsEnableSelectedRepositoryGithubActionsOrganizationRequestPath
-
-# Operation: disable_repository_github_actions
-class ActionsDisableSelectedRepositoryGithubActionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    repository_id: int = Field(default=..., description="The unique identifier of the repository to disable for GitHub Actions.")
-class ActionsDisableSelectedRepositoryGithubActionsOrganizationRequest(StrictModel):
-    """Remove a repository from the list of selected repositories enabled for GitHub Actions in an organization. The organization must have its GitHub Actions permission policy configured to allow selected repositories."""
-    path: ActionsDisableSelectedRepositoryGithubActionsOrganizationRequestPath
-
-# Operation: list_organization_allowed_actions
-class ActionsGetAllowedActionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to scope the allowed actions query.")
-class ActionsGetAllowedActionsOrganizationRequest(StrictModel):
-    """Retrieve the selected actions and reusable workflows permitted in an organization. Requires the organization's `allowed_actions` permission policy to be set to `selected`."""
-    path: ActionsGetAllowedActionsOrganizationRequestPath
-
-# Operation: configure_organization_allowed_actions
-class ActionsSetAllowedActionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class ActionsSetAllowedActionsOrganizationRequestBody(StrictModel):
-    github_owned_allowed: bool | None = Field(default=None, description="Allow GitHub-owned actions, such as those in the official actions organization.")
-    verified_allowed: bool | None = Field(default=None, description="Allow actions from GitHub Marketplace creators who have been verified by GitHub.")
-    patterns_allowed: list[str] | None = Field(default=None, description="List of string-matching patterns to allow specific actions and reusable workflows. Supports wildcards, tags, and SHAs (e.g., owner/repo@*, owner/repo@v2, owner/*). Note: This setting only applies to public repositories.")
-class ActionsSetAllowedActionsOrganizationRequest(StrictModel):
-    """Configure which actions and reusable workflows are permitted to run in an organization. This endpoint requires the organization's allowed_actions policy to be set to 'selected' mode."""
-    path: ActionsSetAllowedActionsOrganizationRequestPath
-    body: ActionsSetAllowedActionsOrganizationRequestBody | None = None
-
-# Operation: get_organization_self_hosted_runners_permissions
-class ActionsGetSelfHostedRunnersPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsGetSelfHostedRunnersPermissionsOrganizationRequest(StrictModel):
-    """Retrieve the self-hosted runners permission settings for an organization. Requires `admin:org` scope or "Actions policies" fine-grained permission."""
-    path: ActionsGetSelfHostedRunnersPermissionsOrganizationRequestPath
-
-# Operation: configure_organization_self_hosted_runner_permissions
-class ActionsSetSelfHostedRunnersPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class ActionsSetSelfHostedRunnersPermissionsOrganizationRequestBody(StrictModel):
-    enabled_repositories: Literal["all", "selected", "none"] = Field(default=..., description="The policy controlling self-hosted runner usage across the organization: 'all' allows any repository to use runners, 'selected' restricts to specific repositories, 'none' disables self-hosted runners organization-wide.")
-class ActionsSetSelfHostedRunnersPermissionsOrganizationRequest(StrictModel):
-    """Configure which repositories in an organization can use self-hosted runners. Requires admin:org scope or Actions policies fine-grained permission."""
-    path: ActionsSetSelfHostedRunnersPermissionsOrganizationRequestPath
-    body: ActionsSetSelfHostedRunnersPermissionsOrganizationRequestBody
 
 # Operation: list_organization_self_hosted_runner_repositories
 class ActionsListSelectedRepositoriesSelfHostedRunnersOrganizationRequestPath(StrictModel):
@@ -2536,24 +1974,6 @@ class ActionsListSelectedRepositoriesSelfHostedRunnersOrganizationRequest(Strict
     """Lists all repositories within an organization that are permitted to use self-hosted runners. Requires admin:org scope or Actions policies fine-grained permission."""
     path: ActionsListSelectedRepositoriesSelfHostedRunnersOrganizationRequestPath
 
-# Operation: configure_self_hosted_runner_repositories
-class ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestBody(StrictModel):
-    selected_repository_ids: list[int] = Field(default=..., description="List of repository IDs that are permitted to use self-hosted runners at the repository level. Order is not significant.")
-class ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequest(StrictModel):
-    """Configure which repositories in an organization are allowed to use self-hosted runners. Requires `admin:org` scope or "Actions policies" fine-grained permission."""
-    path: ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestPath
-    body: ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestBody
-
-# Operation: enable_repository_self_hosted_runners
-class ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization that manages the self-hosted runners.")
-    repository_id: int = Field(default=..., description="The unique numeric identifier of the repository to authorize for self-hosted runner access.")
-class ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequest(StrictModel):
-    """Authorize a repository to use self-hosted runners within an organization. This grants the specified repository access to run workflows on self-hosted runners configured at the organization level."""
-    path: ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequestPath
-
 # Operation: remove_repository_from_self_hosted_runners
 class ActionsDisableSelectedRepositorySelfHostedRunnersOrganizationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
@@ -2561,24 +1981,6 @@ class ActionsDisableSelectedRepositorySelfHostedRunnersOrganizationRequestPath(S
 class ActionsDisableSelectedRepositorySelfHostedRunnersOrganizationRequest(StrictModel):
     """Remove a repository from the list of repositories allowed to use self-hosted runners in an organization. This prevents the specified repository from accessing organization-level self-hosted runners."""
     path: ActionsDisableSelectedRepositorySelfHostedRunnersOrganizationRequestPath
-
-# Operation: get_organization_workflow_permissions
-class ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequest(StrictModel):
-    """Retrieve the default workflow permissions granted to the GITHUB_TOKEN and whether GitHub Actions can submit approving pull request reviews for an organization. Requires admin:org scope."""
-    path: ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath
-
-# Operation: configure_organization_workflow_permissions
-class ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestBody(StrictModel):
-    default_workflow_permissions: Literal["read", "write"] | None = Field(default=None, description="The default permission level granted to GITHUB_TOKEN when running workflows in the organization.")
-    can_approve_pull_request_reviews: bool | None = Field(default=None, description="Whether GitHub Actions can automatically approve pull requests. Enabling this option may increase security risk.")
-class ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequest(StrictModel):
-    """Configure default workflow permissions for the GITHUB_TOKEN and approval settings for GitHub Actions in an organization. Requires admin:org scope for authentication."""
-    path: ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath
-    body: ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestBody | None = None
 
 # Operation: list_runner_groups
 class ActionsListSelfHostedRunnerGroupsForOrgRequestPath(StrictModel):
@@ -2730,19 +2132,6 @@ class ActionsListRunnerApplicationsForOrgRequestPath(StrictModel):
 class ActionsListRunnerApplicationsForOrgRequest(StrictModel):
     """Lists available runner application binaries that can be downloaded and executed for an organization. Requires admin access to the organization."""
     path: ActionsListRunnerApplicationsForOrgRequestPath
-
-# Operation: generate_runner_jitconfig
-class ActionsGenerateRunnerJitconfigForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class ActionsGenerateRunnerJitconfigForOrgRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name to assign to the new runner.")
-    runner_group_id: int = Field(default=..., description="The ID of the runner group to register the runner to.")
-    labels: list[str] = Field(default=..., description="Custom labels to add to the runner. Labels are used to identify and target the runner for specific jobs.", min_length=1, max_length=100)
-    work_folder: str | None = Field(default=None, description="The working directory for job execution, specified as a path relative to the runner installation directory.")
-class ActionsGenerateRunnerJitconfigForOrgRequest(StrictModel):
-    """Generate a just-in-time runner configuration for an organization that can be passed to the runner application at startup. Requires admin access to the organization."""
-    path: ActionsGenerateRunnerJitconfigForOrgRequestPath
-    body: ActionsGenerateRunnerJitconfigForOrgRequestBody
 
 # Operation: generate_runner_registration_token
 class ActionsCreateRegistrationTokenForOrgRequestPath(StrictModel):
@@ -3122,14 +2511,6 @@ class OrgsCheckBlockedUserRequest(StrictModel):
     """Check if a user is blocked by an organization. Returns a 204 status if the user is blocked, or 404 if the user is not blocked or has been identified as spam."""
     path: OrgsCheckBlockedUserRequestPath
 
-# Operation: block_user_organization
-class OrgsBlockUserRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    username: str = Field(default=..., description="The GitHub user account handle to block.")
-class OrgsBlockUserRequest(StrictModel):
-    """Block a user from accessing an organization. Returns a 204 status on success, or 422 if the organization cannot block the specified user."""
-    path: OrgsBlockUserRequestPath
-
 # Operation: unblock_user_organization
 class OrgsUnblockUserRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
@@ -3216,38 +2597,6 @@ class CodeSecurityGetConfigurationsForOrgRequest(StrictModel):
     path: CodeSecurityGetConfigurationsForOrgRequestPath
     query: CodeSecurityGetConfigurationsForOrgRequestQuery | None = None
 
-# Operation: create_security_configuration
-class CodeSecurityCreateConfigurationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name where the security configuration will be created. Organization names are case-insensitive.")
-class CodeSecurityCreateConfigurationRequestBodySecretScanningDelegatedBypassOptions(StrictModel):
-    reviewers: list[CodeSecurityCreateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem] | None = Field(default=None, validation_alias="reviewers", serialization_alias="reviewers", description="An array of user or team identifiers who can review and approve bypasses for secret scanning push protection.")
-class CodeSecurityCreateConfigurationRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the code security configuration. Must be unique within the organization.")
-    description: str = Field(default=..., description="A description of the code security configuration's purpose and scope.", max_length=255)
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of GitHub Code Security features, which controls the overall security posture.")
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependency Graph, which analyzes repository dependencies.")
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of automatic dependency submission, which automatically updates dependency information.")
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot alerts, which notifies about vulnerable dependencies.")
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Dependabot security updates, which automatically creates pull requests to fix vulnerabilities.")
-    dependabot_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated alert dismissal for Dependabot. Requires Dependabot alerts to be enabled.")
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of code scanning default setup, which automatically configures code scanning for repositories.")
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated alert dismissal for code scanning, allowing teams to dismiss alerts without admin approval.")
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning, which detects exposed secrets in repositories.")
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning push protection, which blocks commits containing detected secrets.")
-    secret_scanning_delegated_bypass: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated bypass for secret scanning push protection, allowing designated reviewers to approve secret commits.")
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning validity checks, which verify if detected secrets are still valid.")
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning for non-provider patterns, which detects custom secret patterns.")
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of Copilot secret scanning, which detects secrets in AI-generated code.")
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of delegated alert dismissal for secret scanning, allowing teams to dismiss alerts without admin approval.")
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of secret scanning extended metadata, which provides additional context about detected secrets.")
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(default=None, description="The enablement status of private vulnerability reporting, which allows secure reporting of vulnerabilities.")
-    enforcement: Literal["enforced", "unenforced"] | None = Field(default=None, description="The enforcement status for this security configuration, determining whether it is mandatory or optional for repositories.")
-    secret_scanning_delegated_bypass_options: CodeSecurityCreateConfigurationRequestBodySecretScanningDelegatedBypassOptions | None = None
-class CodeSecurityCreateConfigurationRequest(StrictModel):
-    """Creates a code security configuration for an organization to standardize security settings across repositories. The authenticated user must be an administrator or security manager for the organization."""
-    path: CodeSecurityCreateConfigurationRequestPath
-    body: CodeSecurityCreateConfigurationRequestBody
-
 # Operation: list_default_code_security_configurations
 class CodeSecurityGetDefaultConfigurationsRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to scope the request to a specific organization.")
@@ -3325,17 +2674,6 @@ class CodeSecurityAttachConfigurationRequest(StrictModel):
     path: CodeSecurityAttachConfigurationRequestPath
     body: CodeSecurityAttachConfigurationRequestBody
 
-# Operation: set_code_security_configuration_as_default_for_organization
-class CodeSecuritySetConfigurationAsDefaultRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    configuration_id: int = Field(default=..., description="The unique identifier of the code security configuration to set as default.")
-class CodeSecuritySetConfigurationAsDefaultRequestBody(StrictModel):
-    default_for_new_repos: Literal["all", "none", "private_and_internal", "public"] | None = Field(default=None, description="Specifies which types of new repositories this security configuration should be applied to by default.")
-class CodeSecuritySetConfigurationAsDefaultRequest(StrictModel):
-    """Set a code security configuration as the default for an organization, which will be automatically applied to new repositories matching the specified type. The authenticated user must be an administrator or security manager for the organization."""
-    path: CodeSecuritySetConfigurationAsDefaultRequestPath
-    body: CodeSecuritySetConfigurationAsDefaultRequestBody | None = None
-
 # Operation: list_security_configuration_repositories
 class CodeSecurityGetRepositoriesForConfigurationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
@@ -3357,13 +2695,6 @@ class CodespacesListOrgSecretsRequestPath(StrictModel):
 class CodespacesListOrgSecretsRequest(StrictModel):
     """Lists all Codespaces development environment secrets available at the organization level without revealing their encrypted values. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
     path: CodespacesListOrgSecretsRequestPath
-
-# Operation: get_organization_codespaces_public_key
-class CodespacesGetOrgPublicKeyRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class CodespacesGetOrgPublicKeyRequest(StrictModel):
-    """Retrieves the public key for an organization, which is required to encrypt secrets before creating or updating them in GitHub Codespaces. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
-    path: CodespacesGetOrgPublicKeyRequestPath
 
 # Operation: get_organization_secret_codespace
 class CodespacesGetOrgSecretRequestPath(StrictModel):
@@ -3493,32 +2824,12 @@ class CopilotGetCopilotCodingAgentPermissionsOrganizationRequest(StrictModel):
     """Retrieve the Copilot coding agent permission settings for an organization, showing which repositories have the agent enabled or disabled. Organization owners use this to view their current Copilot coding agent configuration across repositories."""
     path: CopilotGetCopilotCodingAgentPermissionsOrganizationRequestPath
 
-# Operation: configure_copilot_coding_agent_permissions
-class CopilotSetCopilotCodingAgentPermissionsOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class CopilotSetCopilotCodingAgentPermissionsOrganizationRequestBody(StrictModel):
-    enabled_repositories: Literal["all", "selected", "none"] = Field(default=..., description="The policy for which repositories can use Copilot coding agent: `all` enables for all repositories, `selected` enables for specific repositories, or `none` disables organization-wide.")
-class CopilotSetCopilotCodingAgentPermissionsOrganizationRequest(StrictModel):
-    """Configure which repositories in an organization can use GitHub Copilot coding agent. Organization owners can enable the agent for all repositories, selected repositories, or disable it organization-wide."""
-    path: CopilotSetCopilotCodingAgentPermissionsOrganizationRequestPath
-    body: CopilotSetCopilotCodingAgentPermissionsOrganizationRequestBody
-
 # Operation: list_copilot_coding_agent_repositories
 class CopilotListCopilotCodingAgentSelectedRepositoriesForOrganizationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
 class CopilotListCopilotCodingAgentSelectedRepositoriesForOrganizationRequest(StrictModel):
     """Lists repositories enabled for Copilot coding agent in an organization when the repository policy is set to selected. Organization owners can use this endpoint to view which repositories have Copilot coding agent access enabled."""
     path: CopilotListCopilotCodingAgentSelectedRepositoriesForOrganizationRequestPath
-
-# Operation: update_copilot_coding_agent_repositories
-class CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestBody(StrictModel):
-    selected_repository_ids: list[int] = Field(default=..., description="List of repository IDs to enable for Copilot coding agent. Replaces the entire existing list.")
-class CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequest(StrictModel):
-    """Replace the list of repositories enabled for Copilot coding agent in an organization. This operation requires the coding agent repository policy to be set to 'selected' and needs admin:org scope."""
-    path: CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestPath
-    body: CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestBody
 
 # Operation: enable_copilot_coding_agent_for_repository
 class CopilotEnableCopilotCodingAgentForRepositoryInOrganizationRequestPath(StrictModel):
@@ -3528,31 +2839,12 @@ class CopilotEnableCopilotCodingAgentForRepositoryInOrganizationRequest(StrictMo
     """Enable a repository for Copilot coding agent in an organization. This operation adds a repository to the list of selected repositories when the organization's coding agent repository policy is set to 'selected'."""
     path: CopilotEnableCopilotCodingAgentForRepositoryInOrganizationRequestPath
 
-# Operation: disable_copilot_coding_agent_for_repository
-class CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
-    repository_id: int = Field(default=..., description="The unique numeric identifier of the repository to disable for Copilot coding agent.")
-class CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequest(StrictModel):
-    """Remove a repository from the list of repositories enabled for Copilot coding agent in an organization. This operation only works when the coding agent repository policy is set to 'selected'."""
-    path: CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequestPath
-
 # Operation: list_copilot_content_exclusions
 class CopilotCopilotContentExclusionForOrganizationRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to scope the content exclusion rules to a specific organization.")
 class CopilotCopilotContentExclusionForOrganizationRequest(StrictModel):
     """Retrieve Copilot content exclusion path rules configured for an organization. This endpoint allows organization owners to view which paths are excluded from GitHub Copilot."""
     path: CopilotCopilotContentExclusionForOrganizationRequestPath
-
-# Operation: configure_copilot_content_exclusion
-class CopilotSetCopilotContentExclusionForOrganizationRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class CopilotSetCopilotContentExclusionForOrganizationRequestBody(StrictModel):
-    """The content exclusion rules to set"""
-    body: dict[str, list[str | CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV1 | CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV2]] = Field(default=..., description="A mapping of repository names to arrays of file paths to exclude from Copilot. Each path should be specified relative to the repository root. Note: Comments in existing rules will be removed, and duplicate keys will be overwritten with only the last occurrence saved.", examples=[{'octo-repo': ['/src/some-dir/kernel.rs']}])
-class CopilotSetCopilotContentExclusionForOrganizationRequest(StrictModel):
-    """Configure GitHub Copilot content exclusion rules for an organization by specifying file paths that should be excluded from Copilot suggestions. Only organization owners can modify these settings."""
-    path: CopilotSetCopilotContentExclusionForOrganizationRequestPath
-    body: CopilotSetCopilotContentExclusionForOrganizationRequestBody
 
 # Operation: get_copilot_metrics
 class CopilotCopilotMetricsForOrganizationRequestPath(StrictModel):
@@ -3786,29 +3078,6 @@ class OrgsRedeliverWebhookDeliveryRequest(StrictModel):
     """Redeliver a previously failed or missed webhook delivery for an organization webhook. Requires organization owner permissions and appropriate OAuth or personal access token scopes."""
     path: OrgsRedeliverWebhookDeliveryRequestPath
 
-# Operation: ping_webhook
-class OrgsPingWebhookRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    hook_id: int = Field(default=..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook deliveries.")
-class OrgsPingWebhookRequest(StrictModel):
-    """Send a ping event to an organization webhook to test its connectivity. Requires organization owner permissions."""
-    path: OrgsPingWebhookRequestPath
-
-# Operation: list_route_stats_by_actor
-class ApiInsightsGetRouteStatsByActorRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-    actor_type: Literal["installation", "classic_pat", "fine_grained_pat", "oauth_app", "github_app_user_to_server"] = Field(default=..., description="The type of actor making the API requests.")
-    actor_id: int = Field(default=..., description="The unique identifier of the actor.")
-class ApiInsightsGetRouteStatsByActorRequestQuery(StrictModel):
-    min_timestamp: str = Field(default=..., description="The start of the time range for statistics in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ).")
-    max_timestamp: str | None = Field(default=None, description="The end of the time range for statistics in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ). Defaults to 30 days before min_timestamp if not provided.")
-    direction: Literal["asc", "desc"] | None = Field(default=None, description="The sort order for results based on request count.")
-    api_route_substring: str | None = Field(default=None, description="Filter results to routes containing this substring (case-insensitive search).")
-class ApiInsightsGetRouteStatsByActorRequest(StrictModel):
-    """Retrieve API request count statistics for a specific actor (installation, PAT, or app) broken down by route within a specified time frame. Results can be filtered by route substring and sorted by request count."""
-    path: ApiInsightsGetRouteStatsByActorRequestPath
-    query: ApiInsightsGetRouteStatsByActorRequestQuery
-
 # Operation: list_api_request_stats
 class ApiInsightsGetSubjectStatsRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive.")
@@ -3832,18 +3101,6 @@ class ApiInsightsGetSummaryStatsRequest(StrictModel):
     """Retrieve aggregated API request statistics for an organization across all users and applications within a specified time period."""
     path: ApiInsightsGetSummaryStatsRequestPath
     query: ApiInsightsGetSummaryStatsRequestQuery
-
-# Operation: get_user_api_stats
-class ApiInsightsGetSummaryStatsByUserRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization identifier. Organization names are case-insensitive.")
-    user_id: str = Field(default=..., description="The unique identifier of the user whose API statistics should be retrieved.")
-class ApiInsightsGetSummaryStatsByUserRequestQuery(StrictModel):
-    min_timestamp: str = Field(default=..., description="The start of the time range for statistics retrieval. Must be provided in ISO 8601 format.")
-    max_timestamp: str | None = Field(default=None, description="The end of the time range for statistics retrieval. If not provided, defaults to 30 days before the minimum timestamp. Must be provided in ISO 8601 format.")
-class ApiInsightsGetSummaryStatsByUserRequest(StrictModel):
-    """Retrieve API request statistics for a specific user within an organization over a specified time period. Returns aggregated metrics on API usage during the requested timeframe."""
-    path: ApiInsightsGetSummaryStatsByUserRequestPath
-    query: ApiInsightsGetSummaryStatsByUserRequestQuery
 
 # Operation: get_api_stats_by_actor
 class ApiInsightsGetSummaryStatsByActorRequestPath(StrictModel):
@@ -3932,24 +3189,6 @@ class InteractionsGetRestrictionsForOrgRequest(StrictModel):
     """Retrieve the current interaction restrictions for an organization, including which types of GitHub users can interact and when the restriction expires. Returns an empty response if no restrictions are active."""
     path: InteractionsGetRestrictionsForOrgRequestPath
 
-# Operation: restrict_org_interactions
-class InteractionsSetRestrictionsForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class InteractionsSetRestrictionsForOrgRequestBody(StrictModel):
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(default=..., description="The type of GitHub user permitted to interact (comment, open issues, or create pull requests) while the restriction is active.")
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(default=None, description="How long the interaction restriction remains in effect before automatically expiring.")
-class InteractionsSetRestrictionsForOrgRequest(StrictModel):
-    """Set interaction restrictions for an organization to temporarily limit who can comment, open issues, or create pull requests in public repositories. Organization owners can use this to manage interactions, and organization-level restrictions override any repository-specific limits."""
-    path: InteractionsSetRestrictionsForOrgRequestPath
-    body: InteractionsSetRestrictionsForOrgRequestBody
-
-# Operation: remove_organization_interaction_restrictions
-class InteractionsRemoveRestrictionsForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-class InteractionsRemoveRestrictionsForOrgRequest(StrictModel):
-    """Remove all interaction restrictions from public repositories in an organization. Only organization owners can perform this action."""
-    path: InteractionsRemoveRestrictionsForOrgRequestPath
-
 # Operation: list_pending_invitations
 class OrgsListPendingInvitationsRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive.")
@@ -4009,19 +3248,6 @@ class OrgsCreateIssueFieldRequest(StrictModel):
     path: OrgsCreateIssueFieldRequestPath
     body: OrgsCreateIssueFieldRequestBody
 
-# Operation: update_issue_field
-class OrgsUpdateIssueFieldRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-    issue_field_id: int = Field(default=..., description="The unique identifier of the issue field to update.")
-class OrgsUpdateIssueFieldRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Updated description text for the issue field.")
-    visibility: Literal["organization_members_only", "all"] | None = Field(default=None, description="Controls who can view this issue field. Organization members only restricts visibility to organization members, while all makes it visible to any user who can see issues.")
-    options: list[OrgsUpdateIssueFieldBodyOptionsItem] | None = Field(default=None, description="Array of options for single select fields. Only applicable when updating single_select type fields. Options are processed in the order provided.")
-class OrgsUpdateIssueFieldRequest(StrictModel):
-    """Updates an issue field configuration for an organization. Requires organization administrator privileges to modify field properties including description, visibility, and select options."""
-    path: OrgsUpdateIssueFieldRequestPath
-    body: OrgsUpdateIssueFieldRequestBody | None = None
-
 # Operation: delete_issue_field
 class OrgsDeleteIssueFieldRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive.")
@@ -4049,20 +3275,6 @@ class OrgsCreateIssueTypeRequest(StrictModel):
     """Create a new issue type for an organization. The authenticated user must be an organization administrator with the `admin:org` scope to use this endpoint."""
     path: OrgsCreateIssueTypeRequestPath
     body: OrgsCreateIssueTypeRequestBody
-
-# Operation: update_issue_type
-class OrgsUpdateIssueTypeRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
-    issue_type_id: int = Field(default=..., description="The unique identifier of the issue type to update.")
-class OrgsUpdateIssueTypeRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the issue type.")
-    is_enabled: bool = Field(default=..., description="Controls whether the issue type is available for use at the organization level.")
-    description: str | None = Field(default=None, description="A brief explanation of the issue type's purpose and usage.")
-    color: Literal["gray", "blue", "green", "yellow", "orange", "red", "pink", "purple"] | None = Field(default=None, description="Visual color indicator for the issue type in the UI.")
-class OrgsUpdateIssueTypeRequest(StrictModel):
-    """Updates an issue type configuration for an organization. Requires organization administrator privileges to modify issue type properties including name, status, description, and color."""
-    path: OrgsUpdateIssueTypeRequestPath
-    body: OrgsUpdateIssueTypeRequestBody
 
 # Operation: delete_issue_type
 class OrgsDeleteIssueTypeRequestPath(StrictModel):
@@ -4105,14 +3317,6 @@ class OrgsCheckMembershipForUserRequestPath(StrictModel):
 class OrgsCheckMembershipForUserRequest(StrictModel):
     """Verify whether a user is a member of an organization, including both public and private membership status."""
     path: OrgsCheckMembershipForUserRequestPath
-
-# Operation: remove_organization_member
-class OrgsRemoveMemberRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-    username: str = Field(default=..., description="The GitHub username handle for the user to remove from the organization.")
-class OrgsRemoveMemberRequest(StrictModel):
-    """Remove a user from an organization, which revokes their access to all organization repositories and teams. Note that if the user has indirect membership through an enterprise team, only their direct membership is removed."""
-    path: OrgsRemoveMemberRequestPath
 
 # Operation: list_organization_member_codespaces
 class CodespacesGetCodespacesForUserInOrgRequestPath(StrictModel):
@@ -4181,21 +3385,6 @@ class MigrationsListForOrgRequestPath(StrictModel):
 class MigrationsListForOrgRequest(StrictModel):
     """Retrieve the most recent migrations for an organization, including both exports (startable via REST API) and imports (read-only). Repository details are only included for export migrations."""
     path: MigrationsListForOrgRequestPath
-
-# Operation: initiate_organization_migration
-class MigrationsStartForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Organization names are case-insensitive.")
-class MigrationsStartForOrgRequestBody(StrictModel):
-    repositories: list[str] = Field(default=..., description="A list of repository names to include in the migration. Specify each repository as a separate array element.")
-    lock_repositories: bool | None = Field(default=None, description="Lock repositories during migration to prevent modifications while data is being exported.")
-    exclude_git_data: bool | None = Field(default=None, description="Exclude Git repository data (commits, branches, history) from the migration archive.")
-    exclude_attachments: bool | None = Field(default=None, description="Exclude file attachments from the migration archive to reduce the exported file size.")
-    exclude_releases: bool | None = Field(default=None, description="Exclude release artifacts and release metadata from the migration archive to reduce the exported file size.")
-    exclude_owner_projects: bool | None = Field(default=None, description="Exclude projects owned by the organization or organization members from the migration archive.")
-class MigrationsStartForOrgRequest(StrictModel):
-    """Initiates a migration archive generation for an organization, allowing you to export selected repositories with configurable data inclusion options. This operation prepares the migration package and can optionally lock repositories during the process."""
-    path: MigrationsStartForOrgRequestPath
-    body: MigrationsStartForOrgRequestBody
 
 # Operation: get_migration_status
 class MigrationsGetStatusForOrgRequestPath(StrictModel):
@@ -4729,16 +3918,6 @@ class OrgsCustomPropertiesForReposGetOrganizationDefinitionsRequest(StrictModel)
     """Retrieve all custom property definitions configured for an organization. Organization members can access these property schemas to understand available custom properties."""
     path: OrgsCustomPropertiesForReposGetOrganizationDefinitionsRequestPath
 
-# Operation: batch_upsert_organization_custom_properties
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestBody(StrictModel):
-    properties: list[CustomProperty] = Field(default=..., description="Array of custom property definitions to create or update. Each property in the batch is processed independently, with existing properties being fully replaced by new values.", min_length=1, max_length=100)
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequest(StrictModel):
-    """Create or update custom properties for an organization in batch. Existing properties are replaced entirely, and unspecified optional fields revert to their default values."""
-    path: OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestPath
-    body: OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestBody
-
 # Operation: get_organization_custom_property
 class OrgsCustomPropertiesForReposGetOrganizationDefinitionRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to scope the custom property lookup.")
@@ -4746,31 +3925,6 @@ class OrgsCustomPropertiesForReposGetOrganizationDefinitionRequestPath(StrictMod
 class OrgsCustomPropertiesForReposGetOrganizationDefinitionRequest(StrictModel):
     """Retrieve a custom property definition for an organization. Organization members can access these property definitions to understand custom metadata configured for the organization."""
     path: OrgsCustomPropertiesForReposGetOrganizationDefinitionRequestPath
-
-# Operation: define_organization_custom_property
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-    custom_property_name: str = Field(default=..., description="The name of the custom property being defined or updated.")
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestBody(StrictModel):
-    value_type: Literal["string", "single_select", "multi_select", "true_false", "url"] = Field(default=..., description="The data type for values of this custom property.")
-    required: bool | None = Field(default=None, description="Whether this property must be set on all applicable repositories.")
-    default_value: str | list[str] | None = Field(default=None, description="The default value assigned to this property when not explicitly set.")
-    description: str | None = Field(default=None, description="A brief explanation of what this custom property represents and its purpose.")
-    allowed_values: list[str] | None = Field(default=None, description="An ordered list of permitted values for this property. Maximum of 200 allowed values. Only applicable for select-type properties.")
-    values_editable_by: Literal["org_actors", "org_and_repo_actors"] | None = Field(default=None, description="Specifies which actors can modify property values after the schema is defined.")
-    require_explicit_values: bool | None = Field(default=None, description="Whether explicit values must be provided when setting this property, preventing use of default values.")
-class OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequest(StrictModel):
-    """Create or update a custom property schema for an organization. This defines the structure and validation rules for a custom property that can be applied to repositories within the organization."""
-    path: OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestPath
-    body: OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestBody
-
-# Operation: delete_organization_custom_property
-class OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier for the organization.")
-    custom_property_name: str = Field(default=..., description="The name of the custom property to remove from the organization's schema.")
-class OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequest(StrictModel):
-    """Remove a custom property definition from an organization. Only organization administrators or users with the custom_properties_org_definitions_manager permission can perform this action."""
-    path: OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequestPath
 
 # Operation: list_organization_repository_custom_properties
 class OrgsCustomPropertiesForReposGetOrganizationValuesRequestPath(StrictModel):
@@ -4876,21 +4030,6 @@ class ReposGetOrgRulesetsRequest(StrictModel):
     path: ReposGetOrgRulesetsRequestPath
     query: ReposGetOrgRulesetsRequestQuery | None = None
 
-# Operation: create_organization_ruleset
-class ReposCreateOrgRulesetRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class ReposCreateOrgRulesetRequestBody(StrictModel):
-    """Request body"""
-    name: str = Field(default=..., description="The name of the ruleset.")
-    enforcement: Literal["disabled", "active", "evaluate"] = Field(default=..., description="The enforcement level of the ruleset. Use 'disabled' to turn off the ruleset, 'active' to enforce rules, or 'evaluate' to allow admins to test rules before enforcement (GitHub Enterprise only).")
-    bypass_actors: list[RepositoryRulesetBypassActor] | None = Field(default=None, description="An array of actors (users, teams, or apps) that can bypass the rules in this ruleset.")
-    conditions: ReposCreateOrgRulesetBodyConditionsV0 | ReposCreateOrgRulesetBodyConditionsV1 | ReposCreateOrgRulesetBodyConditionsV2 | None = Field(default=None, description="Conditions that determine which repositories and refs the ruleset applies to. Branch and tag rulesets require both a repository identifier (name, ID, or property) and ref_name. Push rulesets do not require ref_name. Repository policy rulesets require only a repository identifier.")
-    rules: list[RepositoryRuleCreation | RepositoryRuleUpdate | RepositoryRuleDeletion | RepositoryRuleRequiredLinearHistory | RepositoryRuleRequiredDeployments | RepositoryRuleRequiredSignatures | RepositoryRulePullRequest | RepositoryRuleRequiredStatusChecks | RepositoryRuleNonFastForward | RepositoryRuleCommitMessagePattern | RepositoryRuleCommitAuthorEmailPattern | RepositoryRuleCommitterEmailPattern | RepositoryRuleBranchNamePattern | RepositoryRuleTagNamePattern | RepositoryRuleFilePathRestriction | RepositoryRuleMaxFilePathLength | RepositoryRuleFileExtensionRestriction | RepositoryRuleMaxFileSize | RepositoryRuleWorkflows | RepositoryRuleCodeScanning] | None = Field(default=None, description="An array of rules to enforce within this ruleset. Each rule defines specific requirements for commits, branches, or other repository operations.")
-class ReposCreateOrgRulesetRequest(StrictModel):
-    """Create a repository ruleset for an organization to enforce or evaluate rules across repositories. Rulesets can target specific repositories and branches/tags based on defined conditions."""
-    path: ReposCreateOrgRulesetRequestPath
-    body: ReposCreateOrgRulesetRequestBody
-
 # Operation: list_organization_rule_suites
 class ReposGetOrgRuleSuitesRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name (case-insensitive).")
@@ -4919,21 +4058,6 @@ class ReposGetOrgRulesetRequestPath(StrictModel):
 class ReposGetOrgRulesetRequest(StrictModel):
     """Retrieve a specific repository ruleset for an organization. Note that the bypass_actors property is only returned if the requester has write access to the ruleset."""
     path: ReposGetOrgRulesetRequestPath
-
-# Operation: update_organization_ruleset
-class ReposUpdateOrgRulesetRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. The name is not case sensitive.")
-    ruleset_id: int = Field(default=..., description="The unique identifier of the ruleset to update.")
-class ReposUpdateOrgRulesetRequestBody(StrictModel):
-    """Request body"""
-    enforcement: Literal["disabled", "active", "evaluate"] | None = Field(default=None, description="The enforcement level of the ruleset. Use 'disabled' to turn off the ruleset, 'active' to enforce rules, or 'evaluate' to allow admins to test rules before enforcement (evaluate is only available with GitHub Enterprise).")
-    bypass_actors: list[RepositoryRulesetBypassActor] | None = Field(default=None, description="An array of actors who can bypass the rules in this ruleset. The order and format of actors should follow the ruleset's actor specification.")
-    conditions: ReposUpdateOrgRulesetBodyConditionsV0 | ReposUpdateOrgRulesetBodyConditionsV1 | ReposUpdateOrgRulesetBodyConditionsV2 | None = Field(default=None, description="Conditions that determine when the ruleset applies. Branch and tag rulesets require both repository_name and ref_name, or both repository_id and ref_name, or both repository_property and ref_name. Push rulesets do not require ref_name. Repository policy rulesets require only repository_name, repository_id, or repository_property.")
-    rules: list[RepositoryRuleCreation | RepositoryRuleUpdate | RepositoryRuleDeletion | RepositoryRuleRequiredLinearHistory | RepositoryRuleRequiredDeployments | RepositoryRuleRequiredSignatures | RepositoryRulePullRequest | RepositoryRuleRequiredStatusChecks | RepositoryRuleNonFastForward | RepositoryRuleCommitMessagePattern | RepositoryRuleCommitAuthorEmailPattern | RepositoryRuleCommitterEmailPattern | RepositoryRuleBranchNamePattern | RepositoryRuleTagNamePattern | RepositoryRuleFilePathRestriction | RepositoryRuleMaxFilePathLength | RepositoryRuleFileExtensionRestriction | RepositoryRuleMaxFileSize | RepositoryRuleWorkflows | RepositoryRuleCodeScanning] | None = Field(default=None, description="An array of rules to enforce within the ruleset. Each rule defines specific repository policies or restrictions.")
-class ReposUpdateOrgRulesetRequest(StrictModel):
-    """Update an existing repository ruleset for an organization, including its enforcement level, bypass actors, conditions, and rules."""
-    path: ReposUpdateOrgRulesetRequestPath
-    body: ReposUpdateOrgRulesetRequestBody | None = None
 
 # Operation: delete_organization_ruleset
 class ReposDeleteOrgRulesetRequestPath(StrictModel):
@@ -4984,17 +4108,6 @@ class SecretScanningListOrgPatternConfigsRequest(StrictModel):
     """Lists all secret scanning pattern configurations for an organization. These patterns define custom rules used to detect secrets during scanning."""
     path: SecretScanningListOrgPatternConfigsRequestPath
 
-# Operation: update_secret_scanning_patterns
-class SecretScanningUpdateOrgPatternConfigsRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class SecretScanningUpdateOrgPatternConfigsRequestBody(StrictModel):
-    provider_pattern_settings: list[SecretScanningUpdateOrgPatternConfigsBodyProviderPatternSettingsItem] | None = Field(default=None, description="Array of pattern settings for provider-managed secret patterns. Order is preserved and each item configures detection behavior for a specific provider pattern.")
-    custom_pattern_settings: list[SecretScanningUpdateOrgPatternConfigsBodyCustomPatternSettingsItem] | None = Field(default=None, description="Array of pattern settings for custom secret patterns. Order is preserved and each item configures detection behavior for a custom pattern definition.")
-class SecretScanningUpdateOrgPatternConfigsRequest(StrictModel):
-    """Update secret scanning pattern configurations for an organization, including both provider-managed and custom detection patterns. Requires `write:org` scope."""
-    path: SecretScanningUpdateOrgPatternConfigsRequestPath
-    body: SecretScanningUpdateOrgPatternConfigsRequestBody | None = None
-
 # Operation: list_organization_security_advisories
 class SecurityAdvisoriesListOrgRepositoryAdvisoriesRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive.")
@@ -5006,40 +4119,12 @@ class SecurityAdvisoriesListOrgRepositoryAdvisoriesRequest(StrictModel):
     path: SecurityAdvisoriesListOrgRepositoryAdvisoriesRequestPath
     query: SecurityAdvisoriesListOrgRepositoryAdvisoriesRequestQuery | None = None
 
-# Operation: get_immutable_releases_settings
-class OrgsGetImmutableReleasesSettingsRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive identifier used to specify which organization's immutable releases settings to retrieve.")
-class OrgsGetImmutableReleasesSettingsRequest(StrictModel):
-    """Retrieve the immutable releases policy settings for an organization. Requires `admin:org` scope for authentication."""
-    path: OrgsGetImmutableReleasesSettingsRequestPath
-
-# Operation: configure_immutable_releases
-class OrgsSetImmutableReleasesSettingsRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name (case-insensitive).")
-class OrgsSetImmutableReleasesSettingsRequestBody(StrictModel):
-    enforced_repositories: Literal["all", "none", "selected"] = Field(default=..., description="The enforcement policy for immutable releases: apply to all repositories, no repositories, or a selected subset.")
-    selected_repository_ids: list[int] | None = Field(default=None, description="Array of repository IDs to enforce immutable releases on. Only applicable when `enforced_repositories` is set to `selected`. Use the dedicated endpoints to add or remove individual repositories from this policy.")
-class OrgsSetImmutableReleasesSettingsRequest(StrictModel):
-    """Configure the immutable releases policy for an organization, controlling how release immutability is enforced across repositories. Requires `admin:org` OAuth scope or classic personal access token."""
-    path: OrgsSetImmutableReleasesSettingsRequestPath
-    body: OrgsSetImmutableReleasesSettingsRequestBody
-
 # Operation: list_immutable_release_repositories
 class OrgsGetImmutableReleasesSettingsRepositoriesRequestPath(StrictModel):
     org: str = Field(default=..., description="The organization name. Case-insensitive.")
 class OrgsGetImmutableReleasesSettingsRepositoriesRequest(StrictModel):
     """List all repositories in an organization that have been selected for immutable releases enforcement. Requires admin:org scope."""
     path: OrgsGetImmutableReleasesSettingsRepositoriesRequestPath
-
-# Operation: set_immutable_releases_repositories
-class OrgsSetImmutableReleasesSettingsRepositoriesRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class OrgsSetImmutableReleasesSettingsRepositoriesRequestBody(StrictModel):
-    selected_repository_ids: list[int] = Field(default=..., description="An array of repository IDs to enforce immutable releases on. Only applicable when the organization's `enforced_repositories` policy is set to `selected`. This replaces all previously selected repositories. Order is not significant.")
-class OrgsSetImmutableReleasesSettingsRepositoriesRequest(StrictModel):
-    """Replace the complete set of repositories selected for immutable releases enforcement in an organization. This endpoint requires the organization's immutable releases policy to be configured with `enforced_repositories` set to `selected`."""
-    path: OrgsSetImmutableReleasesSettingsRepositoriesRequestPath
-    body: OrgsSetImmutableReleasesSettingsRepositoriesRequestBody
 
 # Operation: enable_repository_immutable_releases
 class OrgsEnableSelectedRepositoryImmutableReleasesOrganizationRequestPath(StrictModel):
@@ -5063,18 +4148,6 @@ class HostedComputeListNetworkConfigurationsForOrgRequestPath(StrictModel):
 class HostedComputeListNetworkConfigurationsForOrgRequest(StrictModel):
     """Retrieve all hosted compute network configurations for an organization. Requires `read:network_configurations` scope."""
     path: HostedComputeListNetworkConfigurationsForOrgRequestPath
-
-# Operation: create_network_configuration
-class HostedComputeCreateNetworkConfigurationForOrgRequestPath(StrictModel):
-    org: str = Field(default=..., description="The organization name. Case-insensitive.")
-class HostedComputeCreateNetworkConfigurationForOrgRequestBody(StrictModel):
-    name: str = Field(default=..., description="Name of the network configuration. Must be between 1 and 100 characters and may only contain letters (a-z, A-Z), numbers (0-9), periods, hyphens, and underscores.")
-    compute_service: Literal["none", "actions"] | None = Field(default=None, description="The hosted compute service to use for this network configuration.")
-    network_settings_ids: list[str] = Field(default=..., description="A list of network settings resource identifiers to associate with this configuration. Exactly one identifier must be provided.", min_length=1, max_length=1)
-class HostedComputeCreateNetworkConfigurationForOrgRequest(StrictModel):
-    """Creates a hosted compute network configuration for an organization. Requires the `write:network_configurations` scope."""
-    path: HostedComputeCreateNetworkConfigurationForOrgRequestPath
-    body: HostedComputeCreateNetworkConfigurationForOrgRequestBody
 
 # Operation: get_network_configuration
 class HostedComputeGetNetworkConfigurationForOrgRequestPath(StrictModel):
@@ -5376,17 +4449,6 @@ class ActionsGetActionsCacheRetentionLimitForRepositoryRequest(StrictModel):
     """Retrieves the GitHub Actions cache retention limit for a repository, which determines how long cached artifacts are retained before automatic eviction due to age or size constraints."""
     path: ActionsGetActionsCacheRetentionLimitForRepositoryRequestPath
 
-# Operation: configure_actions_cache_retention
-class ActionsSetActionsCacheRetentionLimitForRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetActionsCacheRetentionLimitForRepositoryRequestBody(StrictModel):
-    max_cache_retention_days: int | None = Field(default=None, description="The maximum number of days to retain caches in this repository before automatic eviction.")
-class ActionsSetActionsCacheRetentionLimitForRepositoryRequest(StrictModel):
-    """Configure the maximum retention period for GitHub Actions caches in a repository. This setting determines how long cached artifacts will be preserved before automatic eviction, unless manually deleted or removed due to storage constraints."""
-    path: ActionsSetActionsCacheRetentionLimitForRepositoryRequestPath
-    body: ActionsSetActionsCacheRetentionLimitForRepositoryRequestBody | None = None
-
 # Operation: get_actions_cache_storage_limit_repository
 class ActionsGetActionsCacheStorageLimitForRepositoryRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -5394,17 +4456,6 @@ class ActionsGetActionsCacheStorageLimitForRepositoryRequestPath(StrictModel):
 class ActionsGetActionsCacheStorageLimitForRepositoryRequest(StrictModel):
     """Retrieve the GitHub Actions cache storage limit for a repository, which determines the maximum size of caches before eviction occurs. Requires admin:repository scope."""
     path: ActionsGetActionsCacheStorageLimitForRepositoryRequestPath
-
-# Operation: set_actions_cache_storage_limit_for_repository
-class ActionsSetActionsCacheStorageLimitForRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetActionsCacheStorageLimitForRepositoryRequestBody(StrictModel):
-    max_cache_size_gb: int | None = Field(default=None, description="The maximum total cache size for this repository, in gigabytes.")
-class ActionsSetActionsCacheStorageLimitForRepositoryRequest(StrictModel):
-    """Set the maximum storage limit for GitHub Actions caches in a repository. This controls the total cache size before automatic eviction occurs."""
-    path: ActionsSetActionsCacheStorageLimitForRepositoryRequestPath
-    body: ActionsSetActionsCacheStorageLimitForRepositoryRequestBody | None = None
 
 # Operation: get_actions_cache_usage
 class ActionsGetActionsCacheUsageRequestPath(StrictModel):
@@ -5484,18 +4535,6 @@ class ActionsGetCustomOidcSubClaimForRepoRequest(StrictModel):
     """Retrieve the customization template for an OpenID Connect (OIDC) subject claim in a repository. This template defines how the OIDC subject claim is formatted for GitHub Actions workflows."""
     path: ActionsGetCustomOidcSubClaimForRepoRequestPath
 
-# Operation: configure_oidc_subject_claim
-class ActionsSetCustomOidcSubClaimForRepoRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetCustomOidcSubClaimForRepoRequestBody(StrictModel):
-    use_default: bool = Field(default=..., description="Whether to use the default OIDC subject claim template. When `true`, any custom claim keys are ignored and the default template is applied.")
-    include_claim_keys: list[str] | None = Field(default=None, description="Array of claim key names to include in the custom OIDC subject claim template. Each key must contain only alphanumeric characters and underscores. Only used when `use_default` is `false`.")
-class ActionsSetCustomOidcSubClaimForRepoRequest(StrictModel):
-    """Configure the OpenID Connect (OIDC) subject claim customization template for a repository. Allows you to set a custom template and specify whether to use default or custom claim keys."""
-    path: ActionsSetCustomOidcSubClaimForRepoRequestPath
-    body: ActionsSetCustomOidcSubClaimForRepoRequestBody
-
 # Operation: list_organization_secrets_available_to_repository
 class ActionsListRepoOrganizationSecretsRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
@@ -5512,147 +4551,6 @@ class ActionsListRepoOrganizationVariablesRequest(StrictModel):
     """Retrieve all organization variables that are shared with a specific repository. Requires collaborator access to the repository."""
     path: ActionsListRepoOrganizationVariablesRequestPath
 
-# Operation: get_repository_actions_permissions
-class ActionsGetGithubActionsPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is case-insensitive.")
-class ActionsGetGithubActionsPermissionsRepositoryRequest(StrictModel):
-    """Retrieve the GitHub Actions permissions policy for a repository, including whether GitHub Actions is enabled and which actions and reusable workflows are allowed to run. Requires `repo` scope authorization."""
-    path: ActionsGetGithubActionsPermissionsRepositoryRequestPath
-
-# Operation: configure_repository_actions_permissions
-class ActionsSetGithubActionsPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetGithubActionsPermissionsRepositoryRequestBody(StrictModel):
-    enabled: bool = Field(default=..., description="Whether GitHub Actions is enabled on the repository.")
-    allowed_actions: Literal["all", "local_only", "selected"] | None = Field(default=None, description="The permissions policy that controls which actions and reusable workflows are allowed to run in the repository.")
-    sha_pinning_required: bool | None = Field(default=None, description="Whether actions must be pinned to a full-length commit SHA for security purposes.")
-class ActionsSetGithubActionsPermissionsRepositoryRequest(StrictModel):
-    """Configure GitHub Actions permissions and policies for a repository, including whether Actions is enabled and which actions and reusable workflows are allowed to run."""
-    path: ActionsSetGithubActionsPermissionsRepositoryRequestPath
-    body: ActionsSetGithubActionsPermissionsRepositoryRequestBody
-
-# Operation: get_workflow_repository_access
-class ActionsGetWorkflowAccessToRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner account of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. The name is case-insensitive.")
-class ActionsGetWorkflowAccessToRepositoryRequest(StrictModel):
-    """Retrieve the access level that external workflows have to actions and reusable workflows in a private repository. This setting controls whether workflows from other repositories can access components within this repository."""
-    path: ActionsGetWorkflowAccessToRepositoryRequestPath
-
-# Operation: configure_workflow_access_level
-class ActionsSetWorkflowAccessToRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner account of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. Case-insensitive.")
-class ActionsSetWorkflowAccessToRepositoryRequestBody(StrictModel):
-    access_level: Literal["none", "user", "organization"] = Field(default=..., description="The access level for external workflows. `none` restricts access to workflows within this repository only. `user` allows sharing across user-owned private repositories. `organization` allows sharing across all organization repositories.")
-class ActionsSetWorkflowAccessToRepositoryRequest(StrictModel):
-    """Configure the access level that external workflows have to actions and reusable workflows in a private repository. This controls whether workflows outside the repository can reference and use components within it."""
-    path: ActionsSetWorkflowAccessToRepositoryRequestPath
-    body: ActionsSetWorkflowAccessToRepositoryRequestBody
-
-# Operation: get_artifact_and_log_retention_settings_repository
-class ActionsGetArtifactAndLogRetentionSettingsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. The name is case-insensitive.")
-class ActionsGetArtifactAndLogRetentionSettingsRepositoryRequest(StrictModel):
-    """Retrieve the artifact and log retention settings configured for a repository. This determines how long GitHub Actions artifacts and logs are retained before automatic deletion."""
-    path: ActionsGetArtifactAndLogRetentionSettingsRepositoryRequestPath
-
-# Operation: configure_artifact_retention
-class ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestBody(StrictModel):
-    days: int = Field(default=..., description="The number of days to retain artifacts and logs before automatic deletion. Must be a positive integer.")
-class ActionsSetArtifactAndLogRetentionSettingsRepositoryRequest(StrictModel):
-    """Configure the retention period for artifacts and logs in a repository. This setting applies to all GitHub Actions workflows in the repository."""
-    path: ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestPath
-    body: ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestBody
-
-# Operation: get_fork_pull_request_approval_permissions
-class ActionsGetForkPrContributorApprovalPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is case-insensitive.")
-class ActionsGetForkPrContributorApprovalPermissionsRepositoryRequest(StrictModel):
-    """Retrieves the fork pull request contributor approval policy for a repository, which controls whether contributors can approve their own pull requests created from forks. Requires `repo` scope for OAuth apps and personal access tokens."""
-    path: ActionsGetForkPrContributorApprovalPermissionsRepositoryRequestPath
-
-# Operation: configure_fork_pr_approval_policy_repository
-class ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. The name is case-insensitive.")
-class ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestBody(StrictModel):
-    approval_policy: Literal["first_time_contributors_new_to_github", "first_time_contributors", "all_external_contributors"] = Field(default=..., description="The approval policy that determines when fork PR workflows require maintainer approval before execution.")
-class ActionsSetForkPrContributorApprovalPermissionsRepositoryRequest(StrictModel):
-    """Configure the approval policy for pull requests from forked repositories. This controls whether maintainer approval is required before fork PR workflows can run."""
-    path: ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestPath
-    body: ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestBody
-
-# Operation: get_fork_pr_workflow_settings
-class ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner account of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. Case-insensitive.")
-class ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest(StrictModel):
-    """Retrieve the settings that control whether workflows from fork pull requests can execute on a private repository. Requires `repo` scope for authentication."""
-    path: ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath
-
-# Operation: configure_fork_pull_request_workflow_settings
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestBody(StrictModel):
-    run_workflows_from_fork_pull_requests: bool = Field(default=..., description="Whether workflows triggered by pull requests from forks are allowed to run on this private repository.")
-    send_write_tokens_to_workflows: bool | None = Field(default=None, description="Whether GitHub Actions can create pull requests or submit approving pull request reviews when executing workflows triggered by fork pull requests.")
-    send_secrets_and_variables: bool | None = Field(default=None, description="Whether secrets and variables are accessible to workflows triggered by pull requests from forks.")
-    require_approval_for_fork_pr_workflows: bool | None = Field(default=None, description="Whether workflows triggered by pull requests from forks require explicit approval from a repository administrator before execution.")
-class ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest(StrictModel):
-    """Configure security and execution settings for workflows triggered by pull requests from forks on a private repository. Controls whether these workflows can run, access secrets, create pull requests, and whether they require administrator approval."""
-    path: ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath
-    body: ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestBody
-
-# Operation: list_allowed_actions
-class ActionsGetAllowedActionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. The name is case-insensitive.")
-class ActionsGetAllowedActionsRepositoryRequest(StrictModel):
-    """Retrieve the allowed actions and reusable workflows configured for a repository. This endpoint requires the repository's `allowed_actions` policy to be set to `selected`."""
-    path: ActionsGetAllowedActionsRepositoryRequestPath
-
-# Operation: configure_allowed_actions
-class ActionsSetAllowedActionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetAllowedActionsRepositoryRequestBody(StrictModel):
-    github_owned_allowed: bool | None = Field(default=None, description="Whether GitHub-owned actions are allowed. When enabled, includes actions from the GitHub `actions` organization.")
-    verified_allowed: bool | None = Field(default=None, description="Whether actions from GitHub Marketplace verified creators are allowed. Set to true to permit all actions by verified creators.")
-    patterns_allowed: list[str] | None = Field(default=None, description="List of string-matching patterns to allow specific actions and reusable workflows. Supports wildcards, tags, and SHAs for flexible matching. Note: This setting only applies to public repositories.")
-class ActionsSetAllowedActionsRepositoryRequest(StrictModel):
-    """Configure which actions and reusable workflows are allowed to run in a repository. The repository's allowed_actions permission policy must be set to 'selected' for this configuration to take effect."""
-    path: ActionsSetAllowedActionsRepositoryRequestPath
-    body: ActionsSetAllowedActionsRepositoryRequestBody | None = None
-
-# Operation: get_workflow_permissions
-class ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequest(StrictModel):
-    """Retrieve the default workflow permissions granted to the GITHUB_TOKEN in a repository, including whether GitHub Actions can submit approving pull request reviews. This determines what actions workflows can perform automatically."""
-    path: ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath
-
-# Operation: configure_workflow_permissions
-class ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestBody(StrictModel):
-    default_workflow_permissions: Literal["read", "write"] | None = Field(default=None, description="The default permission level granted to the GITHUB_TOKEN when executing workflows in this repository.")
-    can_approve_pull_request_reviews: bool | None = Field(default=None, description="Whether GitHub Actions can automatically approve pull requests. Enabling this option presents a security risk and should be used cautiously.")
-class ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequest(StrictModel):
-    """Configure default permissions for the GITHUB_TOKEN in repository workflows and control whether GitHub Actions can approve pull requests. This setting applies to all workflows running in the repository."""
-    path: ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath
-    body: ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestBody | None = None
-
 # Operation: list_runners
 class ActionsListSelfHostedRunnersForRepoRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -5668,28 +4566,6 @@ class ActionsListRunnerApplicationsForRepoRequestPath(StrictModel):
 class ActionsListRunnerApplicationsForRepoRequest(StrictModel):
     """Lists available runner application binaries that can be downloaded and executed for a repository. Requires admin access to the repository."""
     path: ActionsListRunnerApplicationsForRepoRequestPath
-
-# Operation: generate_runner_jitconfig_for_repo
-class ActionsGenerateRunnerJitconfigForRepoRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsGenerateRunnerJitconfigForRepoRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name to assign to the new runner.")
-    runner_group_id: int = Field(default=..., description="The ID of the runner group to register the runner to.")
-    labels: list[str] = Field(default=..., description="Custom labels to add to the runner. Accepts 1 to 100 labels as an array of strings.", min_length=1, max_length=100)
-    work_folder: str | None = Field(default=None, description="The working directory for job execution, specified as a path relative to the runner installation directory.")
-class ActionsGenerateRunnerJitconfigForRepoRequest(StrictModel):
-    """Generate a just-in-time runner configuration for a repository that can be passed to the runner application at startup. Requires admin access to the repository."""
-    path: ActionsGenerateRunnerJitconfigForRepoRequestPath
-    body: ActionsGenerateRunnerJitconfigForRepoRequestBody
-
-# Operation: create_runner_registration_token
-class ActionsCreateRegistrationTokenForRepoRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ActionsCreateRegistrationTokenForRepoRequest(StrictModel):
-    """Generate a registration token for configuring a self-hosted runner in a repository. The token expires after one hour and requires admin access to the repository."""
-    path: ActionsCreateRegistrationTokenForRepoRequestPath
 
 # Operation: generate_runner_removal_token_repository
 class ActionsCreateRemoveTokenForRepoRequestPath(StrictModel):
@@ -6012,19 +4888,6 @@ class ActionsGetRepoSecretRequest(StrictModel):
     """Retrieve metadata for a specific repository secret without exposing its encrypted value. Requires collaborator access to the repository."""
     path: ActionsGetRepoSecretRequestPath
 
-# Operation: create_or_update_repository_secret
-class ActionsCreateOrUpdateRepoSecretRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. Case-insensitive.")
-    secret_name: str = Field(default=..., description="The name of the secret to create or update.")
-class ActionsCreateOrUpdateRepoSecretRequestBody(StrictModel):
-    encrypted_value: str = Field(default=..., description="The encrypted secret value using LibSodium with the public key from the Get repository public key endpoint. Must be base64-encoded.", pattern='^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$')
-    key_id: str = Field(default=..., description="The ID of the public key used to encrypt the secret. Retrieve this from the Get repository public key endpoint.")
-class ActionsCreateOrUpdateRepoSecretRequest(StrictModel):
-    """Create or update an encrypted secret in a repository for use in GitHub Actions workflows. The secret value must be encrypted using LibSodium with the repository's public key before submission."""
-    path: ActionsCreateOrUpdateRepoSecretRequestPath
-    body: ActionsCreateOrUpdateRepoSecretRequestBody
-
 # Operation: delete_repository_secret
 class ActionsDeleteRepoSecretRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
@@ -6149,15 +5012,6 @@ class ActionsListWorkflowRunsRequest(StrictModel):
     """List all workflow runs for a specific workflow in a repository. You can filter results by actor, branch, date range, and other criteria to narrow down the results."""
     path: ActionsListWorkflowRunsRequestPath
     query: ActionsListWorkflowRunsRequestQuery | None = None
-
-# Operation: get_workflow_usage
-class ActionsGetWorkflowUsageRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    workflow_id: str = Field(default=..., description="The ID of the workflow or the workflow file name (e.g., `main.yaml`). Accepts both string identifiers and integer IDs.")
-class ActionsGetWorkflowUsageRequest(StrictModel):
-    """Retrieves billable minutes consumed by a specific workflow during the current billing cycle. This endpoint is deprecated and will be closed; refer to GitHub's official migration guidance for alternatives."""
-    path: ActionsGetWorkflowUsageRequestPath
 
 # Operation: list_repository_activities
 class ReposListActivitiesRequestPath(StrictModel):
@@ -6389,49 +5243,6 @@ class ReposDeleteAdminBranchProtectionRequest(StrictModel):
     """Disable admin enforcement on a protected branch. Requires admin or owner permissions and branch protection must already be enabled."""
     path: ReposDeleteAdminBranchProtectionRequestPath
 
-# Operation: get_pull_request_review_protection
-class ReposGetPullRequestReviewProtectionRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is case-insensitive.")
-    branch: str = Field(default=..., description="The name of the branch to retrieve protection settings for. Cannot contain wildcard characters; use the GraphQL API for wildcard support.")
-class ReposGetPullRequestReviewProtectionRequest(StrictModel):
-    """Retrieve the pull request review protection settings for a specific branch. This operation is available for public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
-    path: ReposGetPullRequestReviewProtectionRequestPath
-
-# Operation: configure_pull_request_review_protection
-class ReposUpdatePullRequestReviewProtectionRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. Case-insensitive.")
-    branch: str = Field(default=..., description="The branch name. Cannot contain wildcard characters; use GraphQL API for wildcard support.")
-class ReposUpdatePullRequestReviewProtectionRequestBodyDismissalRestrictions(StrictModel):
-    users: list[str] | None = Field(default=None, validation_alias="users", serialization_alias="users", description="List of user logins who can dismiss pull request reviews. Replaces previous values when provided.")
-    teams: list[str] | None = Field(default=None, validation_alias="teams", serialization_alias="teams", description="List of team slugs who can dismiss pull request reviews. Replaces previous values when provided.")
-    apps: list[str] | None = Field(default=None, validation_alias="apps", serialization_alias="apps", description="List of app slugs who can dismiss pull request reviews. Replaces previous values when provided.")
-class ReposUpdatePullRequestReviewProtectionRequestBodyBypassPullRequestAllowances(StrictModel):
-    users: list[str] | None = Field(default=None, validation_alias="users", serialization_alias="users", description="List of user logins allowed to bypass pull request review requirements. Replaces previous values when provided.")
-    teams: list[str] | None = Field(default=None, validation_alias="teams", serialization_alias="teams", description="List of team slugs allowed to bypass pull request review requirements. Replaces previous values when provided.")
-    apps: list[str] | None = Field(default=None, validation_alias="apps", serialization_alias="apps", description="List of app slugs allowed to bypass pull request review requirements. Replaces previous values when provided.")
-class ReposUpdatePullRequestReviewProtectionRequestBody(StrictModel):
-    dismiss_stale_reviews: bool | None = Field(default=None, description="Automatically dismiss approving reviews when a new commit is pushed.")
-    require_code_owner_reviews: bool | None = Field(default=None, description="Require code owners to review and approve pull requests before merging.")
-    required_approving_review_count: int | None = Field(default=None, description="Number of reviewers required to approve pull requests before merging.")
-    require_last_push_approval: bool | None = Field(default=None, description="Require the most recent push to be approved by someone other than the person who pushed it.")
-    dismissal_restrictions: ReposUpdatePullRequestReviewProtectionRequestBodyDismissalRestrictions | None = None
-    bypass_pull_request_allowances: ReposUpdatePullRequestReviewProtectionRequestBodyBypassPullRequestAllowances | None = None
-class ReposUpdatePullRequestReviewProtectionRequest(StrictModel):
-    """Configure pull request review protection settings for a branch, including required approvals, dismissal permissions, and bypass allowances. Requires admin or owner permissions and branch protection to be enabled."""
-    path: ReposUpdatePullRequestReviewProtectionRequestPath
-    body: ReposUpdatePullRequestReviewProtectionRequestBody | None = None
-
-# Operation: remove_pull_request_review_protection
-class ReposDeletePullRequestReviewProtectionRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    branch: str = Field(default=..., description="The name of the branch to remove pull request review protection from. Cannot contain wildcard characters.")
-class ReposDeletePullRequestReviewProtectionRequest(StrictModel):
-    """Remove pull request review protection requirements from a branch. This allows bypassing mandatory pull request reviews on the specified branch."""
-    path: ReposDeletePullRequestReviewProtectionRequestPath
-
 # Operation: check_branch_signature_protection
 class ReposGetCommitSignatureProtectionRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
@@ -6440,15 +5251,6 @@ class ReposGetCommitSignatureProtectionRequestPath(StrictModel):
 class ReposGetCommitSignatureProtectionRequest(StrictModel):
     """Check whether a branch requires signed commits. Returns the signature protection status for a protected branch when you have admin or owner permissions to the repository."""
     path: ReposGetCommitSignatureProtectionRequestPath
-
-# Operation: enable_branch_signature_protection
-class ReposCreateCommitSignatureProtectionRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    branch: str = Field(default=..., description="The name of the branch to protect. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names.")
-class ReposCreateCommitSignatureProtectionRequest(StrictModel):
-    """Enable required commit signature protection on a branch. Requires admin or owner permissions and branch protection to be already enabled on the repository."""
-    path: ReposCreateCommitSignatureProtectionRequestPath
 
 # Operation: disable_branch_signature_protection
 class ReposDeleteCommitSignatureProtectionRequestPath(StrictModel):
@@ -6468,19 +5270,6 @@ class ReposGetStatusChecksProtectionRequest(StrictModel):
     """Retrieve the required status checks protection rules for a branch. Status checks must pass before pull requests can be merged into the protected branch."""
     path: ReposGetStatusChecksProtectionRequestPath
 
-# Operation: update_status_check_protection
-class ReposUpdateStatusCheckProtectionRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. Case-insensitive.")
-    branch: str = Field(default=..., description="The name of the branch. Cannot contain wildcard characters.")
-class ReposUpdateStatusCheckProtectionRequestBody(StrictModel):
-    strict: bool | None = Field(default=None, description="Require branches to be up to date before merging.")
-    checks: list[ReposUpdateStatusCheckProtectionBodyChecksItem] | None = Field(default=None, description="The list of status checks required to merge into this branch. Each check identifies a required CI/CD workflow or external service.")
-class ReposUpdateStatusCheckProtectionRequest(StrictModel):
-    """Update required status checks for a protected branch. Requires admin or owner permissions and branch protection to be enabled."""
-    path: ReposUpdateStatusCheckProtectionRequestPath
-    body: ReposUpdateStatusCheckProtectionRequestBody | None = None
-
 # Operation: disable_branch_status_check_protection
 class ReposRemoveStatusCheckProtectionRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -6498,30 +5287,6 @@ class ReposGetAllStatusCheckContextsRequestPath(StrictModel):
 class ReposGetAllStatusCheckContextsRequest(StrictModel):
     """Retrieve all required status check contexts for a protected branch. Status checks must pass before merging is allowed on the specified branch."""
     path: ReposGetAllStatusCheckContextsRequestPath
-
-# Operation: add_required_status_check_contexts
-class ReposAddStatusCheckContextsRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    branch: str = Field(default=..., description="The name of the branch to protect. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names.")
-class ReposAddStatusCheckContextsRequestBody(StrictModel):
-    body: ReposAddStatusCheckContextsBodyV0 | list[str] | None = Field(default=None, description="An array of status check context strings to add to the required status checks. Each context identifies a specific status check (e.g., continuous integration service). Order is not significant.", examples=[{'contexts': ['continuous-integration/travis-ci', 'continuous-integration/jenkins']}])
-class ReposAddStatusCheckContextsRequest(StrictModel):
-    """Add status check contexts to a protected branch's required status checks. This operation is available for public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
-    path: ReposAddStatusCheckContextsRequestPath
-    body: ReposAddStatusCheckContextsRequestBody | None = None
-
-# Operation: configure_required_status_check_contexts
-class ReposSetStatusCheckContextsRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    branch: str = Field(default=..., description="The name of the branch to configure protection for. Cannot contain wildcard characters; use the GraphQL API for wildcard support.")
-class ReposSetStatusCheckContextsRequestBody(StrictModel):
-    body: ReposSetStatusCheckContextsBodyV0 | list[str] | None = Field(default=None, description="An array of status check context strings that must pass before merging. Each context identifies a specific status check (e.g., a CI/CD provider). The order of contexts is not significant.", examples=[{'contexts': ['continuous-integration/travis-ci']}])
-class ReposSetStatusCheckContextsRequest(StrictModel):
-    """Configure the list of status checks that must pass before merging pull requests to a protected branch. This operation replaces the entire set of required status check contexts."""
-    path: ReposSetStatusCheckContextsRequestPath
-    body: ReposSetStatusCheckContextsRequestBody | None = None
 
 # Operation: remove_branch_protection_status_check_contexts
 class ReposRemoveStatusCheckContextsRequestPath(StrictModel):
@@ -6561,18 +5326,6 @@ class ReposGetAppsWithAccessToProtectedBranchRequestPath(StrictModel):
 class ReposGetAppsWithAccessToProtectedBranchRequest(StrictModel):
     """Lists the GitHub Apps that have push access to a protected branch. Only GitHub Apps installed on the repository with write access to repository contents can be authorized on a protected branch."""
     path: ReposGetAppsWithAccessToProtectedBranchRequestPath
-
-# Operation: grant_app_push_access
-class ReposAddAppAccessRestrictionsRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. Case-insensitive.")
-    branch: str = Field(default=..., description="The branch name. Cannot contain wildcard characters; use GraphQL API for wildcard support.")
-class ReposAddAppAccessRestrictionsRequestBody(StrictModel):
-    apps: list[str] = Field(default=..., description="The GitHub Apps to grant push access, specified by their slugified app names. The combined total of users, apps, and teams cannot exceed 100 items.")
-class ReposAddAppAccessRestrictionsRequest(StrictModel):
-    """Grant specified GitHub Apps push access to a protected branch. Only apps installed on the repository with write access to repository contents can be authorized."""
-    path: ReposAddAppAccessRestrictionsRequestPath
-    body: ReposAddAppAccessRestrictionsRequestBody
 
 # Operation: update_branch_protection_app_restrictions
 class ReposSetAppAccessRestrictionsRequestPath(StrictModel):
@@ -6664,18 +5417,6 @@ class ReposAddUserAccessRestrictionsRequest(StrictModel):
     path: ReposAddUserAccessRestrictionsRequestPath
     body: ReposAddUserAccessRestrictionsRequestBody
 
-# Operation: replace_branch_protection_user_restrictions
-class ReposSetUserAccessRestrictionsRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    branch: str = Field(default=..., description="The name of the branch to configure protection restrictions for. Cannot contain wildcard characters.")
-class ReposSetUserAccessRestrictionsRequestBody(StrictModel):
-    users: list[str] = Field(default=..., description="List of usernames to grant push access to the protected branch. Order is not significant. The combined total of users, apps, and teams cannot exceed 100 items.")
-class ReposSetUserAccessRestrictionsRequest(StrictModel):
-    """Replace the list of users with push access to a protected branch. This operation removes all previously granted access and applies the new user list. The total number of users, apps, and teams combined cannot exceed 100."""
-    path: ReposSetUserAccessRestrictionsRequestPath
-    body: ReposSetUserAccessRestrictionsRequestBody
-
 # Operation: revoke_user_branch_access
 class ReposRemoveUserAccessRestrictionsRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -6760,17 +5501,6 @@ class ChecksCreateSuiteRequest(StrictModel):
     """Manually create a check suite for a repository commit. Use this endpoint only when automatic check suite creation has been disabled via repository preferences."""
     path: ChecksCreateSuiteRequestPath
     body: ChecksCreateSuiteRequestBody
-
-# Operation: configure_check_suite_automation
-class ChecksSetSuitesPreferencesRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ChecksSetSuitesPreferencesRequestBody(StrictModel):
-    auto_trigger_checks: list[ChecksSetSuitesPreferencesBodyAutoTriggerChecksItem] | None = Field(default=None, description="An array of check suite automation settings. Each item specifies whether to enable or disable automatic CheckSuite event creation upon pushes to the repository. Enabled by default.")
-class ChecksSetSuitesPreferencesRequest(StrictModel):
-    """Configure automatic check suite creation settings for a repository. By default, check suites are created automatically on every push; use this operation to disable automatic creation and manually trigger check suites instead."""
-    path: ChecksSetSuitesPreferencesRequestPath
-    body: ChecksSetSuitesPreferencesRequestBody | None = None
 
 # Operation: get_check_suite
 class ChecksGetSuiteRequestPath(StrictModel):
@@ -6980,20 +5710,6 @@ class CodeScanningGetDefaultSetupRequest(StrictModel):
     """Retrieves the default setup configuration for code scanning in a repository. Requires `repo` scope for private repositories or `public_repo` scope for public repositories."""
     path: CodeScanningGetDefaultSetupRequestPath
 
-# Operation: configure_code_scanning_default_setup
-class CodeScanningUpdateDefaultSetupRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class CodeScanningUpdateDefaultSetupRequestBody(StrictModel):
-    state: Literal["configured", "not-configured"] | None = Field(default=None, description="The desired state of code scanning default setup, either enabled or disabled.")
-    query_suite: Literal["default", "extended"] | None = Field(default=None, description="The CodeQL query suite to use for analysis. The default suite includes standard security checks, while extended includes additional queries.")
-    threat_model: Literal["remote", "remote_and_local"] | None = Field(default=None, description="The threat model for code scanning analysis. Use `remote` to analyze only network sources, or `remote_and_local` to include local sources such as filesystem access, command-line arguments, database reads, environment variables, and standard input.")
-    languages: list[Literal["actions", "c-cpp", "csharp", "go", "java-kotlin", "javascript-typescript", "python", "ruby", "swift"]] | None = Field(default=None, description="An array of CodeQL languages to analyze. The order of languages in the array does not affect analysis results.")
-class CodeScanningUpdateDefaultSetupRequest(StrictModel):
-    """Configure or update the default code scanning setup for a repository, including the analysis state, query suite, threat model, and languages to analyze. Requires `repo` scope for private repositories or `public_repo` scope for public repositories."""
-    path: CodeScanningUpdateDefaultSetupRequestPath
-    body: CodeScanningUpdateDefaultSetupRequestBody | None = None
-
 # Operation: upload_sarif
 class CodeScanningUploadSarifRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository.")
@@ -7083,18 +5799,6 @@ class CodespacesPreFlightWithRepoForAuthenticatedUserRequestPath(StrictModel):
 class CodespacesPreFlightWithRepoForAuthenticatedUserRequest(StrictModel):
     """Retrieve the default configuration attributes for creating a new codespace in a repository. This includes machine types, regions, and other preset values based on the repository's codespace settings."""
     path: CodespacesPreFlightWithRepoForAuthenticatedUserRequestPath
-
-# Operation: validate_devcontainer_permissions
-class CodespacesCheckPermissionsForDevcontainerRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The owner of the repository. Case-insensitive.")
-    repo: str = Field(default=..., description="The repository name without the `.git` extension. Case-insensitive.")
-class CodespacesCheckPermissionsForDevcontainerRequestQuery(StrictModel):
-    ref: str = Field(default=..., description="The git reference pointing to the devcontainer configuration location, typically a branch name in the format `heads/BRANCH_NAME`.")
-    devcontainer_path: str = Field(default=..., description="The file path to the devcontainer.json configuration file to validate permissions against.")
-class CodespacesCheckPermissionsForDevcontainerRequest(StrictModel):
-    """Validates whether the permissions defined in a devcontainer configuration have been accepted by the authenticated user. Use this to check permission acceptance before creating or updating a codespace."""
-    path: CodespacesCheckPermissionsForDevcontainerRequestPath
-    query: CodespacesCheckPermissionsForDevcontainerRequestQuery
 
 # Operation: list_codespace_secrets
 class CodespacesListRepoSecretsRequestPath(StrictModel):
@@ -7668,18 +6372,6 @@ class ReposGetDeploymentStatusRequest(StrictModel):
     """Retrieve a specific deployment status for a deployment. Users with pull access can view deployment status details to monitor deployment progress and outcomes."""
     path: ReposGetDeploymentStatusRequestPath
 
-# Operation: trigger_repository_dispatch_event
-class ReposCreateDispatchEventRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposCreateDispatchEventRequestBody(StrictModel):
-    event_type: str = Field(default=..., description="A custom webhook event name that triggers the dispatch. Must be between 1 and 100 characters.", min_length=1, max_length=100)
-    client_payload: dict[str, Any] | None = Field(default=None, description="JSON object containing extra information for the webhook event. Supports up to 10 top-level properties with a maximum total payload size of 64KB. Used by workflows and apps to access custom data passed during dispatch.", max_length=10)
-class ReposCreateDispatchEventRequest(StrictModel):
-    """Trigger a repository dispatch webhook event to initiate GitHub Actions workflows or GitHub App webhooks based on external activity. Pass custom event data via client_payload for workflow processing."""
-    path: ReposCreateDispatchEventRequestPath
-    body: ReposCreateDispatchEventRequestBody
-
 # Operation: list_environments
 class ReposGetAllEnvironmentsRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
@@ -7788,18 +6480,6 @@ class ReposGetAllDeploymentProtectionRulesRequest(StrictModel):
     """Retrieve all custom deployment protection rules enabled for a specific environment. Anyone with read access to the repository can use this endpoint to view deployment safeguards."""
     path: ReposGetAllDeploymentProtectionRulesRequestPath
 
-# Operation: enable_deployment_protection_rule
-class ReposCreateDeploymentProtectionRuleRequestPath(StrictModel):
-    environment_name: str = Field(default=..., description="The name of the environment. The name must be URL encoded, with slashes replaced by %2F.")
-    repo: str = Field(default=..., description="The name of the repository without the .git extension. The name is not case sensitive.")
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-class ReposCreateDeploymentProtectionRuleRequestBody(StrictModel):
-    integration_id: int | None = Field(default=None, description="The ID of the custom app that will be enabled on the environment.")
-class ReposCreateDeploymentProtectionRuleRequest(StrictModel):
-    """Enable a custom deployment protection rule on an environment. The authenticated user must have admin or owner permissions to the repository."""
-    path: ReposCreateDeploymentProtectionRuleRequestPath
-    body: ReposCreateDeploymentProtectionRuleRequestBody | None = None
-
 # Operation: list_deployment_rule_integrations
 class ReposListCustomDeploymentRuleIntegrationsRequestPath(StrictModel):
     environment_name: str = Field(default=..., description="The name of the environment. URL encode special characters, such as replacing forward slashes with `%2F`.")
@@ -7856,20 +6536,6 @@ class ActionsGetEnvironmentSecretRequestPath(StrictModel):
 class ActionsGetEnvironmentSecretRequest(StrictModel):
     """Retrieve a single environment secret without revealing its encrypted value. Requires collaborator access to the repository."""
     path: ActionsGetEnvironmentSecretRequestPath
-
-# Operation: create_or_update_environment_secret
-class ActionsCreateOrUpdateEnvironmentSecretRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    environment_name: str = Field(default=..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`.")
-    secret_name: str = Field(default=..., description="The name of the secret to create or update.")
-class ActionsCreateOrUpdateEnvironmentSecretRequestBody(StrictModel):
-    encrypted_value: str = Field(default=..., description="The encrypted value of the secret. Must be encrypted using LibSodium with the public key from the Get environment public key endpoint. The value must be base64-encoded.", pattern='^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$')
-    key_id: str = Field(default=..., description="The ID of the public key used to encrypt the secret. Retrieve this from the Get environment public key endpoint.")
-class ActionsCreateOrUpdateEnvironmentSecretRequest(StrictModel):
-    """Create or update an encrypted secret for a GitHub environment. The secret value must be encrypted using LibSodium with the environment's public key before submission."""
-    path: ActionsCreateOrUpdateEnvironmentSecretRequestPath
-    body: ActionsCreateOrUpdateEnvironmentSecretRequestBody
 
 # Operation: delete_environment_secret
 class ActionsDeleteEnvironmentSecretRequestPath(StrictModel):
@@ -8252,22 +6918,6 @@ class ReposCheckImmutableReleasesRequest(StrictModel):
     """Retrieve the immutable releases configuration for a repository, including whether immutability is enabled and if it's being enforced by the repository owner. Requires admin read access to the repository."""
     path: ReposCheckImmutableReleasesRequestPath
 
-# Operation: enable_immutable_releases
-class ReposEnableImmutableReleasesRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is case-insensitive.")
-class ReposEnableImmutableReleasesRequest(StrictModel):
-    """Enable immutable releases for a repository to prevent modification of release artifacts after creation. The authenticated user must have admin access to the repository."""
-    path: ReposEnableImmutableReleasesRequestPath
-
-# Operation: disable_immutable_releases
-class ReposDisableImmutableReleasesRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposDisableImmutableReleasesRequest(StrictModel):
-    """Disable immutable releases for a repository. The authenticated user must have admin access to the repository."""
-    path: ReposDisableImmutableReleasesRequestPath
-
 # Operation: get_app_installation_repository
 class AppsGetRepoInstallationRequestPath(StrictModel):
     owner: str = Field(default=..., description="The owner of the repository account. This is case-insensitive and can be either a user or organization name.")
@@ -8283,18 +6933,6 @@ class InteractionsGetRestrictionsForRepoRequestPath(StrictModel):
 class InteractionsGetRestrictionsForRepoRequest(StrictModel):
     """Retrieve the current interaction restrictions for a repository, including which user types can interact and when the restriction expires. Returns an empty response if no restrictions are active."""
     path: InteractionsGetRestrictionsForRepoRequestPath
-
-# Operation: restrict_repository_interactions
-class InteractionsSetRestrictionsForRepoRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class InteractionsSetRestrictionsForRepoRequestBody(StrictModel):
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(default=..., description="The type of GitHub user permitted to interact with the repository while the restriction is active.")
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(default=None, description="The duration for which the interaction restriction will remain in effect.")
-class InteractionsSetRestrictionsForRepoRequest(StrictModel):
-    """Set temporary interaction restrictions on a repository to limit who can comment, open issues, or create pull requests. Requires owner or admin access to the repository."""
-    path: InteractionsSetRestrictionsForRepoRequestPath
-    body: InteractionsSetRestrictionsForRepoRequestBody
 
 # Operation: remove_interaction_restrictions
 class InteractionsRemoveRestrictionsForRepoRequestPath(StrictModel):
@@ -9116,14 +7754,6 @@ class ReposCancelPagesDeploymentRequest(StrictModel):
     """Cancel an active GitHub Pages deployment. The authenticated user must have write permissions for the GitHub Pages site."""
     path: ReposCancelPagesDeploymentRequestPath
 
-# Operation: check_pages_health
-class ReposGetPagesHealthCheckRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposGetPagesHealthCheckRequest(StrictModel):
-    """Check the DNS health status of a GitHub Pages domain configuration. The first request returns a 202 status and initiates an asynchronous health check; subsequent requests return the completed results with a 200 status."""
-    path: ReposGetPagesHealthCheckRequestPath
-
 # Operation: check_private_vulnerability_reporting
 class ReposCheckPrivateVulnerabilityReportingRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
@@ -9131,22 +7761,6 @@ class ReposCheckPrivateVulnerabilityReportingRequestPath(StrictModel):
 class ReposCheckPrivateVulnerabilityReportingRequest(StrictModel):
     """Check whether private vulnerability reporting is enabled for a repository. This setting allows security researchers to report vulnerabilities privately before public disclosure."""
     path: ReposCheckPrivateVulnerabilityReportingRequestPath
-
-# Operation: enable_private_vulnerability_reporting
-class ReposEnablePrivateVulnerabilityReportingRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposEnablePrivateVulnerabilityReportingRequest(StrictModel):
-    """Enable private vulnerability reporting for a repository, allowing security researchers to report vulnerabilities confidentially. The authenticated user must have admin access to the repository."""
-    path: ReposEnablePrivateVulnerabilityReportingRequestPath
-
-# Operation: disable_vulnerability_reporting
-class ReposDisablePrivateVulnerabilityReportingRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposDisablePrivateVulnerabilityReportingRequest(StrictModel):
-    """Disable private vulnerability reporting for a repository. The authenticated user must have admin access to the repository."""
-    path: ReposDisablePrivateVulnerabilityReportingRequestPath
 
 # Operation: list_repository_custom_properties
 class ReposCustomPropertiesForReposGetRepositoryValuesRequestPath(StrictModel):
@@ -9753,33 +8367,6 @@ class ReposGetBranchRulesRequest(StrictModel):
     """Retrieve all active rules that apply to a specified branch. Rules are returned regardless of configuration level (repository or organization) and include only those with active enforcement status."""
     path: ReposGetBranchRulesRequestPath
 
-# Operation: list_repository_rulesets
-class ReposGetRepoRulesetsRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposGetRepoRulesetsRequestQuery(StrictModel):
-    includes_parents: bool | None = Field(default=None, description="Include rulesets configured at higher organizational or enterprise levels that apply to this repository.")
-    targets: str | None = Field(default=None, description="Filter rulesets by one or more rule targets using a comma-separated list. Only rulesets that apply to the specified targets will be returned.")
-class ReposGetRepoRulesetsRequest(StrictModel):
-    """Retrieve all rulesets configured for a repository, optionally including inherited rulesets from parent levels and filtering by specific rule targets."""
-    path: ReposGetRepoRulesetsRequestPath
-    query: ReposGetRepoRulesetsRequestQuery | None = None
-
-# Operation: create_ruleset
-class ReposCreateRepoRulesetRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposCreateRepoRulesetRequestBody(StrictModel):
-    """Request body"""
-    name: str = Field(default=..., description="The name of the ruleset. This is a human-readable identifier for the ruleset.")
-    enforcement: Literal["disabled", "active", "evaluate"] = Field(default=..., description="The enforcement level of the ruleset. Use `disabled` to turn off the ruleset, `active` to enforce rules, or `evaluate` to allow admins to test rules before enforcing them (evaluate is only available with GitHub Enterprise).")
-    bypass_actors: list[RepositoryRulesetBypassActor] | None = Field(default=None, description="An array of actors (users, teams, or apps) that can bypass the rules in this ruleset. Bypass actors allow specified entities to push directly without triggering rule violations.")
-    rules: list[RepositoryRule] | None = Field(default=None, description="An array of rules within the ruleset. Each rule defines specific protections or requirements for branches and tags covered by this ruleset.")
-class ReposCreateRepoRulesetRequest(StrictModel):
-    """Create a ruleset for a repository to enforce branch protection and merge policies. Rulesets allow you to define rules that apply to branches and tags, with support for testing rules before full enforcement."""
-    path: ReposCreateRepoRulesetRequestPath
-    body: ReposCreateRepoRulesetRequestBody
-
 # Operation: list_rule_suites
 class ReposGetRepoRuleSuitesRequestPath(StrictModel):
     owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
@@ -9813,31 +8400,6 @@ class ReposGetRepoRulesetRequest(StrictModel):
     """Retrieve a specific ruleset configured for a repository. The bypass_actors property is only included if you have write access to the ruleset."""
     path: ReposGetRepoRulesetRequestPath
     query: ReposGetRepoRulesetRequestQuery | None = None
-
-# Operation: update_ruleset
-class ReposUpdateRepoRulesetRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-    ruleset_id: int = Field(default=..., description="The ID of the ruleset to update.")
-class ReposUpdateRepoRulesetRequestBody(StrictModel):
-    """Request body"""
-    enforcement: Literal["disabled", "active", "evaluate"] | None = Field(default=None, description="The enforcement level of the ruleset. Use `disabled` to turn off the ruleset, `active` to enforce rules, or `evaluate` to allow admins to test rules before enforcing them (GitHub Enterprise only).")
-    bypass_actors: list[RepositoryRulesetBypassActor] | None = Field(default=None, description="An array of actors who can bypass the rules in this ruleset. Each actor is an object specifying the actor type and ID.")
-    rules: list[RepositoryRule] | None = Field(default=None, description="An array of rules within the ruleset. Each rule object defines conditions and enforcement behavior for the repository.")
-    name: str | None = Field(default=None, description="The name of the ruleset.")
-class ReposUpdateRepoRulesetRequest(StrictModel):
-    """Update an existing repository ruleset to modify its enforcement level, bypass actors, or rules. Changes take effect immediately on the repository."""
-    path: ReposUpdateRepoRulesetRequestPath
-    body: ReposUpdateRepoRulesetRequestBody | None = None
-
-# Operation: delete_ruleset
-class ReposDeleteRepoRulesetRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is case-insensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is case-insensitive.")
-    ruleset_id: int = Field(default=..., description="The unique identifier of the ruleset to delete.")
-class ReposDeleteRepoRulesetRequest(StrictModel):
-    """Delete a ruleset from a repository. This permanently removes the specified ruleset and its associated rules."""
-    path: ReposDeleteRepoRulesetRequestPath
 
 # Operation: list_ruleset_history_repository
 class ReposGetRepoRulesetHistoryRequestPath(StrictModel):
@@ -10183,14 +8745,6 @@ class ReposGetTopPathsRequestPath(StrictModel):
 class ReposGetTopPathsRequest(StrictModel):
     """Retrieve the top 10 most popular content paths for a repository based on traffic data from the last 14 days."""
     path: ReposGetTopPathsRequestPath
-
-# Operation: list_top_referrers
-class ReposGetTopReferrersRequestPath(StrictModel):
-    owner: str = Field(default=..., description="The account owner of the repository. The name is not case sensitive.")
-    repo: str = Field(default=..., description="The name of the repository without the `.git` extension. The name is not case sensitive.")
-class ReposGetTopReferrersRequest(StrictModel):
-    """Retrieve the top 10 referral sources that drove traffic to a repository over the last 14 days. Useful for understanding which external sites are directing users to your repository."""
-    path: ReposGetTopReferrersRequestPath
 
 # Operation: get_repository_views
 class ReposGetViewsRequestPath(StrictModel):
@@ -10592,13 +9146,6 @@ class UsersDeleteGpgKeyForAuthenticatedUserRequest(StrictModel):
     """Remove a GPG key from the authenticated user's GitHub account. Requires `admin:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
     path: UsersDeleteGpgKeyForAuthenticatedUserRequestPath
 
-# Operation: list_installation_repositories_for_user
-class AppsListInstallationReposForAuthenticatedUserRequestPath(StrictModel):
-    installation_id: int = Field(default=..., description="The unique identifier of the app installation for which to list accessible repositories.", examples=[1])
-class AppsListInstallationReposForAuthenticatedUserRequest(StrictModel):
-    """List repositories accessible to the authenticated user for a specific app installation. Returns repositories where the user has explicit read, write, or admin permissions, including owned repositories, collaborator repositories, and those accessible through organization membership."""
-    path: AppsListInstallationReposForAuthenticatedUserRequestPath
-
 # Operation: add_repository_to_installation
 class AppsAddRepoToInstallationForAuthenticatedUserRequestPath(StrictModel):
     installation_id: int = Field(default=..., description="The unique identifier of the installation to which the repository will be added.", examples=[1])
@@ -10614,14 +9161,6 @@ class AppsRemoveRepoFromInstallationForAuthenticatedUserRequestPath(StrictModel)
 class AppsRemoveRepoFromInstallationForAuthenticatedUserRequest(StrictModel):
     """Remove a single repository from an app installation. The authenticated user must have admin access to the repository, and the installation must have repository selection set to 'selected'."""
     path: AppsRemoveRepoFromInstallationForAuthenticatedUserRequestPath
-
-# Operation: restrict_user_interactions
-class InteractionsSetRestrictionsForAuthenticatedUserRequestBody(StrictModel):
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(default=..., description="The type of GitHub user permitted to interact with your repositories during the restriction period.")
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(default=None, description="How long the interaction restriction remains in effect before automatically expiring.")
-class InteractionsSetRestrictionsForAuthenticatedUserRequest(StrictModel):
-    """Set interaction restrictions for your public repositories to temporarily limit who can comment, open issues, or create pull requests. User-level restrictions override any limits set on individual repositories."""
-    body: InteractionsSetRestrictionsForAuthenticatedUserRequestBody
 
 # Operation: list_issues_assigned
 class IssuesListForAuthenticatedUserRequestQuery(StrictModel):
@@ -10678,18 +9217,6 @@ class OrgsUpdateMembershipForAuthenticatedUserRequest(StrictModel):
     """Activate an organization membership for the authenticated user by converting a pending invitation to active status. The user must have a pending invitation from the organization to perform this action."""
     path: OrgsUpdateMembershipForAuthenticatedUserRequestPath
     body: OrgsUpdateMembershipForAuthenticatedUserRequestBody
-
-# Operation: start_user_migration
-class MigrationsStartForAuthenticatedUserRequestBody(StrictModel):
-    lock_repositories: bool | None = Field(default=None, description="Lock all repositories being migrated at the start of the migration to prevent modifications during the process.")
-    exclude_git_data: bool | None = Field(default=None, description="Exclude repository git data (commit history, branches, tags) from the migration archive.")
-    exclude_attachments: bool | None = Field(default=None, description="Exclude file attachments from the migration archive.")
-    exclude_releases: bool | None = Field(default=None, description="Exclude release artifacts and release metadata from the migration archive.")
-    exclude_owner_projects: bool | None = Field(default=None, description="Exclude projects owned by the organization or users from the migration archive.")
-    repositories: list[str] = Field(default=..., description="List of repository identifiers to include in the migration. Order and format should match the API's repository identifier specification.")
-class MigrationsStartForAuthenticatedUserRequest(StrictModel):
-    """Initiates the generation of a user migration archive with configurable options to include or exclude specific data types and lock repositories during the migration process."""
-    body: MigrationsStartForAuthenticatedUserRequestBody
 
 # Operation: get_migration_status_user
 class MigrationsGetStatusForAuthenticatedUserRequestPath(StrictModel):
@@ -11440,10 +9967,6 @@ class ChecksCreateBodyV0(PermissiveModel):
 class ChecksCreateBodyV1(PermissiveModel):
     status: Literal["queued", "in_progress"] | None = None
 
-class ChecksSetSuitesPreferencesBodyAutoTriggerChecksItem(PermissiveModel):
-    app_id: int = Field(..., description="The `id` of the GitHub App.")
-    setting: bool = Field(..., description="Set to `true` to enable automatic creation of CheckSuite events upon pushes to the repository, or `false` to disable them.")
-
 class ChecksUpdateBodyV0(PermissiveModel):
     status: Literal["completed"] | None = None
 
@@ -11457,10 +9980,6 @@ class CodeOfConduct(PermissiveModel):
     url: str = Field(..., json_schema_extra={'format': 'uri'})
     body: str | None = None
     html_url: str | None = Field(..., json_schema_extra={'format': 'uri'})
-
-class CodeSecurityCreateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem(PermissiveModel):
-    reviewer_id: int = Field(..., description="The ID of the team or role selected as a bypass reviewer")
-    reviewer_type: Literal["TEAM", "ROLE"] = Field(..., description="The type of the bypass reviewer")
 
 class CodeSecurityUpdateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem(PermissiveModel):
     reviewer_id: int = Field(..., description="The ID of the team or role selected as a bypass reviewer")
@@ -11519,41 +10038,10 @@ class Contributor(PermissiveModel):
     name: str | None = None
     user_view_type: str | None = None
 
-class CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV1(StrictModel):
-    if_any_match: list[str] = Field(..., validation_alias="ifAnyMatch", serialization_alias="ifAnyMatch")
-
-class CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV2(StrictModel):
-    if_none_match: list[str] = Field(..., validation_alias="ifNoneMatch", serialization_alias="ifNoneMatch")
-
-class CustomProperty(PermissiveModel):
-    """Custom property defined on an organization"""
-    property_name: str = Field(..., description="The name of the property")
-    url: str | None = Field(None, description="The URL that can be used to fetch, update, or delete info about this property via the API.", json_schema_extra={'format': 'uri'})
-    source_type: Literal["organization", "enterprise"] | None = Field(None, description="The source type of the property")
-    value_type: Literal["string", "single_select", "multi_select", "true_false"] = Field(..., description="The type of the value for the property")
-    required: bool | None = Field(None, description="Whether the property is required.")
-    default_value: str | list[str] | None = Field(None, description="Default value of the property")
-    description: str | None = Field(None, description="Short description of the property")
-    allowed_values: list[str] | None = Field(None, description="An ordered list of the allowed values of the property.\nThe property can have up to 200 allowed values.", max_length=200)
-    values_editable_by: Literal["org_actors", "org_and_repo_actors"] | None = Field(None, description="Who can edit the values of the property")
-
 class CustomPropertyValue(PermissiveModel):
     """Custom property name and associated value"""
     property_name: str = Field(..., description="The name of the property")
     value: str | list[str] | None = Field(..., description="The value assigned to the property")
-
-class DeployKey(PermissiveModel):
-    """An SSH key granting access to a single repository."""
-    id_: int = Field(..., validation_alias="id", serialization_alias="id")
-    key: str
-    url: str
-    title: str
-    verified: bool
-    created_at: str
-    read_only: bool
-    added_by: str | None = None
-    last_used: str | None = Field(None, json_schema_extra={'format': 'date-time'})
-    enabled: bool | None = None
 
 class Enterprise(PermissiveModel):
     """An enterprise on GitHub."""
@@ -11586,14 +10074,6 @@ class HookResponse(PermissiveModel):
     code: int | None = Field(...)
     status: str | None = Field(...)
     message: str | None = Field(...)
-
-class IntegrationPermissions(PermissiveModel):
-    """The set of permissions for the GitHub app"""
-    issues: str | None = None
-    checks: str | None = None
-    metadata: str | None = None
-    contents: str | None = None
-    deployments: str | None = None
 
 class IssueDependenciesSummary(PermissiveModel):
     blocked_by: int
@@ -11712,20 +10192,6 @@ class Manifest(StrictModel):
     metadata: Metadata | None = None
     resolved: dict[str, Dependency] | None = Field(None, description="A collection of resolved package dependencies.")
 
-class MinimalRepositoryLicense(PermissiveModel):
-    key: str | None = None
-    name: str | None = None
-    spdx_id: str | None = None
-    url: str | None = None
-    node_id: str | None = None
-
-class MinimalRepositoryPermissions(PermissiveModel):
-    admin: bool | None = None
-    maintain: bool | None = None
-    push: bool | None = None
-    triage: bool | None = None
-    pull: bool | None = None
-
 class NullableIntegrationPermissions(PermissiveModel):
     """The set of permissions for the GitHub app"""
     issues: str | None = None
@@ -11839,12 +10305,6 @@ class OrgsSetClusterDeploymentRecordsBodyDeploymentsItem(PermissiveModel):
     tags: dict[str, str] | None = Field(None, description="Key-value pairs to tag the deployment record.")
     runtime_risks: Annotated[list[Literal["critical-resource", "internet-exposed", "lateral-movement", "sensitive-data"]], AfterValidator(_check_unique_items)] | None = Field(None, description="A list of runtime risks associated with the deployment.", max_length=4)
 
-class OrgsUpdateIssueFieldBodyOptionsItem(PermissiveModel):
-    name: str = Field(..., description="Name of the option.")
-    description: str | None = Field(None, description="Description of the option.")
-    color: Literal["gray", "blue", "green", "yellow", "orange", "red", "pink", "purple"] = Field(..., description="Color for the option.")
-    priority: int = Field(..., description="Priority of the option for ordering.")
-
 class ProjectsAddFieldForOrgBodyV0(StrictModel):
     issue_field_id: int = Field(..., description="The ID of the IssueField to create the field for.")
 
@@ -11911,33 +10371,6 @@ class PullRequestLinks(PermissiveModel):
     review_comment: Link
     self: Link
 
-class PullRequestMinimalBaseRepo(PermissiveModel):
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'int64'})
-    url: str
-    name: str
-
-class PullRequestMinimalBase(PermissiveModel):
-    ref: str
-    sha: str
-    repo: PullRequestMinimalBaseRepo
-
-class PullRequestMinimalHeadRepo(PermissiveModel):
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'int64'})
-    url: str
-    name: str
-
-class PullRequestMinimalHead(PermissiveModel):
-    ref: str
-    sha: str
-    repo: PullRequestMinimalHeadRepo
-
-class PullRequestMinimal(PermissiveModel):
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'int64'})
-    number: int
-    url: str
-    head: PullRequestMinimalHead
-    base: PullRequestMinimalBase
-
 class ReactionRollup(PermissiveModel):
     url: str = Field(..., json_schema_extra={'format': 'uri'})
     total_count: int
@@ -11950,50 +10383,14 @@ class ReactionRollup(PermissiveModel):
     eyes: int
     rocket: int
 
-class ReposAddStatusCheckContextsBodyV0(PermissiveModel):
-    contexts: list[str] = Field(..., description="The name of the status checks")
-
 class ReposAddTeamAccessRestrictionsBodyV0(PermissiveModel):
     teams: list[str] = Field(..., description="The slug values for teams")
-
-class ReposCreateOrgRulesetBodyConditionsV0RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
-
-class ReposCreateOrgRulesetBodyConditionsV0RepositoryName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of repository names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~ALL` to include all repositories.")
-    exclude: list[str] | None = Field(None, description="Array of repository names or patterns to exclude. The condition will not pass if any of these patterns match.")
-    protected: bool | None = Field(None, description="Whether renaming of target repositories is prevented.")
-
-class ReposCreateOrgRulesetBodyConditionsV0(PermissiveModel):
-    """Conditions to target repositories by name and refs by name"""
-    ref_name: ReposCreateOrgRulesetBodyConditionsV0RefName | None = None
-    repository_name: ReposCreateOrgRulesetBodyConditionsV0RepositoryName
-
-class ReposCreateOrgRulesetBodyConditionsV1RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
-
-class ReposCreateOrgRulesetBodyConditionsV1RepositoryId(PermissiveModel):
-    repository_ids: list[int] | None = Field(None, description="The repository IDs that the ruleset applies to. One of these IDs must match for the condition to pass.")
-
-class ReposCreateOrgRulesetBodyConditionsV1(PermissiveModel):
-    """Conditions to target repositories by id and refs by name"""
-    ref_name: ReposCreateOrgRulesetBodyConditionsV1RefName | None = None
-    repository_id: ReposCreateOrgRulesetBodyConditionsV1RepositoryId
-
-class ReposCreateOrgRulesetBodyConditionsV2RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
 
 class ReposRemoveStatusCheckContextsBodyV0(PermissiveModel):
     contexts: list[str] = Field(..., description="The name of the status checks")
 
 class ReposRemoveTeamAccessRestrictionsBodyV0(PermissiveModel):
     teams: list[str] = Field(..., description="The slug values for teams")
-
-class ReposSetStatusCheckContextsBodyV0(PermissiveModel):
-    contexts: list[str] = Field(..., description="The name of the status checks")
 
 class ReposSetTeamAccessRestrictionsBodyV0(PermissiveModel):
     teams: list[str] = Field(..., description="The slug values for teams")
@@ -12003,40 +10400,6 @@ class ReposUpdateBodySecurityAndAnalysisSecretScanningDelegatedBypassOptionsRevi
     reviewer_type: Literal["TEAM", "ROLE"] = Field(..., description="The type of the bypass reviewer")
 
 class ReposUpdateBranchProtectionBodyRequiredStatusChecksChecksItem(PermissiveModel):
-    context: str = Field(..., description="The name of the required check")
-    app_id: int | None = Field(None, description="The ID of the GitHub App that must provide this check. Omit this field to automatically select the GitHub App that has recently provided this check, or any app if it was not set by a GitHub App. Pass -1 to explicitly allow any app to set the status.")
-
-class ReposUpdateOrgRulesetBodyConditionsV0RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
-
-class ReposUpdateOrgRulesetBodyConditionsV0RepositoryName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of repository names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~ALL` to include all repositories.")
-    exclude: list[str] | None = Field(None, description="Array of repository names or patterns to exclude. The condition will not pass if any of these patterns match.")
-    protected: bool | None = Field(None, description="Whether renaming of target repositories is prevented.")
-
-class ReposUpdateOrgRulesetBodyConditionsV0(PermissiveModel):
-    """Conditions to target repositories by name and refs by name"""
-    ref_name: ReposUpdateOrgRulesetBodyConditionsV0RefName | None = None
-    repository_name: ReposUpdateOrgRulesetBodyConditionsV0RepositoryName
-
-class ReposUpdateOrgRulesetBodyConditionsV1RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
-
-class ReposUpdateOrgRulesetBodyConditionsV1RepositoryId(PermissiveModel):
-    repository_ids: list[int] | None = Field(None, description="The repository IDs that the ruleset applies to. One of these IDs must match for the condition to pass.")
-
-class ReposUpdateOrgRulesetBodyConditionsV1(PermissiveModel):
-    """Conditions to target repositories by id and refs by name"""
-    ref_name: ReposUpdateOrgRulesetBodyConditionsV1RefName | None = None
-    repository_id: ReposUpdateOrgRulesetBodyConditionsV1RepositoryId
-
-class ReposUpdateOrgRulesetBodyConditionsV2RefName(PermissiveModel):
-    include: list[str] | None = Field(None, description="Array of ref names or patterns to include. One of these patterns must match for the condition to pass. Also accepts `~DEFAULT_BRANCH` to include the default branch or `~ALL` to include all branches.")
-    exclude: list[str] | None = Field(None, description="Array of ref names or patterns to exclude. The condition will not pass if any of these patterns match.")
-
-class ReposUpdateStatusCheckProtectionBodyChecksItem(PermissiveModel):
     context: str = Field(..., description="The name of the required check")
     app_id: int | None = Field(None, description="The ID of the GitHub App that must provide this check. Omit this field to automatically select the GitHub App that has recently provided this check, or any app if it was not set by a GitHub App. Pass -1 to explicitly allow any app to set the status.")
 
@@ -12051,248 +10414,6 @@ class RepositoryPermissions(PermissiveModel):
     triage: bool | None = None
     push: bool
     maintain: bool | None = None
-
-class RepositoryRuleBranchNamePatternParameters(PermissiveModel):
-    name: str | None = Field(None, description="How this rule will appear to users.")
-    negate: bool | None = Field(None, description="If true, the rule will fail if the pattern matches.")
-    operator: Literal["starts_with", "ends_with", "contains", "regex"] = Field(..., description="The operator to use for matching.")
-    pattern: str = Field(..., description="The pattern to match with.")
-
-class RepositoryRuleBranchNamePattern(PermissiveModel):
-    """Parameters to be used for the branch_name_pattern rule"""
-    type_: Literal["branch_name_pattern"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleBranchNamePatternParameters | None = None
-
-class RepositoryRuleCommitAuthorEmailPatternParameters(PermissiveModel):
-    name: str | None = Field(None, description="How this rule will appear to users.")
-    negate: bool | None = Field(None, description="If true, the rule will fail if the pattern matches.")
-    operator: Literal["starts_with", "ends_with", "contains", "regex"] = Field(..., description="The operator to use for matching.")
-    pattern: str = Field(..., description="The pattern to match with.")
-
-class RepositoryRuleCommitAuthorEmailPattern(PermissiveModel):
-    """Parameters to be used for the commit_author_email_pattern rule"""
-    type_: Literal["commit_author_email_pattern"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleCommitAuthorEmailPatternParameters | None = None
-
-class RepositoryRuleCommitMessagePatternParameters(PermissiveModel):
-    name: str | None = Field(None, description="How this rule will appear to users.")
-    negate: bool | None = Field(None, description="If true, the rule will fail if the pattern matches.")
-    operator: Literal["starts_with", "ends_with", "contains", "regex"] = Field(..., description="The operator to use for matching.")
-    pattern: str = Field(..., description="The pattern to match with.")
-
-class RepositoryRuleCommitMessagePattern(PermissiveModel):
-    """Parameters to be used for the commit_message_pattern rule"""
-    type_: Literal["commit_message_pattern"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleCommitMessagePatternParameters | None = None
-
-class RepositoryRuleCommitterEmailPatternParameters(PermissiveModel):
-    name: str | None = Field(None, description="How this rule will appear to users.")
-    negate: bool | None = Field(None, description="If true, the rule will fail if the pattern matches.")
-    operator: Literal["starts_with", "ends_with", "contains", "regex"] = Field(..., description="The operator to use for matching.")
-    pattern: str = Field(..., description="The pattern to match with.")
-
-class RepositoryRuleCommitterEmailPattern(PermissiveModel):
-    """Parameters to be used for the committer_email_pattern rule"""
-    type_: Literal["committer_email_pattern"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleCommitterEmailPatternParameters | None = None
-
-class RepositoryRuleCopilotCodeReviewParameters(PermissiveModel):
-    review_draft_pull_requests: bool | None = Field(None, description="Copilot automatically reviews draft pull requests before they are marked as ready for review.")
-    review_on_push: bool | None = Field(None, description="Copilot automatically reviews each new push to the pull request.")
-
-class RepositoryRuleCopilotCodeReview(PermissiveModel):
-    """Request Copilot code review for new pull requests automatically if the author has access to Copilot code review."""
-    type_: Literal["copilot_code_review"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleCopilotCodeReviewParameters | None = None
-
-class RepositoryRuleCreation(PermissiveModel):
-    """Only allow users with bypass permission to create matching refs."""
-    type_: Literal["creation"] = Field(..., validation_alias="type", serialization_alias="type")
-
-class RepositoryRuleDeletion(PermissiveModel):
-    """Only allow users with bypass permissions to delete matching refs."""
-    type_: Literal["deletion"] = Field(..., validation_alias="type", serialization_alias="type")
-
-class RepositoryRuleFileExtensionRestrictionParameters(PermissiveModel):
-    restricted_file_extensions: list[str] = Field(..., description="The file extensions that are restricted from being pushed to the commit graph.")
-
-class RepositoryRuleFileExtensionRestriction(PermissiveModel):
-    """Prevent commits that include files with specified file extensions from being pushed to the commit graph."""
-    type_: Literal["file_extension_restriction"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleFileExtensionRestrictionParameters | None = None
-
-class RepositoryRuleFilePathRestrictionParameters(PermissiveModel):
-    restricted_file_paths: list[str] = Field(..., description="The file paths that are restricted from being pushed to the commit graph.")
-
-class RepositoryRuleFilePathRestriction(PermissiveModel):
-    """Prevent commits that include changes in specified file and folder paths from being pushed to the commit graph. This includes absolute paths that contain file names."""
-    type_: Literal["file_path_restriction"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleFilePathRestrictionParameters | None = None
-
-class RepositoryRuleMaxFilePathLengthParameters(PermissiveModel):
-    max_file_path_length: int = Field(..., description="The maximum amount of characters allowed in file paths.", ge=1, le=32767)
-
-class RepositoryRuleMaxFilePathLength(PermissiveModel):
-    """Prevent commits that include file paths that exceed the specified character limit from being pushed to the commit graph."""
-    type_: Literal["max_file_path_length"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleMaxFilePathLengthParameters | None = None
-
-class RepositoryRuleMaxFileSizeParameters(PermissiveModel):
-    max_file_size: int = Field(..., description="The maximum file size allowed in megabytes. This limit does not apply to Git Large File Storage (Git LFS).", ge=1, le=100)
-
-class RepositoryRuleMaxFileSize(PermissiveModel):
-    """Prevent commits with individual files that exceed the specified limit from being pushed to the commit graph."""
-    type_: Literal["max_file_size"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleMaxFileSizeParameters | None = None
-
-class RepositoryRuleMergeQueueParameters(PermissiveModel):
-    check_response_timeout_minutes: int = Field(..., description="Maximum time for a required status check to report a conclusion. After this much time has elapsed, checks that have not reported a conclusion will be assumed to have failed", ge=1, le=360)
-    grouping_strategy: Literal["ALLGREEN", "HEADGREEN"] = Field(..., description="When set to ALLGREEN, the merge commit created by merge queue for each PR in the group must pass all required checks to merge. When set to HEADGREEN, only the commit at the head of the merge group, i.e. the commit containing changes from all of the PRs in the group, must pass its required checks to merge.")
-    max_entries_to_build: int = Field(..., description="Limit the number of queued pull requests requesting checks and workflow runs at the same time.", ge=0, le=100)
-    max_entries_to_merge: int = Field(..., description="The maximum number of PRs that will be merged together in a group.", ge=0, le=100)
-    merge_method: Literal["MERGE", "SQUASH", "REBASE"] = Field(..., description="Method to use when merging changes from queued pull requests.")
-    min_entries_to_merge: int = Field(..., description="The minimum number of PRs that will be merged together in a group.", ge=0, le=100)
-    min_entries_to_merge_wait_minutes: int = Field(..., description="The time merge queue should wait after the first PR is added to the queue for the minimum group size to be met. After this time has elapsed, the minimum group size will be ignored and a smaller group will be merged.", ge=0, le=360)
-
-class RepositoryRuleMergeQueue(PermissiveModel):
-    """Merges must be performed via a merge queue."""
-    type_: Literal["merge_queue"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleMergeQueueParameters | None = None
-
-class RepositoryRuleNonFastForward(PermissiveModel):
-    """Prevent users with push access from force pushing to refs."""
-    type_: Literal["non_fast_forward"] = Field(..., validation_alias="type", serialization_alias="type")
-
-class RepositoryRuleParamsCodeScanningTool(PermissiveModel):
-    """A tool that must provide code scanning results for this rule to pass."""
-    alerts_threshold: Literal["none", "errors", "errors_and_warnings", "all"] = Field(..., description="The severity level at which code scanning results that raise alerts block a reference update. For more information on alert severity levels, see \"[About code scanning alerts](https://docs.github.com/code-security/code-scanning/managing-code-scanning-alerts/about-code-scanning-alerts#about-alert-severity-and-security-severity-levels).\"")
-    security_alerts_threshold: Literal["none", "critical", "high_or_higher", "medium_or_higher", "all"] = Field(..., description="The severity level at which code scanning results that raise security alerts block a reference update. For more information on security severity levels, see \"[About code scanning alerts](https://docs.github.com/code-security/code-scanning/managing-code-scanning-alerts/about-code-scanning-alerts#about-alert-severity-and-security-severity-levels).\"")
-    tool: str = Field(..., description="The name of a code scanning tool")
-
-class RepositoryRuleCodeScanningParameters(PermissiveModel):
-    code_scanning_tools: list[RepositoryRuleParamsCodeScanningTool] = Field(..., description="Tools that must provide code scanning results for this rule to pass.")
-
-class RepositoryRuleCodeScanning(PermissiveModel):
-    """Choose which tools must provide code scanning results before the reference is updated. When configured, code scanning must be enabled and have results for both the commit and the reference being updated."""
-    type_: Literal["code_scanning"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleCodeScanningParameters | None = None
-
-class RepositoryRuleParamsStatusCheckConfiguration(PermissiveModel):
-    """Required status check"""
-    context: str = Field(..., description="The status check context name that must be present on the commit.")
-    integration_id: int | None = Field(None, description="The optional integration ID that this status check must originate from.")
-
-class RepositoryRuleParamsWorkflowFileReference(PermissiveModel):
-    """A workflow that must run for this rule to pass"""
-    path: str = Field(..., description="The path to the workflow file")
-    ref: str | None = Field(None, description="The ref (branch or tag) of the workflow file to use")
-    repository_id: int = Field(..., description="The ID of the repository where the workflow is defined")
-    sha: str | None = Field(None, description="The commit SHA of the workflow file to use")
-
-class RepositoryRulePullRequestParameters(PermissiveModel):
-    allowed_merge_methods: list[Literal["merge", "squash", "rebase"]] | None = Field(None, description="Array of allowed merge methods. Allowed values include `merge`, `squash`, and `rebase`. At least one option must be enabled.")
-    automatic_copilot_code_review_enabled: bool | None = Field(None, description="Request Copilot code review for new pull requests automatically if the author has access to Copilot code review.")
-    dismiss_stale_reviews_on_push: bool = Field(..., description="New, reviewable commits pushed will dismiss previous pull request review approvals.")
-    require_code_owner_review: bool = Field(..., description="Require an approving review in pull requests that modify files that have a designated code owner.")
-    require_last_push_approval: bool = Field(..., description="Whether the most recent reviewable push must be approved by someone other than the person who pushed it.")
-    required_approving_review_count: int = Field(..., description="The number of approving reviews that are required before a pull request can be merged.", ge=0, le=10)
-    required_review_thread_resolution: bool = Field(..., description="All conversations on code must be resolved before a pull request can be merged.")
-
-class RepositoryRulePullRequest(PermissiveModel):
-    """Require all commits be made to a non-target branch and submitted via a pull request before they can be merged."""
-    type_: Literal["pull_request"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRulePullRequestParameters | None = None
-
-class RepositoryRuleRequiredDeploymentsParameters(PermissiveModel):
-    required_deployment_environments: list[str] = Field(..., description="The environments that must be successfully deployed to before branches can be merged.")
-
-class RepositoryRuleRequiredDeployments(PermissiveModel):
-    """Choose which environments must be successfully deployed to before refs can be pushed into a ref that matches this rule."""
-    type_: Literal["required_deployments"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleRequiredDeploymentsParameters | None = None
-
-class RepositoryRuleRequiredLinearHistory(PermissiveModel):
-    """Prevent merge commits from being pushed to matching refs."""
-    type_: Literal["required_linear_history"] = Field(..., validation_alias="type", serialization_alias="type")
-
-class RepositoryRuleRequiredSignatures(PermissiveModel):
-    """Commits pushed to matching refs must have verified signatures."""
-    type_: Literal["required_signatures"] = Field(..., validation_alias="type", serialization_alias="type")
-
-class RepositoryRuleRequiredStatusChecksParameters(PermissiveModel):
-    do_not_enforce_on_create: bool | None = Field(None, description="Allow repositories and branches to be created if a check would otherwise prohibit it.")
-    required_status_checks: list[RepositoryRuleParamsStatusCheckConfiguration] = Field(..., description="Status checks that are required.")
-    strict_required_status_checks_policy: bool = Field(..., description="Whether pull requests targeting a matching branch must be tested with the latest code. This setting will not take effect unless at least one status check is enabled.")
-
-class RepositoryRuleRequiredStatusChecks(PermissiveModel):
-    """Choose which status checks must pass before the ref is updated. When enabled, commits must first be pushed to another ref where the checks pass."""
-    type_: Literal["required_status_checks"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleRequiredStatusChecksParameters | None = None
-
-class RepositoryRuleTagNamePatternParameters(PermissiveModel):
-    name: str | None = Field(None, description="How this rule will appear to users.")
-    negate: bool | None = Field(None, description="If true, the rule will fail if the pattern matches.")
-    operator: Literal["starts_with", "ends_with", "contains", "regex"] = Field(..., description="The operator to use for matching.")
-    pattern: str = Field(..., description="The pattern to match with.")
-
-class RepositoryRuleTagNamePattern(PermissiveModel):
-    """Parameters to be used for the tag_name_pattern rule"""
-    type_: Literal["tag_name_pattern"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleTagNamePatternParameters | None = None
-
-class RepositoryRuleUpdateParameters(PermissiveModel):
-    update_allows_fetch_and_merge: bool = Field(..., description="Branch can pull changes from its upstream repository")
-
-class RepositoryRuleUpdate(PermissiveModel):
-    """Only allow users with bypass permission to update matching refs."""
-    type_: Literal["update"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleUpdateParameters | None = None
-
-class RepositoryRuleWorkflowsParameters(PermissiveModel):
-    do_not_enforce_on_create: bool | None = Field(None, description="Allow repositories and branches to be created if a check would otherwise prohibit it.")
-    workflows: list[RepositoryRuleParamsWorkflowFileReference] = Field(..., description="Workflows that must pass for this rule to pass.")
-
-class RepositoryRuleWorkflows(PermissiveModel):
-    """Require all changes made to a targeted branch to pass the specified workflows before they can be merged."""
-    type_: Literal["workflows"] = Field(..., validation_alias="type", serialization_alias="type")
-    parameters: RepositoryRuleWorkflowsParameters | None = None
-
-class RepositoryRule(PermissiveModel):
-    """A repository rule."""
-    repository_rule: RepositoryRuleCreation | RepositoryRuleUpdate | RepositoryRuleDeletion | RepositoryRuleRequiredLinearHistory | RepositoryRuleMergeQueue | RepositoryRuleRequiredDeployments | RepositoryRuleRequiredSignatures | RepositoryRulePullRequest | RepositoryRuleRequiredStatusChecks | RepositoryRuleNonFastForward | RepositoryRuleCommitMessagePattern | RepositoryRuleCommitAuthorEmailPattern | RepositoryRuleCommitterEmailPattern | RepositoryRuleBranchNamePattern | RepositoryRuleTagNamePattern | RepositoryRuleFilePathRestriction | RepositoryRuleMaxFilePathLength | RepositoryRuleFileExtensionRestriction | RepositoryRuleMaxFileSize | RepositoryRuleWorkflows | RepositoryRuleCodeScanning | RepositoryRuleCopilotCodeReview
-
-class RepositoryRulesetConditionsRepositoryPropertySpec(PermissiveModel):
-    """Parameters for a targeting a repository property"""
-    name: str = Field(..., description="The name of the repository property to target")
-    property_values: list[str] = Field(..., description="The values to match for the repository property")
-    source: Literal["custom", "system"] | None = Field(None, description="The source of the repository property. Defaults to 'custom' if not specified.")
-
-class ReposCreateOrgRulesetBodyConditionsV2RepositoryProperty(PermissiveModel):
-    include: list[RepositoryRulesetConditionsRepositoryPropertySpec] | None = Field(None, description="The repository properties and values to include. All of these properties must match for the condition to pass.")
-    exclude: list[RepositoryRulesetConditionsRepositoryPropertySpec] | None = Field(None, description="The repository properties and values to exclude. The condition will not pass if any of these properties match.")
-
-class ReposCreateOrgRulesetBodyConditionsV2(PermissiveModel):
-    """Conditions to target repositories by property and refs by name"""
-    ref_name: ReposCreateOrgRulesetBodyConditionsV2RefName | None = None
-    repository_property: ReposCreateOrgRulesetBodyConditionsV2RepositoryProperty
-
-class ReposUpdateOrgRulesetBodyConditionsV2RepositoryProperty(PermissiveModel):
-    include: list[RepositoryRulesetConditionsRepositoryPropertySpec] | None = Field(None, description="The repository properties and values to include. All of these properties must match for the condition to pass.")
-    exclude: list[RepositoryRulesetConditionsRepositoryPropertySpec] | None = Field(None, description="The repository properties and values to exclude. The condition will not pass if any of these properties match.")
-
-class ReposUpdateOrgRulesetBodyConditionsV2(PermissiveModel):
-    """Conditions to target repositories by property and refs by name"""
-    ref_name: ReposUpdateOrgRulesetBodyConditionsV2RefName | None = None
-    repository_property: ReposUpdateOrgRulesetBodyConditionsV2RepositoryProperty
-
-class SecretScanningUpdateOrgPatternConfigsBodyCustomPatternSettingsItem(PermissiveModel):
-    token_type: str | None = Field(None, description="The ID of the pattern to configure.")
-    custom_pattern_version: str | None = None
-    push_protection_setting: Literal["disabled", "enabled"] | None = Field(None, description="Push protection setting to set for the pattern.")
-
-class SecretScanningUpdateOrgPatternConfigsBodyProviderPatternSettingsItem(PermissiveModel):
-    token_type: str | None = Field(None, description="The ID of the pattern to configure.")
-    push_protection_setting: Literal["not-set", "disabled", "enabled"] | None = Field(None, description="Push protection setting to set for the pattern.")
 
 class SecurityAdvisoriesCreatePrivateVulnerabilityReportBodyVulnerabilitiesItemPackage(PermissiveModel):
     """The name of the package affected by the vulnerability."""
@@ -12387,25 +10508,6 @@ class Classroom(PermissiveModel):
     organization: SimpleClassroomOrganization
     url: str = Field(..., description="The URL of the classroom on GitHub Classroom.")
 
-class SimpleCommitAuthor(PermissiveModel):
-    """Information about the Git author"""
-    name: str = Field(..., description="Name of the commit's author")
-    email: str = Field(..., description="Git email address of the commit's author", json_schema_extra={'format': 'email'})
-
-class SimpleCommitCommitter(PermissiveModel):
-    """Information about the Git committer"""
-    name: str = Field(..., description="Name of the commit's committer")
-    email: str = Field(..., description="Git email address of the commit's committer", json_schema_extra={'format': 'email'})
-
-class SimpleCommit(PermissiveModel):
-    """A commit."""
-    id_: str = Field(..., validation_alias="id", serialization_alias="id", description="SHA for the commit")
-    tree_id: str = Field(..., description="SHA for the commit's tree")
-    message: str = Field(..., description="Message describing the purpose of the commit")
-    timestamp: str = Field(..., description="Timestamp of the commit", json_schema_extra={'format': 'date-time'})
-    author: SimpleCommitAuthor | None = Field(..., description="Information about the Git author")
-    committer: SimpleCommitCommitter | None = Field(..., description="Information about the Git committer")
-
 class SimpleUser(PermissiveModel):
     """A GitHub user."""
     name: str | None = None
@@ -12438,114 +10540,6 @@ class AutoMerge(PermissiveModel):
     commit_title: str = Field(..., description="Title for the merge commit message.")
     commit_message: str = Field(..., description="Commit message for the merge commit.")
 
-class Integration(PermissiveModel):
-    """GitHub apps are a new way to extend GitHub. They can be installed directly on organizations and user accounts and granted access to specific repositories. They come with granular permissions and built-in webhooks. GitHub apps are first class actors within GitHub."""
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", description="Unique identifier of the GitHub app")
-    slug: str | None = Field(None, description="The slug name of the GitHub app")
-    node_id: str
-    client_id: str | None = None
-    owner: SimpleUser | Enterprise
-    name: str = Field(..., description="The name of the GitHub app")
-    description: str | None = Field(...)
-    external_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    html_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    created_at: str = Field(..., json_schema_extra={'format': 'date-time'})
-    updated_at: str = Field(..., json_schema_extra={'format': 'date-time'})
-    permissions: dict[str, str] = Field(..., description="The set of permissions for the GitHub app")
-    events: list[str] = Field(..., description="The list of events for the GitHub app. Note that the `installation_target`, `security_advisory`, and `meta` events are not included because they are global events and not specific to an installation.")
-    installations_count: int | None = Field(None, description="The number of installations associated with the GitHub app. Only returned when the integration is requesting details about itself.")
-
-class MinimalRepository(PermissiveModel):
-    """Minimal Repository"""
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'int64'})
-    node_id: str
-    name: str
-    full_name: str
-    owner: SimpleUser
-    private: bool
-    html_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    description: str | None = Field(...)
-    fork: bool
-    url: str = Field(..., json_schema_extra={'format': 'uri'})
-    archive_url: str
-    assignees_url: str
-    blobs_url: str
-    branches_url: str
-    collaborators_url: str
-    comments_url: str
-    commits_url: str
-    compare_url: str
-    contents_url: str
-    contributors_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    deployments_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    downloads_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    events_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    forks_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    git_commits_url: str
-    git_refs_url: str
-    git_tags_url: str
-    git_url: str | None = None
-    issue_comment_url: str
-    issue_events_url: str
-    issues_url: str
-    keys_url: str
-    labels_url: str
-    languages_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    merges_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    milestones_url: str
-    notifications_url: str
-    pulls_url: str
-    releases_url: str
-    ssh_url: str | None = None
-    stargazers_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    statuses_url: str
-    subscribers_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    subscription_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    tags_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    teams_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    trees_url: str
-    clone_url: str | None = None
-    mirror_url: str | None = None
-    hooks_url: str = Field(..., json_schema_extra={'format': 'uri'})
-    svn_url: str | None = None
-    homepage: str | None = None
-    language: str | None = None
-    forks_count: int | None = None
-    stargazers_count: int | None = None
-    watchers_count: int | None = None
-    size: int | None = Field(None, description="The size of the repository, in kilobytes. Size is calculated hourly. When a repository is initially created, the size is 0.")
-    default_branch: str | None = None
-    open_issues_count: int | None = None
-    is_template: bool | None = None
-    topics: list[str] | None = None
-    has_issues: bool | None = None
-    has_projects: bool | None = None
-    has_wiki: bool | None = None
-    has_pages: bool | None = None
-    has_downloads: bool | None = None
-    has_discussions: bool | None = None
-    archived: bool | None = None
-    disabled: bool | None = None
-    visibility: str | None = None
-    pushed_at: str | None = Field(None, json_schema_extra={'format': 'date-time'})
-    created_at: str | None = Field(None, json_schema_extra={'format': 'date-time'})
-    updated_at: str | None = Field(None, json_schema_extra={'format': 'date-time'})
-    permissions: MinimalRepositoryPermissions | None = None
-    role_name: str | None = None
-    temp_clone_token: str | None = None
-    delete_branch_on_merge: bool | None = None
-    subscribers_count: int | None = None
-    network_count: int | None = None
-    code_of_conduct: CodeOfConduct | None = None
-    license_: MinimalRepositoryLicense | None = Field(None, validation_alias="license", serialization_alias="license")
-    forks: int | None = None
-    open_issues: int | None = None
-    watchers: int | None = None
-    allow_forking: bool | None = None
-    web_commit_signoff_required: bool | None = None
-    security_and_analysis: SecurityAndAnalysis | None = None
-    custom_properties: dict[str, Any] | None = Field(None, description="The custom properties that were defined for the repository. The keys are the custom property names, and the values are the corresponding custom property values.")
-
 class NullableIntegration(PermissiveModel):
     """GitHub apps are a new way to extend GitHub. They can be installed directly on organizations and user accounts and granted access to specific repositories. They come with granular permissions and built-in webhooks. GitHub apps are first class actors within GitHub."""
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="Unique identifier of the GitHub app")
@@ -12562,28 +10556,6 @@ class NullableIntegration(PermissiveModel):
     permissions: dict[str, str] = Field(..., description="The set of permissions for the GitHub app")
     events: list[str] = Field(..., description="The list of events for the GitHub app. Note that the `installation_target`, `security_advisory`, and `meta` events are not included because they are global events and not specific to an installation.")
     installations_count: int | None = Field(None, description="The number of installations associated with the GitHub app. Only returned when the integration is requesting details about itself.")
-
-class CheckSuite(PermissiveModel):
-    """A suite of checks performed on the code of a given code change"""
-    id_: int = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'int64'})
-    node_id: str
-    head_branch: str | None = Field(...)
-    head_sha: str = Field(..., description="The SHA of the head commit that is being checked.")
-    status: Literal["queued", "in_progress", "completed", "waiting", "requested", "pending"] | None = Field(..., description="The phase of the lifecycle that the check suite is currently in. Statuses of waiting, requested, and pending are reserved for GitHub Actions check suites.")
-    conclusion: Literal["success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "startup_failure", "stale"] | None = Field(...)
-    url: str | None = Field(...)
-    before: str | None = Field(...)
-    after: str | None = Field(...)
-    pull_requests: list[PullRequestMinimal] | None = Field(...)
-    app: NullableIntegration
-    repository: MinimalRepository
-    created_at: str | None = Field(..., json_schema_extra={'format': 'date-time'})
-    updated_at: str | None = Field(..., json_schema_extra={'format': 'date-time'})
-    head_commit: SimpleCommit
-    latest_check_runs_count: int
-    check_runs_url: str
-    rerequestable: bool | None = None
-    runs_rerequestable: bool | None = None
 
 class Deployment(PermissiveModel):
     """A request for a specific ref(branch,sha,tag) to be deployed"""
@@ -12934,12 +10906,6 @@ class ReposCreateOrUpdateEnvironmentBodyReviewersItem(PermissiveModel):
     type_: Literal["User", "Team"] | None = Field(None, validation_alias="type", serialization_alias="type")
     id_: int | None = Field(None, validation_alias="id", serialization_alias="id", description="The id of the user or team who can review the deployment")
 
-class RepositoryRulesetBypassActor(PermissiveModel):
-    """An actor that can bypass rules in a ruleset"""
-    actor_id: int | None = Field(None, description="The ID of the actor that can bypass a ruleset. Required for `Integration`, `RepositoryRole`, and `Team` actor types. If `actor_type` is `OrganizationAdmin`, this should be `1`. If `actor_type` is `DeployKey`, this should be null. `OrganizationAdmin` is not applicable for personal repositories.")
-    actor_type: Literal["Integration", "OrganizationAdmin", "RepositoryRole", "Team", "DeployKey"] = Field(..., description="The type of actor that can bypass a ruleset.")
-    bypass_mode: Literal["always", "pull_request", "exempt"] | None = Field('always', description="When the specified actor can bypass the ruleset. `pull_request` means that an actor can only bypass rules on pull requests. `pull_request` is not applicable for the `DeployKey` actor type. Also, `pull_request` is only applicable to branch rulesets. When `bypass_mode` is `exempt`, rules will not be run for that actor and a bypass audit entry will not be created.")
-
 class TeamSimple(PermissiveModel):
     """Groups of organization members that gives permissions on specified repositories."""
     id_: int = Field(..., validation_alias="id", serialization_alias="id", description="Unique identifier of the team")
@@ -13051,24 +11017,17 @@ AutoMerge.model_rebuild()
 CampaignsCreateCampaignBodyCodeScanningAlertsItem.model_rebuild()
 ChecksCreateBodyV0.model_rebuild()
 ChecksCreateBodyV1.model_rebuild()
-ChecksSetSuitesPreferencesBodyAutoTriggerChecksItem.model_rebuild()
-CheckSuite.model_rebuild()
 ChecksUpdateBodyV0.model_rebuild()
 ChecksUpdateBodyV1.model_rebuild()
 Classroom.model_rebuild()
 CodeOfConduct.model_rebuild()
-CodeSecurityCreateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem.model_rebuild()
 CodeSecurityUpdateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem.model_rebuild()
 CodespacesCreateForAuthenticatedUserBodyV0.model_rebuild()
 CodespacesCreateForAuthenticatedUserBodyV1.model_rebuild()
 CodespacesCreateForAuthenticatedUserBodyV1PullRequest.model_rebuild()
 Contributor.model_rebuild()
-CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV1.model_rebuild()
-CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV2.model_rebuild()
-CustomProperty.model_rebuild()
 CustomPropertyValue.model_rebuild()
 Dependency.model_rebuild()
-DeployKey.model_rebuild()
 Deployment.model_rebuild()
 Enterprise.model_rebuild()
 GistsCreateBodyFilesValue.model_rebuild()
@@ -13076,8 +11035,6 @@ GistsUpdateBodyFilesValue.model_rebuild()
 GitCreateTreeBodyTreeItem.model_rebuild()
 Hook.model_rebuild()
 HookResponse.model_rebuild()
-Integration.model_rebuild()
-IntegrationPermissions.model_rebuild()
 Issue.model_rebuild()
 IssueDependenciesSummary.model_rebuild()
 IssueFieldValue.model_rebuild()
@@ -13099,9 +11056,6 @@ Manifest.model_rebuild()
 ManifestFile.model_rebuild()
 Metadata.model_rebuild()
 Migration.model_rebuild()
-MinimalRepository.model_rebuild()
-MinimalRepositoryLicense.model_rebuild()
-MinimalRepositoryPermissions.model_rebuild()
 NullableIntegration.model_rebuild()
 NullableIntegrationPermissions.model_rebuild()
 NullableLicenseSimple.model_rebuild()
@@ -13115,7 +11069,6 @@ OrgsCreateIssueFieldBodyOptionsItem.model_rebuild()
 OrgsDeleteAttestationsBulkBodyV0.model_rebuild()
 OrgsDeleteAttestationsBulkBodyV1.model_rebuild()
 OrgsSetClusterDeploymentRecordsBodyDeploymentsItem.model_rebuild()
-OrgsUpdateIssueFieldBodyOptionsItem.model_rebuild()
 Package.model_rebuild()
 ProjectsAddFieldForOrgBodyV0.model_rebuild()
 ProjectsAddFieldForOrgBodyV1.model_rebuild()
@@ -13132,90 +11085,17 @@ PullRequestBase.model_rebuild()
 PullRequestHead.model_rebuild()
 PullRequestLabelsItem.model_rebuild()
 PullRequestLinks.model_rebuild()
-PullRequestMinimal.model_rebuild()
-PullRequestMinimalBase.model_rebuild()
-PullRequestMinimalBaseRepo.model_rebuild()
-PullRequestMinimalHead.model_rebuild()
-PullRequestMinimalHeadRepo.model_rebuild()
 ReactionRollup.model_rebuild()
-ReposAddStatusCheckContextsBodyV0.model_rebuild()
 ReposAddTeamAccessRestrictionsBodyV0.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV0.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV0RefName.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV0RepositoryName.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV1.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV1RefName.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV1RepositoryId.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV2.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV2RefName.model_rebuild()
-ReposCreateOrgRulesetBodyConditionsV2RepositoryProperty.model_rebuild()
 ReposCreateOrUpdateEnvironmentBodyReviewersItem.model_rebuild()
 Repository.model_rebuild()
 RepositoryCodeSearchIndexStatus.model_rebuild()
 RepositoryPermissions.model_rebuild()
-RepositoryRule.model_rebuild()
-RepositoryRuleBranchNamePattern.model_rebuild()
-RepositoryRuleBranchNamePatternParameters.model_rebuild()
-RepositoryRuleCodeScanning.model_rebuild()
-RepositoryRuleCodeScanningParameters.model_rebuild()
-RepositoryRuleCommitAuthorEmailPattern.model_rebuild()
-RepositoryRuleCommitAuthorEmailPatternParameters.model_rebuild()
-RepositoryRuleCommitMessagePattern.model_rebuild()
-RepositoryRuleCommitMessagePatternParameters.model_rebuild()
-RepositoryRuleCommitterEmailPattern.model_rebuild()
-RepositoryRuleCommitterEmailPatternParameters.model_rebuild()
-RepositoryRuleCopilotCodeReview.model_rebuild()
-RepositoryRuleCopilotCodeReviewParameters.model_rebuild()
-RepositoryRuleCreation.model_rebuild()
-RepositoryRuleDeletion.model_rebuild()
-RepositoryRuleFileExtensionRestriction.model_rebuild()
-RepositoryRuleFileExtensionRestrictionParameters.model_rebuild()
-RepositoryRuleFilePathRestriction.model_rebuild()
-RepositoryRuleFilePathRestrictionParameters.model_rebuild()
-RepositoryRuleMaxFilePathLength.model_rebuild()
-RepositoryRuleMaxFilePathLengthParameters.model_rebuild()
-RepositoryRuleMaxFileSize.model_rebuild()
-RepositoryRuleMaxFileSizeParameters.model_rebuild()
-RepositoryRuleMergeQueue.model_rebuild()
-RepositoryRuleMergeQueueParameters.model_rebuild()
-RepositoryRuleNonFastForward.model_rebuild()
-RepositoryRuleParamsCodeScanningTool.model_rebuild()
-RepositoryRuleParamsStatusCheckConfiguration.model_rebuild()
-RepositoryRuleParamsWorkflowFileReference.model_rebuild()
-RepositoryRulePullRequest.model_rebuild()
-RepositoryRulePullRequestParameters.model_rebuild()
-RepositoryRuleRequiredDeployments.model_rebuild()
-RepositoryRuleRequiredDeploymentsParameters.model_rebuild()
-RepositoryRuleRequiredLinearHistory.model_rebuild()
-RepositoryRuleRequiredSignatures.model_rebuild()
-RepositoryRuleRequiredStatusChecks.model_rebuild()
-RepositoryRuleRequiredStatusChecksParameters.model_rebuild()
-RepositoryRulesetBypassActor.model_rebuild()
-RepositoryRulesetConditionsRepositoryPropertySpec.model_rebuild()
-RepositoryRuleTagNamePattern.model_rebuild()
-RepositoryRuleTagNamePatternParameters.model_rebuild()
-RepositoryRuleUpdate.model_rebuild()
-RepositoryRuleUpdateParameters.model_rebuild()
-RepositoryRuleWorkflows.model_rebuild()
-RepositoryRuleWorkflowsParameters.model_rebuild()
 ReposRemoveStatusCheckContextsBodyV0.model_rebuild()
 ReposRemoveTeamAccessRestrictionsBodyV0.model_rebuild()
-ReposSetStatusCheckContextsBodyV0.model_rebuild()
 ReposSetTeamAccessRestrictionsBodyV0.model_rebuild()
 ReposUpdateBodySecurityAndAnalysisSecretScanningDelegatedBypassOptionsReviewersItem.model_rebuild()
 ReposUpdateBranchProtectionBodyRequiredStatusChecksChecksItem.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV0.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV0RefName.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV0RepositoryName.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV1.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV1RefName.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV1RepositoryId.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV2.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV2RefName.model_rebuild()
-ReposUpdateOrgRulesetBodyConditionsV2RepositoryProperty.model_rebuild()
-ReposUpdateStatusCheckProtectionBodyChecksItem.model_rebuild()
-SecretScanningUpdateOrgPatternConfigsBodyCustomPatternSettingsItem.model_rebuild()
-SecretScanningUpdateOrgPatternConfigsBodyProviderPatternSettingsItem.model_rebuild()
 SecurityAdvisoriesCreatePrivateVulnerabilityReportBodyVulnerabilitiesItem.model_rebuild()
 SecurityAdvisoriesCreatePrivateVulnerabilityReportBodyVulnerabilitiesItemPackage.model_rebuild()
 SecurityAdvisoriesCreateRepositoryAdvisoryBodyCreditsItem.model_rebuild()
@@ -13233,9 +11113,6 @@ SecurityAndAnalysisSecretScanningAiDetection.model_rebuild()
 SecurityAndAnalysisSecretScanningNonProviderPatterns.model_rebuild()
 SecurityAndAnalysisSecretScanningPushProtection.model_rebuild()
 SimpleClassroomOrganization.model_rebuild()
-SimpleCommit.model_rebuild()
-SimpleCommitAuthor.model_rebuild()
-SimpleCommitCommitter.model_rebuild()
 SimpleUser.model_rebuild()
 Status.model_rebuild()
 SubIssuesSummary.model_rebuild()

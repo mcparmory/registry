@@ -7,7 +7,7 @@ API Info:
 - Contact: Support (https://support.github.com/contact?tags=dotcom-rest-api)
 - Terms of Service: https://docs.github.com/articles/github-terms-of-service
 
-Generated: 2026-04-06 14:24:48 UTC
+Generated: 2026-04-09 17:23:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -502,11 +502,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
     # Per-operation URL override (OAS 3.0 path/operation-level servers)
     _url_override = OPERATION_URL_MAP.get(tool_name or "")
@@ -552,7 +556,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -955,10 +962,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -1202,33 +1214,6 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 
 mcp = FastMCP("GitHub", middleware=[_JsonCoercionMiddleware()])
 
-# Tags: meta
-@mcp.tool()
-async def get_api_root() -> dict[str, Any]:
-    """Retrieve the root endpoint of the GitHub REST API, which provides hypermedia links to all accessible resources and serves as the entry point for API discovery."""
-
-    # Extract parameters for API call
-    _http_path = "/"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_api_root")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_api_root", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_api_root",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: security-advisories
 @mcp.tool()
 async def list_advisories(
@@ -1308,42 +1293,6 @@ async def get_authenticated_app() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def complete_github_app_manifest(code: str = Field(..., description="The temporary code received during the GitHub App manifest flow setup. This code is exchanged for the app's credentials and configuration.")) -> dict[str, Any]:
-    """Complete the GitHub App manifest flow handshake by exchanging a temporary code for the app's credentials. This endpoint returns the app's ID, private key (pem), and webhook secret needed to finalize GitHub App creation."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsCreateFromManifestRequest(
-            path=_models.AppsCreateFromManifestRequestPath(code=code)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for complete_github_app_manifest: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/app-manifests/{code}/conversions", _request.path.model_dump(by_alias=True)) if _request.path else "/app-manifests/{code}/conversions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("complete_github_app_manifest")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("complete_github_app_manifest", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="complete_github_app_manifest",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
 async def get_webhook_config() -> dict[str, Any]:
     """Retrieve the webhook configuration for a GitHub App. Requires JWT authentication as the GitHub App to access this endpoint."""
 
@@ -1364,48 +1313,6 @@ async def get_webhook_config() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def configure_app_webhook(
-    url: str | None = Field(None, description="The URL endpoint where webhook payloads will be delivered. Must be a valid URI."),
-    content_type: str | None = Field(None, description="The media type format for serializing webhook payloads. Defaults to form-encoded if not specified."),
-    secret: str | None = Field(None, description="An optional secret string used to generate HMAC signatures for verifying webhook delivery authenticity in request headers."),
-) -> dict[str, Any]:
-    """Update the webhook configuration for a GitHub App, including the delivery URL, payload format, and optional signature secret. Requires JWT authentication."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsUpdateWebhookConfigForAppRequest(
-            body=_models.AppsUpdateWebhookConfigForAppRequestBody(url=url, content_type=content_type, secret=secret)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_app_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/app/hook/config"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_app_webhook")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_app_webhook", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_app_webhook",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -1649,48 +1556,6 @@ async def uninstall_app(installation_id: int = Field(..., description="The uniqu
 
 # Tags: apps
 @mcp.tool()
-async def create_installation_access_token(
-    installation_id: int = Field(..., description="The unique identifier of the GitHub App installation for which to create the access token."),
-    permissions: _models.AppPermissions | None = Field(None, description="GitHub App permissions to grant the installation access token. Each key is a permission scope (e.g. actions, contents, issues) with value 'read' or 'write'."),
-) -> dict[str, Any]:
-    """Creates a short-lived access token (expires in 1 hour) that allows a GitHub App to make authenticated API requests for a specific installation. You can optionally restrict the token to specific repositories and/or permissions using the request body parameters."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsCreateInstallationAccessTokenRequest(
-            path=_models.AppsCreateInstallationAccessTokenRequestPath(installation_id=installation_id),
-            body=_models.AppsCreateInstallationAccessTokenRequestBody(permissions=permissions)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_installation_access_token: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/app/installations/{installation_id}/access_tokens", _request.path.model_dump(by_alias=True)) if _request.path else "/app/installations/{installation_id}/access_tokens"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_installation_access_token")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_installation_access_token", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_installation_access_token",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
 async def suspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the app installation to suspend.")) -> dict[str, Any]:
     """Suspend a GitHub App installation on a user, organization, or enterprise account, blocking the app from accessing that account's resources and API/webhook events. Requires JWT authentication as the GitHub App."""
 
@@ -1805,90 +1670,6 @@ async def revoke_app_authorization(
 
 # Tags: apps
 @mcp.tool()
-async def validate_token(
-    client_id: str = Field(..., description="The client ID of the GitHub application requesting token validation."),
-    access_token: str = Field(..., description="The OAuth or GitHub application access token to validate."),
-) -> dict[str, Any]:
-    """Validate an OAuth or GitHub application token without triggering rate limits for failed login attempts. Returns 404 if the token is invalid."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsCheckTokenRequest(
-            path=_models.AppsCheckTokenRequestPath(client_id=client_id),
-            body=_models.AppsCheckTokenRequestBody(access_token=access_token)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for validate_token: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/applications/{client_id}/token", _request.path.model_dump(by_alias=True)) if _request.path else "/applications/{client_id}/token"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("validate_token")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("validate_token", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="validate_token",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def reset_application_token(
-    client_id: str = Field(..., description="The client ID of the GitHub or OAuth application."),
-    access_token: str = Field(..., description="The current access token of the OAuth or GitHub application to be reset."),
-) -> dict[str, Any]:
-    """Reset an OAuth or GitHub application token, invalidating the current token and issuing a new one without requiring end-user interaction. The new token takes effect immediately and must be saved by the application."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsResetTokenRequest(
-            path=_models.AppsResetTokenRequestPath(client_id=client_id),
-            body=_models.AppsResetTokenRequestBody(access_token=access_token)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for reset_application_token: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/applications/{client_id}/token", _request.path.model_dump(by_alias=True)) if _request.path else "/applications/{client_id}/token"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("reset_application_token")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("reset_application_token", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="reset_application_token",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
 async def revoke_application_token(
     client_id: str = Field(..., description="The client ID of the GitHub application whose token should be revoked."),
     access_token: str = Field(..., description="The OAuth access token to be revoked. This token must be valid and associated with the specified application."),
@@ -1968,42 +1749,6 @@ async def create_scoped_token(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def get_app(app_slug: str = Field(..., description="The URL-friendly slug identifier for the GitHub App, found on the app's settings page (e.g., the slug in https://github.com/settings/apps/:app_slug).")) -> dict[str, Any]:
-    """Retrieve details about a GitHub App using its URL-friendly slug identifier. The slug can be found on the app's settings page."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsGetBySlugRequest(
-            path=_models.AppsGetBySlugRequestPath(app_slug=app_slug)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/apps/{app_slug}", _request.path.model_dump(by_alias=True)) if _request.path else "/apps/{app_slug}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 
@@ -2279,149 +2024,6 @@ async def get_conduct_code(key: str = Field(..., description="The unique identif
 
     return _response_data
 
-# Tags: credentials
-@mcp.tool()
-async def revoke_credentials(credentials: list[str] = Field(..., description="List of credentials to revoke. Each credential should be specified as a token string. Revocation is permanent and cannot be undone; new credentials must be generated after revocation.", min_length=1, max_length=1000)) -> dict[str, Any]:
-    """Revoke exposed or compromised credentials including personal access tokens. This unauthenticated endpoint allows you to revoke credentials you don't own (found on GitHub or elsewhere) or credentials associated with old accounts you no longer have access to. Credential owners will be notified of the revocation."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CredentialsRevokeRequest(
-            body=_models.CredentialsRevokeRequestBody(credentials=credentials)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for revoke_credentials: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/credentials/revoke"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("revoke_credentials")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("revoke_credentials", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="revoke_credentials",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: emojis
-@mcp.tool()
-async def list_emojis() -> dict[str, Any]:
-    """Retrieves a complete list of all emojis available for use on GitHub, including custom and standard emoji support."""
-
-    # Extract parameters for API call
-    _http_path = "/emojis"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_emojis")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_emojis", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_emojis",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_enterprise_actions_cache_retention_limit(enterprise: str = Field(..., description="The slug version of the enterprise name. Used to identify which enterprise's cache retention limit to retrieve.")) -> dict[str, Any]:
-    """Retrieve the GitHub Actions cache retention limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache retention settings."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetActionsCacheRetentionLimitForEnterpriseRequest(
-            path=_models.ActionsGetActionsCacheRetentionLimitForEnterpriseRequestPath(enterprise=enterprise)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_enterprise_actions_cache_retention_limit: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/actions/cache/retention-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/actions/cache/retention-limit"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_enterprise_actions_cache_retention_limit")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_enterprise_actions_cache_retention_limit", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_enterprise_actions_cache_retention_limit",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def set_actions_cache_retention_limit(
-    enterprise: str = Field(..., description="The slug version of the enterprise name."),
-    max_cache_retention_days: int | None = Field(None, description="The maximum number of days that caches in repositories under this enterprise may be retained."),
-) -> dict[str, Any]:
-    """Set the maximum cache retention limit for GitHub Actions across an enterprise. All organizations and repositories within the enterprise are constrained by this limit and cannot exceed it."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheRetentionLimitForEnterpriseRequest(
-            path=_models.ActionsSetActionsCacheRetentionLimitForEnterpriseRequestPath(enterprise=enterprise),
-            body=_models.ActionsSetActionsCacheRetentionLimitForEnterpriseRequestBody(max_cache_retention_days=max_cache_retention_days)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_actions_cache_retention_limit: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/actions/cache/retention-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/actions/cache/retention-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_actions_cache_retention_limit")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_actions_cache_retention_limit", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_actions_cache_retention_limit",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: actions
 @mcp.tool()
 async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier used to reference the enterprise in API requests.")) -> dict[str, Any]:
@@ -2453,48 +2055,6 @@ async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(...
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def set_actions_cache_storage_limit(
-    enterprise: str = Field(..., description="The slug version of the enterprise name. Used to identify which enterprise's cache storage limit should be configured."),
-    max_cache_size_gb: int | None = Field(None, description="The maximum total cache storage size in gigabytes for repositories and organizations within the enterprise. All child organizations and repositories must respect this limit."),
-) -> dict[str, Any]:
-    """Set the maximum GitHub Actions cache storage limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache storage configurations."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheStorageLimitForEnterpriseRequest(
-            path=_models.ActionsSetActionsCacheStorageLimitForEnterpriseRequestPath(enterprise=enterprise),
-            body=_models.ActionsSetActionsCacheStorageLimitForEnterpriseRequestBody(max_cache_size_gb=max_cache_size_gb)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_actions_cache_storage_limit: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/actions/cache/storage-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/actions/cache/storage-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_actions_cache_storage_limit")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_actions_cache_storage_limit", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_actions_cache_storage_limit",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -2578,45 +2138,6 @@ async def add_oidc_custom_property(
 
     return _response_data
 
-# Tags: oidc
-@mcp.tool()
-async def remove_oidc_custom_property(
-    enterprise: str = Field(..., description="The enterprise slug identifier. This is the URL-friendly version of the enterprise name used in API paths."),
-    custom_property_name: str = Field(..., description="The name of the custom property to remove from OIDC token inclusion. Once removed, this property will no longer be included in OIDC tokens for repository actions."),
-) -> dict[str, Any]:
-    """Remove a repository custom property from OIDC token inclusion for an enterprise. This prevents the specified custom property from being included in OIDC tokens generated for repository actions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequest(
-            path=_models.OidcDeleteOidcCustomPropertyInclusionForEnterpriseRequestPath(enterprise=enterprise, custom_property_name=custom_property_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_oidc_custom_property: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/actions/oidc/customization/properties/repo/{custom_property_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/actions/oidc/customization/properties/repo/{custom_property_name}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_oidc_custom_property")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_oidc_custom_property", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_oidc_custom_property",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: code-security
 @mcp.tool()
 async def list_code_security_configurations(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any]:
@@ -2648,65 +2169,6 @@ async def list_code_security_configurations(enterprise: str = Field(..., descrip
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-security
-@mcp.tool()
-async def create_enterprise_code_security_configuration(
-    enterprise: str = Field(..., description="The slug version of the enterprise name."),
-    name: str = Field(..., description="The name of the code security configuration. Must be unique within the enterprise."),
-    description: str = Field(..., description="A description of the code security configuration.", max_length=255),
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of GitHub Code Security features."),
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependency Graph."),
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of automatic dependency submission for detected dependencies."),
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot alerts for vulnerable dependencies."),
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot security updates to automatically fix vulnerabilities."),
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of code scanning default setup for automated vulnerability detection."),
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated alert dismissal for code scanning alerts."),
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning to detect exposed credentials."),
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning push protection to block commits with exposed secrets."),
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning validity checks to verify detected secrets."),
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning for non-provider patterns and custom secrets."),
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Copilot secret scanning for generic secrets detection."),
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated alert dismissal for secret scanning alerts."),
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning extended metadata for additional context on detected secrets."),
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of private vulnerability reporting for coordinated disclosure."),
-    enforcement: Literal["enforced", "unenforced"] | None = Field(None, description="The enforcement status for this security configuration. Enforced configurations are mandatory; unenforced are optional."),
-) -> dict[str, Any]:
-    """Creates a code security configuration for an enterprise to standardize security settings across repositories. The authenticated user must be an enterprise administrator with the `admin:enterprise` scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeSecurityCreateConfigurationForEnterpriseRequest(
-            path=_models.CodeSecurityCreateConfigurationForEnterpriseRequestPath(enterprise=enterprise),
-            body=_models.CodeSecurityCreateConfigurationForEnterpriseRequestBody(name=name, description=description, code_security=code_security, dependency_graph=dependency_graph, dependency_graph_autosubmit_action=dependency_graph_autosubmit_action, dependabot_alerts=dependabot_alerts, dependabot_security_updates=dependabot_security_updates, code_scanning_default_setup=code_scanning_default_setup, code_scanning_delegated_alert_dismissal=code_scanning_delegated_alert_dismissal, secret_scanning=secret_scanning, secret_scanning_push_protection=secret_scanning_push_protection, secret_scanning_validity_checks=secret_scanning_validity_checks, secret_scanning_non_provider_patterns=secret_scanning_non_provider_patterns, secret_scanning_generic_secrets=secret_scanning_generic_secrets, secret_scanning_delegated_alert_dismissal=secret_scanning_delegated_alert_dismissal, secret_scanning_extended_metadata=secret_scanning_extended_metadata, private_vulnerability_reporting=private_vulnerability_reporting, enforcement=enforcement)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_enterprise_code_security_configuration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/code-security/configurations", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/code-security/configurations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_enterprise_code_security_configuration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_enterprise_code_security_configuration", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_enterprise_code_security_configuration",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -2789,65 +2251,6 @@ async def get_code_security_configuration_enterprise(
 
 # Tags: code-security
 @mcp.tool()
-async def update_code_security_configuration_enterprise(
-    enterprise: str = Field(..., description="The slug version of the enterprise name."),
-    configuration_id: int = Field(..., description="The unique identifier of the code security configuration to update."),
-    description: str | None = Field(None, description="A description of the code security configuration.", max_length=255),
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of GitHub Code Security features."),
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependency Graph."),
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of automatic dependency submission."),
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot alerts."),
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot security updates."),
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of code scanning default setup."),
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of code scanning delegated alert dismissal."),
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning."),
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning push protection."),
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning validity checks."),
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning non-provider patterns."),
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Copilot secret scanning for generic secrets."),
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning delegated alert dismissal."),
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning extended metadata."),
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of private vulnerability reporting."),
-    enforcement: Literal["enforced", "unenforced"] | None = Field(None, description="The enforcement status for this security configuration across the enterprise."),
-) -> dict[str, Any]:
-    """Update a custom code security configuration for an enterprise. Allows administrators to modify security feature enablement settings and enforcement status across the organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeSecurityUpdateEnterpriseConfigurationRequest(
-            path=_models.CodeSecurityUpdateEnterpriseConfigurationRequestPath(enterprise=enterprise, configuration_id=configuration_id),
-            body=_models.CodeSecurityUpdateEnterpriseConfigurationRequestBody(description=description, code_security=code_security, dependency_graph=dependency_graph, dependency_graph_autosubmit_action=dependency_graph_autosubmit_action, dependabot_alerts=dependabot_alerts, dependabot_security_updates=dependabot_security_updates, code_scanning_default_setup=code_scanning_default_setup, code_scanning_delegated_alert_dismissal=code_scanning_delegated_alert_dismissal, secret_scanning=secret_scanning, secret_scanning_push_protection=secret_scanning_push_protection, secret_scanning_validity_checks=secret_scanning_validity_checks, secret_scanning_non_provider_patterns=secret_scanning_non_provider_patterns, secret_scanning_generic_secrets=secret_scanning_generic_secrets, secret_scanning_delegated_alert_dismissal=secret_scanning_delegated_alert_dismissal, secret_scanning_extended_metadata=secret_scanning_extended_metadata, private_vulnerability_reporting=private_vulnerability_reporting, enforcement=enforcement)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_code_security_configuration_enterprise: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/code-security/configurations/{configuration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/code-security/configurations/{configuration_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_code_security_configuration_enterprise")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_code_security_configuration_enterprise", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_code_security_configuration_enterprise",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-security
-@mcp.tool()
 async def delete_code_security_configuration_enterprise(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to delete."),
@@ -2920,49 +2323,6 @@ async def attach_code_security_configuration(
     _response_data, _ = await _execute_tool_request(
         tool_name="attach_code_security_configuration",
         method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-security
-@mcp.tool()
-async def set_code_security_configuration_as_default(
-    enterprise: str = Field(..., description="The slug version of the enterprise name."),
-    configuration_id: int = Field(..., description="The unique identifier of the code security configuration to set as default."),
-    default_for_new_repos: Literal["all", "none", "private_and_internal", "public"] | None = Field(None, description="Specifies which repository types this security configuration should apply to by default."),
-) -> dict[str, Any]:
-    """Set a code security configuration as the default for an enterprise. This configuration will automatically apply to new repositories of matching types created within organizations that don't already have a default configuration set."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeSecuritySetConfigurationAsDefaultForEnterpriseRequest(
-            path=_models.CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestPath(enterprise=enterprise, configuration_id=configuration_id),
-            body=_models.CodeSecuritySetConfigurationAsDefaultForEnterpriseRequestBody(default_for_new_repos=default_for_new_repos)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_code_security_configuration_as_default: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/enterprises/{enterprise}/code-security/configurations/{configuration_id}/defaults", _request.path.model_dump(by_alias=True)) if _request.path else "/enterprises/{enterprise}/code-security/configurations/{configuration_id}/defaults"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_code_security_configuration_as_default")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_code_security_configuration_as_default", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_code_security_configuration_as_default",
-        method="PUT",
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
@@ -4627,33 +3987,6 @@ async def list_installation_repositories() -> dict[str, Any]:
 
     return _response_data
 
-# Tags: apps
-@mcp.tool()
-async def revoke_installation_token() -> dict[str, Any]:
-    """Revoke the current installation access token, invalidating it for all future API requests. After revocation, a new installation token must be created to continue authenticating as this installation."""
-
-    # Extract parameters for API call
-    _http_path = "/installation/token"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("revoke_installation_token")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("revoke_installation_token", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="revoke_installation_token",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: issues
 @mcp.tool()
 async def list_issues(
@@ -4776,89 +4109,6 @@ async def get_license(license_: str = Field(..., alias="license", description="T
 
     return _response_data
 
-# Tags: markdown
-@mcp.tool()
-async def render_markdown(
-    text: str = Field(..., description="The Markdown text to render as HTML."),
-    mode: Literal["markdown", "gfm"] | None = Field(None, description="The rendering mode that determines Markdown syntax support. Use `markdown` for standard Markdown or `gfm` for GitHub Flavored Markdown with enhanced syntax features."),
-    context: str | None = Field(None, description="The repository context in `owner/repo` format for resolving references in GFM mode. When provided, shorthand references like `#42` are converted to links pointing to the specified repository."),
-) -> dict[str, Any]:
-    """Convert Markdown text to HTML, with support for GitHub Flavored Markdown (GFM) and repository-aware reference linking. Additional token scopes may be required depending on referenced content types (e.g., `issues:read` for issue references)."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.MarkdownRenderRequest(
-            body=_models.MarkdownRenderRequestBody(text=text, mode=mode, context=context)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for render_markdown: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/markdown"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("render_markdown")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("render_markdown", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="render_markdown",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: markdown
-@mcp.tool()
-async def render_markdown_raw(body: str | None = Field(None, description="The Markdown content to render as plain text. Must be sent with Content-Type header of text/plain or text/x-markdown, not JSON format.")) -> dict[str, Any]:
-    """Render a Markdown document using plain text input. Supports standard Markdown syntax (GitHub Flavored Markdown not supported) with a maximum content size of 400 KB."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.MarkdownRenderRawRequest(
-            body=_models.MarkdownRenderRawRequestBody(body=body)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for render_markdown_raw: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/markdown/raw"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_body = next(iter(_http_body.values()), None) if _http_body else None
-    _http_headers = {}
-    _http_headers["Content-Type"] = "text/plain"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("render_markdown_raw")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("render_markdown_raw", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="render_markdown_raw",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        body_content_type="text/plain",
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: apps
 @mcp.tool()
 async def get_subscription_plan(account_id: int = Field(..., description="The unique identifier of the user or organization account to retrieve subscription information for.")) -> dict[str, Any]:
@@ -4924,48 +4174,6 @@ async def list_marketplace_plans() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def list_plan_accounts(
-    plan_id: int = Field(..., description="The unique identifier of the marketplace plan for which to retrieve associated accounts."),
-    direction: Literal["asc", "desc"] | None = Field(None, description="Sort order for the returned accounts list. Use 'asc' to return oldest accounts first, or 'desc' for newest first. Only applies when used with a sort parameter."),
-) -> dict[str, Any]:
-    """Retrieve all user and organization accounts associated with a marketplace plan, including seat counts for per-seat pricing and any pending plan changes awaiting the next billing cycle."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsListAccountsForPlanRequest(
-            path=_models.AppsListAccountsForPlanRequestPath(plan_id=plan_id),
-            query=_models.AppsListAccountsForPlanRequestQuery(direction=direction)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_plan_accounts: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/marketplace_listing/plans/{plan_id}/accounts", _request.path.model_dump(by_alias=True)) if _request.path else "/marketplace_listing/plans/{plan_id}/accounts"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_plan_accounts")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_plan_accounts", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_plan_accounts",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
 async def get_subscription_plan_stubbed(account_id: int = Field(..., description="The unique identifier of the account (user or organization) to check subscription status for.")) -> dict[str, Any]:
     """Retrieve the active subscription plan for a GitHub account. Returns the current subscription status and any pending plan changes scheduled for the next billing cycle."""
 
@@ -5019,75 +4227,6 @@ async def list_marketplace_plans_stubbed() -> dict[str, Any]:
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_marketplace_plans_stubbed",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def list_plan_accounts_stubbed(
-    plan_id: int = Field(..., description="The unique identifier of the marketplace plan for which to retrieve associated accounts."),
-    direction: Literal["asc", "desc"] | None = Field(None, description="Sort order for the returned accounts list. Use 'asc' to return oldest accounts first, or 'desc' for newest first. Only applies when used with a sort parameter."),
-) -> dict[str, Any]:
-    """Retrieve all repository and organization accounts associated with a marketplace plan, including seat counts for per-seat pricing models and any pending plan changes. Requires JWT authentication for GitHub Apps or basic authentication for OAuth apps."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsListAccountsForPlanStubbedRequest(
-            path=_models.AppsListAccountsForPlanStubbedRequestPath(plan_id=plan_id),
-            query=_models.AppsListAccountsForPlanStubbedRequestQuery(direction=direction)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_plan_accounts_stubbed: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/marketplace_listing/stubbed/plans/{plan_id}/accounts", _request.path.model_dump(by_alias=True)) if _request.path else "/marketplace_listing/stubbed/plans/{plan_id}/accounts"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_plan_accounts_stubbed")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_plan_accounts_stubbed", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_plan_accounts_stubbed",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: meta
-@mcp.tool()
-async def get_github_meta() -> dict[str, Any]:
-    """Retrieve GitHub's meta information including IP addresses (IPv4 and IPv6) and domain names. Query directly for the latest values as they may change."""
-
-    # Extract parameters for API call
-    _http_path = "/meta"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_github_meta")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_github_meta", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_github_meta",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -5437,44 +4576,6 @@ async def mute_thread_subscription(thread_id: int = Field(..., description="The 
 
     return _response_data
 
-# Tags: meta
-@mcp.tool()
-async def get_octocat(s: str | None = Field(None, description="Custom text to display in Octocat's speech bubble. If omitted, a default message is shown.")) -> dict[str, Any]:
-    """Retrieve an ASCII art representation of Octocat, GitHub's mascot. Optionally customize the speech bubble with your own text."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.MetaGetOctocatRequest(
-            query=_models.MetaGetOctocatRequestQuery(s=s)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_octocat: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/octocat"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_octocat")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_octocat", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_octocat",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: orgs
 @mcp.tool()
 async def list_organizations(since: int | None = Field(None, description="Organization ID cursor for pagination. Returns only organizations with an ID greater than this value to fetch the next page of results.")) -> dict[str, Any]:
@@ -5515,84 +4616,6 @@ async def list_organizations(since: int | None = Field(None, description="Organi
 
 # Tags: actions
 @mcp.tool()
-async def get_actions_cache_retention_limit(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Retrieve the GitHub Actions cache retention limit for an organization. This limit applies to all repositories within the organization and prevents them from setting higher retention periods."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetActionsCacheRetentionLimitForOrganizationRequest(
-            path=_models.ActionsGetActionsCacheRetentionLimitForOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_actions_cache_retention_limit: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{org}/actions/cache/retention-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org}/actions/cache/retention-limit"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_actions_cache_retention_limit")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_actions_cache_retention_limit", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_actions_cache_retention_limit",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def set_actions_cache_retention_limit_for_organization(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    max_cache_retention_days: int | None = Field(None, description="The maximum number of days that caches in repositories under this organization may be retained."),
-) -> dict[str, Any]:
-    """Set the maximum cache retention limit for GitHub Actions across all repositories in an organization. This limit applies organization-wide and individual repositories cannot exceed it."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheRetentionLimitForOrganizationRequest(
-            path=_models.ActionsSetActionsCacheRetentionLimitForOrganizationRequestPath(org=org),
-            body=_models.ActionsSetActionsCacheRetentionLimitForOrganizationRequestBody(max_cache_retention_days=max_cache_retention_days)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_actions_cache_retention_limit_for_organization: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{org}/actions/cache/retention-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org}/actions/cache/retention-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_actions_cache_retention_limit_for_organization")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_actions_cache_retention_limit_for_organization", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_actions_cache_retention_limit_for_organization",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def get_actions_cache_storage_limit(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
     """Retrieve the GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
 
@@ -5622,48 +4645,6 @@ async def get_actions_cache_storage_limit(org: str = Field(..., description="The
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_actions_cache_storage_limit(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    max_cache_size_gb: int | None = Field(None, description="The maximum total cache storage size allowed for all caches in a repository, measured in gigabytes. This limit applies organization-wide and cannot be overridden at the repository level."),
-) -> dict[str, Any]:
-    """Configure the maximum GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheStorageLimitForOrganizationRequest(
-            path=_models.ActionsSetActionsCacheStorageLimitForOrganizationRequestPath(org=org),
-            body=_models.ActionsSetActionsCacheStorageLimitForOrganizationRequestBody(max_cache_size_gb=max_cache_size_gb)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_actions_cache_storage_limit: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{org}/actions/cache/storage-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org}/actions/cache/storage-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_actions_cache_storage_limit")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_actions_cache_storage_limit", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_actions_cache_storage_limit",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -5740,48 +4721,6 @@ async def update_dependabot_repository_access(
     _response_data, _ = await _execute_tool_request(
         tool_name="update_dependabot_repository_access",
         method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: dependabot
-@mcp.tool()
-async def configure_dependabot_default_repository_access(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    default_level: Literal["public", "internal"] = Field(..., description="The default repository access level for Dependabot updates. 'public' restricts access to public repositories only, while 'internal' allows access to public and internal repositories."),
-) -> dict[str, Any]:
-    """Configure the default repository access level that Dependabot will have when performing updates across the organization. This setting applies to all repositories unless explicitly overridden."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DependabotSetRepositoryAccessDefaultLevelRequest(
-            path=_models.DependabotSetRepositoryAccessDefaultLevelRequestPath(org=org),
-            body=_models.DependabotSetRepositoryAccessDefaultLevelRequestBody(default_level=default_level)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_dependabot_default_repository_access: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{org}/dependabot/repository-access/default-level", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org}/dependabot/repository-access/default-level"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_dependabot_default_repository_access")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_dependabot_default_repository_access", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_dependabot_default_repository_access",
-        method="PUT",
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
@@ -6997,440 +5936,6 @@ async def add_oidc_custom_property_org(
 
     return _response_data
 
-# Tags: oidc
-@mcp.tool()
-async def remove_oidc_custom_property_for_org(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    custom_property_name: str = Field(..., description="The name of the custom property to remove from OIDC token inclusion."),
-) -> dict[str, Any]:
-    """Remove a repository custom property from OIDC token inclusion for an organization. This prevents the specified custom property from being included in OpenID Connect tokens generated for repository actions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OidcDeleteOidcCustomPropertyInclusionForOrgRequest(
-            path=_models.OidcDeleteOidcCustomPropertyInclusionForOrgRequestPath(org=org, custom_property_name=custom_property_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_oidc_custom_property_for_org: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/oidc/customization/properties/repo/{custom_property_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/oidc/customization/properties/repo/{custom_property_name}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_oidc_custom_property_for_org")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_oidc_custom_property_for_org", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_oidc_custom_property_for_org",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: oidc
-@mcp.tool()
-async def get_oidc_subject_claim_template(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the OIDC customization template.")) -> dict[str, Any]:
-    """Retrieves the customization template for an organization's OpenID Connect (OIDC) subject claim. Requires `read:org` scope for OAuth app tokens and personal access tokens (classic)."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OidcGetOidcCustomSubTemplateForOrgRequest(
-            path=_models.OidcGetOidcCustomSubTemplateForOrgRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_oidc_subject_claim_template: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/oidc/customization/sub", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/oidc/customization/sub"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_oidc_subject_claim_template")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_oidc_subject_claim_template", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_oidc_subject_claim_template",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: oidc
-@mcp.tool()
-async def configure_oidc_subject_claim_template(
-    org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
-    include_claim_keys: list[str] = Field(..., description="Array of claim keys to include in the OIDC subject claim template. Each key must contain only alphanumeric characters and underscores. The order of keys in the array determines their order in the subject claim assertion."),
-) -> dict[str, Any]:
-    """Configure the customization template for OIDC subject claim assertions in an organization. This operation creates or updates the template that defines which claim keys are included in the subject claim."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OidcUpdateOidcCustomSubTemplateForOrgRequest(
-            path=_models.OidcUpdateOidcCustomSubTemplateForOrgRequestPath(org=org),
-            body=_models.OidcUpdateOidcCustomSubTemplateForOrgRequestBody(include_claim_keys=include_claim_keys)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_oidc_subject_claim_template: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/oidc/customization/sub", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/oidc/customization/sub"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_oidc_subject_claim_template")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_oidc_subject_claim_template", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_oidc_subject_claim_template",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_organization_actions_permissions(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
-    """Retrieve the GitHub Actions permissions policy for an organization, including repository permissions and allowed actions and reusable workflows. Requires `admin:org` scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetGithubActionsPermissionsOrganizationRequest(
-            path=_models.ActionsGetGithubActionsPermissionsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_organization_actions_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_organization_actions_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_organization_actions_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_organization_actions_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_organization_actions_permissions(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    enabled_repositories: Literal["all", "none", "selected"] = Field(..., description="The policy controlling which repositories in the organization are allowed to run GitHub Actions."),
-    allowed_actions: Literal["all", "local_only", "selected"] | None = Field(None, description="The permissions policy controlling which actions and reusable workflows are allowed to run in the organization."),
-    sha_pinning_required: bool | None = Field(None, description="Whether actions must be pinned to a full-length commit SHA for security enforcement."),
-) -> dict[str, Any]:
-    """Configure GitHub Actions permissions for an organization, including which repositories can run actions and which actions or reusable workflows are allowed. Requires admin:org scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetGithubActionsPermissionsOrganizationRequest(
-            path=_models.ActionsSetGithubActionsPermissionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetGithubActionsPermissionsOrganizationRequestBody(enabled_repositories=enabled_repositories, allowed_actions=allowed_actions, sha_pinning_required=sha_pinning_required)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_organization_actions_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_organization_actions_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_organization_actions_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_organization_actions_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_artifact_and_log_retention_settings(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Retrieve the artifact and log retention settings configured for an organization. Requires admin:org scope or Actions policies fine-grained permission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetArtifactAndLogRetentionSettingsOrganizationRequest(
-            path=_models.ActionsGetArtifactAndLogRetentionSettingsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_artifact_and_log_retention_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/artifact-and-log-retention", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/artifact-and-log-retention"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_artifact_and_log_retention_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_artifact_and_log_retention_settings", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_artifact_and_log_retention_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_artifact_and_log_retention(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    days: int = Field(..., description="The number of days to retain artifacts and logs. Determines how long GitHub Actions stores workflow artifacts and logs before automatic deletion."),
-) -> dict[str, Any]:
-    """Configure how long artifacts and logs are retained for GitHub Actions workflows in an organization. Requires admin:org scope or Actions policies permission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetArtifactAndLogRetentionSettingsOrganizationRequest(
-            path=_models.ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetArtifactAndLogRetentionSettingsOrganizationRequestBody(days=days)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_artifact_and_log_retention: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/artifact-and-log-retention", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/artifact-and-log-retention"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_artifact_and_log_retention")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_artifact_and_log_retention", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_artifact_and_log_retention",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_fork_pull_request_contributor_approval_policy(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Retrieve the fork pull request contributor approval policy for an organization. This policy determines whether contributors can approve pull requests created from forks."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetForkPrContributorApprovalPermissionsOrganizationRequest(
-            path=_models.ActionsGetForkPrContributorApprovalPermissionsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_fork_pull_request_contributor_approval_policy: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/fork-pr-contributor-approval", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/fork-pr-contributor-approval"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_fork_pull_request_contributor_approval_policy")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_fork_pull_request_contributor_approval_policy", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_fork_pull_request_contributor_approval_policy",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_fork_pr_approval_policy(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    approval_policy: Literal["first_time_contributors_new_to_github", "first_time_contributors", "all_external_contributors"] = Field(..., description="The approval policy that determines when fork pull request workflows require maintainer approval before execution."),
-) -> dict[str, Any]:
-    """Configure the approval policy for fork pull request workflows in an organization. This controls whether maintainer approval is required before fork PR workflows can run."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetForkPrContributorApprovalPermissionsOrganizationRequest(
-            path=_models.ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetForkPrContributorApprovalPermissionsOrganizationRequestBody(approval_policy=approval_policy)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_fork_pr_approval_policy: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/fork-pr-contributor-approval", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/fork-pr-contributor-approval"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_fork_pr_approval_policy")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_fork_pr_approval_policy", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_fork_pr_approval_policy",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_fork_pr_workflow_settings_organization(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Retrieve the organization's settings for whether workflows from fork pull requests are permitted to run on private repositories. This controls security policies for automated workflows triggered by external contributors."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest(
-            path=_models.ActionsGetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_fork_pr_workflow_settings_organization: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_fork_pr_workflow_settings_organization")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_fork_pr_workflow_settings_organization", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_fork_pr_workflow_settings_organization",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_fork_pull_request_workflows_for_private_repos(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    run_workflows_from_fork_pull_requests: bool = Field(..., description="Allow workflows triggered by pull requests from forks to run on private repositories in this organization."),
-    send_write_tokens_to_workflows: bool | None = Field(None, description="Allow workflows triggered by fork pull requests to create pull requests or submit approving pull request reviews."),
-    send_secrets_and_variables: bool | None = Field(None, description="Make secrets and variables available to workflows triggered by pull requests from forks."),
-    require_approval_for_fork_pr_workflows: bool | None = Field(None, description="Require approval from a repository administrator before workflows triggered by fork pull requests can execute."),
-) -> dict[str, Any]:
-    """Configure GitHub Actions workflow permissions for pull requests from forks on private repositories within an organization. This controls whether fork PR workflows can execute and what access they have to tokens, secrets, and variables."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequest(
-            path=_models.ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetPrivateRepoForkPrWorkflowsSettingsOrganizationRequestBody(run_workflows_from_fork_pull_requests=run_workflows_from_fork_pull_requests, send_write_tokens_to_workflows=send_write_tokens_to_workflows, send_secrets_and_variables=send_secrets_and_variables, require_approval_for_fork_pr_workflows=require_approval_for_fork_pr_workflows)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_fork_pull_request_workflows_for_private_repos: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_fork_pull_request_workflows_for_private_repos")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_fork_pull_request_workflows_for_private_repos", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_fork_pull_request_workflows_for_private_repos",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: actions
 @mcp.tool()
 async def list_organization_github_actions_repositories(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
@@ -7462,284 +5967,6 @@ async def list_organization_github_actions_repositories(org: str = Field(..., de
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def enable_actions_repositories(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    selected_repository_ids: list[int] = Field(..., description="List of repository IDs to enable for GitHub Actions. Order is not significant. Each ID must be a valid repository identifier within the organization."),
-) -> dict[str, Any]:
-    """Replace the list of repositories enabled for GitHub Actions in an organization. Requires the organization's `enabled_repositories` permission policy to be set to `selected`."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequest(
-            path=_models.ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetSelectedRepositoriesEnabledGithubActionsOrganizationRequestBody(selected_repository_ids=selected_repository_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_actions_repositories: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/repositories", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/repositories"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_actions_repositories")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_actions_repositories", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_actions_repositories",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def enable_repository_github_actions(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    repository_id: int = Field(..., description="The unique identifier of the repository to enable for GitHub Actions."),
-) -> dict[str, Any]:
-    """Enable GitHub Actions for a specific repository within an organization. The organization must have its GitHub Actions policy configured to allow selected repositories."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsEnableSelectedRepositoryGithubActionsOrganizationRequest(
-            path=_models.ActionsEnableSelectedRepositoryGithubActionsOrganizationRequestPath(org=org, repository_id=repository_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_repository_github_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/repositories/{repository_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/repositories/{repository_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_repository_github_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_repository_github_actions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_repository_github_actions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def disable_repository_github_actions(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    repository_id: int = Field(..., description="The unique identifier of the repository to disable for GitHub Actions."),
-) -> dict[str, Any]:
-    """Remove a repository from the list of selected repositories enabled for GitHub Actions in an organization. The organization must have its GitHub Actions permission policy configured to allow selected repositories."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsDisableSelectedRepositoryGithubActionsOrganizationRequest(
-            path=_models.ActionsDisableSelectedRepositoryGithubActionsOrganizationRequestPath(org=org, repository_id=repository_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for disable_repository_github_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/repositories/{repository_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/repositories/{repository_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("disable_repository_github_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("disable_repository_github_actions", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="disable_repository_github_actions",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def list_organization_allowed_actions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the allowed actions query.")) -> dict[str, Any]:
-    """Retrieve the selected actions and reusable workflows permitted in an organization. Requires the organization's `allowed_actions` permission policy to be set to `selected`."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetAllowedActionsOrganizationRequest(
-            path=_models.ActionsGetAllowedActionsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_organization_allowed_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/selected-actions", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/selected-actions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_organization_allowed_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_organization_allowed_actions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_organization_allowed_actions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_organization_allowed_actions(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    github_owned_allowed: bool | None = Field(None, description="Allow GitHub-owned actions, such as those in the official actions organization."),
-    verified_allowed: bool | None = Field(None, description="Allow actions from GitHub Marketplace creators who have been verified by GitHub."),
-    patterns_allowed: list[str] | None = Field(None, description="List of string-matching patterns to allow specific actions and reusable workflows. Supports wildcards, tags, and SHAs (e.g., owner/repo@*, owner/repo@v2, owner/*). Note: This setting only applies to public repositories."),
-) -> dict[str, Any]:
-    """Configure which actions and reusable workflows are permitted to run in an organization. This endpoint requires the organization's allowed_actions policy to be set to 'selected' mode."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetAllowedActionsOrganizationRequest(
-            path=_models.ActionsSetAllowedActionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetAllowedActionsOrganizationRequestBody(github_owned_allowed=github_owned_allowed, verified_allowed=verified_allowed, patterns_allowed=patterns_allowed)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_organization_allowed_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/selected-actions", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/selected-actions"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_organization_allowed_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_organization_allowed_actions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_organization_allowed_actions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_organization_self_hosted_runners_permissions(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
-    """Retrieve the self-hosted runners permission settings for an organization. Requires `admin:org` scope or "Actions policies" fine-grained permission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetSelfHostedRunnersPermissionsOrganizationRequest(
-            path=_models.ActionsGetSelfHostedRunnersPermissionsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_organization_self_hosted_runners_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/self-hosted-runners", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/self-hosted-runners"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_organization_self_hosted_runners_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_organization_self_hosted_runners_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_organization_self_hosted_runners_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_organization_self_hosted_runner_permissions(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    enabled_repositories: Literal["all", "selected", "none"] = Field(..., description="The policy controlling self-hosted runner usage across the organization: 'all' allows any repository to use runners, 'selected' restricts to specific repositories, 'none' disables self-hosted runners organization-wide."),
-) -> dict[str, Any]:
-    """Configure which repositories in an organization can use self-hosted runners. Requires admin:org scope or Actions policies fine-grained permission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetSelfHostedRunnersPermissionsOrganizationRequest(
-            path=_models.ActionsSetSelfHostedRunnersPermissionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetSelfHostedRunnersPermissionsOrganizationRequestBody(enabled_repositories=enabled_repositories)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_organization_self_hosted_runner_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/self-hosted-runners", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/self-hosted-runners"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_organization_self_hosted_runner_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_organization_self_hosted_runner_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_organization_self_hosted_runner_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -7783,87 +6010,6 @@ async def list_organization_self_hosted_runner_repositories(org: str = Field(...
 
 # Tags: actions
 @mcp.tool()
-async def configure_self_hosted_runner_repositories(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    selected_repository_ids: list[int] = Field(..., description="List of repository IDs that are permitted to use self-hosted runners at the repository level. Order is not significant."),
-) -> dict[str, Any]:
-    """Configure which repositories in an organization are allowed to use self-hosted runners. Requires `admin:org` scope or "Actions policies" fine-grained permission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequest(
-            path=_models.ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestPath(org=org),
-            body=_models.ActionsSetSelectedRepositoriesSelfHostedRunnersOrganizationRequestBody(selected_repository_ids=selected_repository_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_self_hosted_runner_repositories: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/self-hosted-runners/repositories", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/self-hosted-runners/repositories"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_self_hosted_runner_repositories")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_self_hosted_runner_repositories", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_self_hosted_runner_repositories",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def enable_repository_self_hosted_runners(
-    org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that manages the self-hosted runners."),
-    repository_id: int = Field(..., description="The unique numeric identifier of the repository to authorize for self-hosted runner access."),
-) -> dict[str, Any]:
-    """Authorize a repository to use self-hosted runners within an organization. This grants the specified repository access to run workflows on self-hosted runners configured at the organization level."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequest(
-            path=_models.ActionsEnableSelectedRepositorySelfHostedRunnersOrganizationRequestPath(org=org, repository_id=repository_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_repository_self_hosted_runners: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/self-hosted-runners/repositories/{repository_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/self-hosted-runners/repositories/{repository_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_repository_self_hosted_runners")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_repository_self_hosted_runners", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_repository_self_hosted_runners",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def remove_repository_from_self_hosted_runners(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     repository_id: int = Field(..., description="The unique numeric identifier of the repository to remove from self-hosted runner access."),
@@ -7896,85 +6042,6 @@ async def remove_repository_from_self_hosted_runners(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_organization_workflow_permissions(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
-    """Retrieve the default workflow permissions granted to the GITHUB_TOKEN and whether GitHub Actions can submit approving pull request reviews for an organization. Requires admin:org scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequest(
-            path=_models.ActionsGetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_organization_workflow_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/workflow", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/workflow"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_organization_workflow_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_organization_workflow_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_organization_workflow_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_organization_workflow_permissions(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    default_workflow_permissions: Literal["read", "write"] | None = Field(None, description="The default permission level granted to GITHUB_TOKEN when running workflows in the organization."),
-    can_approve_pull_request_reviews: bool | None = Field(None, description="Whether GitHub Actions can automatically approve pull requests. Enabling this option may increase security risk."),
-) -> dict[str, Any]:
-    """Configure default workflow permissions for the GITHUB_TOKEN and approval settings for GitHub Actions in an organization. Requires admin:org scope for authentication."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequest(
-            path=_models.ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestPath(org=org),
-            body=_models.ActionsSetGithubActionsDefaultWorkflowPermissionsOrganizationRequestBody(default_workflow_permissions=default_workflow_permissions, can_approve_pull_request_reviews=can_approve_pull_request_reviews)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_organization_workflow_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/permissions/workflow", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/permissions/workflow"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_organization_workflow_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_organization_workflow_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_organization_workflow_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -8623,51 +6690,6 @@ async def list_runner_applications(org: str = Field(..., description="The organi
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def generate_runner_jitconfig(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    name: str = Field(..., description="The name to assign to the new runner."),
-    runner_group_id: int = Field(..., description="The ID of the runner group to register the runner to."),
-    labels: list[str] = Field(..., description="Custom labels to add to the runner. Labels are used to identify and target the runner for specific jobs.", min_length=1, max_length=100),
-    work_folder: str | None = Field(None, description="The working directory for job execution, specified as a path relative to the runner installation directory."),
-) -> dict[str, Any]:
-    """Generate a just-in-time runner configuration for an organization that can be passed to the runner application at startup. Requires admin access to the organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGenerateRunnerJitconfigForOrgRequest(
-            path=_models.ActionsGenerateRunnerJitconfigForOrgRequestPath(org=org),
-            body=_models.ActionsGenerateRunnerJitconfigForOrgRequestBody(name=name, runner_group_id=runner_group_id, labels=labels, work_folder=work_folder)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for generate_runner_jitconfig: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/actions/runners/generate-jitconfig", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/actions/runners/generate-jitconfig"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("generate_runner_jitconfig")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("generate_runner_jitconfig", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="generate_runner_jitconfig",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -10300,45 +8322,6 @@ async def check_blocked_user(
 
 # Tags: orgs
 @mcp.tool()
-async def block_user_organization(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    username: str = Field(..., description="The GitHub user account handle to block."),
-) -> dict[str, Any]:
-    """Block a user from accessing an organization. Returns a 204 status on success, or 422 if the organization cannot block the specified user."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsBlockUserRequest(
-            path=_models.OrgsBlockUserRequestPath(org=org, username=username)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for block_user_organization: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/blocks/{username}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/blocks/{username}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("block_user_organization")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("block_user_organization", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="block_user_organization",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
 async def unblock_user_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     username: str = Field(..., description="The GitHub username handle to unblock from the organization."),
@@ -10678,69 +8661,6 @@ async def list_code_security_configurations_for_org(
 
 # Tags: code-security
 @mcp.tool()
-async def create_security_configuration(
-    org: str = Field(..., description="The organization name where the security configuration will be created. Organization names are case-insensitive."),
-    name: str = Field(..., description="The name of the code security configuration. Must be unique within the organization."),
-    description: str = Field(..., description="A description of the code security configuration's purpose and scope.", max_length=255),
-    code_security: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of GitHub Code Security features, which controls the overall security posture."),
-    dependency_graph: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependency Graph, which analyzes repository dependencies."),
-    dependency_graph_autosubmit_action: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of automatic dependency submission, which automatically updates dependency information."),
-    dependabot_alerts: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot alerts, which notifies about vulnerable dependencies."),
-    dependabot_security_updates: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Dependabot security updates, which automatically creates pull requests to fix vulnerabilities."),
-    dependabot_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated alert dismissal for Dependabot. Requires Dependabot alerts to be enabled."),
-    code_scanning_default_setup: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of code scanning default setup, which automatically configures code scanning for repositories."),
-    code_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated alert dismissal for code scanning, allowing teams to dismiss alerts without admin approval."),
-    secret_scanning: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning, which detects exposed secrets in repositories."),
-    secret_scanning_push_protection: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning push protection, which blocks commits containing detected secrets."),
-    secret_scanning_delegated_bypass: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated bypass for secret scanning push protection, allowing designated reviewers to approve secret commits."),
-    reviewers: list[_models.CodeSecurityCreateConfigurationBodySecretScanningDelegatedBypassOptionsReviewersItem] | None = Field(None, description="An array of user or team identifiers who can review and approve bypasses for secret scanning push protection."),
-    secret_scanning_validity_checks: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning validity checks, which verify if detected secrets are still valid."),
-    secret_scanning_non_provider_patterns: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning for non-provider patterns, which detects custom secret patterns."),
-    secret_scanning_generic_secrets: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of Copilot secret scanning, which detects secrets in AI-generated code."),
-    secret_scanning_delegated_alert_dismissal: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of delegated alert dismissal for secret scanning, allowing teams to dismiss alerts without admin approval."),
-    secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning extended metadata, which provides additional context about detected secrets."),
-    private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of private vulnerability reporting, which allows secure reporting of vulnerabilities."),
-    enforcement: Literal["enforced", "unenforced"] | None = Field(None, description="The enforcement status for this security configuration, determining whether it is mandatory or optional for repositories."),
-) -> dict[str, Any]:
-    """Creates a code security configuration for an organization to standardize security settings across repositories. The authenticated user must be an administrator or security manager for the organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeSecurityCreateConfigurationRequest(
-            path=_models.CodeSecurityCreateConfigurationRequestPath(org=org),
-            body=_models.CodeSecurityCreateConfigurationRequestBody(name=name, description=description, code_security=code_security, dependency_graph=dependency_graph, dependency_graph_autosubmit_action=dependency_graph_autosubmit_action, dependabot_alerts=dependabot_alerts, dependabot_security_updates=dependabot_security_updates, dependabot_delegated_alert_dismissal=dependabot_delegated_alert_dismissal, code_scanning_default_setup=code_scanning_default_setup, code_scanning_delegated_alert_dismissal=code_scanning_delegated_alert_dismissal, secret_scanning=secret_scanning, secret_scanning_push_protection=secret_scanning_push_protection, secret_scanning_delegated_bypass=secret_scanning_delegated_bypass, secret_scanning_validity_checks=secret_scanning_validity_checks, secret_scanning_non_provider_patterns=secret_scanning_non_provider_patterns, secret_scanning_generic_secrets=secret_scanning_generic_secrets, secret_scanning_delegated_alert_dismissal=secret_scanning_delegated_alert_dismissal, secret_scanning_extended_metadata=secret_scanning_extended_metadata, private_vulnerability_reporting=private_vulnerability_reporting, enforcement=enforcement,
-                secret_scanning_delegated_bypass_options=_models.CodeSecurityCreateConfigurationRequestBodySecretScanningDelegatedBypassOptions(reviewers=reviewers) if any(v is not None for v in [reviewers]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_security_configuration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/code-security/configurations", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/code-security/configurations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_security_configuration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_security_configuration", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_security_configuration",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-security
-@mcp.tool()
 async def list_default_code_security_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the request to a specific organization.")) -> dict[str, Any]:
     """Retrieves the default code security configurations for an organization. The authenticated user must be an administrator or security manager to access this endpoint."""
 
@@ -11004,49 +8924,6 @@ async def attach_security_configuration(
 
 # Tags: code-security
 @mcp.tool()
-async def set_code_security_configuration_as_default_for_organization(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    configuration_id: int = Field(..., description="The unique identifier of the code security configuration to set as default."),
-    default_for_new_repos: Literal["all", "none", "private_and_internal", "public"] | None = Field(None, description="Specifies which types of new repositories this security configuration should be applied to by default."),
-) -> dict[str, Any]:
-    """Set a code security configuration as the default for an organization, which will be automatically applied to new repositories matching the specified type. The authenticated user must be an administrator or security manager for the organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeSecuritySetConfigurationAsDefaultRequest(
-            path=_models.CodeSecuritySetConfigurationAsDefaultRequestPath(org=org, configuration_id=configuration_id),
-            body=_models.CodeSecuritySetConfigurationAsDefaultRequestBody(default_for_new_repos=default_for_new_repos)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_code_security_configuration_as_default_for_organization: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/code-security/configurations/{configuration_id}/defaults", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/code-security/configurations/{configuration_id}/defaults"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_code_security_configuration_as_default_for_organization")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_code_security_configuration_as_default_for_organization", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_code_security_configuration_as_default_for_organization",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-security
-@mcp.tool()
 async def list_security_configuration_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to retrieve associated repositories for."),
@@ -11148,42 +9025,6 @@ async def list_organization_secrets_codespaces(org: str = Field(..., description
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_organization_secrets_codespaces",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: codespaces
-@mcp.tool()
-async def get_organization_codespaces_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Retrieves the public key for an organization, which is required to encrypt secrets before creating or updating them in GitHub Codespaces. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodespacesGetOrgPublicKeyRequest(
-            path=_models.CodespacesGetOrgPublicKeyRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_organization_codespaces_public_key: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/codespaces/secrets/public-key", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/codespaces/secrets/public-key"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_organization_codespaces_public_key")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_organization_codespaces_public_key", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_organization_codespaces_public_key",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -11756,48 +9597,6 @@ async def list_copilot_coding_agent_permissions(org: str = Field(..., descriptio
 
 # Tags: copilot
 @mcp.tool()
-async def configure_copilot_coding_agent_permissions(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    enabled_repositories: Literal["all", "selected", "none"] = Field(..., description="The policy for which repositories can use Copilot coding agent: `all` enables for all repositories, `selected` enables for specific repositories, or `none` disables organization-wide."),
-) -> dict[str, Any]:
-    """Configure which repositories in an organization can use GitHub Copilot coding agent. Organization owners can enable the agent for all repositories, selected repositories, or disable it organization-wide."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CopilotSetCopilotCodingAgentPermissionsOrganizationRequest(
-            path=_models.CopilotSetCopilotCodingAgentPermissionsOrganizationRequestPath(org=org),
-            body=_models.CopilotSetCopilotCodingAgentPermissionsOrganizationRequestBody(enabled_repositories=enabled_repositories)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_copilot_coding_agent_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/copilot/coding-agent/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/copilot/coding-agent/permissions"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_copilot_coding_agent_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_copilot_coding_agent_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_copilot_coding_agent_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: copilot
-@mcp.tool()
 async def list_copilot_coding_agent_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any]:
     """Lists repositories enabled for Copilot coding agent in an organization when the repository policy is set to selected. Organization owners can use this endpoint to view which repositories have Copilot coding agent access enabled."""
 
@@ -11827,48 +9626,6 @@ async def list_copilot_coding_agent_repositories(org: str = Field(..., descripti
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: copilot
-@mcp.tool()
-async def update_copilot_coding_agent_repositories(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    selected_repository_ids: list[int] = Field(..., description="List of repository IDs to enable for Copilot coding agent. Replaces the entire existing list."),
-) -> dict[str, Any]:
-    """Replace the list of repositories enabled for Copilot coding agent in an organization. This operation requires the coding agent repository policy to be set to 'selected' and needs admin:org scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequest(
-            path=_models.CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestPath(org=org),
-            body=_models.CopilotSetCopilotCodingAgentSelectedRepositoriesForOrganizationRequestBody(selected_repository_ids=selected_repository_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_copilot_coding_agent_repositories: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/copilot/coding-agent/permissions/repositories", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/copilot/coding-agent/permissions/repositories"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_copilot_coding_agent_repositories")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_copilot_coding_agent_repositories", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_copilot_coding_agent_repositories",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -11915,45 +9672,6 @@ async def enable_copilot_coding_agent_for_repository(
 
 # Tags: copilot
 @mcp.tool()
-async def disable_copilot_coding_agent_for_repository(
-    org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
-    repository_id: int = Field(..., description="The unique numeric identifier of the repository to disable for Copilot coding agent."),
-) -> dict[str, Any]:
-    """Remove a repository from the list of repositories enabled for Copilot coding agent in an organization. This operation only works when the coding agent repository policy is set to 'selected'."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequest(
-            path=_models.CopilotDisableCopilotCodingAgentForRepositoryInOrganizationRequestPath(org=org, repository_id=repository_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for disable_copilot_coding_agent_for_repository: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/copilot/coding-agent/permissions/repositories/{repository_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/copilot/coding-agent/permissions/repositories/{repository_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("disable_copilot_coding_agent_for_repository")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("disable_copilot_coding_agent_for_repository", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="disable_copilot_coding_agent_for_repository",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: copilot
-@mcp.tool()
 async def list_copilot_content_exclusions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the content exclusion rules to a specific organization.")) -> dict[str, Any]:
     """Retrieve Copilot content exclusion path rules configured for an organization. This endpoint allows organization owners to view which paths are excluded from GitHub Copilot."""
 
@@ -11983,49 +9701,6 @@ async def list_copilot_content_exclusions(org: str = Field(..., description="The
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: copilot
-@mcp.tool()
-async def configure_copilot_content_exclusion(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    body: dict[str, list[str | _models.CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV1 | _models.CopilotSetCopilotContentExclusionForOrganizationBodyValueItemV2]] = Field(..., description="A mapping of repository names to arrays of file paths to exclude from Copilot. Each path should be specified relative to the repository root. Note: Comments in existing rules will be removed, and duplicate keys will be overwritten with only the last occurrence saved."),
-) -> dict[str, Any]:
-    """Configure GitHub Copilot content exclusion rules for an organization by specifying file paths that should be excluded from Copilot suggestions. Only organization owners can modify these settings."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CopilotSetCopilotContentExclusionForOrganizationRequest(
-            path=_models.CopilotSetCopilotContentExclusionForOrganizationRequestPath(org=org),
-            body=_models.CopilotSetCopilotContentExclusionForOrganizationRequestBody(body=body)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_copilot_content_exclusion: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/copilot/content_exclusion", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/copilot/content_exclusion"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_body = next(iter(_http_body.values()), None) if _http_body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_copilot_content_exclusion")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_copilot_content_exclusion", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_copilot_content_exclusion",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -13002,92 +10677,6 @@ async def redeliver_webhook_delivery_organization(
 
 # Tags: orgs
 @mcp.tool()
-async def ping_webhook(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook deliveries."),
-) -> dict[str, Any]:
-    """Send a ping event to an organization webhook to test its connectivity. Requires organization owner permissions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsPingWebhookRequest(
-            path=_models.OrgsPingWebhookRequestPath(org=org, hook_id=hook_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for ping_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/hooks/{hook_id}/pings", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/hooks/{hook_id}/pings"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("ping_webhook")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("ping_webhook", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="ping_webhook",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def list_route_stats_by_actor(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    actor_type: Literal["installation", "classic_pat", "fine_grained_pat", "oauth_app", "github_app_user_to_server"] = Field(..., description="The type of actor making the API requests."),
-    actor_id: int = Field(..., description="The unique identifier of the actor."),
-    min_timestamp: str = Field(..., description="The start of the time range for statistics in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)."),
-    max_timestamp: str | None = Field(None, description="The end of the time range for statistics in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ). Defaults to 30 days before min_timestamp if not provided."),
-    direction: Literal["asc", "desc"] | None = Field(None, description="The sort order for results based on request count."),
-    api_route_substring: str | None = Field(None, description="Filter results to routes containing this substring (case-insensitive search)."),
-) -> dict[str, Any]:
-    """Retrieve API request count statistics for a specific actor (installation, PAT, or app) broken down by route within a specified time frame. Results can be filtered by route substring and sorted by request count."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ApiInsightsGetRouteStatsByActorRequest(
-            path=_models.ApiInsightsGetRouteStatsByActorRequestPath(org=org, actor_type=actor_type, actor_id=actor_id),
-            query=_models.ApiInsightsGetRouteStatsByActorRequestQuery(min_timestamp=min_timestamp, max_timestamp=max_timestamp, direction=direction, api_route_substring=api_route_substring)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_route_stats_by_actor: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/insights/api/route-stats/{actor_type}/{actor_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/insights/api/route-stats/{actor_type}/{actor_id}"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_route_stats_by_actor")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_route_stats_by_actor", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_route_stats_by_actor",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
 async def list_api_request_stats(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics. Specify as an ISO 8601 timestamp."),
@@ -13165,50 +10754,6 @@ async def get_api_summary_stats(
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_api_summary_stats",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def get_user_api_stats(
-    org: str = Field(..., description="The organization identifier. Organization names are case-insensitive."),
-    user_id: str = Field(..., description="The unique identifier of the user whose API statistics should be retrieved."),
-    min_timestamp: str = Field(..., description="The start of the time range for statistics retrieval. Must be provided in ISO 8601 format."),
-    max_timestamp: str | None = Field(None, description="The end of the time range for statistics retrieval. If not provided, defaults to 30 days before the minimum timestamp. Must be provided in ISO 8601 format."),
-) -> dict[str, Any]:
-    """Retrieve API request statistics for a specific user within an organization over a specified time period. Returns aggregated metrics on API usage during the requested timeframe."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ApiInsightsGetSummaryStatsByUserRequest(
-            path=_models.ApiInsightsGetSummaryStatsByUserRequestPath(org=org, user_id=user_id),
-            query=_models.ApiInsightsGetSummaryStatsByUserRequestQuery(min_timestamp=min_timestamp, max_timestamp=max_timestamp)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_user_api_stats: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/insights/api/summary-stats/users/{user_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/insights/api/summary-stats/users/{user_id}"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_user_api_stats")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_user_api_stats", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_user_api_stats",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -13552,85 +11097,6 @@ async def get_organization_interaction_restrictions(org: str = Field(..., descri
 
     return _response_data
 
-# Tags: interactions
-@mcp.tool()
-async def restrict_org_interactions(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(..., description="The type of GitHub user permitted to interact (comment, open issues, or create pull requests) while the restriction is active."),
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(None, description="How long the interaction restriction remains in effect before automatically expiring."),
-) -> dict[str, Any]:
-    """Set interaction restrictions for an organization to temporarily limit who can comment, open issues, or create pull requests in public repositories. Organization owners can use this to manage interactions, and organization-level restrictions override any repository-specific limits."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.InteractionsSetRestrictionsForOrgRequest(
-            path=_models.InteractionsSetRestrictionsForOrgRequestPath(org=org),
-            body=_models.InteractionsSetRestrictionsForOrgRequestBody(limit=limit, expiry=expiry)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for restrict_org_interactions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/interaction-limits", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/interaction-limits"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("restrict_org_interactions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("restrict_org_interactions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="restrict_org_interactions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: interactions
-@mcp.tool()
-async def remove_organization_interaction_restrictions(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
-    """Remove all interaction restrictions from public repositories in an organization. Only organization owners can perform this action."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.InteractionsRemoveRestrictionsForOrgRequest(
-            path=_models.InteractionsRemoveRestrictionsForOrgRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_organization_interaction_restrictions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/interaction-limits", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/interaction-limits"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_organization_interaction_restrictions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_organization_interaction_restrictions", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_organization_interaction_restrictions",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: orgs
 @mcp.tool()
 async def list_pending_invitations(
@@ -13879,51 +11345,6 @@ async def create_issue_field(
 
 # Tags: orgs
 @mcp.tool()
-async def update_issue_field(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    issue_field_id: int = Field(..., description="The unique identifier of the issue field to update."),
-    description: str | None = Field(None, description="Updated description text for the issue field."),
-    visibility: Literal["organization_members_only", "all"] | None = Field(None, description="Controls who can view this issue field. Organization members only restricts visibility to organization members, while all makes it visible to any user who can see issues."),
-    options: list[_models.OrgsUpdateIssueFieldBodyOptionsItem] | None = Field(None, description="Array of options for single select fields. Only applicable when updating single_select type fields. Options are processed in the order provided."),
-) -> dict[str, Any]:
-    """Updates an issue field configuration for an organization. Requires organization administrator privileges to modify field properties including description, visibility, and select options."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsUpdateIssueFieldRequest(
-            path=_models.OrgsUpdateIssueFieldRequestPath(org=org, issue_field_id=issue_field_id),
-            body=_models.OrgsUpdateIssueFieldRequestBody(description=description, visibility=visibility, options=options)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_issue_field: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/issue-fields/{issue_field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/issue-fields/{issue_field_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_issue_field")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_issue_field", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_issue_field",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
 async def delete_issue_field(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     issue_field_id: int = Field(..., description="The unique identifier of the issue field to delete."),
@@ -14034,52 +11455,6 @@ async def create_issue_type(
     _response_data, _ = await _execute_tool_request(
         tool_name="create_issue_type",
         method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def update_issue_type(
-    org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
-    issue_type_id: int = Field(..., description="The unique identifier of the issue type to update."),
-    name: str = Field(..., description="The display name for the issue type."),
-    is_enabled: bool = Field(..., description="Controls whether the issue type is available for use at the organization level."),
-    description: str | None = Field(None, description="A brief explanation of the issue type's purpose and usage."),
-    color: Literal["gray", "blue", "green", "yellow", "orange", "red", "pink", "purple"] | None = Field(None, description="Visual color indicator for the issue type in the UI."),
-) -> dict[str, Any]:
-    """Updates an issue type configuration for an organization. Requires organization administrator privileges to modify issue type properties including name, status, description, and color."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsUpdateIssueTypeRequest(
-            path=_models.OrgsUpdateIssueTypeRequestPath(org=org, issue_type_id=issue_type_id),
-            body=_models.OrgsUpdateIssueTypeRequestBody(name=name, is_enabled=is_enabled, description=description, color=color)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_issue_type: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/issue-types/{issue_type_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/issue-types/{issue_type_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_issue_type")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_issue_type", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_issue_type",
-        method="PUT",
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
@@ -14249,45 +11624,6 @@ async def check_organization_membership(
     _response_data, _ = await _execute_tool_request(
         tool_name="check_organization_membership",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def remove_organization_member(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    username: str = Field(..., description="The GitHub username handle for the user to remove from the organization."),
-) -> dict[str, Any]:
-    """Remove a user from an organization, which revokes their access to all organization repositories and teams. Note that if the user has indirect membership through an enterprise team, only their direct membership is removed."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsRemoveMemberRequest(
-            path=_models.OrgsRemoveMemberRequestPath(org=org, username=username)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_organization_member: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/members/{username}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/members/{username}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_organization_member")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_organization_member", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_organization_member",
-        method="DELETE",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -14605,53 +11941,6 @@ async def list_organization_migrations(org: str = Field(..., description="The or
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: migrations
-@mcp.tool()
-async def initiate_organization_migration(
-    org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
-    repositories: list[str] = Field(..., description="A list of repository names to include in the migration. Specify each repository as a separate array element."),
-    lock_repositories: bool | None = Field(None, description="Lock repositories during migration to prevent modifications while data is being exported."),
-    exclude_git_data: bool | None = Field(None, description="Exclude Git repository data (commits, branches, history) from the migration archive."),
-    exclude_attachments: bool | None = Field(None, description="Exclude file attachments from the migration archive to reduce the exported file size."),
-    exclude_releases: bool | None = Field(None, description="Exclude release artifacts and release metadata from the migration archive to reduce the exported file size."),
-    exclude_owner_projects: bool | None = Field(None, description="Exclude projects owned by the organization or organization members from the migration archive."),
-) -> dict[str, Any]:
-    """Initiates a migration archive generation for an organization, allowing you to export selected repositories with configurable data inclusion options. This operation prepares the migration package and can optionally lock repositories during the process."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.MigrationsStartForOrgRequest(
-            path=_models.MigrationsStartForOrgRequestPath(org=org),
-            body=_models.MigrationsStartForOrgRequestBody(repositories=repositories, lock_repositories=lock_repositories, exclude_git_data=exclude_git_data, exclude_attachments=exclude_attachments, exclude_releases=exclude_releases, exclude_owner_projects=exclude_owner_projects)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for initiate_organization_migration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/migrations", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/migrations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("initiate_organization_migration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("initiate_organization_migration", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="initiate_organization_migration",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -16880,48 +14169,6 @@ async def list_organization_custom_property_definitions(org: str = Field(..., de
 
 # Tags: orgs
 @mcp.tool()
-async def batch_upsert_organization_custom_properties(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    properties: list[_models.CustomProperty] = Field(..., description="Array of custom property definitions to create or update. Each property in the batch is processed independently, with existing properties being fully replaced by new values.", min_length=1, max_length=100),
-) -> dict[str, Any]:
-    """Create or update custom properties for an organization in batch. Existing properties are replaced entirely, and unspecified optional fields revert to their default values."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequest(
-            path=_models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestPath(org=org),
-            body=_models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionsRequestBody(properties=properties)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for batch_upsert_organization_custom_properties: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/properties/schema", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/properties/schema"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("batch_upsert_organization_custom_properties")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("batch_upsert_organization_custom_properties", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="batch_upsert_organization_custom_properties",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
 async def get_organization_custom_property(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property lookup."),
     custom_property_name: str = Field(..., description="The name of the custom property to retrieve. Must match an existing custom property defined for the organization."),
@@ -16952,94 +14199,6 @@ async def get_organization_custom_property(
     _response_data, _ = await _execute_tool_request(
         tool_name="get_organization_custom_property",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def define_organization_custom_property(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    custom_property_name: str = Field(..., description="The name of the custom property being defined or updated."),
-    value_type: Literal["string", "single_select", "multi_select", "true_false", "url"] = Field(..., description="The data type for values of this custom property."),
-    required: bool | None = Field(None, description="Whether this property must be set on all applicable repositories."),
-    default_value: str | list[str] | None = Field(None, description="The default value assigned to this property when not explicitly set."),
-    description: str | None = Field(None, description="A brief explanation of what this custom property represents and its purpose."),
-    allowed_values: list[str] | None = Field(None, description="An ordered list of permitted values for this property. Maximum of 200 allowed values. Only applicable for select-type properties."),
-    values_editable_by: Literal["org_actors", "org_and_repo_actors"] | None = Field(None, description="Specifies which actors can modify property values after the schema is defined."),
-    require_explicit_values: bool | None = Field(None, description="Whether explicit values must be provided when setting this property, preventing use of default values."),
-) -> dict[str, Any]:
-    """Create or update a custom property schema for an organization. This defines the structure and validation rules for a custom property that can be applied to repositories within the organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequest(
-            path=_models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestPath(org=org, custom_property_name=custom_property_name),
-            body=_models.OrgsCustomPropertiesForReposCreateOrUpdateOrganizationDefinitionRequestBody(value_type=value_type, required=required, default_value=default_value, description=description, allowed_values=allowed_values, values_editable_by=values_editable_by, require_explicit_values=require_explicit_values)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for define_organization_custom_property: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/properties/schema/{custom_property_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/properties/schema/{custom_property_name}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("define_organization_custom_property")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("define_organization_custom_property", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="define_organization_custom_property",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def delete_organization_custom_property(
-    org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
-    custom_property_name: str = Field(..., description="The name of the custom property to remove from the organization's schema."),
-) -> dict[str, Any]:
-    """Remove a custom property definition from an organization. Only organization administrators or users with the custom_properties_org_definitions_manager permission can perform this action."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequest(
-            path=_models.OrgsCustomPropertiesForReposDeleteOrganizationDefinitionRequestPath(org=org, custom_property_name=custom_property_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_organization_custom_property: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/properties/schema/{custom_property_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/properties/schema/{custom_property_name}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_organization_custom_property")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_organization_custom_property", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_organization_custom_property",
-        method="DELETE",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -17435,52 +14594,6 @@ async def list_organization_rulesets(
 
 # Tags: repos
 @mcp.tool()
-async def create_organization_ruleset(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    name: str = Field(..., description="The name of the ruleset."),
-    enforcement: Literal["disabled", "active", "evaluate"] = Field(..., description="The enforcement level of the ruleset. Use 'disabled' to turn off the ruleset, 'active' to enforce rules, or 'evaluate' to allow admins to test rules before enforcement (GitHub Enterprise only)."),
-    bypass_actors: list[_models.RepositoryRulesetBypassActor] | None = Field(None, description="An array of actors (users, teams, or apps) that can bypass the rules in this ruleset."),
-    conditions: _models.ReposCreateOrgRulesetBodyConditionsV0 | _models.ReposCreateOrgRulesetBodyConditionsV1 | _models.ReposCreateOrgRulesetBodyConditionsV2 | None = Field(None, description="Conditions that determine which repositories and refs the ruleset applies to. Branch and tag rulesets require both a repository identifier (name, ID, or property) and ref_name. Push rulesets do not require ref_name. Repository policy rulesets require only a repository identifier."),
-    rules: list[_models.RepositoryRuleCreation | _models.RepositoryRuleUpdate | _models.RepositoryRuleDeletion | _models.RepositoryRuleRequiredLinearHistory | _models.RepositoryRuleRequiredDeployments | _models.RepositoryRuleRequiredSignatures | _models.RepositoryRulePullRequest | _models.RepositoryRuleRequiredStatusChecks | _models.RepositoryRuleNonFastForward | _models.RepositoryRuleCommitMessagePattern | _models.RepositoryRuleCommitAuthorEmailPattern | _models.RepositoryRuleCommitterEmailPattern | _models.RepositoryRuleBranchNamePattern | _models.RepositoryRuleTagNamePattern | _models.RepositoryRuleFilePathRestriction | _models.RepositoryRuleMaxFilePathLength | _models.RepositoryRuleFileExtensionRestriction | _models.RepositoryRuleMaxFileSize | _models.RepositoryRuleWorkflows | _models.RepositoryRuleCodeScanning] | None = Field(None, description="An array of rules to enforce within this ruleset. Each rule defines specific requirements for commits, branches, or other repository operations."),
-) -> dict[str, Any]:
-    """Create a repository ruleset for an organization to enforce or evaluate rules across repositories. Rulesets can target specific repositories and branches/tags based on defined conditions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposCreateOrgRulesetRequest(
-            path=_models.ReposCreateOrgRulesetRequestPath(org=org),
-            body=_models.ReposCreateOrgRulesetRequestBody(name=name, enforcement=enforcement, bypass_actors=bypass_actors, conditions=conditions, rules=rules)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_organization_ruleset: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/rulesets", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/rulesets"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_organization_ruleset")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_organization_ruleset", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_organization_ruleset",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def list_organization_rule_suites(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     repository_name: str | None = Field(None, description="Filter results to a specific repository by name."),
@@ -17597,52 +14710,6 @@ async def get_organization_ruleset(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def update_organization_ruleset(
-    org: str = Field(..., description="The organization name. The name is not case sensitive."),
-    ruleset_id: int = Field(..., description="The unique identifier of the ruleset to update."),
-    enforcement: Literal["disabled", "active", "evaluate"] | None = Field(None, description="The enforcement level of the ruleset. Use 'disabled' to turn off the ruleset, 'active' to enforce rules, or 'evaluate' to allow admins to test rules before enforcement (evaluate is only available with GitHub Enterprise)."),
-    bypass_actors: list[_models.RepositoryRulesetBypassActor] | None = Field(None, description="An array of actors who can bypass the rules in this ruleset. The order and format of actors should follow the ruleset's actor specification."),
-    conditions: _models.ReposUpdateOrgRulesetBodyConditionsV0 | _models.ReposUpdateOrgRulesetBodyConditionsV1 | _models.ReposUpdateOrgRulesetBodyConditionsV2 | None = Field(None, description="Conditions that determine when the ruleset applies. Branch and tag rulesets require both repository_name and ref_name, or both repository_id and ref_name, or both repository_property and ref_name. Push rulesets do not require ref_name. Repository policy rulesets require only repository_name, repository_id, or repository_property."),
-    rules: list[_models.RepositoryRuleCreation | _models.RepositoryRuleUpdate | _models.RepositoryRuleDeletion | _models.RepositoryRuleRequiredLinearHistory | _models.RepositoryRuleRequiredDeployments | _models.RepositoryRuleRequiredSignatures | _models.RepositoryRulePullRequest | _models.RepositoryRuleRequiredStatusChecks | _models.RepositoryRuleNonFastForward | _models.RepositoryRuleCommitMessagePattern | _models.RepositoryRuleCommitAuthorEmailPattern | _models.RepositoryRuleCommitterEmailPattern | _models.RepositoryRuleBranchNamePattern | _models.RepositoryRuleTagNamePattern | _models.RepositoryRuleFilePathRestriction | _models.RepositoryRuleMaxFilePathLength | _models.RepositoryRuleFileExtensionRestriction | _models.RepositoryRuleMaxFileSize | _models.RepositoryRuleWorkflows | _models.RepositoryRuleCodeScanning] | None = Field(None, description="An array of rules to enforce within the ruleset. Each rule defines specific repository policies or restrictions."),
-) -> dict[str, Any]:
-    """Update an existing repository ruleset for an organization, including its enforcement level, bypass actors, conditions, and rules."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposUpdateOrgRulesetRequest(
-            path=_models.ReposUpdateOrgRulesetRequestPath(org=org, ruleset_id=ruleset_id),
-            body=_models.ReposUpdateOrgRulesetRequestBody(enforcement=enforcement, bypass_actors=bypass_actors, conditions=conditions, rules=rules)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_organization_ruleset: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/rulesets/{ruleset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/rulesets/{ruleset_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_organization_ruleset")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_organization_ruleset", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_organization_ruleset",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -17851,49 +14918,6 @@ async def list_secret_scanning_patterns(org: str = Field(..., description="The o
 
     return _response_data
 
-# Tags: secret-scanning
-@mcp.tool()
-async def update_secret_scanning_patterns(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    provider_pattern_settings: list[_models.SecretScanningUpdateOrgPatternConfigsBodyProviderPatternSettingsItem] | None = Field(None, description="Array of pattern settings for provider-managed secret patterns. Order is preserved and each item configures detection behavior for a specific provider pattern."),
-    custom_pattern_settings: list[_models.SecretScanningUpdateOrgPatternConfigsBodyCustomPatternSettingsItem] | None = Field(None, description="Array of pattern settings for custom secret patterns. Order is preserved and each item configures detection behavior for a custom pattern definition."),
-) -> dict[str, Any]:
-    """Update secret scanning pattern configurations for an organization, including both provider-managed and custom detection patterns. Requires `write:org` scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SecretScanningUpdateOrgPatternConfigsRequest(
-            path=_models.SecretScanningUpdateOrgPatternConfigsRequestPath(org=org),
-            body=_models.SecretScanningUpdateOrgPatternConfigsRequestBody(provider_pattern_settings=provider_pattern_settings, custom_pattern_settings=custom_pattern_settings)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_secret_scanning_patterns: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/secret-scanning/pattern-configurations", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/secret-scanning/pattern-configurations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_secret_scanning_patterns")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_secret_scanning_patterns", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_secret_scanning_patterns",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: security-advisories
 @mcp.tool()
 async def list_organization_security_advisories(
@@ -17939,85 +14963,6 @@ async def list_organization_security_advisories(
 
 # Tags: orgs
 @mcp.tool()
-async def get_immutable_releases_settings(org: str = Field(..., description="The organization name. Case-insensitive identifier used to specify which organization's immutable releases settings to retrieve.")) -> dict[str, Any]:
-    """Retrieve the immutable releases policy settings for an organization. Requires `admin:org` scope for authentication."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsGetImmutableReleasesSettingsRequest(
-            path=_models.OrgsGetImmutableReleasesSettingsRequestPath(org=org)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_immutable_releases_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/settings/immutable-releases", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/settings/immutable-releases"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_immutable_releases_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_immutable_releases_settings", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_immutable_releases_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def configure_immutable_releases(
-    org: str = Field(..., description="The organization name (case-insensitive)."),
-    enforced_repositories: Literal["all", "none", "selected"] = Field(..., description="The enforcement policy for immutable releases: apply to all repositories, no repositories, or a selected subset."),
-    selected_repository_ids: list[int] | None = Field(None, description="Array of repository IDs to enforce immutable releases on. Only applicable when `enforced_repositories` is set to `selected`. Use the dedicated endpoints to add or remove individual repositories from this policy."),
-) -> dict[str, Any]:
-    """Configure the immutable releases policy for an organization, controlling how release immutability is enforced across repositories. Requires `admin:org` OAuth scope or classic personal access token."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsSetImmutableReleasesSettingsRequest(
-            path=_models.OrgsSetImmutableReleasesSettingsRequestPath(org=org),
-            body=_models.OrgsSetImmutableReleasesSettingsRequestBody(enforced_repositories=enforced_repositories, selected_repository_ids=selected_repository_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_immutable_releases: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/settings/immutable-releases", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/settings/immutable-releases"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_immutable_releases")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_immutable_releases", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_immutable_releases",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
 async def list_immutable_release_repositories(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
     """List all repositories in an organization that have been selected for immutable releases enforcement. Requires admin:org scope."""
 
@@ -18047,48 +14992,6 @@ async def list_immutable_release_repositories(org: str = Field(..., description=
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: orgs
-@mcp.tool()
-async def set_immutable_releases_repositories(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    selected_repository_ids: list[int] = Field(..., description="An array of repository IDs to enforce immutable releases on. Only applicable when the organization's `enforced_repositories` policy is set to `selected`. This replaces all previously selected repositories. Order is not significant."),
-) -> dict[str, Any]:
-    """Replace the complete set of repositories selected for immutable releases enforcement in an organization. This endpoint requires the organization's immutable releases policy to be configured with `enforced_repositories` set to `selected`."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OrgsSetImmutableReleasesSettingsRepositoriesRequest(
-            path=_models.OrgsSetImmutableReleasesSettingsRepositoriesRequestPath(org=org),
-            body=_models.OrgsSetImmutableReleasesSettingsRepositoriesRequestBody(selected_repository_ids=selected_repository_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_immutable_releases_repositories: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/settings/immutable-releases/repositories", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/settings/immutable-releases/repositories"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_immutable_releases_repositories")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_immutable_releases_repositories", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_immutable_releases_repositories",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -18203,50 +15106,6 @@ async def list_network_configurations(org: str = Field(..., description="The org
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: hosted-compute
-@mcp.tool()
-async def create_network_configuration(
-    org: str = Field(..., description="The organization name. Case-insensitive."),
-    name: str = Field(..., description="Name of the network configuration. Must be between 1 and 100 characters and may only contain letters (a-z, A-Z), numbers (0-9), periods, hyphens, and underscores."),
-    network_settings_ids: list[str] = Field(..., description="A list of network settings resource identifiers to associate with this configuration. Exactly one identifier must be provided.", min_length=1, max_length=1),
-    compute_service: Literal["none", "actions"] | None = Field(None, description="The hosted compute service to use for this network configuration."),
-) -> dict[str, Any]:
-    """Creates a hosted compute network configuration for an organization. Requires the `write:network_configurations` scope."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.HostedComputeCreateNetworkConfigurationForOrgRequest(
-            path=_models.HostedComputeCreateNetworkConfigurationForOrgRequestPath(org=org),
-            body=_models.HostedComputeCreateNetworkConfigurationForOrgRequestBody(name=name, compute_service=compute_service, network_settings_ids=network_settings_ids)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_network_configuration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/orgs/{org}/settings/network-configurations", _request.path.model_dump(by_alias=True)) if _request.path else "/orgs/{org}/settings/network-configurations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_network_configuration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_network_configuration", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_network_configuration",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -19084,33 +15943,6 @@ async def list_child_teams(
 
     return _response_data
 
-# Tags: rate-limit
-@mcp.tool()
-async def get_rate_limit_status() -> dict[str, Any]:
-    """Retrieve rate limit status for the authenticated user across all API resource categories (core, search, code search, GraphQL, and specialized endpoints). This endpoint itself does not consume rate limit quota."""
-
-    # Extract parameters for API call
-    _http_path = "/rate_limit"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_rate_limit_status")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_rate_limit_status", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_rate_limit_status",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: repos
 @mcp.tool()
 async def get_repository(
@@ -19455,49 +16287,6 @@ async def get_cache_retention_limit(
 
 # Tags: actions
 @mcp.tool()
-async def configure_actions_cache_retention(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    max_cache_retention_days: int | None = Field(None, description="The maximum number of days to retain caches in this repository before automatic eviction."),
-) -> dict[str, Any]:
-    """Configure the maximum retention period for GitHub Actions caches in a repository. This setting determines how long cached artifacts will be preserved before automatic eviction, unless manually deleted or removed due to storage constraints."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheRetentionLimitForRepositoryRequest(
-            path=_models.ActionsSetActionsCacheRetentionLimitForRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetActionsCacheRetentionLimitForRepositoryRequestBody(max_cache_retention_days=max_cache_retention_days)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_actions_cache_retention: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/cache/retention-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/cache/retention-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_actions_cache_retention")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_actions_cache_retention", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_actions_cache_retention",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def get_actions_cache_storage_limit_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
@@ -19530,49 +16319,6 @@ async def get_actions_cache_storage_limit_repository(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def set_actions_cache_storage_limit_for_repository(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    max_cache_size_gb: int | None = Field(None, description="The maximum total cache size for this repository, in gigabytes."),
-) -> dict[str, Any]:
-    """Set the maximum storage limit for GitHub Actions caches in a repository. This controls the total cache size before automatic eviction occurs."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetActionsCacheStorageLimitForRepositoryRequest(
-            path=_models.ActionsSetActionsCacheStorageLimitForRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetActionsCacheStorageLimitForRepositoryRequestBody(max_cache_size_gb=max_cache_size_gb)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for set_actions_cache_storage_limit_for_repository: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/cache/storage-limit", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/cache/storage-limit"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("set_actions_cache_storage_limit_for_repository")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("set_actions_cache_storage_limit_for_repository", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="set_actions_cache_storage_limit_for_repository",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -19909,50 +16655,6 @@ async def get_oidc_subject_claim_customization(
 
 # Tags: actions
 @mcp.tool()
-async def configure_oidc_subject_claim(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    use_default: bool = Field(..., description="Whether to use the default OIDC subject claim template. When `true`, any custom claim keys are ignored and the default template is applied."),
-    include_claim_keys: list[str] | None = Field(None, description="Array of claim key names to include in the custom OIDC subject claim template. Each key must contain only alphanumeric characters and underscores. Only used when `use_default` is `false`."),
-) -> dict[str, Any]:
-    """Configure the OpenID Connect (OIDC) subject claim customization template for a repository. Allows you to set a custom template and specify whether to use default or custom claim keys."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetCustomOidcSubClaimForRepoRequest(
-            path=_models.ActionsSetCustomOidcSubClaimForRepoRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetCustomOidcSubClaimForRepoRequestBody(use_default=use_default, include_claim_keys=include_claim_keys)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_oidc_subject_claim: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/oidc/customization/sub", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/oidc/customization/sub"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_oidc_subject_claim")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_oidc_subject_claim", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_oidc_subject_claim",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def list_organization_secrets_available_to_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -20031,588 +16733,6 @@ async def list_organization_variables_shared(
 
 # Tags: actions
 @mcp.tool()
-async def get_repository_actions_permissions(
-    owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieve the GitHub Actions permissions policy for a repository, including whether GitHub Actions is enabled and which actions and reusable workflows are allowed to run. Requires `repo` scope authorization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetGithubActionsPermissionsRepositoryRequest(
-            path=_models.ActionsGetGithubActionsPermissionsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_repository_actions_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_repository_actions_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_repository_actions_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_repository_actions_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_repository_actions_permissions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    enabled: bool = Field(..., description="Whether GitHub Actions is enabled on the repository."),
-    allowed_actions: Literal["all", "local_only", "selected"] | None = Field(None, description="The permissions policy that controls which actions and reusable workflows are allowed to run in the repository."),
-    sha_pinning_required: bool | None = Field(None, description="Whether actions must be pinned to a full-length commit SHA for security purposes."),
-) -> dict[str, Any]:
-    """Configure GitHub Actions permissions and policies for a repository, including whether Actions is enabled and which actions and reusable workflows are allowed to run."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetGithubActionsPermissionsRepositoryRequest(
-            path=_models.ActionsSetGithubActionsPermissionsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetGithubActionsPermissionsRepositoryRequestBody(enabled=enabled, allowed_actions=allowed_actions, sha_pinning_required=sha_pinning_required)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_repository_actions_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_repository_actions_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_repository_actions_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_repository_actions_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_workflow_repository_access(
-    owner: str = Field(..., description="The owner account of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieve the access level that external workflows have to actions and reusable workflows in a private repository. This setting controls whether workflows from other repositories can access components within this repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetWorkflowAccessToRepositoryRequest(
-            path=_models.ActionsGetWorkflowAccessToRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_workflow_repository_access: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/access", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/access"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_workflow_repository_access")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_workflow_repository_access", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_workflow_repository_access",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_workflow_access_level(
-    owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-    access_level: Literal["none", "user", "organization"] = Field(..., description="The access level for external workflows. `none` restricts access to workflows within this repository only. `user` allows sharing across user-owned private repositories. `organization` allows sharing across all organization repositories."),
-) -> dict[str, Any]:
-    """Configure the access level that external workflows have to actions and reusable workflows in a private repository. This controls whether workflows outside the repository can reference and use components within it."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetWorkflowAccessToRepositoryRequest(
-            path=_models.ActionsSetWorkflowAccessToRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetWorkflowAccessToRepositoryRequestBody(access_level=access_level)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_workflow_access_level: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/access", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/access"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_workflow_access_level")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_workflow_access_level", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_workflow_access_level",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_artifact_and_log_retention_settings_repository(
-    owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieve the artifact and log retention settings configured for a repository. This determines how long GitHub Actions artifacts and logs are retained before automatic deletion."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetArtifactAndLogRetentionSettingsRepositoryRequest(
-            path=_models.ActionsGetArtifactAndLogRetentionSettingsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_artifact_and_log_retention_settings_repository: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/artifact-and-log-retention", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/artifact-and-log-retention"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_artifact_and_log_retention_settings_repository")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_artifact_and_log_retention_settings_repository", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_artifact_and_log_retention_settings_repository",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_artifact_retention(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    days: int = Field(..., description="The number of days to retain artifacts and logs before automatic deletion. Must be a positive integer."),
-) -> dict[str, Any]:
-    """Configure the retention period for artifacts and logs in a repository. This setting applies to all GitHub Actions workflows in the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetArtifactAndLogRetentionSettingsRepositoryRequest(
-            path=_models.ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetArtifactAndLogRetentionSettingsRepositoryRequestBody(days=days)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_artifact_retention: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/artifact-and-log-retention", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/artifact-and-log-retention"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_artifact_retention")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_artifact_retention", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_artifact_retention",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_fork_pull_request_approval_permissions(
-    owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieves the fork pull request contributor approval policy for a repository, which controls whether contributors can approve their own pull requests created from forks. Requires `repo` scope for OAuth apps and personal access tokens."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetForkPrContributorApprovalPermissionsRepositoryRequest(
-            path=_models.ActionsGetForkPrContributorApprovalPermissionsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_fork_pull_request_approval_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_fork_pull_request_approval_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_fork_pull_request_approval_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_fork_pull_request_approval_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_fork_pr_approval_policy_repository(
-    owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-    approval_policy: Literal["first_time_contributors_new_to_github", "first_time_contributors", "all_external_contributors"] = Field(..., description="The approval policy that determines when fork PR workflows require maintainer approval before execution."),
-) -> dict[str, Any]:
-    """Configure the approval policy for pull requests from forked repositories. This controls whether maintainer approval is required before fork PR workflows can run."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetForkPrContributorApprovalPermissionsRepositoryRequest(
-            path=_models.ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetForkPrContributorApprovalPermissionsRepositoryRequestBody(approval_policy=approval_policy)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_fork_pr_approval_policy_repository: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_fork_pr_approval_policy_repository")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_fork_pr_approval_policy_repository", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_fork_pr_approval_policy_repository",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_fork_pr_workflow_settings(
-    owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieve the settings that control whether workflows from fork pull requests can execute on a private repository. Requires `repo` scope for authentication."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest(
-            path=_models.ActionsGetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_fork_pr_workflow_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_fork_pr_workflow_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_fork_pr_workflow_settings", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_fork_pr_workflow_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_fork_pull_request_workflow_settings(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    run_workflows_from_fork_pull_requests: bool = Field(..., description="Whether workflows triggered by pull requests from forks are allowed to run on this private repository."),
-    send_write_tokens_to_workflows: bool | None = Field(None, description="Whether GitHub Actions can create pull requests or submit approving pull request reviews when executing workflows triggered by fork pull requests."),
-    send_secrets_and_variables: bool | None = Field(None, description="Whether secrets and variables are accessible to workflows triggered by pull requests from forks."),
-    require_approval_for_fork_pr_workflows: bool | None = Field(None, description="Whether workflows triggered by pull requests from forks require explicit approval from a repository administrator before execution."),
-) -> dict[str, Any]:
-    """Configure security and execution settings for workflows triggered by pull requests from forks on a private repository. Controls whether these workflows can run, access secrets, create pull requests, and whether they require administrator approval."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequest(
-            path=_models.ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetPrivateRepoForkPrWorkflowsSettingsRepositoryRequestBody(run_workflows_from_fork_pull_requests=run_workflows_from_fork_pull_requests, send_write_tokens_to_workflows=send_write_tokens_to_workflows, send_secrets_and_variables=send_secrets_and_variables, require_approval_for_fork_pr_workflows=require_approval_for_fork_pr_workflows)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_fork_pull_request_workflow_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/fork-pr-workflows-private-repos"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_fork_pull_request_workflow_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_fork_pull_request_workflow_settings", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_fork_pull_request_workflow_settings",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def list_allowed_actions(
-    owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Retrieve the allowed actions and reusable workflows configured for a repository. This endpoint requires the repository's `allowed_actions` policy to be set to `selected`."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetAllowedActionsRepositoryRequest(
-            path=_models.ActionsGetAllowedActionsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_allowed_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/selected-actions", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/selected-actions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_allowed_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_allowed_actions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_allowed_actions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_allowed_actions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    github_owned_allowed: bool | None = Field(None, description="Whether GitHub-owned actions are allowed. When enabled, includes actions from the GitHub `actions` organization."),
-    verified_allowed: bool | None = Field(None, description="Whether actions from GitHub Marketplace verified creators are allowed. Set to true to permit all actions by verified creators."),
-    patterns_allowed: list[str] | None = Field(None, description="List of string-matching patterns to allow specific actions and reusable workflows. Supports wildcards, tags, and SHAs for flexible matching. Note: This setting only applies to public repositories."),
-) -> dict[str, Any]:
-    """Configure which actions and reusable workflows are allowed to run in a repository. The repository's allowed_actions permission policy must be set to 'selected' for this configuration to take effect."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetAllowedActionsRepositoryRequest(
-            path=_models.ActionsSetAllowedActionsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetAllowedActionsRepositoryRequestBody(github_owned_allowed=github_owned_allowed, verified_allowed=verified_allowed, patterns_allowed=patterns_allowed)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_allowed_actions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/selected-actions", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/selected-actions"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_allowed_actions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_allowed_actions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_allowed_actions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_workflow_permissions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Retrieve the default workflow permissions granted to the GITHUB_TOKEN in a repository, including whether GitHub Actions can submit approving pull request reviews. This determines what actions workflows can perform automatically."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequest(
-            path=_models.ActionsGetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_workflow_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/workflow", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/workflow"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_workflow_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_workflow_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_workflow_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def configure_workflow_permissions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    default_workflow_permissions: Literal["read", "write"] | None = Field(None, description="The default permission level granted to the GITHUB_TOKEN when executing workflows in this repository."),
-    can_approve_pull_request_reviews: bool | None = Field(None, description="Whether GitHub Actions can automatically approve pull requests. Enabling this option presents a security risk and should be used cautiously."),
-) -> dict[str, Any]:
-    """Configure default permissions for the GITHUB_TOKEN in repository workflows and control whether GitHub Actions can approve pull requests. This setting applies to all workflows running in the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequest(
-            path=_models.ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsSetGithubActionsDefaultWorkflowPermissionsRepositoryRequestBody(default_workflow_permissions=default_workflow_permissions, can_approve_pull_request_reviews=can_approve_pull_request_reviews)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_workflow_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/permissions/workflow", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/permissions/workflow"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_workflow_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_workflow_permissions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_workflow_permissions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def list_runners(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -20682,91 +16802,6 @@ async def list_runner_downloads(
     _response_data, _ = await _execute_tool_request(
         tool_name="list_runner_downloads",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def generate_runner_jitconfig_for_repo(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    name: str = Field(..., description="The name to assign to the new runner."),
-    runner_group_id: int = Field(..., description="The ID of the runner group to register the runner to."),
-    labels: list[str] = Field(..., description="Custom labels to add to the runner. Accepts 1 to 100 labels as an array of strings.", min_length=1, max_length=100),
-    work_folder: str | None = Field(None, description="The working directory for job execution, specified as a path relative to the runner installation directory."),
-) -> dict[str, Any]:
-    """Generate a just-in-time runner configuration for a repository that can be passed to the runner application at startup. Requires admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGenerateRunnerJitconfigForRepoRequest(
-            path=_models.ActionsGenerateRunnerJitconfigForRepoRequestPath(owner=owner, repo=repo),
-            body=_models.ActionsGenerateRunnerJitconfigForRepoRequestBody(name=name, runner_group_id=runner_group_id, labels=labels, work_folder=work_folder)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for generate_runner_jitconfig_for_repo: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/runners/generate-jitconfig", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/runners/generate-jitconfig"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("generate_runner_jitconfig_for_repo")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("generate_runner_jitconfig_for_repo", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="generate_runner_jitconfig_for_repo",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def create_runner_registration_token(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Generate a registration token for configuring a self-hosted runner in a repository. The token expires after one hour and requires admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsCreateRegistrationTokenForRepoRequest(
-            path=_models.ActionsCreateRegistrationTokenForRepoRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_runner_registration_token: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/runners/registration-token", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/runners/registration-token"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_runner_registration_token")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_runner_registration_token", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_runner_registration_token",
-        method="POST",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -22069,51 +18104,6 @@ async def get_repository_secret(
 
 # Tags: actions
 @mcp.tool()
-async def create_or_update_repository_secret(
-    owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-    secret_name: str = Field(..., description="The name of the secret to create or update."),
-    encrypted_value: str = Field(..., description="The encrypted secret value using LibSodium with the public key from the Get repository public key endpoint. Must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
-    key_id: str = Field(..., description="The ID of the public key used to encrypt the secret. Retrieve this from the Get repository public key endpoint."),
-) -> dict[str, Any]:
-    """Create or update an encrypted secret in a repository for use in GitHub Actions workflows. The secret value must be encrypted using LibSodium with the repository's public key before submission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsCreateOrUpdateRepoSecretRequest(
-            path=_models.ActionsCreateOrUpdateRepoSecretRequestPath(owner=owner, repo=repo, secret_name=secret_name),
-            body=_models.ActionsCreateOrUpdateRepoSecretRequestBody(encrypted_value=encrypted_value, key_id=key_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_or_update_repository_secret: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/secrets/{secret_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/secrets/{secret_name}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_or_update_repository_secret")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_or_update_repository_secret", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_or_update_repository_secret",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
 async def delete_repository_secret(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository, excluding the `.git` extension. Case-insensitive."),
@@ -22608,46 +18598,6 @@ async def list_workflow_runs_for_workflow(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def get_workflow_usage(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    workflow_id: str = Field(..., description="The ID of the workflow or the workflow file name (e.g., `main.yaml`). Accepts both string identifiers and integer IDs."),
-) -> dict[str, Any]:
-    """Retrieves billable minutes consumed by a specific workflow during the current billing cycle. This endpoint is deprecated and will be closed; refer to GitHub's official migration guidance for alternatives."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsGetWorkflowUsageRequest(
-            path=_models.ActionsGetWorkflowUsageRequestPath(owner=owner, repo=repo, workflow_id=workflow_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_workflow_usage: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/actions/workflows/{workflow_id}/timing", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/actions/workflows/{workflow_id}/timing"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_workflow_usage")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_workflow_usage", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_workflow_usage",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 
@@ -23504,141 +19454,6 @@ async def disable_admin_branch_protection(
 
 # Tags: repos
 @mcp.tool()
-async def get_pull_request_review_protection(
-    owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-    branch: str = Field(..., description="The name of the branch to retrieve protection settings for. Cannot contain wildcard characters; use the GraphQL API for wildcard support."),
-) -> dict[str, Any]:
-    """Retrieve the pull request review protection settings for a specific branch. This operation is available for public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposGetPullRequestReviewProtectionRequest(
-            path=_models.ReposGetPullRequestReviewProtectionRequestPath(owner=owner, repo=repo, branch=branch)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_pull_request_review_protection: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_pull_request_review_protection")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_pull_request_review_protection", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_pull_request_review_protection",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def configure_pull_request_review_protection(
-    owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-    branch: str = Field(..., description="The branch name. Cannot contain wildcard characters; use GraphQL API for wildcard support."),
-    dismissal_restrictions_users: list[str] | None = Field(None, alias="dismissal_restrictionsUsers", description="List of user logins who can dismiss pull request reviews. Replaces previous values when provided."),
-    bypass_pull_request_allowances_users: list[str] | None = Field(None, alias="bypass_pull_request_allowancesUsers", description="List of user logins allowed to bypass pull request review requirements. Replaces previous values when provided."),
-    dismissal_restrictions_teams: list[str] | None = Field(None, alias="dismissal_restrictionsTeams", description="List of team slugs who can dismiss pull request reviews. Replaces previous values when provided."),
-    bypass_pull_request_allowances_teams: list[str] | None = Field(None, alias="bypass_pull_request_allowancesTeams", description="List of team slugs allowed to bypass pull request review requirements. Replaces previous values when provided."),
-    dismissal_restrictions_apps: list[str] | None = Field(None, alias="dismissal_restrictionsApps", description="List of app slugs who can dismiss pull request reviews. Replaces previous values when provided."),
-    bypass_pull_request_allowances_apps: list[str] | None = Field(None, alias="bypass_pull_request_allowancesApps", description="List of app slugs allowed to bypass pull request review requirements. Replaces previous values when provided."),
-    dismiss_stale_reviews: bool | None = Field(None, description="Automatically dismiss approving reviews when a new commit is pushed."),
-    require_code_owner_reviews: bool | None = Field(None, description="Require code owners to review and approve pull requests before merging."),
-    required_approving_review_count: int | None = Field(None, description="Number of reviewers required to approve pull requests before merging."),
-    require_last_push_approval: bool | None = Field(None, description="Require the most recent push to be approved by someone other than the person who pushed it."),
-) -> dict[str, Any]:
-    """Configure pull request review protection settings for a branch, including required approvals, dismissal permissions, and bypass allowances. Requires admin or owner permissions and branch protection to be enabled."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposUpdatePullRequestReviewProtectionRequest(
-            path=_models.ReposUpdatePullRequestReviewProtectionRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposUpdatePullRequestReviewProtectionRequestBody(dismiss_stale_reviews=dismiss_stale_reviews, require_code_owner_reviews=require_code_owner_reviews, required_approving_review_count=required_approving_review_count, require_last_push_approval=require_last_push_approval,
-                dismissal_restrictions=_models.ReposUpdatePullRequestReviewProtectionRequestBodyDismissalRestrictions(users=dismissal_restrictions_users, teams=dismissal_restrictions_teams, apps=dismissal_restrictions_apps) if any(v is not None for v in [dismissal_restrictions_users, dismissal_restrictions_teams, dismissal_restrictions_apps]) else None,
-                bypass_pull_request_allowances=_models.ReposUpdatePullRequestReviewProtectionRequestBodyBypassPullRequestAllowances(users=bypass_pull_request_allowances_users, teams=bypass_pull_request_allowances_teams, apps=bypass_pull_request_allowances_apps) if any(v is not None for v in [bypass_pull_request_allowances_users, bypass_pull_request_allowances_teams, bypass_pull_request_allowances_apps]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_pull_request_review_protection: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_pull_request_review_protection")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_pull_request_review_protection", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_pull_request_review_protection",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def remove_pull_request_review_protection(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    branch: str = Field(..., description="The name of the branch to remove pull request review protection from. Cannot contain wildcard characters."),
-) -> dict[str, Any]:
-    """Remove pull request review protection requirements from a branch. This allows bypassing mandatory pull request reviews on the specified branch."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposDeletePullRequestReviewProtectionRequest(
-            path=_models.ReposDeletePullRequestReviewProtectionRequestPath(owner=owner, repo=repo, branch=branch)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_pull_request_review_protection: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_pull_request_review_protection")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_pull_request_review_protection", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_pull_request_review_protection",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def check_branch_signature_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
@@ -23670,46 +19485,6 @@ async def check_branch_signature_protection(
     _response_data, _ = await _execute_tool_request(
         tool_name="check_branch_signature_protection",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def enable_branch_signature_protection(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    branch: str = Field(..., description="The name of the branch to protect. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
-    """Enable required commit signature protection on a branch. Requires admin or owner permissions and branch protection to be already enabled on the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposCreateCommitSignatureProtectionRequest(
-            path=_models.ReposCreateCommitSignatureProtectionRequestPath(owner=owner, repo=repo, branch=branch)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_branch_signature_protection: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_signatures"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_branch_signature_protection")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_branch_signature_protection", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_branch_signature_protection",
-        method="POST",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -23799,51 +19574,6 @@ async def get_branch_status_checks_protection(
 
 # Tags: repos
 @mcp.tool()
-async def update_status_check_protection(
-    owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-    branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters."),
-    strict: bool | None = Field(None, description="Require branches to be up to date before merging."),
-    checks: list[_models.ReposUpdateStatusCheckProtectionBodyChecksItem] | None = Field(None, description="The list of status checks required to merge into this branch. Each check identifies a required CI/CD workflow or external service."),
-) -> dict[str, Any]:
-    """Update required status checks for a protected branch. Requires admin or owner permissions and branch protection to be enabled."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposUpdateStatusCheckProtectionRequest(
-            path=_models.ReposUpdateStatusCheckProtectionRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposUpdateStatusCheckProtectionRequestBody(strict=strict, checks=checks)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_status_check_protection: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_status_check_protection")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_status_check_protection", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_status_check_protection",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def disable_branch_status_check_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -23917,96 +19647,6 @@ async def list_status_check_contexts(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def add_required_status_check_contexts(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    branch: str = Field(..., description="The name of the branch to protect. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-    body: _models.ReposAddStatusCheckContextsBodyV0 | list[str] | None = Field(None, description="An array of status check context strings to add to the required status checks. Each context identifies a specific status check (e.g., continuous integration service). Order is not significant."),
-) -> dict[str, Any]:
-    """Add status check contexts to a protected branch's required status checks. This operation is available for public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposAddStatusCheckContextsRequest(
-            path=_models.ReposAddStatusCheckContextsRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposAddStatusCheckContextsRequestBody(body=body)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for add_required_status_check_contexts: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_body = next(iter(_http_body.values()), None) if _http_body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("add_required_status_check_contexts")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("add_required_status_check_contexts", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="add_required_status_check_contexts",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def configure_required_status_check_contexts(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    branch: str = Field(..., description="The name of the branch to configure protection for. Cannot contain wildcard characters; use the GraphQL API for wildcard support."),
-    body: _models.ReposSetStatusCheckContextsBodyV0 | list[str] | None = Field(None, description="An array of status check context strings that must pass before merging. Each context identifies a specific status check (e.g., a CI/CD provider). The order of contexts is not significant."),
-) -> dict[str, Any]:
-    """Configure the list of status checks that must pass before merging pull requests to a protected branch. This operation replaces the entire set of required status check contexts."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposSetStatusCheckContextsRequest(
-            path=_models.ReposSetStatusCheckContextsRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposSetStatusCheckContextsRequestBody(body=body)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_required_status_check_contexts: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_body = next(iter(_http_body.values()), None) if _http_body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_required_status_check_contexts")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_required_status_check_contexts", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_required_status_check_contexts",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -24172,50 +19812,6 @@ async def list_apps_with_protected_branch_access(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def grant_app_push_access(
-    owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-    branch: str = Field(..., description="The branch name. Cannot contain wildcard characters; use GraphQL API for wildcard support."),
-    apps: list[str] = Field(..., description="The GitHub Apps to grant push access, specified by their slugified app names. The combined total of users, apps, and teams cannot exceed 100 items."),
-) -> dict[str, Any]:
-    """Grant specified GitHub Apps push access to a protected branch. Only apps installed on the repository with write access to repository contents can be authorized."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposAddAppAccessRestrictionsRequest(
-            path=_models.ReposAddAppAccessRestrictionsRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposAddAppAccessRestrictionsRequestBody(apps=apps)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for grant_app_push_access: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("grant_app_push_access")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("grant_app_push_access", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="grant_app_push_access",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -24570,50 +20166,6 @@ async def grant_user_push_access(
 
 # Tags: repos
 @mcp.tool()
-async def replace_branch_protection_user_restrictions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    branch: str = Field(..., description="The name of the branch to configure protection restrictions for. Cannot contain wildcard characters."),
-    users: list[str] = Field(..., description="List of usernames to grant push access to the protected branch. Order is not significant. The combined total of users, apps, and teams cannot exceed 100 items."),
-) -> dict[str, Any]:
-    """Replace the list of users with push access to a protected branch. This operation removes all previously granted access and applies the new user list. The total number of users, apps, and teams combined cannot exceed 100."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposSetUserAccessRestrictionsRequest(
-            path=_models.ReposSetUserAccessRestrictionsRequestPath(owner=owner, repo=repo, branch=branch),
-            body=_models.ReposSetUserAccessRestrictionsRequestBody(users=users)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for replace_branch_protection_user_restrictions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("replace_branch_protection_user_restrictions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("replace_branch_protection_user_restrictions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="replace_branch_protection_user_restrictions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def revoke_user_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -24944,49 +20496,6 @@ async def create_check_suite(
     _response_data, _ = await _execute_tool_request(
         tool_name="create_check_suite",
         method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: checks
-@mcp.tool()
-async def configure_check_suite_automation(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    auto_trigger_checks: list[_models.ChecksSetSuitesPreferencesBodyAutoTriggerChecksItem] | None = Field(None, description="An array of check suite automation settings. Each item specifies whether to enable or disable automatic CheckSuite event creation upon pushes to the repository. Enabled by default."),
-) -> dict[str, Any]:
-    """Configure automatic check suite creation settings for a repository. By default, check suites are created automatically on every push; use this operation to disable automatic creation and manually trigger check suites instead."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ChecksSetSuitesPreferencesRequest(
-            path=_models.ChecksSetSuitesPreferencesRequestPath(owner=owner, repo=repo),
-            body=_models.ChecksSetSuitesPreferencesRequestBody(auto_trigger_checks=auto_trigger_checks)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_check_suite_automation: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/check-suites/preferences", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/check-suites/preferences"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_check_suite_automation")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_check_suite_automation", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_check_suite_automation",
-        method="PATCH",
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
@@ -25832,52 +21341,6 @@ async def get_code_scanning_default_setup(
 
 # Tags: code-scanning
 @mcp.tool()
-async def configure_code_scanning_default_setup(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    state: Literal["configured", "not-configured"] | None = Field(None, description="The desired state of code scanning default setup, either enabled or disabled."),
-    query_suite: Literal["default", "extended"] | None = Field(None, description="The CodeQL query suite to use for analysis. The default suite includes standard security checks, while extended includes additional queries."),
-    threat_model: Literal["remote", "remote_and_local"] | None = Field(None, description="The threat model for code scanning analysis. Use `remote` to analyze only network sources, or `remote_and_local` to include local sources such as filesystem access, command-line arguments, database reads, environment variables, and standard input."),
-    languages: list[Literal["actions", "c-cpp", "csharp", "go", "java-kotlin", "javascript-typescript", "python", "ruby", "swift"]] | None = Field(None, description="An array of CodeQL languages to analyze. The order of languages in the array does not affect analysis results."),
-) -> dict[str, Any]:
-    """Configure or update the default code scanning setup for a repository, including the analysis state, query suite, threat model, and languages to analyze. Requires `repo` scope for private repositories or `public_repo` scope for public repositories."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodeScanningUpdateDefaultSetupRequest(
-            path=_models.CodeScanningUpdateDefaultSetupRequestPath(owner=owner, repo=repo),
-            body=_models.CodeScanningUpdateDefaultSetupRequestBody(state=state, query_suite=query_suite, threat_model=threat_model, languages=languages)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for configure_code_scanning_default_setup: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/code-scanning/default-setup", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/code-scanning/default-setup"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("configure_code_scanning_default_setup")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("configure_code_scanning_default_setup", "PATCH", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="configure_code_scanning_default_setup",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: code-scanning
-@mcp.tool()
 async def upload_sarif(
     owner: str = Field(..., description="The account owner of the repository."),
     repo: str = Field(..., description="The name of the repository (without the .git extension)."),
@@ -26242,50 +21705,6 @@ async def get_codespace_defaults(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: codespaces
-@mcp.tool()
-async def validate_devcontainer_permissions(
-    owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
-    repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-    ref: str = Field(..., description="The git reference pointing to the devcontainer configuration location, typically a branch name in the format `heads/BRANCH_NAME`."),
-    devcontainer_path: str = Field(..., description="The file path to the devcontainer.json configuration file to validate permissions against."),
-) -> dict[str, Any]:
-    """Validates whether the permissions defined in a devcontainer configuration have been accepted by the authenticated user. Use this to check permission acceptance before creating or updating a codespace."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.CodespacesCheckPermissionsForDevcontainerRequest(
-            path=_models.CodespacesCheckPermissionsForDevcontainerRequestPath(owner=owner, repo=repo),
-            query=_models.CodespacesCheckPermissionsForDevcontainerRequestQuery(ref=ref, devcontainer_path=devcontainer_path)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for validate_devcontainer_permissions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/codespaces/permissions_check", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/codespaces/permissions_check"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("validate_devcontainer_permissions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("validate_devcontainer_permissions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="validate_devcontainer_permissions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -28477,50 +23896,6 @@ async def get_deployment_status(
 
 # Tags: repos
 @mcp.tool()
-async def trigger_repository_dispatch_event(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    event_type: str = Field(..., description="A custom webhook event name that triggers the dispatch. Must be between 1 and 100 characters.", min_length=1, max_length=100),
-    client_payload: dict[str, Any] | None = Field(None, description="JSON object containing extra information for the webhook event. Supports up to 10 top-level properties with a maximum total payload size of 64KB. Used by workflows and apps to access custom data passed during dispatch.", max_length=10),
-) -> dict[str, Any]:
-    """Trigger a repository dispatch webhook event to initiate GitHub Actions workflows or GitHub App webhooks based on external activity. Pass custom event data via client_payload for workflow processing."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposCreateDispatchEventRequest(
-            path=_models.ReposCreateDispatchEventRequestPath(owner=owner, repo=repo),
-            body=_models.ReposCreateDispatchEventRequestBody(event_type=event_type, client_payload=client_payload)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for trigger_repository_dispatch_event: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/dispatches", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/dispatches"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("trigger_repository_dispatch_event")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("trigger_repository_dispatch_event", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="trigger_repository_dispatch_event",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def list_environments(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
@@ -28941,50 +24316,6 @@ async def list_deployment_protection_rules(
 
 # Tags: repos
 @mcp.tool()
-async def enable_deployment_protection_rule(
-    environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by %2F."),
-    repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    integration_id: int | None = Field(None, description="The ID of the custom app that will be enabled on the environment."),
-) -> dict[str, Any]:
-    """Enable a custom deployment protection rule on an environment. The authenticated user must have admin or owner permissions to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposCreateDeploymentProtectionRuleRequest(
-            path=_models.ReposCreateDeploymentProtectionRuleRequestPath(environment_name=environment_name, repo=repo, owner=owner),
-            body=_models.ReposCreateDeploymentProtectionRuleRequestBody(integration_id=integration_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_deployment_protection_rule: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/environments/{environment_name}/deployment_protection_rules", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/environments/{environment_name}/deployment_protection_rules"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_deployment_protection_rule")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_deployment_protection_rule", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_deployment_protection_rule",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def list_deployment_rule_integrations(
     environment_name: str = Field(..., description="The name of the environment. URL encode special characters, such as replacing forward slashes with `%2F`."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -29221,52 +24552,6 @@ async def get_environment_secret(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: actions
-@mcp.tool()
-async def create_or_update_environment_secret(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
-    secret_name: str = Field(..., description="The name of the secret to create or update."),
-    encrypted_value: str = Field(..., description="The encrypted value of the secret. Must be encrypted using LibSodium with the public key from the Get environment public key endpoint. The value must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
-    key_id: str = Field(..., description="The ID of the public key used to encrypt the secret. Retrieve this from the Get environment public key endpoint."),
-) -> dict[str, Any]:
-    """Create or update an encrypted secret for a GitHub environment. The secret value must be encrypted using LibSodium with the environment's public key before submission."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ActionsCreateOrUpdateEnvironmentSecretRequest(
-            path=_models.ActionsCreateOrUpdateEnvironmentSecretRequestPath(owner=owner, repo=repo, environment_name=environment_name, secret_name=secret_name),
-            body=_models.ActionsCreateOrUpdateEnvironmentSecretRequestBody(encrypted_value=encrypted_value, key_id=key_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_or_update_environment_secret: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/environments/{environment_name}/secrets/{secret_name}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_or_update_environment_secret")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_or_update_environment_secret", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_or_update_environment_secret",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -30749,84 +26034,6 @@ async def get_immutable_releases(
 
     return _response_data
 
-# Tags: repos
-@mcp.tool()
-async def enable_immutable_releases(
-    owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
-    """Enable immutable releases for a repository to prevent modification of release artifacts after creation. The authenticated user must have admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposEnableImmutableReleasesRequest(
-            path=_models.ReposEnableImmutableReleasesRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_immutable_releases: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/immutable-releases", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/immutable-releases"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_immutable_releases")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_immutable_releases", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_immutable_releases",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def disable_immutable_releases(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Disable immutable releases for a repository. The authenticated user must have admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposDisableImmutableReleasesRequest(
-            path=_models.ReposDisableImmutableReleasesRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for disable_immutable_releases: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/immutable-releases", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/immutable-releases"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("disable_immutable_releases")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("disable_immutable_releases", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="disable_immutable_releases",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: apps
 @mcp.tool()
 async def get_app_installation_repository(
@@ -30900,50 +26107,6 @@ async def get_repository_interaction_restrictions(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: interactions
-@mcp.tool()
-async def restrict_repository_interactions(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(..., description="The type of GitHub user permitted to interact with the repository while the restriction is active."),
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(None, description="The duration for which the interaction restriction will remain in effect."),
-) -> dict[str, Any]:
-    """Set temporary interaction restrictions on a repository to limit who can comment, open issues, or create pull requests. Requires owner or admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.InteractionsSetRestrictionsForRepoRequest(
-            path=_models.InteractionsSetRestrictionsForRepoRequestPath(owner=owner, repo=repo),
-            body=_models.InteractionsSetRestrictionsForRepoRequestBody(limit=limit, expiry=expiry)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for restrict_repository_interactions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/interaction-limits", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/interaction-limits"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("restrict_repository_interactions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("restrict_repository_interactions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="restrict_repository_interactions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -34209,45 +29372,6 @@ async def cancel_pages_deployment(
 
 # Tags: repos
 @mcp.tool()
-async def check_pages_health(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Check the DNS health status of a GitHub Pages domain configuration. The first request returns a 202 status and initiates an asynchronous health check; subsequent requests return the completed results with a 200 status."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposGetPagesHealthCheckRequest(
-            path=_models.ReposGetPagesHealthCheckRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for check_pages_health: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/pages/health", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/pages/health"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("check_pages_health")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("check_pages_health", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="check_pages_health",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def check_private_vulnerability_reporting(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
@@ -34278,84 +29402,6 @@ async def check_private_vulnerability_reporting(
     _response_data, _ = await _execute_tool_request(
         tool_name="check_private_vulnerability_reporting",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def enable_private_vulnerability_reporting(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Enable private vulnerability reporting for a repository, allowing security researchers to report vulnerabilities confidentially. The authenticated user must have admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposEnablePrivateVulnerabilityReportingRequest(
-            path=_models.ReposEnablePrivateVulnerabilityReportingRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_private_vulnerability_reporting: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/private-vulnerability-reporting", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/private-vulnerability-reporting"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_private_vulnerability_reporting")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("enable_private_vulnerability_reporting", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_private_vulnerability_reporting",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def disable_vulnerability_reporting(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Disable private vulnerability reporting for a repository. The authenticated user must have admin access to the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposDisablePrivateVulnerabilityReportingRequest(
-            path=_models.ReposDisablePrivateVulnerabilityReportingRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for disable_vulnerability_reporting: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/private-vulnerability-reporting", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/private-vulnerability-reporting"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("disable_vulnerability_reporting")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("disable_vulnerability_reporting", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="disable_vulnerability_reporting",
-        method="DELETE",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -36630,96 +31676,6 @@ async def list_branch_rules(
 
 # Tags: repos
 @mcp.tool()
-async def list_repository_rulesets(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    includes_parents: bool | None = Field(None, description="Include rulesets configured at higher organizational or enterprise levels that apply to this repository."),
-    targets: str | None = Field(None, description="Filter rulesets by one or more rule targets using a comma-separated list. Only rulesets that apply to the specified targets will be returned."),
-) -> dict[str, Any]:
-    """Retrieve all rulesets configured for a repository, optionally including inherited rulesets from parent levels and filtering by specific rule targets."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposGetRepoRulesetsRequest(
-            path=_models.ReposGetRepoRulesetsRequestPath(owner=owner, repo=repo),
-            query=_models.ReposGetRepoRulesetsRequestQuery(includes_parents=includes_parents, targets=targets)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_repository_rulesets: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/rulesets", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/rulesets"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_repository_rulesets")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_repository_rulesets", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_repository_rulesets",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def create_ruleset(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    name: str = Field(..., description="The name of the ruleset. This is a human-readable identifier for the ruleset."),
-    enforcement: Literal["disabled", "active", "evaluate"] = Field(..., description="The enforcement level of the ruleset. Use `disabled` to turn off the ruleset, `active` to enforce rules, or `evaluate` to allow admins to test rules before enforcing them (evaluate is only available with GitHub Enterprise)."),
-    bypass_actors: list[_models.RepositoryRulesetBypassActor] | None = Field(None, description="An array of actors (users, teams, or apps) that can bypass the rules in this ruleset. Bypass actors allow specified entities to push directly without triggering rule violations."),
-    rules: list[_models.RepositoryRule] | None = Field(None, description="An array of rules within the ruleset. Each rule defines specific protections or requirements for branches and tags covered by this ruleset."),
-) -> dict[str, Any]:
-    """Create a ruleset for a repository to enforce branch protection and merge policies. Rulesets allow you to define rules that apply to branches and tags, with support for testing rules before full enforcement."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposCreateRepoRulesetRequest(
-            path=_models.ReposCreateRepoRulesetRequestPath(owner=owner, repo=repo),
-            body=_models.ReposCreateRepoRulesetRequestBody(name=name, enforcement=enforcement, bypass_actors=bypass_actors, rules=rules)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_ruleset: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/rulesets", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/rulesets"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_ruleset")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_ruleset", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_ruleset",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
 async def list_rule_suites(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
@@ -36842,93 +31798,6 @@ async def get_ruleset(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def update_ruleset(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-    ruleset_id: int = Field(..., description="The ID of the ruleset to update."),
-    enforcement: Literal["disabled", "active", "evaluate"] | None = Field(None, description="The enforcement level of the ruleset. Use `disabled` to turn off the ruleset, `active` to enforce rules, or `evaluate` to allow admins to test rules before enforcing them (GitHub Enterprise only)."),
-    bypass_actors: list[_models.RepositoryRulesetBypassActor] | None = Field(None, description="An array of actors who can bypass the rules in this ruleset. Each actor is an object specifying the actor type and ID."),
-    rules: list[_models.RepositoryRule] | None = Field(None, description="An array of rules within the ruleset. Each rule object defines conditions and enforcement behavior for the repository."),
-    name: str | None = Field(None, description="The name of the ruleset."),
-) -> dict[str, Any]:
-    """Update an existing repository ruleset to modify its enforcement level, bypass actors, or rules. Changes take effect immediately on the repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposUpdateRepoRulesetRequest(
-            path=_models.ReposUpdateRepoRulesetRequestPath(owner=owner, repo=repo, ruleset_id=ruleset_id),
-            body=_models.ReposUpdateRepoRulesetRequestBody(enforcement=enforcement, bypass_actors=bypass_actors, rules=rules, name=name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_ruleset: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/rulesets/{ruleset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/rulesets/{ruleset_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_ruleset")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_ruleset", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_ruleset",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def delete_ruleset(
-    owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-    ruleset_id: int = Field(..., description="The unique identifier of the ruleset to delete."),
-) -> dict[str, Any]:
-    """Delete a ruleset from a repository. This permanently removes the specified ruleset and its associated rules."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposDeleteRepoRulesetRequest(
-            path=_models.ReposDeleteRepoRulesetRequestPath(owner=owner, repo=repo, ruleset_id=ruleset_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_ruleset: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/rulesets/{ruleset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/rulesets/{ruleset_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_ruleset")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_ruleset", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_ruleset",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 
@@ -38306,45 +33175,6 @@ async def list_popular_paths(
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_popular_paths",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: repos
-@mcp.tool()
-async def list_top_referrers(
-    owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
-    repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
-    """Retrieve the top 10 referral sources that drove traffic to a repository over the last 14 days. Useful for understanding which external sites are directing users to your repository."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ReposGetTopReferrersRequest(
-            path=_models.ReposGetTopReferrersRequestPath(owner=owner, repo=repo)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_top_referrers: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/repos/{owner}/{repo}/traffic/popular/referrers", _request.path.model_dump(by_alias=True)) if _request.path else "/repos/{owner}/{repo}/traffic/popular/referrers"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_top_referrers")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_top_referrers", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_top_referrers",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -40540,42 +35370,6 @@ async def list_app_installations_user() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def list_installation_repositories_for_user(installation_id: int = Field(..., description="The unique identifier of the app installation for which to list accessible repositories.")) -> dict[str, Any]:
-    """List repositories accessible to the authenticated user for a specific app installation. Returns repositories where the user has explicit read, write, or admin permissions, including owned repositories, collaborator repositories, and those accessible through organization membership."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsListInstallationReposForAuthenticatedUserRequest(
-            path=_models.AppsListInstallationReposForAuthenticatedUserRequestPath(installation_id=installation_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_installation_repositories_for_user: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/user/installations/{installation_id}/repositories", _request.path.model_dump(by_alias=True)) if _request.path else "/user/installations/{installation_id}/repositories"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_installation_repositories_for_user")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_installation_repositories_for_user", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_installation_repositories_for_user",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
 async def add_repository_to_installation(
     installation_id: int = Field(..., description="The unique identifier of the installation to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the installation."),
@@ -40672,74 +35466,6 @@ async def get_interaction_restrictions() -> dict[str, Any]:
     _response_data, _ = await _execute_tool_request(
         tool_name="get_interaction_restrictions",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: interactions
-@mcp.tool()
-async def restrict_user_interactions(
-    limit: Literal["existing_users", "contributors_only", "collaborators_only"] = Field(..., description="The type of GitHub user permitted to interact with your repositories during the restriction period."),
-    expiry: Literal["one_day", "three_days", "one_week", "one_month", "six_months"] | None = Field(None, description="How long the interaction restriction remains in effect before automatically expiring."),
-) -> dict[str, Any]:
-    """Set interaction restrictions for your public repositories to temporarily limit who can comment, open issues, or create pull requests. User-level restrictions override any limits set on individual repositories."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.InteractionsSetRestrictionsForAuthenticatedUserRequest(
-            body=_models.InteractionsSetRestrictionsForAuthenticatedUserRequestBody(limit=limit, expiry=expiry)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for restrict_user_interactions: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/user/interaction-limits"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("restrict_user_interactions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("restrict_user_interactions", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="restrict_user_interactions",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: interactions
-@mcp.tool()
-async def remove_interaction_restrictions_user() -> dict[str, Any]:
-    """Remove all interaction restrictions from your public repositories. This allows any user to interact with your repositories without limitations."""
-
-    # Extract parameters for API call
-    _http_path = "/user/interaction-limits"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_interaction_restrictions_user")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("remove_interaction_restrictions_user", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_interaction_restrictions_user",
-        method="DELETE",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -41120,51 +35846,6 @@ async def list_migrations() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: migrations
-@mcp.tool()
-async def start_user_migration(
-    repositories: list[str] = Field(..., description="List of repository identifiers to include in the migration. Order and format should match the API's repository identifier specification."),
-    lock_repositories: bool | None = Field(None, description="Lock all repositories being migrated at the start of the migration to prevent modifications during the process."),
-    exclude_git_data: bool | None = Field(None, description="Exclude repository git data (commit history, branches, tags) from the migration archive."),
-    exclude_attachments: bool | None = Field(None, description="Exclude file attachments from the migration archive."),
-    exclude_releases: bool | None = Field(None, description="Exclude release artifacts and release metadata from the migration archive."),
-    exclude_owner_projects: bool | None = Field(None, description="Exclude projects owned by the organization or users from the migration archive."),
-) -> dict[str, Any]:
-    """Initiates the generation of a user migration archive with configurable options to include or exclude specific data types and lock repositories during the migration process."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.MigrationsStartForAuthenticatedUserRequest(
-            body=_models.MigrationsStartForAuthenticatedUserRequestBody(lock_repositories=lock_repositories, exclude_git_data=exclude_git_data, exclude_attachments=exclude_attachments, exclude_releases=exclude_releases, exclude_owner_projects=exclude_owner_projects, repositories=repositories)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for start_user_migration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = "/user/migrations"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("start_user_migration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("start_user_migration", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="start_user_migration",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -44285,60 +38966,6 @@ async def list_watched_repositories_by_user(username: str = Field(..., descripti
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_watched_repositories_by_user",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: meta
-@mcp.tool()
-async def list_versions() -> dict[str, Any]:
-    """Retrieve all supported GitHub API versions available for use. This endpoint provides information about the API versions that can be utilized for GitHub API requests."""
-
-    # Extract parameters for API call
-    _http_path = "/versions"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_versions")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_versions", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_versions",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: meta
-@mcp.tool()
-async def get_zen() -> dict[str, Any]:
-    """Retrieve a random inspirational quote from the Zen of GitHub, a collection of programming philosophy principles."""
-
-    # Extract parameters for API call
-    _http_path = "/zen"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_zen")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_zen", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_zen",
         method="GET",
         path=_http_path,
         request_id=_request_id,
