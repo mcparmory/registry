@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CMA - Contentful Management API MCP Server
-Generated: 2026-04-06 17:14:54 UTC
+Generated: 2026-04-09 17:18:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -492,6 +492,9 @@ async def _make_request(
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -533,7 +536,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -797,10 +803,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -1033,9 +1044,11 @@ async def list_spaces() -> dict[str, Any]:
 
     # Extract parameters for API call
     _http_path = "/spaces"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_spaces")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_spaces", "GET", _http_path, _request_id)
@@ -1046,6 +1059,7 @@ async def list_spaces() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1070,6 +1084,7 @@ async def create_space(x_contentful_organization: str | None = Field(None, alias
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_space")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_space", "POST", _http_path, _request_id)
@@ -1101,9 +1116,11 @@ async def get_space(space_id: str = Field(..., description="The unique identifie
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_space")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_space", "GET", _http_path, _request_id)
@@ -1112,44 +1129,6 @@ async def get_space(space_id: str = Field(..., description="The unique identifie
     _response_data, _ = await _execute_tool_request(
         tool_name="get_space",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Spaces
-@mcp.tool()
-async def update_space(
-    space_id: str = Field(..., description="The unique identifier of the space to update."),
-    x_contentful_organization: str | None = Field(None, alias="X-Contentful-Organization", description="Optional organization ID to scope the operation within a specific organization context."),
-) -> dict[str, Any]:
-    """Update a space's name in your Contentful environment. Requires the current version number to prevent concurrent modification conflicts."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutSpacesRequest(
-            path=_models.PutSpacesRequestPath(space_id=space_id),
-            header=_models.PutSpacesRequestHeader(x_contentful_organization=x_contentful_organization)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_space: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}"
-    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_space")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_space", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_space",
-        method="PUT",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -1173,9 +1152,11 @@ async def delete_space(space_id: str = Field(..., description="The unique identi
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_space")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_space", "DELETE", _http_path, _request_id)
@@ -1186,6 +1167,7 @@ async def delete_space(space_id: str = Field(..., description="The unique identi
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1206,9 +1188,11 @@ async def list_environments(space_id: str = Field(..., description="The unique i
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_environments")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_environments", "GET", _http_path, _request_id)
@@ -1219,6 +1203,7 @@ async def list_environments(space_id: str = Field(..., description="The unique i
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1247,6 +1232,7 @@ async def create_environment(
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_environment")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_environment", "POST", _http_path, _request_id)
@@ -1281,9 +1267,11 @@ async def get_environment(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_environment")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_environment", "GET", _http_path, _request_id)
@@ -1294,6 +1282,7 @@ async def get_environment(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1317,9 +1306,11 @@ async def update_environment(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_environment")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_environment", "PUT", _http_path, _request_id)
@@ -1330,6 +1321,7 @@ async def update_environment(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1353,9 +1345,11 @@ async def delete_environment(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_environment")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_environment", "DELETE", _http_path, _request_id)
@@ -1366,6 +1360,7 @@ async def delete_environment(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1386,9 +1381,11 @@ async def list_environment_aliases(space_id: str = Field(..., description="The u
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment_aliases", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment_aliases"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_environment_aliases")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_environment_aliases", "GET", _http_path, _request_id)
@@ -1399,6 +1396,7 @@ async def list_environment_aliases(space_id: str = Field(..., description="The u
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1422,9 +1420,11 @@ async def get_environment_alias(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment_aliases/{environment_alias_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment_aliases/{environment_alias_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_environment_alias")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_environment_alias", "GET", _http_path, _request_id)
@@ -1435,6 +1435,7 @@ async def get_environment_alias(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1458,9 +1459,11 @@ async def create_or_update_environment_alias(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment_aliases/{environment_alias_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment_aliases/{environment_alias_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_environment_alias")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_or_update_environment_alias", "PUT", _http_path, _request_id)
@@ -1471,6 +1474,7 @@ async def create_or_update_environment_alias(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1494,9 +1498,11 @@ async def delete_environment_alias(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment_aliases/{environment_alias_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment_aliases/{environment_alias_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_environment_alias")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_environment_alias", "DELETE", _http_path, _request_id)
@@ -1507,6 +1513,7 @@ async def delete_environment_alias(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1518,9 +1525,11 @@ async def list_organizations() -> dict[str, Any]:
 
     # Extract parameters for API call
     _http_path = "/organizations"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_organizations")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_organizations", "GET", _http_path, _request_id)
@@ -1531,6 +1540,7 @@ async def list_organizations() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1554,9 +1564,11 @@ async def list_content_types(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_content_types")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_content_types", "GET", _http_path, _request_id)
@@ -1567,6 +1579,7 @@ async def list_content_types(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1590,9 +1603,11 @@ async def create_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_content_type", "POST", _http_path, _request_id)
@@ -1603,6 +1618,7 @@ async def create_content_type(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1627,9 +1643,11 @@ async def get_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_content_type", "GET", _http_path, _request_id)
@@ -1640,6 +1658,7 @@ async def get_content_type(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1664,9 +1683,11 @@ async def create_or_update_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_or_update_content_type", "PUT", _http_path, _request_id)
@@ -1677,6 +1698,7 @@ async def create_or_update_content_type(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1701,9 +1723,11 @@ async def delete_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_content_type", "DELETE", _http_path, _request_id)
@@ -1714,6 +1738,7 @@ async def delete_content_type(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1738,9 +1763,11 @@ async def publish_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("publish_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("publish_content_type", "PUT", _http_path, _request_id)
@@ -1751,6 +1778,7 @@ async def publish_content_type(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1775,9 +1803,11 @@ async def deactivate_content_type(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("deactivate_content_type")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("deactivate_content_type", "DELETE", _http_path, _request_id)
@@ -1788,6 +1818,7 @@ async def deactivate_content_type(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1811,9 +1842,11 @@ async def list_content_types_published(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/public/content_types", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/public/content_types"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_content_types_published")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_content_types_published", "GET", _http_path, _request_id)
@@ -1824,116 +1857,7 @@ async def list_content_types_published(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Editor Interface
-@mcp.tool()
-async def list_editor_interfaces(
-    space_id: str = Field(..., description="The unique identifier of the space containing the environment and editor interfaces."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space for which to retrieve editor interfaces."),
-) -> dict[str, Any]:
-    """Retrieve all editor interface configurations for a specific environment within a space. Editor interfaces define how content fields are presented and edited in the Contentful UI."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetSpacesEnvironmentsEditorInterfacesRequest(
-            path=_models.GetSpacesEnvironmentsEditorInterfacesRequestPath(space_id=space_id, environment_id=environment_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_editor_interfaces: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/editor_interfaces", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/editor_interfaces"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_editor_interfaces")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_editor_interfaces", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_editor_interfaces",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Editor Interface
-@mcp.tool()
-async def get_editor_interface(
-    space_id: str = Field(..., description="The unique identifier of the space containing the content type."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space."),
-    content_type_id: str = Field(..., description="The unique identifier of the content type for which to retrieve the editor interface configuration."),
-) -> dict[str, Any]:
-    """Retrieve the editor interface configuration for a specific content type. The editor interface defines how fields are displayed and organized in the Contentful web app."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetSpacesEnvironmentsContentTypesEditorInterfacesRequest(
-            path=_models.GetSpacesEnvironmentsContentTypesEditorInterfacesRequestPath(space_id=space_id, environment_id=environment_id, content_type_id=content_type_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_editor_interface: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/editor_interfaces", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/editor_interfaces"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_editor_interface")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_editor_interface", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_editor_interface",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Editor Interface
-@mcp.tool()
-async def update_editor_interface(
-    space_id: str = Field(..., description="The unique identifier of the space containing the content type whose editor interface you want to update."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space where the editor interface configuration will be updated."),
-    content_type_id: str = Field(..., description="The unique identifier of the content type whose editor interface you want to modify."),
-) -> dict[str, Any]:
-    """Update the editor interface configuration for a specific content type, controlling how fields are displayed and organized in the Contentful editor UI."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutSpacesEnvironmentsContentTypesEditorInterfacesRequest(
-            path=_models.PutSpacesEnvironmentsContentTypesEditorInterfacesRequestPath(space_id=space_id, environment_id=environment_id, content_type_id=content_type_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_editor_interface: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/editor_interfaces", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/editor_interfaces"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_editor_interface")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_editor_interface", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_editor_interface",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1957,9 +1881,11 @@ async def list_extensions(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/extensions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/extensions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_extensions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_extensions", "GET", _http_path, _request_id)
@@ -1970,42 +1896,7 @@ async def list_extensions(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: UI Extensions
-@mcp.tool()
-async def create_extension(
-    space_id: str = Field(..., description="The unique identifier of the space where the extension will be created."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space where the extension will be created."),
-) -> dict[str, Any]:
-    """Create a new UI extension within a specific environment. Extensions allow you to customize the Contentful editor interface with custom widgets and tools."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostSpacesEnvironmentsExtensionsRequest(
-            path=_models.PostSpacesEnvironmentsExtensionsRequestPath(space_id=space_id, environment_id=environment_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_extension: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/extensions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/extensions"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_extension")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_extension", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_extension",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2030,9 +1921,11 @@ async def get_extension(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_extension")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_extension", "GET", _http_path, _request_id)
@@ -2043,6 +1936,7 @@ async def get_extension(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2067,9 +1961,11 @@ async def create_or_update_extension(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_extension")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_or_update_extension", "PUT", _http_path, _request_id)
@@ -2080,6 +1976,7 @@ async def create_or_update_extension(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2104,9 +2001,11 @@ async def delete_extension(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/extensions/{extension_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_extension")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_extension", "DELETE", _http_path, _request_id)
@@ -2117,6 +2016,7 @@ async def delete_extension(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2143,9 +2043,11 @@ async def list_entries(
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_entries")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_entries", "GET", _http_path, _request_id)
@@ -2157,6 +2059,7 @@ async def list_entries(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2186,6 +2089,7 @@ async def create_entry(
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_entry", "POST", _http_path, _request_id)
@@ -2221,9 +2125,11 @@ async def get_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_entry", "GET", _http_path, _request_id)
@@ -2234,6 +2140,7 @@ async def get_entry(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2264,6 +2171,7 @@ async def upsert_entry(
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upsert_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("upsert_entry", "PUT", _http_path, _request_id)
@@ -2305,6 +2213,7 @@ async def update_entry(
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_entry", "PATCH", _http_path, _request_id)
@@ -2340,9 +2249,11 @@ async def delete_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_entry", "DELETE", _http_path, _request_id)
@@ -2353,6 +2264,7 @@ async def delete_entry(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2377,9 +2289,11 @@ async def list_entry_references(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/references", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/references"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_entry_references")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_entry_references", "GET", _http_path, _request_id)
@@ -2390,6 +2304,7 @@ async def list_entry_references(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2414,9 +2329,11 @@ async def publish_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("publish_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("publish_entry", "PUT", _http_path, _request_id)
@@ -2427,6 +2344,7 @@ async def publish_entry(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2451,9 +2369,11 @@ async def unpublish_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unpublish_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unpublish_entry", "DELETE", _http_path, _request_id)
@@ -2464,6 +2384,7 @@ async def unpublish_entry(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2488,9 +2409,11 @@ async def archive_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/archived", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/archived"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("archive_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("archive_entry", "PUT", _http_path, _request_id)
@@ -2501,6 +2424,7 @@ async def archive_entry(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2525,9 +2449,11 @@ async def unarchive_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/archived", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/archived"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unarchive_entry")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unarchive_entry", "DELETE", _http_path, _request_id)
@@ -2538,6 +2464,7 @@ async def unarchive_entry(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2558,9 +2485,11 @@ async def upload_file(space_id: str = Field(..., description="The unique identif
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/uploads", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/uploads"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_file")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("upload_file", "POST", _http_path, _request_id)
@@ -2571,6 +2500,7 @@ async def upload_file(space_id: str = Field(..., description="The unique identif
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2594,9 +2524,11 @@ async def get_upload(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/uploads/{upload_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/uploads/{upload_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_upload")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_upload", "GET", _http_path, _request_id)
@@ -2607,6 +2539,7 @@ async def get_upload(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2630,9 +2563,11 @@ async def delete_upload(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/uploads/{upload_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/uploads/{upload_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_upload")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_upload", "DELETE", _http_path, _request_id)
@@ -2643,6 +2578,7 @@ async def delete_upload(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2666,9 +2602,11 @@ async def list_assets(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_assets")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_assets", "GET", _http_path, _request_id)
@@ -2679,6 +2617,7 @@ async def list_assets(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2702,9 +2641,11 @@ async def create_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_asset", "POST", _http_path, _request_id)
@@ -2715,6 +2656,7 @@ async def create_asset(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2738,9 +2680,11 @@ async def list_published_assets(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/public/assets", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/public/assets"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_published_assets")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_published_assets", "GET", _http_path, _request_id)
@@ -2751,6 +2695,7 @@ async def list_published_assets(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2775,9 +2720,11 @@ async def get_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_asset", "GET", _http_path, _request_id)
@@ -2788,6 +2735,7 @@ async def get_asset(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2812,9 +2760,11 @@ async def create_or_update_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_or_update_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_or_update_asset", "PUT", _http_path, _request_id)
@@ -2825,6 +2775,7 @@ async def create_or_update_asset(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2849,9 +2800,11 @@ async def delete_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_asset", "DELETE", _http_path, _request_id)
@@ -2862,6 +2815,7 @@ async def delete_asset(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2887,9 +2841,11 @@ async def process_asset_file(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/files/{locale_code}/process", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/files/{locale_code}/process"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("process_asset_file")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("process_asset_file", "PUT", _http_path, _request_id)
@@ -2900,6 +2856,7 @@ async def process_asset_file(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2924,9 +2881,11 @@ async def publish_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("publish_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("publish_asset", "PUT", _http_path, _request_id)
@@ -2937,6 +2896,7 @@ async def publish_asset(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2961,9 +2921,11 @@ async def unpublish_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unpublish_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unpublish_asset", "DELETE", _http_path, _request_id)
@@ -2974,6 +2936,7 @@ async def unpublish_asset(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2998,9 +2961,11 @@ async def archive_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/archived", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/archived"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("archive_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("archive_asset", "PUT", _http_path, _request_id)
@@ -3011,6 +2976,7 @@ async def archive_asset(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3035,9 +3001,11 @@ async def unarchive_asset(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/archived", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/assets/{asset_id}/archived"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unarchive_asset")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unarchive_asset", "DELETE", _http_path, _request_id)
@@ -3048,6 +3016,7 @@ async def unarchive_asset(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3071,9 +3040,11 @@ async def create_asset_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/asset_keys", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/asset_keys"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_asset_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_asset_key", "POST", _http_path, _request_id)
@@ -3084,6 +3055,7 @@ async def create_asset_key(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3107,9 +3079,11 @@ async def list_locales(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/locales", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/locales"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_locales")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_locales", "GET", _http_path, _request_id)
@@ -3120,6 +3094,7 @@ async def list_locales(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3143,9 +3118,11 @@ async def create_locale(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/locales", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/locales"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_locale")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_locale", "POST", _http_path, _request_id)
@@ -3156,6 +3133,7 @@ async def create_locale(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3180,9 +3158,11 @@ async def get_locale(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_locale")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_locale", "GET", _http_path, _request_id)
@@ -3193,6 +3173,7 @@ async def get_locale(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3217,9 +3198,11 @@ async def update_locale(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_locale")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_locale", "PUT", _http_path, _request_id)
@@ -3230,6 +3213,7 @@ async def update_locale(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3254,9 +3238,11 @@ async def delete_locale(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/locales/{locale_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_locale")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_locale", "DELETE", _http_path, _request_id)
@@ -3267,6 +3253,7 @@ async def delete_locale(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3290,9 +3277,11 @@ async def list_environment_tags(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/tags", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/tags"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_environment_tags")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_environment_tags", "GET", _http_path, _request_id)
@@ -3303,6 +3292,7 @@ async def list_environment_tags(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3327,9 +3317,11 @@ async def get_tag(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_tag")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_tag", "GET", _http_path, _request_id)
@@ -3340,6 +3332,7 @@ async def get_tag(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3364,9 +3357,11 @@ async def create_tag(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_tag")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_tag", "POST", _http_path, _request_id)
@@ -3377,6 +3372,7 @@ async def create_tag(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3401,9 +3397,11 @@ async def update_tag(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_tag")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_tag", "PUT", _http_path, _request_id)
@@ -3414,6 +3412,7 @@ async def update_tag(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3438,9 +3437,11 @@ async def delete_tag(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/tags/{tag_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_tag")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_tag", "DELETE", _http_path, _request_id)
@@ -3451,6 +3452,7 @@ async def delete_tag(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3471,9 +3473,11 @@ async def list_webhooks(space_id: str = Field(..., description="The unique ident
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/webhook_definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhook_definitions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_webhooks")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_webhooks", "GET", _http_path, _request_id)
@@ -3484,39 +3488,7 @@ async def list_webhooks(space_id: str = Field(..., description="The unique ident
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Webhook
-@mcp.tool()
-async def create_webhook(space_id: str = Field(..., description="The unique identifier of the space where the webhook will be created (e.g., '5nvk6q4s3ttw').")) -> dict[str, Any]:
-    """Create a new webhook definition for a space to receive HTTP notifications when content changes. Webhooks enable real-time integration with external systems by posting events to your specified endpoint."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostSpacesWebhookDefinitionsRequest(
-            path=_models.PostSpacesWebhookDefinitionsRequestPath(space_id=space_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/webhook_definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhook_definitions"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_webhook")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_webhook", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_webhook",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3540,9 +3512,11 @@ async def list_webhook_calls(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/webhooks/{webhook_id}/calls", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhooks/{webhook_id}/calls"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_webhook_calls")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_webhook_calls", "GET", _http_path, _request_id)
@@ -3553,6 +3527,7 @@ async def list_webhook_calls(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3577,9 +3552,11 @@ async def get_webhook_call(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/webhooks/{webhook_id}/calls/{call_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhooks/{webhook_id}/calls/{call_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_webhook_call")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_webhook_call", "GET", _http_path, _request_id)
@@ -3590,6 +3567,7 @@ async def get_webhook_call(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3613,9 +3591,11 @@ async def check_webhook_health(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/webhooks/{webhook_id}/health", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhooks/{webhook_id}/health"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_webhook_health")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("check_webhook_health", "GET", _http_path, _request_id)
@@ -3626,6 +3606,7 @@ async def check_webhook_health(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3649,9 +3630,11 @@ async def get_webhook_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/webhook_definitions/{webhook_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhook_definitions/{webhook_definition_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_webhook_definition")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_webhook_definition", "GET", _http_path, _request_id)
@@ -3662,216 +3645,7 @@ async def get_webhook_definition(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Webhook
-@mcp.tool()
-async def upsert_webhook(
-    space_id: str = Field(..., description="The unique identifier of the space where the webhook will be created or updated."),
-    webhook_definition_id: str = Field(..., description="The unique identifier of the webhook definition to create or update."),
-) -> dict[str, Any]:
-    """Create a new webhook or update an existing one for a space. Webhooks allow you to receive HTTP notifications when content changes occur."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutSpacesWebhookDefinitionsRequest(
-            path=_models.PutSpacesWebhookDefinitionsRequestPath(space_id=space_id, webhook_definition_id=webhook_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for upsert_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/webhook_definitions/{webhook_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhook_definitions/{webhook_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("upsert_webhook")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("upsert_webhook", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="upsert_webhook",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Webhook
-@mcp.tool()
-async def delete_webhook(
-    space_id: str = Field(..., description="The unique identifier of the space containing the webhook definition to delete."),
-    webhook_definition_id: str = Field(..., description="The unique identifier of the webhook definition to delete."),
-) -> dict[str, Any]:
-    """Permanently delete a webhook definition from a space. This removes the webhook configuration and stops any further event notifications from being sent to the configured endpoint."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DeleteSpacesWebhookDefinitionsRequest(
-            path=_models.DeleteSpacesWebhookDefinitionsRequestPath(space_id=space_id, webhook_definition_id=webhook_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/webhook_definitions/{webhook_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/webhook_definitions/{webhook_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_webhook")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_webhook", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_webhook",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Roles
-@mcp.tool()
-async def list_roles(space_id: str = Field(..., description="The unique identifier of the Contentful space (e.g., '5nvk6q4s3ttw'). This space ID is required to fetch its associated roles.")) -> dict[str, Any]:
-    """Retrieve all roles available in a Contentful space. Roles define permissions and access control for space members."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetSpacesBySpaceIdRolesRequest(
-            path=_models.GetSpacesBySpaceIdRolesRequestPath(space_id=space_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_roles: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/roles", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/roles"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_roles")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_roles", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_roles",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Roles
-@mcp.tool()
-async def create_role(space_id: str = Field(..., description="The unique identifier of the Contentful space where the role will be created.")) -> dict[str, Any]:
-    """Create a new role within a Contentful space. Roles define permissions and access control for team members working in the space."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostSpacesRolesRequest(
-            path=_models.PostSpacesRolesRequestPath(space_id=space_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_role: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/roles", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/roles"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_role")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_role", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_role",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Roles
-@mcp.tool()
-async def get_role(
-    space_id: str = Field(..., description="The unique identifier of the space containing the role."),
-    role_id: str = Field(..., description="The unique identifier of the role to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve a specific role within a space. Returns the role's details including permissions and associated metadata."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetSpacesBySpaceIdRolesByRoleIdRequest(
-            path=_models.GetSpacesBySpaceIdRolesByRoleIdRequestPath(space_id=space_id, role_id=role_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_role: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/roles/{role_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/roles/{role_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_role")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_role", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_role",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Roles
-@mcp.tool()
-async def update_role(
-    space_id: str = Field(..., description="The unique identifier of the space containing the role to be updated."),
-    role_id: str = Field(..., description="The unique identifier of the role to be updated."),
-) -> dict[str, Any]:
-    """Update an existing role within a space. Modify role properties such as name, description, and permissions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutSpacesRolesRequest(
-            path=_models.PutSpacesRolesRequestPath(space_id=space_id, role_id=role_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_role: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/roles/{role_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/roles/{role_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_role")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_role", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_role",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3895,9 +3669,11 @@ async def delete_role(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/roles/{role_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/roles/{role_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_role")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_role", "DELETE", _http_path, _request_id)
@@ -3908,6 +3684,7 @@ async def delete_role(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3931,9 +3708,11 @@ async def list_entry_snapshots(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/master/entries/{entry_id}/snapshots", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/master/entries/{entry_id}/snapshots"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_entry_snapshots")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_entry_snapshots", "GET", _http_path, _request_id)
@@ -3944,6 +3723,7 @@ async def list_entry_snapshots(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3967,9 +3747,11 @@ async def list_content_type_snapshots(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/master/content_types/{content_type_id}/snapshots", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/master/content_types/{content_type_id}/snapshots"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_content_type_snapshots")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_content_type_snapshots", "GET", _http_path, _request_id)
@@ -3980,6 +3762,7 @@ async def list_content_type_snapshots(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4004,9 +3787,11 @@ async def get_content_type_snapshot(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/master/content_types/{content_type_id}/snapshots/{snapshot_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/master/content_types/{content_type_id}/snapshots/{snapshot_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_content_type_snapshot")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_content_type_snapshot", "GET", _http_path, _request_id)
@@ -4017,6 +3802,7 @@ async def get_content_type_snapshot(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4041,9 +3827,11 @@ async def get_entry_snapshot(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/master/entries/{entry_id}/snapshots/{snapshot_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/master/entries/{entry_id}/snapshots/{snapshot_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_entry_snapshot")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_entry_snapshot", "GET", _http_path, _request_id)
@@ -4054,6 +3842,7 @@ async def get_entry_snapshot(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4074,9 +3863,11 @@ async def list_space_memberships(space_id: str = Field(..., description="The uni
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/space_memberships", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/space_memberships"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_space_memberships")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_space_memberships", "GET", _http_path, _request_id)
@@ -4087,6 +3878,7 @@ async def list_space_memberships(space_id: str = Field(..., description="The uni
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4107,9 +3899,11 @@ async def create_space_membership(space_id: str = Field(..., description="The un
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/space_memberships", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/space_memberships"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_space_membership")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_space_membership", "POST", _http_path, _request_id)
@@ -4120,6 +3914,7 @@ async def create_space_membership(space_id: str = Field(..., description="The un
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4143,9 +3938,11 @@ async def get_space_membership(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/space_memberships/{space_membership_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/space_memberships/{space_membership_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_space_membership")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_space_membership", "GET", _http_path, _request_id)
@@ -4156,6 +3953,7 @@ async def get_space_membership(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4179,9 +3977,11 @@ async def update_space_membership(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/space_memberships/{space_membership_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/space_memberships/{space_membership_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_space_membership")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_space_membership", "PUT", _http_path, _request_id)
@@ -4192,6 +3992,7 @@ async def update_space_membership(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4215,9 +4016,11 @@ async def remove_space_member(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/space_memberships/{space_membership_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/space_memberships/{space_membership_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("remove_space_member")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("remove_space_member", "DELETE", _http_path, _request_id)
@@ -4228,6 +4031,7 @@ async def remove_space_member(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4248,9 +4052,11 @@ async def list_teams(space_id: str = Field(..., description="The unique identifi
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/teams", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/teams"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_teams")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_teams", "GET", _http_path, _request_id)
@@ -4261,6 +4067,7 @@ async def list_teams(space_id: str = Field(..., description="The unique identifi
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4284,9 +4091,11 @@ async def get_delivery_api_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/api_keys/{api_key_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/api_keys/{api_key_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_delivery_api_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_delivery_api_key", "GET", _http_path, _request_id)
@@ -4297,6 +4106,7 @@ async def get_delivery_api_key(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4320,9 +4130,11 @@ async def update_delivery_api_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/api_keys/{api_key_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/api_keys/{api_key_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_delivery_api_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_delivery_api_key", "PUT", _http_path, _request_id)
@@ -4333,6 +4145,7 @@ async def update_delivery_api_key(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4356,9 +4169,11 @@ async def delete_delivery_api_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/api_keys/{api_key_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/api_keys/{api_key_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_delivery_api_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_delivery_api_key", "DELETE", _http_path, _request_id)
@@ -4369,6 +4184,7 @@ async def delete_delivery_api_key(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4389,9 +4205,11 @@ async def list_delivery_api_keys(space_id: str = Field(..., description="The uni
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/api_keys", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/api_keys"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_delivery_api_keys")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_delivery_api_keys", "GET", _http_path, _request_id)
@@ -4402,6 +4220,7 @@ async def list_delivery_api_keys(space_id: str = Field(..., description="The uni
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4422,9 +4241,11 @@ async def create_delivery_api_key(space_id: str = Field(..., description="The un
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/api_keys", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/api_keys"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_delivery_api_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_delivery_api_key", "POST", _http_path, _request_id)
@@ -4435,6 +4256,7 @@ async def create_delivery_api_key(space_id: str = Field(..., description="The un
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4455,9 +4277,11 @@ async def list_preview_api_keys(space_id: str = Field(..., description="The uniq
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/preview_api_keys", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/preview_api_keys"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_preview_api_keys")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_preview_api_keys", "GET", _http_path, _request_id)
@@ -4468,6 +4292,7 @@ async def list_preview_api_keys(space_id: str = Field(..., description="The uniq
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4491,9 +4316,11 @@ async def get_preview_api_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/preview_api_keys/{preview_api_key_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/preview_api_keys/{preview_api_key_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_preview_api_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_preview_api_key", "GET", _http_path, _request_id)
@@ -4504,6 +4331,7 @@ async def get_preview_api_key(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4515,9 +4343,11 @@ async def list_access_tokens() -> dict[str, Any]:
 
     # Extract parameters for API call
     _http_path = "/users/me/access_tokens"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_access_tokens")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_access_tokens", "GET", _http_path, _request_id)
@@ -4528,30 +4358,7 @@ async def list_access_tokens() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: Personal Access token
-@mcp.tool()
-async def create_access_token() -> dict[str, Any]:
-    """Generate a new personal access token for authenticating API requests on behalf of the current user. This token can be used to access the Content Management API without exposing your main credentials."""
-
-    # Extract parameters for API call
-    _http_path = "/users/me/access_tokens"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_access_token")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_access_token", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_access_token",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4572,9 +4379,11 @@ async def get_access_token(token_id: str = Field(..., description="The unique id
 
     # Extract parameters for API call
     _http_path = _build_path("/users/me/access_tokens/{token_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/me/access_tokens/{token_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_access_token")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_access_token", "GET", _http_path, _request_id)
@@ -4585,6 +4394,7 @@ async def get_access_token(token_id: str = Field(..., description="The unique id
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4605,9 +4415,11 @@ async def revoke_access_token(token_id: str = Field(..., description="The unique
 
     # Extract parameters for API call
     _http_path = _build_path("/users/me/access_tokens/{token_id}/revoked", _request.path.model_dump(by_alias=True)) if _request.path else "/users/me/access_tokens/{token_id}/revoked"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("revoke_access_token")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("revoke_access_token", "PUT", _http_path, _request_id)
@@ -4618,6 +4430,7 @@ async def revoke_access_token(token_id: str = Field(..., description="The unique
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4629,9 +4442,11 @@ async def get_current_user() -> dict[str, Any]:
 
     # Extract parameters for API call
     _http_path = "/users/me"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_current_user")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_current_user", "GET", _http_path, _request_id)
@@ -4642,6 +4457,7 @@ async def get_current_user() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4666,9 +4482,11 @@ async def list_entry_tasks(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_entry_tasks")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_entry_tasks", "GET", _http_path, _request_id)
@@ -4679,6 +4497,7 @@ async def list_entry_tasks(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4703,9 +4522,11 @@ async def create_entry_task(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_entry_task")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_entry_task", "POST", _http_path, _request_id)
@@ -4716,6 +4537,7 @@ async def create_entry_task(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4741,9 +4563,11 @@ async def get_task(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_task")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_task", "GET", _http_path, _request_id)
@@ -4754,6 +4578,7 @@ async def get_task(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4779,9 +4604,11 @@ async def update_task(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_task")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_task", "PUT", _http_path, _request_id)
@@ -4792,6 +4619,7 @@ async def update_task(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4817,9 +4645,11 @@ async def delete_task(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/tasks/{task_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_task")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_task", "DELETE", _http_path, _request_id)
@@ -4830,6 +4660,7 @@ async def delete_task(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4850,9 +4681,11 @@ async def list_scheduled_actions(space_id: str = Field(..., description="The uni
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/scheduled_actions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/scheduled_actions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_scheduled_actions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_scheduled_actions", "GET", _http_path, _request_id)
@@ -4863,6 +4696,7 @@ async def list_scheduled_actions(space_id: str = Field(..., description="The uni
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4883,9 +4717,11 @@ async def create_scheduled_action(space_id: str = Field(..., description="The un
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/scheduled_actions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/scheduled_actions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_scheduled_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_scheduled_action", "POST", _http_path, _request_id)
@@ -4896,6 +4732,7 @@ async def create_scheduled_action(space_id: str = Field(..., description="The un
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4919,9 +4756,11 @@ async def update_scheduled_action(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/scheduled_actions/{scheduled_action_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/scheduled_actions/{scheduled_action_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_scheduled_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_scheduled_action", "PUT", _http_path, _request_id)
@@ -4932,6 +4771,7 @@ async def update_scheduled_action(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4955,9 +4795,11 @@ async def cancel_scheduled_action(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/scheduled_actions/{scheduled_action_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/scheduled_actions/{scheduled_action_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_scheduled_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("cancel_scheduled_action", "DELETE", _http_path, _request_id)
@@ -4968,6 +4810,7 @@ async def cancel_scheduled_action(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4991,9 +4834,11 @@ async def list_releases(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_releases")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_releases", "GET", _http_path, _request_id)
@@ -5004,6 +4849,7 @@ async def list_releases(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5027,9 +4873,11 @@ async def create_environment_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_environment_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_environment_release", "POST", _http_path, _request_id)
@@ -5040,6 +4888,7 @@ async def create_environment_release(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5064,9 +4913,11 @@ async def validate_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/validate", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/validate"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("validate_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("validate_release", "POST", _http_path, _request_id)
@@ -5077,6 +4928,7 @@ async def validate_release(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5101,9 +4953,11 @@ async def list_release_actions(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/actions", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/actions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_release_actions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_release_actions", "GET", _http_path, _request_id)
@@ -5114,6 +4968,7 @@ async def list_release_actions(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5139,9 +4994,11 @@ async def get_release_action(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/actions/{release_action_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/actions/{release_action_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_release_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_release_action", "GET", _http_path, _request_id)
@@ -5152,6 +5009,7 @@ async def get_release_action(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5176,9 +5034,11 @@ async def publish_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("publish_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("publish_release", "PUT", _http_path, _request_id)
@@ -5189,6 +5049,7 @@ async def publish_release(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5213,9 +5074,11 @@ async def unpublish_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/published", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}/published"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unpublish_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unpublish_release", "DELETE", _http_path, _request_id)
@@ -5226,6 +5089,7 @@ async def unpublish_release(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5250,9 +5114,11 @@ async def get_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_release", "GET", _http_path, _request_id)
@@ -5263,6 +5129,7 @@ async def get_release(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5287,9 +5154,11 @@ async def update_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_release", "PUT", _http_path, _request_id)
@@ -5300,6 +5169,7 @@ async def update_release(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5324,9 +5194,11 @@ async def delete_release(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/releases/{releases_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_release")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_release", "DELETE", _http_path, _request_id)
@@ -5337,6 +5209,7 @@ async def delete_release(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5361,9 +5234,11 @@ async def get_bulk_action(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/bulk_actions/actions/{bulk_action_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/bulk_actions/actions/{bulk_action_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_bulk_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_bulk_action", "GET", _http_path, _request_id)
@@ -5374,6 +5249,7 @@ async def get_bulk_action(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5397,9 +5273,11 @@ async def publish_scheduled_actions(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/bulk_actions/publish", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/bulk_actions/publish"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("publish_scheduled_actions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("publish_scheduled_actions", "POST", _http_path, _request_id)
@@ -5410,6 +5288,7 @@ async def publish_scheduled_actions(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5433,9 +5312,11 @@ async def unpublish_scheduled_actions(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/bulk_actions/unpublish", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/bulk_actions/unpublish"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unpublish_scheduled_actions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("unpublish_scheduled_actions", "POST", _http_path, _request_id)
@@ -5446,6 +5327,7 @@ async def unpublish_scheduled_actions(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5469,9 +5351,11 @@ async def validate_scheduled_bulk_action(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environment/{environment_id}/bulk_actions/validate", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environment/{environment_id}/bulk_actions/validate"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("validate_scheduled_bulk_action")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("validate_scheduled_bulk_action", "POST", _http_path, _request_id)
@@ -5482,6 +5366,7 @@ async def validate_scheduled_bulk_action(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5502,9 +5387,11 @@ async def list_app_definitions(organization_id: str = Field(..., description="Th
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_app_definitions")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_app_definitions", "GET", _http_path, _request_id)
@@ -5515,111 +5402,7 @@ async def list_app_definitions(organization_id: str = Field(..., description="Th
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App definitions
-@mcp.tool()
-async def create_app_definition(organization_id: str = Field(..., description="The unique identifier of the organization where the app definition will be created.")) -> dict[str, Any]:
-    """Create a new app definition within an organization. App definitions specify the configuration and metadata for custom apps that can be installed and used within Contentful."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostOrganizationsAppDefinitionsRequest(
-            path=_models.PostOrganizationsAppDefinitionsRequestPath(organization_id=organization_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_app_definition: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_app_definition")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_app_definition", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_app_definition",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App definitions
-@mcp.tool()
-async def get_app_definition(
-    organization_id: str = Field(..., description="The unique identifier of the organization containing the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve a specific app definition by its ID within an organization. App definitions describe the configuration and metadata for apps installed in Contentful."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequest(
-            path=_models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_definition: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_definition")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_definition", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_definition",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App definitions
-@mcp.tool()
-async def update_app_definition(
-    organization_id: str = Field(..., description="The unique identifier of the organization that contains the app definition to be updated."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition to be updated."),
-) -> dict[str, Any]:
-    """Update an existing app definition within an organization. This allows you to modify the configuration and properties of a previously created app definition."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutOrganizationsAppDefinitionsRequest(
-            path=_models.PutOrganizationsAppDefinitionsRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_app_definition: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_app_definition")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_app_definition", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_app_definition",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5643,9 +5426,11 @@ async def delete_app_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_app_definition")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_app_definition", "DELETE", _http_path, _request_id)
@@ -5656,332 +5441,7 @@ async def delete_app_definition(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App uploads
-@mcp.tool()
-async def get_app_upload(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app upload."),
-    app_upload_id: str = Field(..., description="The unique identifier of the app upload to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve details of a specific app upload within an organization. This returns metadata and status information about a previously uploaded app package."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsAppUploadsRequest(
-            path=_models.GetOrganizationsAppUploadsRequestPath(organization_id=organization_id, app_upload_id=app_upload_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_upload: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_uploads/{app_upload_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_uploads/{app_upload_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_upload")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_upload", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_upload",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App uploads
-@mcp.tool()
-async def create_app_upload(
-    organization_id: str = Field(..., description="The unique identifier of the organization where the app upload will be created."),
-    app_upload_id: str = Field(..., description="The unique identifier of the app upload resource to be created."),
-) -> dict[str, Any]:
-    """Create a new app upload for an organization. This operation initializes an app upload resource that can be used to manage application bundles and assets."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostOrganizationsAppUploadsRequest(
-            path=_models.PostOrganizationsAppUploadsRequestPath(organization_id=organization_id, app_upload_id=app_upload_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_app_upload: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_uploads/{app_upload_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_uploads/{app_upload_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_app_upload")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_app_upload", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_app_upload",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App bundles
-@mcp.tool()
-async def list_app_bundles(
-    organization_id: str = Field(..., description="The unique identifier of the organization containing the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to retrieve associated app bundles."),
-) -> dict[str, Any]:
-    """Retrieve all app bundles associated with a specific app definition within an organization. App bundles are collections of app configuration and resources."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequest(
-            path=_models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_app_bundles: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_app_bundles")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("list_app_bundles", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_app_bundles",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App bundles
-@mcp.tool()
-async def create_app_bundle(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition under which the app bundle will be created."),
-) -> dict[str, Any]:
-    """Create a new app bundle within an organization's app definition. App bundles package application code and configuration for deployment."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostOrganizationsAppDefinitionsAppBundlesRequest(
-            path=_models.PostOrganizationsAppDefinitionsAppBundlesRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_app_bundle: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_app_bundle")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_app_bundle", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_app_bundle",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App bundles
-@mcp.tool()
-async def get_app_bundle(
-    organization_id: str = Field(..., description="The unique identifier of the organization that contains the app definition and app bundle."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition that contains the app bundle."),
-    app_bundle_id: str = Field(..., description="The unique identifier of the app bundle to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve a specific app bundle within an app definition. This returns the configuration and metadata for a single app bundle identified by its ID."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequest(
-            path=_models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequestPath(organization_id=organization_id, app_definition_id=app_definition_id, app_bundle_id=app_bundle_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_bundle: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles/{app_bundle_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles/{app_bundle_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_bundle")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_bundle", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_bundle",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App bundles
-@mcp.tool()
-async def delete_app_bundle(
-    organization_id: str = Field(..., description="The unique identifier of the organization that contains the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition that contains the app bundle to be deleted."),
-    app_bundle_id: str = Field(..., description="The unique identifier of the app bundle to delete."),
-) -> dict[str, Any]:
-    """Permanently delete an app bundle from an app definition within an organization. This action cannot be undone."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DeleteOrganizationsAppDefinitionsAppBundlesRequest(
-            path=_models.DeleteOrganizationsAppDefinitionsAppBundlesRequestPath(organization_id=organization_id, app_definition_id=app_definition_id, app_bundle_id=app_bundle_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_app_bundle: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles/{app_bundle_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/app_bundles/{app_bundle_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_app_bundle")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_app_bundle", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_app_bundle",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App event subscriptions
-@mcp.tool()
-async def get_app_event_subscription(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition whose event subscription configuration you want to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve the event subscription configuration for a specific app definition within an organization. This returns the webhook and event settings that determine which events trigger notifications for the app."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsAppDefinitionsEventSubscriptionRequest(
-            path=_models.GetOrganizationsAppDefinitionsEventSubscriptionRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_event_subscription: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_event_subscription")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_event_subscription", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_event_subscription",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App event subscriptions
-@mcp.tool()
-async def update_app_event_subscription(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to update the event subscription."),
-) -> dict[str, Any]:
-    """Update or create an event subscription for an app definition, enabling the app to receive notifications for specified events within an organization."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutOrganizationsAppDefinitionsEventSubscriptionRequest(
-            path=_models.PutOrganizationsAppDefinitionsEventSubscriptionRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_app_event_subscription: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_app_event_subscription")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("update_app_event_subscription", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_app_event_subscription",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App event subscriptions
-@mcp.tool()
-async def delete_app_event_subscription(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition from which to remove the event subscription."),
-) -> dict[str, Any]:
-    """Remove an event subscription from an app definition. This prevents the app from receiving event notifications for the specified app definition."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DeleteOrganizationsAppDefinitionsEventSubscriptionRequest(
-            path=_models.DeleteOrganizationsAppDefinitionsEventSubscriptionRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_app_event_subscription: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/event_subscription"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_app_event_subscription")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("delete_app_event_subscription", "DELETE", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_app_event_subscription",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6005,9 +5465,11 @@ async def get_app_signing_secret(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_app_signing_secret")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_app_signing_secret", "GET", _http_path, _request_id)
@@ -6018,6 +5480,7 @@ async def get_app_signing_secret(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6041,9 +5504,11 @@ async def set_app_signing_secret(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("set_app_signing_secret")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("set_app_signing_secret", "PUT", _http_path, _request_id)
@@ -6054,6 +5519,7 @@ async def set_app_signing_secret(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6077,9 +5543,11 @@ async def revoke_app_signing_secret(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/signing_secret"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("revoke_app_signing_secret")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("revoke_app_signing_secret", "DELETE", _http_path, _request_id)
@@ -6090,42 +5558,7 @@ async def revoke_app_signing_secret(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App signed request
-@mcp.tool()
-async def create_app_signed_request(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app installation."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to create the signed request."),
-) -> dict[str, Any]:
-    """Generate a signed request for an app installation within an organization. This is used to authenticate and authorize app operations in Contentful."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostOrganizationsAppInstallationsSignedRequest(
-            path=_models.PostOrganizationsAppInstallationsSignedRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_app_signed_request: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_installations/{app_definition_id}/signed_request", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_installations/{app_definition_id}/signed_request"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_app_signed_request")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_app_signed_request", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_app_signed_request",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6149,9 +5582,11 @@ async def list_app_keys(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/keys", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/keys"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_app_keys")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_app_keys", "GET", _http_path, _request_id)
@@ -6162,79 +5597,7 @@ async def list_app_keys(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App keys
-@mcp.tool()
-async def create_app_key(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to create the new key."),
-) -> dict[str, Any]:
-    """Create a new API key for an app definition within an organization. This key can be used to authenticate requests on behalf of the app."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostOrganizationsAppDefinitionsKeysRequest(
-            path=_models.PostOrganizationsAppDefinitionsKeysRequestPath(organization_id=organization_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_app_key: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/keys", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/keys"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_app_key")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("create_app_key", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_app_key",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App keys
-@mcp.tool()
-async def get_app_key(
-    organization_id: str = Field(..., description="The unique identifier of the organization that owns the app definition."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition containing the key."),
-    key_kid: str = Field(..., description="The unique identifier (kid) of the specific key to retrieve."),
-) -> dict[str, Any]:
-    """Retrieve a specific cryptographic key associated with an app definition. This key is used for secure communication and authentication with the app."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequest(
-            path=_models.GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequestPath(organization_id=organization_id, app_definition_id=app_definition_id, key_kid=key_kid)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_key: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/keys/{key_kid}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/keys/{key_kid}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_key")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_key", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_key",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6259,9 +5622,11 @@ async def delete_app_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/app_definitions/{app_definition_id}/keys/{key_kid}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/app_definitions/{app_definition_id}/keys/{key_kid}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_app_key")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_app_key", "DELETE", _http_path, _request_id)
@@ -6272,6 +5637,7 @@ async def delete_app_key(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6295,9 +5661,11 @@ async def list_app_installations(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/app_installations", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/app_installations"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_app_installations")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_app_installations", "GET", _http_path, _request_id)
@@ -6308,80 +5676,7 @@ async def list_app_installations(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App Installations
-@mcp.tool()
-async def get_app_installation(
-    space_id: str = Field(..., description="The unique identifier of the space containing the app installation."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space where the app is installed."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition for which to retrieve the installation details."),
-) -> dict[str, Any]:
-    """Retrieve a specific app installation configuration for an app within a given space and environment. This returns the installation details and settings for the specified app definition."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequest(
-            path=_models.GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequestPath(space_id=space_id, environment_id=environment_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app_installation: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app_installation")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_app_installation", "GET", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app_installation",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-    )
-
-    return _response_data
-
-# Tags: App Installations
-@mcp.tool()
-async def install_app(
-    space_id: str = Field(..., description="The unique identifier of the Contentful space where the app will be installed or updated."),
-    environment_id: str = Field(..., description="The unique identifier of the environment within the space where the app installation will be managed."),
-    app_definition_id: str = Field(..., description="The unique identifier of the app definition to install or update."),
-) -> dict[str, Any]:
-    """Install a new app or update an existing app installation in a specific environment. This operation manages app configurations within a Contentful space and environment."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutSpacesEnvironmentsAppInstallationsRequest(
-            path=_models.PutSpacesEnvironmentsAppInstallationsRequestPath(space_id=space_id, environment_id=environment_id, app_definition_id=app_definition_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for install_app: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Extract parameters for API call
-    _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}"
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("install_app")
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("install_app", "PUT", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="install_app",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6406,9 +5701,11 @@ async def uninstall_app(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("uninstall_app")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("uninstall_app", "DELETE", _http_path, _request_id)
@@ -6419,6 +5716,7 @@ async def uninstall_app(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6443,9 +5741,11 @@ async def issue_app_installation_access_token(
 
     # Extract parameters for API call
     _http_path = _build_path("/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}/access_tokens", _request.path.model_dump(by_alias=True)) if _request.path else "/spaces/{space_id}/environments/{environment_id}/app_installations/{app_definition_id}/access_tokens"
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("issue_app_installation_access_token")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("issue_app_installation_access_token", "POST", _http_path, _request_id)
@@ -6456,6 +5756,7 @@ async def issue_app_installation_access_token(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6484,9 +5785,11 @@ async def list_organization_usage_metrics(
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/organization_periodic_usages", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/organization_periodic_usages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_organization_usage_metrics")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_organization_usage_metrics", "GET", _http_path, _request_id)
@@ -6498,6 +5801,7 @@ async def list_organization_usage_metrics(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6526,9 +5830,11 @@ async def list_space_periodic_usages(
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{organization_id}/space_periodic_usages", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{organization_id}/space_periodic_usages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_space_periodic_usages")
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_space_periodic_usages", "GET", _http_path, _request_id)
@@ -6540,6 +5846,7 @@ async def list_space_periodic_usages(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data

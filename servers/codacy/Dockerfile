@@ -1,8 +1,8 @@
-# Codacy API MCP Server
+# Codacy MCP Server
 #
 # Usage:
-#   1. Build: docker build -t mcparmory-codacy-api .
-#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-codacy-api
+#   1. Build: docker build -t mcparmory-codacy .
+#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-codacy
 #
 # The .env file should contain your API credentials.
 # See the generated .env file for required variables.
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Codacy API MCP Server" \
+LABEL org.opencontainers.image.title="Codacy MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

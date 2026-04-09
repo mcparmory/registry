@@ -1,7 +1,6 @@
-# Codacy API MCP Server
+# Codacy MCP Server
 
 Base URL: https://app.codacy.com/api/v3
-
 ## API Info
 - **API License:** Codacy. All rights reserved — [https://www.codacy.com](https://www.codacy.com)
 - **Contact:** Codacy Team (code@codacy.com) — [https://www.codacy.com](https://www.codacy.com)
@@ -14,15 +13,15 @@ Base URL: https://app.codacy.com/api/v3
 
 ```bash
 API_KEY=YOUR_API_KEY \
-uvx mcparmory-codacy-api
+uvx mcparmory-codacy
 ```
 
 ### With pip
 
 ```bash
-pip install mcparmory-codacy-api
+pip install mcparmory-codacy
 API_KEY=YOUR_API_KEY \
-mcparmory-codacy-api
+mcparmory-codacy
 ```
 
 ### MCP Client Configuration
@@ -32,9 +31,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 ```json
 {
   "mcpServers": {
-    "codacy-api": {
+    "codacy": {
       "command": "uvx",
-      "args": ["mcparmory-codacy-api"],
+      "args": ["mcparmory-codacy"],
       "env": {
         "API_KEY": "YOUR_API_KEY"
       }
@@ -67,13 +66,13 @@ python server.py
 
 Edit `.mcp.json` and replace `<SERVER_DIR>` with the absolute path to this directory, then add to your MCP client configuration.
 
-Example (if server is at `/home/user/mcp-servers/codacy-api`):
+Example (if server is at `/home/user/mcp-servers/codacy`):
 ```json
 {
   "mcpServers": {
-    "codacy-api": {
+    "codacy": {
       "command": "python",
-      "args": ["/home/user/mcp-servers/codacy-api/server.py"]
+      "args": ["/home/user/mcp-servers/codacy/server.py"]
     }
   }
 }
@@ -86,15 +85,15 @@ Example (if server is at `/home/user/mcp-servers/codacy-api`):
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
-docker build -t codacy-api .
-docker run -p 8000:8000 --env-file .env codacy-api
+docker build -t codacy .
+docker run -p 8000:8000 --env-file .env codacy
 ```
 
 **Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
-    "codacy-api": {
+    "codacy": {
       "type": "sse",
       "url": "http://localhost:8000/sse"
     }

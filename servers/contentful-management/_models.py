@@ -1,7 +1,7 @@
 """
 Cma - Contentful Management Api MCP Server - Pydantic Models
 
-Generated: 2026-04-06 17:14:54 UTC
+Generated: 2026-04-09 17:18:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -11,8 +11,6 @@ from _validators import StrictModel
 from pydantic import Field
 
 __all__ = [
-    "DeleteOrganizationsAppDefinitionsAppBundlesRequest",
-    "DeleteOrganizationsAppDefinitionsEventSubscriptionRequest",
     "DeleteOrganizationsAppDefinitionsKeysRequest",
     "DeleteOrganizationsAppDefinitionsRequest",
     "DeleteOrganizationsAppDefinitionsSigningSecretRequest",
@@ -39,15 +37,8 @@ __all__ = [
     "DeleteSpacesScheduledActionsRequest",
     "DeleteSpacesSpaceMembershipsRequest",
     "DeleteSpacesUploadsRequest",
-    "DeleteSpacesWebhookDefinitionsRequest",
-    "GetOrganizationsAppDefinitionsEventSubscriptionRequest",
     "GetOrganizationsAppDefinitionsSigningSecretRequest",
-    "GetOrganizationsAppUploadsRequest",
-    "GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequest",
-    "GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequest",
-    "GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequest",
     "GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysRequest",
-    "GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequest",
     "GetOrganizationsByOrganizationIdAppDefinitionsRequest",
     "GetOrganizationsOrganizationPeriodicUsagesRequest",
     "GetOrganizationsSpacePeriodicUsagesRequest",
@@ -59,7 +50,6 @@ __all__ = [
     "GetSpacesBySpaceIdEnvironmentByEnvironmentIdReleasesByReleasesIdActionsRequest",
     "GetSpacesBySpaceIdEnvironmentByEnvironmentIdReleasesByReleasesIdRequest",
     "GetSpacesBySpaceIdEnvironmentByEnvironmentIdReleasesRequest",
-    "GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequest",
     "GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsRequest",
     "GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAssetsByAssetIdRequest",
     "GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAssetsRequest",
@@ -84,8 +74,6 @@ __all__ = [
     "GetSpacesBySpaceIdPreviewApiKeysByPreviewApiKeyIdRequest",
     "GetSpacesBySpaceIdPreviewApiKeysRequest",
     "GetSpacesBySpaceIdRequest",
-    "GetSpacesBySpaceIdRolesByRoleIdRequest",
-    "GetSpacesBySpaceIdRolesRequest",
     "GetSpacesBySpaceIdSpaceMembershipsBySpaceMembershipIdRequest",
     "GetSpacesBySpaceIdSpaceMembershipsRequest",
     "GetSpacesBySpaceIdWebhookDefinitionsByWebhookDefinitionIdRequest",
@@ -93,8 +81,6 @@ __all__ = [
     "GetSpacesBySpaceIdWebhooksByWebhookIdCallsByCallIdRequest",
     "GetSpacesBySpaceIdWebhooksByWebhookIdCallsRequest",
     "GetSpacesEnvironmentBulkActionsActionsRequest",
-    "GetSpacesEnvironmentsContentTypesEditorInterfacesRequest",
-    "GetSpacesEnvironmentsEditorInterfacesRequest",
     "GetSpacesEnvironmentsEntriesReferencesRequest",
     "GetSpacesEnvironmentsPublicAssetsRequest",
     "GetSpacesEnvironmentsPublicContentTypesRequest",
@@ -104,11 +90,6 @@ __all__ = [
     "GetSpacesWebhooksHealthRequest",
     "GetUsersMeAccessTokensByTokenIdRequest",
     "PatchSpacesEnvironmentsEntriesRequest",
-    "PostOrganizationsAppDefinitionsAppBundlesRequest",
-    "PostOrganizationsAppDefinitionsKeysRequest",
-    "PostOrganizationsAppDefinitionsRequest",
-    "PostOrganizationsAppInstallationsSignedRequest",
-    "PostOrganizationsAppUploadsRequest",
     "PostSpacesApiKeysRequest",
     "PostSpacesEnvironmentBulkActionsPublishRequest",
     "PostSpacesEnvironmentBulkActionsUnpublishRequest",
@@ -121,29 +102,22 @@ __all__ = [
     "PostSpacesEnvironmentsContentTypesRequest",
     "PostSpacesEnvironmentsEntriesRequest",
     "PostSpacesEnvironmentsEntriesTasksRequest",
-    "PostSpacesEnvironmentsExtensionsRequest",
     "PostSpacesEnvironmentsLocalesRequest",
     "PostSpacesEnvironmentsRequest",
     "PostSpacesEnvironmentsTagsRequest",
     "PostSpacesRequest",
-    "PostSpacesRolesRequest",
     "PostSpacesScheduledActionsRequest",
     "PostSpacesSpaceMembershipsRequest",
     "PostSpacesUploadsRequest",
-    "PostSpacesWebhookDefinitionsRequest",
-    "PutOrganizationsAppDefinitionsEventSubscriptionRequest",
-    "PutOrganizationsAppDefinitionsRequest",
     "PutOrganizationsAppDefinitionsSigningSecretRequest",
     "PutSpacesApiKeysRequest",
     "PutSpacesEnvironmentAliasesRequest",
     "PutSpacesEnvironmentReleasesPublishedRequest",
     "PutSpacesEnvironmentReleasesRequest",
-    "PutSpacesEnvironmentsAppInstallationsRequest",
     "PutSpacesEnvironmentsAssetsArchivedRequest",
     "PutSpacesEnvironmentsAssetsFilesProcessRequest",
     "PutSpacesEnvironmentsAssetsPublishedRequest",
     "PutSpacesEnvironmentsAssetsRequest",
-    "PutSpacesEnvironmentsContentTypesEditorInterfacesRequest",
     "PutSpacesEnvironmentsContentTypesPublishedRequest",
     "PutSpacesEnvironmentsContentTypesRequest",
     "PutSpacesEnvironmentsEntriesArchivedRequest",
@@ -154,11 +128,8 @@ __all__ = [
     "PutSpacesEnvironmentsLocalesRequest",
     "PutSpacesEnvironmentsRequest",
     "PutSpacesEnvironmentsTagsRequest",
-    "PutSpacesRequest",
-    "PutSpacesRolesRequest",
     "PutSpacesScheduledActionsRequest",
     "PutSpacesSpaceMembershipsRequest",
-    "PutSpacesWebhookDefinitionsRequest",
     "PutUsersMeAccessTokensRevokedRequest",
 ]
 
@@ -179,16 +150,6 @@ class GetSpacesBySpaceIdRequestPath(StrictModel):
 class GetSpacesBySpaceIdRequest(StrictModel):
     """Retrieve detailed information about a specific Contentful space by its ID. This returns the space's configuration, settings, and metadata."""
     path: GetSpacesBySpaceIdRequestPath
-
-# Operation: update_space
-class PutSpacesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space to update.")
-class PutSpacesRequestHeader(StrictModel):
-    x_contentful_organization: str | None = Field(default=None, validation_alias="X-Contentful-Organization", serialization_alias="X-Contentful-Organization", description="Optional organization ID to scope the operation within a specific organization context.")
-class PutSpacesRequest(StrictModel):
-    """Update a space's name in your Contentful environment. Requires the current version number to prevent concurrent modification conflicts."""
-    path: PutSpacesRequestPath
-    header: PutSpacesRequestHeader | None = None
 
 # Operation: delete_space
 class DeleteSpacesRequestPath(StrictModel):
@@ -338,32 +299,6 @@ class GetSpacesEnvironmentsPublicContentTypesRequest(StrictModel):
     """Retrieve all activated content types for a specific space and environment. Content types define the structure and fields available for entries in your space."""
     path: GetSpacesEnvironmentsPublicContentTypesRequestPath
 
-# Operation: list_editor_interfaces
-class GetSpacesEnvironmentsEditorInterfacesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the environment and editor interfaces.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space for which to retrieve editor interfaces.")
-class GetSpacesEnvironmentsEditorInterfacesRequest(StrictModel):
-    """Retrieve all editor interface configurations for a specific environment within a space. Editor interfaces define how content fields are presented and edited in the Contentful UI."""
-    path: GetSpacesEnvironmentsEditorInterfacesRequestPath
-
-# Operation: get_editor_interface
-class GetSpacesEnvironmentsContentTypesEditorInterfacesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the content type.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space.")
-    content_type_id: str = Field(default=..., description="The unique identifier of the content type for which to retrieve the editor interface configuration.")
-class GetSpacesEnvironmentsContentTypesEditorInterfacesRequest(StrictModel):
-    """Retrieve the editor interface configuration for a specific content type. The editor interface defines how fields are displayed and organized in the Contentful web app."""
-    path: GetSpacesEnvironmentsContentTypesEditorInterfacesRequestPath
-
-# Operation: update_editor_interface
-class PutSpacesEnvironmentsContentTypesEditorInterfacesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the content type whose editor interface you want to update.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space where the editor interface configuration will be updated.")
-    content_type_id: str = Field(default=..., description="The unique identifier of the content type whose editor interface you want to modify.")
-class PutSpacesEnvironmentsContentTypesEditorInterfacesRequest(StrictModel):
-    """Update the editor interface configuration for a specific content type, controlling how fields are displayed and organized in the Contentful editor UI."""
-    path: PutSpacesEnvironmentsContentTypesEditorInterfacesRequestPath
-
 # Operation: list_extensions
 class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdExtensionsRequestPath(StrictModel):
     space_id: str = Field(default=..., description="The unique identifier of the space containing the environment and extensions.")
@@ -371,14 +306,6 @@ class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdExtensionsRequestPath(StrictM
 class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdExtensionsRequest(StrictModel):
     """Retrieve all UI extensions configured for a specific environment within a space. Extensions allow customization of the Contentful UI for content editors."""
     path: GetSpacesBySpaceIdEnvironmentsByEnvironmentIdExtensionsRequestPath
-
-# Operation: create_extension
-class PostSpacesEnvironmentsExtensionsRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space where the extension will be created.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space where the extension will be created.")
-class PostSpacesEnvironmentsExtensionsRequest(StrictModel):
-    """Create a new UI extension within a specific environment. Extensions allow you to customize the Contentful editor interface with custom widgets and tools."""
-    path: PostSpacesEnvironmentsExtensionsRequestPath
 
 # Operation: get_extension
 class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdExtensionsByExtensionIdRequestPath(StrictModel):
@@ -738,13 +665,6 @@ class GetSpacesBySpaceIdWebhookDefinitionsRequest(StrictModel):
     """Retrieve all webhook definitions configured for a specific space. Webhooks allow you to receive HTTP notifications when content changes occur in your space."""
     path: GetSpacesBySpaceIdWebhookDefinitionsRequestPath
 
-# Operation: create_webhook
-class PostSpacesWebhookDefinitionsRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space where the webhook will be created (e.g., '5nvk6q4s3ttw').")
-class PostSpacesWebhookDefinitionsRequest(StrictModel):
-    """Create a new webhook definition for a space to receive HTTP notifications when content changes. Webhooks enable real-time integration with external systems by posting events to your specified endpoint."""
-    path: PostSpacesWebhookDefinitionsRequestPath
-
 # Operation: list_webhook_calls
 class GetSpacesBySpaceIdWebhooksByWebhookIdCallsRequestPath(StrictModel):
     space_id: str = Field(default=..., description="The unique identifier of the space containing the webhook. This is required to scope the webhook calls to the correct environment.")
@@ -777,52 +697,6 @@ class GetSpacesBySpaceIdWebhookDefinitionsByWebhookDefinitionIdRequestPath(Stric
 class GetSpacesBySpaceIdWebhookDefinitionsByWebhookDefinitionIdRequest(StrictModel):
     """Retrieve a single webhook definition by its ID. Returns the complete configuration and metadata for the specified webhook in a Contentful space."""
     path: GetSpacesBySpaceIdWebhookDefinitionsByWebhookDefinitionIdRequestPath
-
-# Operation: upsert_webhook
-class PutSpacesWebhookDefinitionsRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space where the webhook will be created or updated.")
-    webhook_definition_id: str = Field(default=..., description="The unique identifier of the webhook definition to create or update.")
-class PutSpacesWebhookDefinitionsRequest(StrictModel):
-    """Create a new webhook or update an existing one for a space. Webhooks allow you to receive HTTP notifications when content changes occur."""
-    path: PutSpacesWebhookDefinitionsRequestPath
-
-# Operation: delete_webhook
-class DeleteSpacesWebhookDefinitionsRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the webhook definition to delete.")
-    webhook_definition_id: str = Field(default=..., description="The unique identifier of the webhook definition to delete.")
-class DeleteSpacesWebhookDefinitionsRequest(StrictModel):
-    """Permanently delete a webhook definition from a space. This removes the webhook configuration and stops any further event notifications from being sent to the configured endpoint."""
-    path: DeleteSpacesWebhookDefinitionsRequestPath
-
-# Operation: list_roles
-class GetSpacesBySpaceIdRolesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the Contentful space (e.g., '5nvk6q4s3ttw'). This space ID is required to fetch its associated roles.")
-class GetSpacesBySpaceIdRolesRequest(StrictModel):
-    """Retrieve all roles available in a Contentful space. Roles define permissions and access control for space members."""
-    path: GetSpacesBySpaceIdRolesRequestPath
-
-# Operation: create_role
-class PostSpacesRolesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the Contentful space where the role will be created.")
-class PostSpacesRolesRequest(StrictModel):
-    """Create a new role within a Contentful space. Roles define permissions and access control for team members working in the space."""
-    path: PostSpacesRolesRequestPath
-
-# Operation: get_role
-class GetSpacesBySpaceIdRolesByRoleIdRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the role.")
-    role_id: str = Field(default=..., description="The unique identifier of the role to retrieve.")
-class GetSpacesBySpaceIdRolesByRoleIdRequest(StrictModel):
-    """Retrieve a specific role within a space. Returns the role's details including permissions and associated metadata."""
-    path: GetSpacesBySpaceIdRolesByRoleIdRequestPath
-
-# Operation: update_role
-class PutSpacesRolesRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the role to be updated.")
-    role_id: str = Field(default=..., description="The unique identifier of the role to be updated.")
-class PutSpacesRolesRequest(StrictModel):
-    """Update an existing role within a space. Modify role properties such as name, description, and permissions."""
-    path: PutSpacesRolesRequestPath
 
 # Operation: delete_role
 class DeleteSpacesRolesRequestPath(StrictModel):
@@ -1185,29 +1059,6 @@ class GetOrganizationsByOrganizationIdAppDefinitionsRequest(StrictModel):
     """Retrieve all app definitions for a specific organization. App definitions describe the configuration and capabilities of apps available within the organization."""
     path: GetOrganizationsByOrganizationIdAppDefinitionsRequestPath
 
-# Operation: create_app_definition
-class PostOrganizationsAppDefinitionsRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization where the app definition will be created.")
-class PostOrganizationsAppDefinitionsRequest(StrictModel):
-    """Create a new app definition within an organization. App definitions specify the configuration and metadata for custom apps that can be installed and used within Contentful."""
-    path: PostOrganizationsAppDefinitionsRequestPath
-
-# Operation: get_app_definition
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization containing the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition to retrieve.")
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequest(StrictModel):
-    """Retrieve a specific app definition by its ID within an organization. App definitions describe the configuration and metadata for apps installed in Contentful."""
-    path: GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdRequestPath
-
-# Operation: update_app_definition
-class PutOrganizationsAppDefinitionsRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that contains the app definition to be updated.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition to be updated.")
-class PutOrganizationsAppDefinitionsRequest(StrictModel):
-    """Update an existing app definition within an organization. This allows you to modify the configuration and properties of a previously created app definition."""
-    path: PutOrganizationsAppDefinitionsRequestPath
-
 # Operation: delete_app_definition
 class DeleteOrganizationsAppDefinitionsRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization that contains the app definition to be deleted.")
@@ -1215,80 +1066,6 @@ class DeleteOrganizationsAppDefinitionsRequestPath(StrictModel):
 class DeleteOrganizationsAppDefinitionsRequest(StrictModel):
     """Permanently delete an app definition from an organization. This action cannot be undone and will remove the app definition and all associated configurations."""
     path: DeleteOrganizationsAppDefinitionsRequestPath
-
-# Operation: get_app_upload
-class GetOrganizationsAppUploadsRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app upload.")
-    app_upload_id: str = Field(default=..., description="The unique identifier of the app upload to retrieve.")
-class GetOrganizationsAppUploadsRequest(StrictModel):
-    """Retrieve details of a specific app upload within an organization. This returns metadata and status information about a previously uploaded app package."""
-    path: GetOrganizationsAppUploadsRequestPath
-
-# Operation: create_app_upload
-class PostOrganizationsAppUploadsRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization where the app upload will be created.")
-    app_upload_id: str = Field(default=..., description="The unique identifier of the app upload resource to be created.")
-class PostOrganizationsAppUploadsRequest(StrictModel):
-    """Create a new app upload for an organization. This operation initializes an app upload resource that can be used to manage application bundles and assets."""
-    path: PostOrganizationsAppUploadsRequestPath
-
-# Operation: list_app_bundles
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization containing the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition for which to retrieve associated app bundles.")
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequest(StrictModel):
-    """Retrieve all app bundles associated with a specific app definition within an organization. App bundles are collections of app configuration and resources."""
-    path: GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesRequestPath
-
-# Operation: create_app_bundle
-class PostOrganizationsAppDefinitionsAppBundlesRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition under which the app bundle will be created.")
-class PostOrganizationsAppDefinitionsAppBundlesRequest(StrictModel):
-    """Create a new app bundle within an organization's app definition. App bundles package application code and configuration for deployment."""
-    path: PostOrganizationsAppDefinitionsAppBundlesRequestPath
-
-# Operation: get_app_bundle
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that contains the app definition and app bundle.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition that contains the app bundle.")
-    app_bundle_id: str = Field(default=..., description="The unique identifier of the app bundle to retrieve.")
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequest(StrictModel):
-    """Retrieve a specific app bundle within an app definition. This returns the configuration and metadata for a single app bundle identified by its ID."""
-    path: GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdAppBundlesByAppBundleIdRequestPath
-
-# Operation: delete_app_bundle
-class DeleteOrganizationsAppDefinitionsAppBundlesRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that contains the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition that contains the app bundle to be deleted.")
-    app_bundle_id: str = Field(default=..., description="The unique identifier of the app bundle to delete.")
-class DeleteOrganizationsAppDefinitionsAppBundlesRequest(StrictModel):
-    """Permanently delete an app bundle from an app definition within an organization. This action cannot be undone."""
-    path: DeleteOrganizationsAppDefinitionsAppBundlesRequestPath
-
-# Operation: get_app_event_subscription
-class GetOrganizationsAppDefinitionsEventSubscriptionRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition whose event subscription configuration you want to retrieve.")
-class GetOrganizationsAppDefinitionsEventSubscriptionRequest(StrictModel):
-    """Retrieve the event subscription configuration for a specific app definition within an organization. This returns the webhook and event settings that determine which events trigger notifications for the app."""
-    path: GetOrganizationsAppDefinitionsEventSubscriptionRequestPath
-
-# Operation: update_app_event_subscription
-class PutOrganizationsAppDefinitionsEventSubscriptionRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition for which to update the event subscription.")
-class PutOrganizationsAppDefinitionsEventSubscriptionRequest(StrictModel):
-    """Update or create an event subscription for an app definition, enabling the app to receive notifications for specified events within an organization."""
-    path: PutOrganizationsAppDefinitionsEventSubscriptionRequestPath
-
-# Operation: delete_app_event_subscription
-class DeleteOrganizationsAppDefinitionsEventSubscriptionRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition from which to remove the event subscription.")
-class DeleteOrganizationsAppDefinitionsEventSubscriptionRequest(StrictModel):
-    """Remove an event subscription from an app definition. This prevents the app from receiving event notifications for the specified app definition."""
-    path: DeleteOrganizationsAppDefinitionsEventSubscriptionRequestPath
 
 # Operation: get_app_signing_secret
 class GetOrganizationsAppDefinitionsSigningSecretRequestPath(StrictModel):
@@ -1314,14 +1091,6 @@ class DeleteOrganizationsAppDefinitionsSigningSecretRequest(StrictModel):
     """Revoke and remove the current signing secret for an app definition. This invalidates the existing secret, requiring a new one to be generated for future app authentications."""
     path: DeleteOrganizationsAppDefinitionsSigningSecretRequestPath
 
-# Operation: create_app_signed_request
-class PostOrganizationsAppInstallationsSignedRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app installation.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition for which to create the signed request.")
-class PostOrganizationsAppInstallationsSignedRequest(StrictModel):
-    """Generate a signed request for an app installation within an organization. This is used to authenticate and authorize app operations in Contentful."""
-    path: PostOrganizationsAppInstallationsSignedRequestPath
-
 # Operation: list_app_keys
 class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization that contains the app definition.")
@@ -1329,23 +1098,6 @@ class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysRequest
 class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysRequest(StrictModel):
     """Retrieve all API keys associated with a specific app definition within an organization. This allows you to manage and view the credentials used for app authentication."""
     path: GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysRequestPath
-
-# Operation: create_app_key
-class PostOrganizationsAppDefinitionsKeysRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition for which to create the new key.")
-class PostOrganizationsAppDefinitionsKeysRequest(StrictModel):
-    """Create a new API key for an app definition within an organization. This key can be used to authenticate requests on behalf of the app."""
-    path: PostOrganizationsAppDefinitionsKeysRequestPath
-
-# Operation: get_app_key
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the app definition.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition containing the key.")
-    key_kid: str = Field(default=..., description="The unique identifier (kid) of the specific key to retrieve.")
-class GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequest(StrictModel):
-    """Retrieve a specific cryptographic key associated with an app definition. This key is used for secure communication and authentication with the app."""
-    path: GetOrganizationsByOrganizationIdAppDefinitionsByAppDefinitionIdKeysByKeyKidRequestPath
 
 # Operation: delete_app_key
 class DeleteOrganizationsAppDefinitionsKeysRequestPath(StrictModel):
@@ -1363,24 +1115,6 @@ class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsRequestPath(S
 class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsRequest(StrictModel):
     """Retrieve all app installations configured for a specific environment within a space. This returns the complete list of installed applications and their configurations."""
     path: GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsRequestPath
-
-# Operation: get_app_installation
-class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the space containing the app installation.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space where the app is installed.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition for which to retrieve the installation details.")
-class GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequest(StrictModel):
-    """Retrieve a specific app installation configuration for an app within a given space and environment. This returns the installation details and settings for the specified app definition."""
-    path: GetSpacesBySpaceIdEnvironmentsByEnvironmentIdAppInstallationsByAppDefinitionIdRequestPath
-
-# Operation: install_app
-class PutSpacesEnvironmentsAppInstallationsRequestPath(StrictModel):
-    space_id: str = Field(default=..., description="The unique identifier of the Contentful space where the app will be installed or updated.")
-    environment_id: str = Field(default=..., description="The unique identifier of the environment within the space where the app installation will be managed.")
-    app_definition_id: str = Field(default=..., description="The unique identifier of the app definition to install or update.")
-class PutSpacesEnvironmentsAppInstallationsRequest(StrictModel):
-    """Install a new app or update an existing app installation in a specific environment. This operation manages app configurations within a Contentful space and environment."""
-    path: PutSpacesEnvironmentsAppInstallationsRequestPath
 
 # Operation: uninstall_app
 class DeleteSpacesEnvironmentsAppInstallationsRequestPath(StrictModel):
