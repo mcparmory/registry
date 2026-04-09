@@ -7,7 +7,7 @@ API Info:
 - Contact: Klaviyo Developer Experience Team <developers@klaviyo.com> (https://developers.klaviyo.com)
 - Terms of Service: https://www.klaviyo.com/legal/api-terms
 
-Generated: 2026-04-09 15:46:03 UTC
+Generated: 2026-04-09 17:25:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
