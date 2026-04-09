@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-globalping"
-version = "1.0.0"
-description = "MCP server for Globalping API"
+version = "1.0.1"
+description = "MCP server for Globalping"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

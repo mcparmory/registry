@@ -1,8 +1,8 @@
 """
-Globalping Api MCP Server - Pydantic Models
+Globalping MCP Server - Pydantic Models
 
-Generated: 2026-03-31 21:19:00 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:22:47 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -100,13 +100,13 @@ class MeasurementLocationOption(StrictModel):
     asn: int | None = None
     network: str | None = None
     tags: Tags | None = None
-    magic: str | None = Field(None, description="Locations defined in a single string instead of the respective location properties.\nThe API performs fuzzy matching on the `country`, `city`, `state` (using `US-` prefix, e.g., `US-NY`), `continen...")
-    limit: int | None = Field(1, description="The maximum number of probes that should run the measurement in this location.\nNon-authenticated requests are limited to a maximum of 50 probes.\nThe result count might be lower if there aren't en...", ge=1, le=200)
+    magic: str | None = Field(None, description="Locations defined in a single string instead of the respective location properties.\nThe API performs fuzzy matching on the `country`, `city`, `state` (using `US-` prefix, e.g., `US-NY`), `continent`, `region`, `asn` (using `AS` prefix, e.g., `AS123`), `tags`, and `network` values.\nSupports full names, ISO codes (where applicable), and common aliases.\nMultiple conditions can be combined using the `+` character, which behaves as a logical `AND`.\n\nNote that in some cases, the names of cities, states, and countries, as well as the ISO codes of countries and continents, overlap. Additionally, city names are not unique across countries.\nWe recommend that you:\n - refer to US states via their full [ISO 3166-2](https://en.wikipedia.org/wiki/ISO_3166-2:US) codes, e.g., `US-NY`,\n - refer to cities in combination with their country or US state,\n - refer to continents by their name (not the two letter codes).\n")
+    limit: int | None = Field(1, description="The maximum number of probes that should run the measurement in this location.\nNon-authenticated requests are limited to a maximum of 50 probes.\nThe result count might be lower if there aren't enough probes available in this location.\nMutually exclusive with the global `limit` property.\n", ge=1, le=200)
 
 class MeasurementRequest(StrictModel):
     type_: Literal["ping", "traceroute", "dns", "mtr", "http"] = Field(..., validation_alias="type", serialization_alias="type")
     target: str
-    in_progress_updates: bool | None = Field(False, validation_alias="inProgressUpdates", serialization_alias="inProgressUpdates", description="Indicates whether you want to get partial results while the measurement is still running:\n- If `true`, partial results are returned as soon as they are available, and you can present them to the u...")
+    in_progress_updates: bool | None = Field(False, validation_alias="inProgressUpdates", serialization_alias="inProgressUpdates", description="Indicates whether you want to get partial results while the measurement is still running:\n- If `true`, partial results are returned as soon as they are available, and you can present them to the user in real time. Note that only the first 5 tests from the `results` array will update in real time.\n- If `false`, the result of each test is updated only after the test finishes.\n")
     locations: list[MeasurementLocationOption] | str | None = None
     limit: int | None = None
     measurement_options: MeasurementPingOptions | MeasurementTracerouteOptions | MeasurementDnsOptions | MeasurementMtrOptions | MeasurementHttpOptions | None = Field(None, validation_alias="measurementOptions", serialization_alias="measurementOptions")

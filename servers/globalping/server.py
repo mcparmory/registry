@@ -6,14 +6,15 @@ API Info:
 - API License: Open Software License 3.0 (OSL-3.0)
 - Terms of Service: https://github.com/jsdelivr/globalping
 
-Generated: 2026-03-31 21:19:00 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:22:47 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -38,6 +39,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.globalping.io")
@@ -489,11 +491,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -535,7 +541,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -737,19 +746,44 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -774,10 +808,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -871,10 +910,8 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'OAuth2',
+    'BearerAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -914,9 +951,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -960,6 +997,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -972,7 +1010,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -984,16 +1022,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1007,11 +1049,11 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Globalping")
+mcp = FastMCP("Globalping", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Measurements
 @mcp.tool()
-async def create_measurement(body: _models.MeasurementRequest | None = Field(None, description="Measurement configuration specifying the probe type (ping, traceroute, dns, http), target host or URL, geographic locations or probe IDs to measure from, and optional measurement parameters. Locations can be filtered by country code, region, city, ASN, cloud provider, or magic string matching. Reuse a previous measurement's ID to run identical probes across multiple measurements.", examples=[{'type': 'ping', 'target': 'cdn.jsdelivr.net', 'locations': [{'country': 'DE'}, {'country': 'PL'}]}, {'type': 'ping', 'target': 'cdn.jsdelivr.net', 'locations': [{'country': 'DE', 'limit': 4}, {'country': 'PL', 'limit': 2}]}, {'type': 'ping', 'target': 'cdn.jsdelivr.net', 'locations': [{'magic': 'FR'}, {'magic': 'Poland'}, {'magic': 'Berlin+Germany'}, {'magic': 'California'}, {'magic': 'Europe'}, {'magic': 'Western Europe'}, {'magic': 'AS13335'}, {'magic': 'aws-us-east-1'}, {'magic': 'Google'}]}, {'type': 'ping', 'target': 'cdn.jsdelivr.net', 'measurementOptions': {'packets': 6}}, {'type': 'ping', 'target': 'cdn.jsdelivr.net', 'locations': '1wzMrzLBZfaPoT1c'}])) -> dict[str, Any]:
+async def create_measurement(body: _models.MeasurementRequest | None = Field(None, description="Measurement configuration specifying the probe type (ping, traceroute, dns, http), target host or URL, geographic locations or probe IDs to measure from, and optional measurement parameters. Locations can be filtered by country code, region, city, ASN, cloud provider, or magic string matching. Reuse a previous measurement's ID to run identical probes across multiple measurements.")) -> dict[str, Any]:
     """Initiates a new network measurement that runs asynchronously. Monitor progress via the URL provided in the Location response header, or enable real-time updates by setting inProgressUpdates to true for interactive applications."""
 
     # Construct request model with validation
@@ -1023,12 +1065,6 @@ async def create_measurement(body: _models.MeasurementRequest | None = Field(Non
         logging.error(f"Parameter validation failed for create_measurement: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_measurement", "POST", "/v1/measurements", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/measurements"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1038,6 +1074,9 @@ async def create_measurement(body: _models.MeasurementRequest | None = Field(Non
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_measurement")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_measurement", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1065,12 +1104,6 @@ async def poll_measurement(id_: str = Field(..., alias="id", description="The un
         logging.error(f"Parameter validation failed for poll_measurement: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("poll_measurement", "GET", "/v1/measurements/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/measurements/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/measurements/{id}"
     _http_headers = {}
@@ -1078,6 +1111,9 @@ async def poll_measurement(id_: str = Field(..., alias="id", description="The un
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("poll_measurement")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("poll_measurement", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1095,12 +1131,6 @@ async def poll_measurement(id_: str = Field(..., alias="id", description="The un
 async def list_probes() -> dict[str, Any]:
     """Retrieve a list of all probes currently online with their metadata including location and assigned tags. Use probe location or measurement IDs to reference probes when creating new measurements, as probes do not expose unique identifiers."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_probes", "GET", "/v1/probes", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/probes"
     _http_headers = {}
@@ -1109,39 +1139,12 @@ async def list_probes() -> dict[str, Any]:
     _auth = await _get_auth_for_operation("list_probes")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_probes", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_probes",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Limits
-@mcp.tool()
-async def get_rate_limits() -> dict[str, Any]:
-    """Retrieve the current rate limits applicable to the authenticated user or IP address. Returns limit thresholds and usage information for API requests."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_rate_limits", "GET", "/v1/limits", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/v1/limits"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_rate_limits")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_rate_limits",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -1234,7 +1237,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python globalping_api_server.py", file=sys.stderr)
+        print("  python globalping_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

@@ -1,4 +1,4 @@
-# Globalping API MCP Server
+# Globalping MCP Server
 
 Base URL: https://api.globalping.io
 ## API Info
