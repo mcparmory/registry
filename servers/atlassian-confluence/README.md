@@ -1,7 +1,6 @@
-# The Confluence Cloud REST API MCP Server
+# Atlassian Confluence MCP Server
 
 Base URL: //your-domain.atlassian.net
-
 ## API Info
 - **Terms of Service:** [https://atlassian.com/terms/](https://atlassian.com/terms/)
 
@@ -12,6 +11,7 @@ Base URL: //your-domain.atlassian.net
 ### Quick Start (recommended)
 
 ```bash
+BASE_URL=https://your-instance.example.com \
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
@@ -24,6 +24,7 @@ uvx mcparmory-atlassian-confluence
 
 ```bash
 pip install mcparmory-atlassian-confluence
+BASE_URL=https://your-instance.example.com \
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
@@ -43,6 +44,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-atlassian-confluence"],
       "env": {
+        "BASE_URL": "https://your-instance.example.com",
         "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
         "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
         "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",

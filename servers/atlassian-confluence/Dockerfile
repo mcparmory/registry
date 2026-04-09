@@ -1,4 +1,4 @@
-# The Confluence Cloud REST API MCP Server
+# Atlassian Confluence MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-atlassian-confluence .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="The Confluence Cloud REST API MCP Server" \
+LABEL org.opencontainers.image.title="Atlassian Confluence MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
