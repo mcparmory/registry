@@ -1,7 +1,6 @@
-# Apify API MCP Server
+# Apify MCP Server
 
 Base URL: https://api.apify.com
-
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0.html](https://www.apache.org/licenses/LICENSE-2.0.html)
 

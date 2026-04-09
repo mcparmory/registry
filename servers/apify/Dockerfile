@@ -1,4 +1,4 @@
-# Apify API MCP Server
+# Apify MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-apify .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Apify API MCP Server" \
+LABEL org.opencontainers.image.title="Apify MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
