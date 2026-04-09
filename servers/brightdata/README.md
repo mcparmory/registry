@@ -1,7 +1,6 @@
-# Bright Data API MCP Server
+# Bright Data MCP Server
 
 Base URL: https://api.brightdata.com
-
 ---
 
 ## Install

@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/
 
-Generated: 2026-04-09 12:10:21 UTC
+Generated: 2026-04-09 17:15:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -498,6 +498,8 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:

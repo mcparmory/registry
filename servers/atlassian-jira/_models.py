@@ -1,7 +1,7 @@
 """
 Atlassian Jira MCP Server - Pydantic Models
 
-Generated: 2026-04-09 12:10:21 UTC
+Generated: 2026-04-09 17:15:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
