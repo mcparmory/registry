@@ -1,7 +1,6 @@
-# Search API MCP Server
+# Algolia Search MCP Server
 
 Base URL: https://ALGOLIA_APPLICATION_ID.algolia.net
-
 ---
 
 ## Install

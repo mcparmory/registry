@@ -1,4 +1,4 @@
-# Search API MCP Server
+# Algolia Search MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-algolia-search .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Search API MCP Server" \
+LABEL org.opencontainers.image.title="Algolia Search MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
