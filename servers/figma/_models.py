@@ -1,8 +1,8 @@
 """
-Figma Api MCP Server - Pydantic Models
+Figma MCP Server - Pydantic Models
 
-Generated: 2026-03-31 15:28:44 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:26 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ __all__ = [
     "DeleteCommentReactionRequest",
     "DeleteCommentRequest",
     "DeleteDevResourceRequest",
-    "DeleteWebhookRequest",
     "GetActivityLogsRequest",
     "GetCommentReactionsRequest",
     "GetCommentsRequest",
@@ -48,15 +47,12 @@ __all__ = [
     "GetTeamProjectsRequest",
     "GetTeamStylesRequest",
     "GetWebhookRequest",
-    "GetWebhookRequestsRequest",
     "GetWebhooksRequest",
     "PostCommentReactionRequest",
     "PostCommentRequest",
     "PostDevResourcesRequest",
     "PostVariablesRequest",
-    "PostWebhookRequest",
     "PutDevResourcesRequest",
-    "PutWebhookRequest",
     "FrameOffset",
     "FrameOffsetRegion",
     "PostDevResourcesBodyDevResourcesItem",
@@ -296,20 +292,6 @@ class GetWebhooksRequest(StrictModel):
     """Retrieve webhooks filtered by context or plan. Use context_id to get webhooks for a specific context, or plan_api_id to retrieve all webhooks across all accessible contexts with pagination support."""
     query: GetWebhooksRequestQuery | None = None
 
-# Operation: create_webhook
-class PostWebhookRequestBody(StrictModel):
-    """The webhook to create."""
-    event_type: Literal["PING", "FILE_UPDATE", "FILE_VERSION_UPDATE", "FILE_DELETE", "LIBRARY_PUBLISH", "FILE_COMMENT", "DEV_MODE_STATUS_UPDATE"] = Field(default=..., description="The event type that triggers this webhook. Choose from file updates, deletions, library publishes, comments, dev mode changes, or a test PING event.")
-    context: str = Field(default=..., description="The scope level for this webhook: team-level events, project-level events, or file-level events.")
-    context_id: str = Field(default=..., description="The unique identifier of the team, project, or file you want to monitor for events.")
-    endpoint: str = Field(default=..., description="The HTTP endpoint URL that will receive POST requests when the event triggers. Must be a valid, publicly accessible URL.", max_length=2048)
-    passcode: str = Field(default=..., description="A secret string that Figma will include in webhook requests to your endpoint, allowing you to verify the request authenticity.", max_length=100)
-    status: Literal["ACTIVE", "PAUSED"] | None = Field(default=None, description="The initial state of the webhook. Set to PAUSED to prevent the automatic PING test event from being sent immediately.")
-    description: str | None = Field(default=None, description="A human-readable name or description for this webhook to help identify its purpose.", max_length=150)
-class PostWebhookRequest(StrictModel):
-    """Create a new webhook that will POST to your endpoint when a specified event occurs. By default, a PING event is automatically sent to verify the endpoint; you can create the webhook in PAUSED status to prevent this initial test."""
-    body: PostWebhookRequestBody
-
 # Operation: get_webhook
 class GetWebhookRequestPath(StrictModel):
     webhook_id: str = Field(default=..., description="The unique identifier of the webhook to retrieve.")
@@ -317,41 +299,12 @@ class GetWebhookRequest(StrictModel):
     """Retrieve a webhook configuration by its ID. Use this to fetch details about a specific webhook including its URL, events, and status."""
     path: GetWebhookRequestPath
 
-# Operation: update_webhook
-class PutWebhookRequestPath(StrictModel):
-    webhook_id: str = Field(default=..., description="The unique identifier of the webhook to update.")
-class PutWebhookRequestBody(StrictModel):
-    """The webhook to update."""
-    event_type: Literal["PING", "FILE_UPDATE", "FILE_VERSION_UPDATE", "FILE_DELETE", "LIBRARY_PUBLISH", "FILE_COMMENT", "DEV_MODE_STATUS_UPDATE"] = Field(default=..., description="The type of event this webhook should subscribe to. Determines which Figma events will trigger POST requests to your endpoint.")
-    endpoint: str = Field(default=..., description="The HTTP endpoint URL that will receive POST requests when the subscribed event triggers. Must be a valid, publicly accessible URL.")
-    passcode: str = Field(default=..., description="A security token that Figma will include in webhook requests to verify the request authenticity. Use this to validate that incoming requests are from Figma.")
-    status: Literal["ACTIVE", "PAUSED"] | None = Field(default=None, description="The operational state of the webhook. Set to ACTIVE to enable event delivery or PAUSED to temporarily disable it without deletion.")
-    description: str | None = Field(default=None, description="A user-friendly label or description for this webhook to help identify its purpose.")
-class PutWebhookRequest(StrictModel):
-    """Update an existing webhook configuration by ID. Modify the event subscription, endpoint URL, authentication passcode, status, or description."""
-    path: PutWebhookRequestPath
-    body: PutWebhookRequestBody
-
-# Operation: delete_webhook
-class DeleteWebhookRequestPath(StrictModel):
-    webhook_id: str = Field(default=..., description="The unique identifier of the webhook to delete.")
-class DeleteWebhookRequest(StrictModel):
-    """Permanently deletes the specified webhook. This action cannot be undone and will stop all event notifications to this webhook endpoint."""
-    path: DeleteWebhookRequestPath
-
-# Operation: list_webhook_requests
-class GetWebhookRequestsRequestPath(StrictModel):
-    webhook_id: str = Field(default=..., description="The unique identifier of the webhook subscription whose requests you want to retrieve.")
-class GetWebhookRequestsRequest(StrictModel):
-    """Retrieve all webhook requests sent for a specific webhook subscription within the last week. Useful for debugging webhook delivery issues and monitoring webhook activity."""
-    path: GetWebhookRequestsRequestPath
-
 # Operation: list_activity_logs
 class GetActivityLogsRequestQuery(StrictModel):
     events: str | None = Field(default=None, description="Filter results to include only specified event types. Accepts comma-separated values to include multiple event types; all events are returned if unspecified.")
     start_time: float | None = Field(default=None, description="Unix timestamp marking the start of the time range (inclusive). Defaults to one year ago if unspecified.")
     end_time: float | None = Field(default=None, description="Unix timestamp marking the end of the time range (inclusive). Defaults to the current timestamp if unspecified.")
-    limit: float | None = Field(default=None, description="Maximum number of events to return in the response. Defaults to 1000 if unspecified.", ge=1)
+    limit: float | None = Field(default=None, description="Maximum number of events to return in the response. Defaults to 1000 if unspecified.")
     order: Literal["asc", "desc"] | None = Field(default=None, description="Sort order for events by timestamp. Use ascending order to show oldest events first, or descending order to show newest events first.")
 class GetActivityLogsRequest(StrictModel):
     """Retrieve a list of activity log events filtered by type, time range, and ordering. Useful for auditing, monitoring system changes, and tracking user actions."""
@@ -729,7 +682,7 @@ class FrameOffsetRegion(PermissiveModel):
 class Comment(PermissiveModel):
     """A comment or reply left by a user."""
     id_: str = Field(..., validation_alias="id", serialization_alias="id", description="Unique identifier for comment.")
-    client_meta: Vector | FrameOffset | Region | FrameOffsetRegion = Field(..., description="Positioning information of the comment. Includes information on the location of the comment pin, which is either the absolute coordinates on the canvas or a relative offset within a frame. If the c...")
+    client_meta: Vector | FrameOffset | Region | FrameOffsetRegion = Field(..., description="Positioning information of the comment. Includes information on the location of the comment pin, which is either the absolute coordinates on the canvas or a relative offset within a frame. If the comment is a region, it will also contain the region height, width, and position of the anchor in regards to the region.")
     file_key: str = Field(..., description="The file in which the comment lives")
     parent_id: str | None = Field(None, description="If present, the id of the comment to which this is the reply")
     user: User = Field(..., description="The user who left the comment")
@@ -741,7 +694,7 @@ class Comment(PermissiveModel):
 
 class GradientPaint(PermissiveModel):
     type_: Literal["GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"] = Field(..., validation_alias="type", serialization_alias="type", description="The string literal representing the paint's type. Always check the `type` before reading other properties.")
-    gradient_handle_positions: list[Vector] = Field(..., validation_alias="gradientHandlePositions", serialization_alias="gradientHandlePositions", description="This field contains three vectors, each of which are a position in normalized object space (normalized object space is if the top left corner of the bounding box of the object is (0, 0) and the bot...")
+    gradient_handle_positions: list[Vector] = Field(..., validation_alias="gradientHandlePositions", serialization_alias="gradientHandlePositions", description="This field contains three vectors, each of which are a position in normalized object space (normalized object space is if the top left corner of the bounding box of the object is (0, 0) and the bottom right is (1,1)). The first position corresponds to the start of the gradient (value 0 for the purposes of calculating gradient stops), the second position is the end of the gradient (value 1), and the third handle position determines the width of the gradient.")
     gradient_stops: list[ColorStop] = Field(..., validation_alias="gradientStops", serialization_alias="gradientStops", description="Positions of key points along the gradient axis with the colors anchored there. Colors along the gradient are interpolated smoothly between neighboring gradient stops.")
     visible: bool | None = Field(True, description="Is the paint enabled?")
     opacity: float | None = Field(1, description="Overall opacity of paint (colors within the paint can also have opacity values which would blend with this)", ge=0, le=1)

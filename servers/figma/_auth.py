@@ -1,8 +1,8 @@
 """
-Authentication module for Figma API MCP server.
+Authentication module for Figma MCP server.
 
-Generated: 2026-03-31 15:28:44 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:26 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
 1. Authentication class implementations (OAuth2)
@@ -17,7 +17,6 @@ import hashlib
 import json
 import logging
 import os
-import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -129,9 +128,9 @@ class OAuth2Auth:
         # Parse scopes from environment (required)
         scopes_env = os.getenv("OAUTH2_SCOPES", "").strip()
         self.scopes = [s.strip() for s in scopes_env.split(",") if s.strip()]
-        # Redirect URI for authorization flows (hardcoded port, change in auth.py if needed)
-        self.callback_port = OAUTH2_CALLBACK_PORT
-        self.redirect_uri = f"http://localhost:{OAUTH2_CALLBACK_PORT}/callback"
+        # Redirect URI for authorization flows
+        self.callback_port = int(os.getenv("OAUTH2_CALLBACK_PORT", "9400"))
+        self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
         self.token_url = "https://api.figma.com/v1/oauth/token"
@@ -143,7 +142,7 @@ class OAuth2Auth:
         self.token_file = self.token_dir / "oauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
-        self._auth_lock: asyncio.Lock | None = None  # Lazy init (no event loop yet)
+        self._auth_lock = asyncio.Lock()  # Prevents concurrent auth flows (dual browser tabs)
 
         # Load existing token if available
         self._load_token()
@@ -160,10 +159,13 @@ class OAuth2Auth:
 
     def _save_token(self, token: dict) -> None:
         """Save token to disk with restricted permissions."""
+        normalized = dict(token)
+        if "expires_in" in normalized and "expires_at" not in normalized:
+            normalized["expires_at"] = time.time() + int(normalized["expires_in"])
         self.token_dir.mkdir(parents=True, exist_ok=True)
-        self.token_file.write_text(json.dumps(token, indent=2))
+        self.token_file.write_text(json.dumps(normalized, indent=2))
         self.token_file.chmod(0o600)
-        self.token = token
+        self.token = normalized
 
     def _create_client(self) -> OAuth2Client:
         """Create authlib OAuth2Client."""
@@ -176,7 +178,7 @@ class OAuth2Auth:
     def _is_token_expired(self) -> bool:
         """Check if current token is expired or about to expire."""
         if not self.token:
-            return True
+            return False  # Caller handles missing token separately
         expires_at = self.token.get("expires_at")
         if expires_at is None:
             return False  # No expiry info — assume valid
@@ -189,26 +191,41 @@ class OAuth2Auth:
         if not self.token_url:
             return False
 
-        try:
-            client = self._create_client()
-            new_token = client.refresh_token(
-                self.token_url,
-                refresh_token=self.token.get("refresh_token"),
-            )
-            if new_token and new_token.get("access_token"):
-                self._save_token(dict(new_token))
-                return True
-        except Exception:
-            pass
+        loop = asyncio.get_running_loop()
+        refresh_token_val = self.token["refresh_token"]
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                new_token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.refresh_token(
+                        self.token_url,
+                        refresh_token=refresh_token_val,
+                    ),
+                )
+                if new_token and new_token.get("access_token"):
+                    self._save_token(dict(new_token))
+                    return True
+            except Exception as exc:
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                logger.debug("Token refresh failed (%s): %s", auth_method, exc)
+                break
         return False
 
     async def authorize(self, port: int | None = None) -> dict:
         """
-        Run OAuth2 authorization code flow with local callback server.
+        Run OAuth2 authorization code flow with async local callback server.
 
-        Starts a temporary HTTP server on localhost to receive the callback,
+        Starts an asyncio TCP server on localhost to receive the callback,
         opens the browser to the authorization URL, and waits for the user
-        to authorize.
+        to authorize. Retries up to 5 adjacent ports if the primary port is in use.
 
         Args:
             port: Local callback server port (default: from OAUTH2_CALLBACK_PORT env or 9400)
@@ -220,25 +237,114 @@ class OAuth2Auth:
             ValueError: If authorization fails or is denied
             TimeoutError: If user doesn't complete authorization in 120 seconds
         """
-        import http.server
+        import errno
+        import html as _html
         import urllib.parse
 
-        port = port or self.callback_port
-        redirect_uri = f"http://localhost:{port}/callback"
+        base_port = port or self.callback_port
 
-        client = self._create_client()
-
-        # Generate PKCE challenge
+        # PKCE
         code_verifier = generate_token(48)
-        import base64
         code_challenge = base64.urlsafe_b64encode(
             hashlib.sha256(code_verifier.encode()).digest()
         ).rstrip(b"=").decode()
+        state = generate_token(30)
 
-        # Build authorization URL
-        # state param required by many providers (e.g., Figma) for CSRF protection
-        from authlib.common.security import generate_token as _gen_token
-        state = _gen_token(30)
+        callback_done: asyncio.Event = asyncio.Event()
+        result: dict = {}
+
+        async def _handle_connection(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                request_line = (await reader.readline()).decode(errors="replace").strip()
+                while True:
+                    line = await reader.readline()
+                    if not line or line == b"\r\n":
+                        break
+
+                path = request_line.split(" ", 2)[1] if request_line.startswith("GET ") else ""
+                parsed = urllib.parse.urlparse(path)
+                params = urllib.parse.parse_qs(parsed.query)
+
+                if parsed.path == "/callback" and ("code" in params or "error" in params):
+                    if "error" in params:
+                        result["error"] = params["error"][0]
+                        result["error_description"] = params.get("error_description", [""])[0]
+                        status = "400 Bad Request"
+                        title = "Authorization failed"
+                        body = f"<p style='color:#ff8787'>{_html.escape(result.get('error_description') or result['error'])}</p>"
+                    else:
+                        cb_state = params.get("state", [None])[0]
+                        if cb_state != state:
+                            result["error"] = "state_mismatch"
+                            result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                            status = "400 Bad Request"
+                            title = "Authorization failed"
+                            body = "<p style='color:#ff8787'>State mismatch — possible CSRF attack.</p>"
+                        else:
+                            result["code"] = params["code"][0]
+                            status = "200 OK"
+                            title = "Authorization successful"
+                            body = "<p>You can close this window.</p>"
+                    callback_done.set()
+                else:
+                    status, title, body = "200 OK", "Please wait\u2026", ""
+
+                html = (
+                    "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    f"<title>{title}</title>"
+                    "<style>*{margin:0;padding:0;box-sizing:border-box}"
+                    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+                    "background:#1a1a1a;color:#e8e8e8;display:flex;align-items:center;"
+                    "justify-content:center;min-height:100vh}"
+                    ".card{background:#242424;border:1px solid #333;border-radius:16px;"
+                    "padding:48px 40px;text-align:center;max-width:420px;width:90%;"
+                    "box-shadow:0 8px 32px rgba(0,0,0,.4)}"
+                    ".logo{width:64px;height:64px;margin-bottom:32px;border-radius:12px}"
+                    "h1{font-size:28px;font-weight:600;margin-bottom:10px}"
+                    "p{font-size:15px;color:#888;line-height:1.5}"
+                    ".footer{margin-top:32px;padding-top:20px;border-top:1px solid #333}"
+                    ".footer a{color:#ff5722;text-decoration:none;font-size:13px}</style>"
+                    "</head><body><div class='card'>"
+                    "<img src='https://wjxawmrpsfuivlicnepc.supabase.co/storage/v1/object/public/newsletter/logo-blacksmith.png'"
+                    " alt='MCP Blacksmith' class='logo'>"
+                    f"<h1>{title}</h1>{body}"
+                    "<div class='footer'><a href='https://mcpblacksmith.com'>mcpblacksmith.com</a></div>"
+                    "</div></body></html>"
+                )
+                payload = html.encode()
+                response = (
+                    f"HTTP/1.1 {status}\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode() + payload
+                writer.write(response)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Bind to port with retry on EADDRINUSE
+        bound_port = base_port
+        server = None
+        for attempt in range(5):
+            try:
+                server = await asyncio.start_server(
+                    _handle_connection, "localhost", base_port + attempt
+                )
+                bound_port = base_port + attempt
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE or attempt == 4:
+                    raise
+        if server is None:
+            raise OSError(f"Could not bind to any port in range {base_port}–{base_port + 4}")
+
+        redirect_uri = f"http://localhost:{bound_port}/callback"
+
         auth_params = {
             "response_type": "code",
             "client_id": self.client_id,
@@ -250,72 +356,70 @@ class OAuth2Auth:
         }
         auth_url = f"{self.auth_url}?{urllib.parse.urlencode(auth_params)}"
 
-        # Capture authorization code via local HTTP callback server
-        result: dict = {}
-
-        class CallbackHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                parsed = urllib.parse.urlparse(self.path)
-                params = urllib.parse.parse_qs(parsed.query)
-                if "code" in params:
-                    # Verify state matches to prevent CSRF
-                    callback_state = params.get("state", [None])[0]
-                    if callback_state != state:
-                        result["error"] = "state_mismatch"
-                        result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
-                        self.send_response(400)
-                        self.send_header("Content-type", "text/html")
-                        self.end_headers()
-                        self.wfile.write(b"<html><body><h2>Authorization failed</h2><p>State mismatch</p></body></html>")
-                        return
-                    result["code"] = params["code"][0]
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    self.wfile.write(b"<html><body><h2>Authorization successful!</h2><p>You can close this tab.</p></body></html>")
-                elif "error" in params:
-                    result["error"] = params.get("error", ["unknown"])[0]
-                    result["error_description"] = params.get("error_description", [""])[0]
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    error_desc = result.get("error_description", "")
-                    self.wfile.write(f"<html><body><h2>Authorization failed</h2><p>{error_desc}</p></body></html>".encode())
-
-            def log_message(self, format, *args):
-                pass  # Suppress server logs
-
-        server = http.server.HTTPServer(("localhost", port), CallbackHandler)
-        server_thread = threading.Thread(target=server.handle_request, daemon=True)
-        server_thread.start()
-
-        # Open browser for user authorization
-        webbrowser.open(auth_url)
-
-        # Wait for callback (120s timeout)
-        server_thread.join(timeout=120)
-        server.server_close()
+        async with server:
+            logger.info("OAuth2 callback server listening on port %d", bound_port)
+            print(f"\nAuthorize this application:\n\n  {auth_url}\n")
+            webbrowser.open(auth_url)
+            try:
+                await asyncio.wait_for(callback_done.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    "Authorization timed out (120s). "
+                    "Please try again and complete authorization in the browser."
+                )
 
         if "error" in result:
             raise ValueError(
                 f"Authorization denied: {result['error']} — {result.get('error_description', '')}"
             )
         if "code" not in result:
-            raise TimeoutError(
-                "Authorization timed out (120s). "
-                "Please try again and complete authorization in the browser."
-            )
+            raise ValueError("Authorization failed: no code received after callback")
 
-        # Exchange code for token
-        token = client.fetch_token(
-            self.token_url,
-            code=result["code"],
-            redirect_uri=redirect_uri,
-            code_verifier=code_verifier,
-        )
+        # Token exchange with client_secret_post / client_secret_basic fallback
+        loop = asyncio.get_running_loop()
+        token = None
+        last_exc: Exception | None = None
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.fetch_token(
+                        self.token_url,
+                        code=result["code"],
+                        redirect_uri=redirect_uri,
+                        code_verifier=code_verifier,
+                    ),
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                raise
 
         if not token or not token.get("access_token"):
-            raise ValueError("Token exchange failed — no access_token received")
+            raise ValueError(
+                "Token exchange failed — no access_token received"
+                + (f": {last_exc}" if last_exc else "")
+            )
+
+        # Scope validation — warn only, don't fail
+        returned_scope = token.get("scope", "")
+        if returned_scope:
+            missing = set(self.scopes) - set(returned_scope.split())
+            if missing:
+                logger.warning(
+                    "OAuth2 provider returned fewer scopes than requested. "
+                    "Missing: %s. Some API operations may fail.",
+                    ", ".join(sorted(missing)),
+                )
 
         self._save_token(dict(token))
         return dict(token)
@@ -333,15 +437,14 @@ class OAuth2Auth:
             Dict with Authorization header (Bearer token)
         """
         # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
-        if self._auth_lock is None:
-            self._auth_lock = asyncio.Lock()
         async with self._auth_lock:
             # Re-check after acquiring lock (another call may have completed auth)
             if not self.token:
                 await self.authorize()
 
             # Token expired — try refresh, then re-authorize
-            if self._is_token_expired():
+            # elif: skip expiry check if authorize() just ran above (prevents double browser tab)
+            elif self._is_token_expired():
                 if not await self._refresh_token():
                     await self.authorize()
 
@@ -418,9 +521,9 @@ class OrgOAuth2Auth:
         # Parse scopes from environment (required)
         scopes_env = os.getenv("ORG_OAUTH2_SCOPES", "").strip()
         self.scopes = [s.strip() for s in scopes_env.split(",") if s.strip()]
-        # Redirect URI for authorization flows (hardcoded port, change in auth.py if needed)
-        self.callback_port = ORG_OAUTH2_CALLBACK_PORT
-        self.redirect_uri = f"http://localhost:{ORG_OAUTH2_CALLBACK_PORT}/callback"
+        # Redirect URI for authorization flows
+        self.callback_port = int(os.getenv("ORG_OAUTH2_CALLBACK_PORT", "9400"))
+        self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
         self.token_url = "https://api.figma.com/v1/oauth/token"
@@ -432,7 +535,7 @@ class OrgOAuth2Auth:
         self.token_file = self.token_dir / "orgoauth2_tokens.json"
         self.client: OAuth2Client | None = None
         self.token: dict | None = None
-        self._auth_lock: asyncio.Lock | None = None  # Lazy init (no event loop yet)
+        self._auth_lock = asyncio.Lock()  # Prevents concurrent auth flows (dual browser tabs)
 
         # Load existing token if available
         self._load_token()
@@ -449,10 +552,13 @@ class OrgOAuth2Auth:
 
     def _save_token(self, token: dict) -> None:
         """Save token to disk with restricted permissions."""
+        normalized = dict(token)
+        if "expires_in" in normalized and "expires_at" not in normalized:
+            normalized["expires_at"] = time.time() + int(normalized["expires_in"])
         self.token_dir.mkdir(parents=True, exist_ok=True)
-        self.token_file.write_text(json.dumps(token, indent=2))
+        self.token_file.write_text(json.dumps(normalized, indent=2))
         self.token_file.chmod(0o600)
-        self.token = token
+        self.token = normalized
 
     def _create_client(self) -> OAuth2Client:
         """Create authlib OAuth2Client."""
@@ -465,7 +571,7 @@ class OrgOAuth2Auth:
     def _is_token_expired(self) -> bool:
         """Check if current token is expired or about to expire."""
         if not self.token:
-            return True
+            return False  # Caller handles missing token separately
         expires_at = self.token.get("expires_at")
         if expires_at is None:
             return False  # No expiry info — assume valid
@@ -478,26 +584,41 @@ class OrgOAuth2Auth:
         if not self.token_url:
             return False
 
-        try:
-            client = self._create_client()
-            new_token = client.refresh_token(
-                self.token_url,
-                refresh_token=self.token.get("refresh_token"),
-            )
-            if new_token and new_token.get("access_token"):
-                self._save_token(dict(new_token))
-                return True
-        except Exception:
-            pass
+        loop = asyncio.get_running_loop()
+        refresh_token_val = self.token["refresh_token"]
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                new_token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.refresh_token(
+                        self.token_url,
+                        refresh_token=refresh_token_val,
+                    ),
+                )
+                if new_token and new_token.get("access_token"):
+                    self._save_token(dict(new_token))
+                    return True
+            except Exception as exc:
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                logger.debug("Token refresh failed (%s): %s", auth_method, exc)
+                break
         return False
 
     async def authorize(self, port: int | None = None) -> dict:
         """
-        Run OAuth2 authorization code flow with local callback server.
+        Run OAuth2 authorization code flow with async local callback server.
 
-        Starts a temporary HTTP server on localhost to receive the callback,
+        Starts an asyncio TCP server on localhost to receive the callback,
         opens the browser to the authorization URL, and waits for the user
-        to authorize.
+        to authorize. Retries up to 5 adjacent ports if the primary port is in use.
 
         Args:
             port: Local callback server port (default: from ORG_OAUTH2_CALLBACK_PORT env or 9400)
@@ -509,25 +630,114 @@ class OrgOAuth2Auth:
             ValueError: If authorization fails or is denied
             TimeoutError: If user doesn't complete authorization in 120 seconds
         """
-        import http.server
+        import errno
+        import html as _html
         import urllib.parse
 
-        port = port or self.callback_port
-        redirect_uri = f"http://localhost:{port}/callback"
+        base_port = port or self.callback_port
 
-        client = self._create_client()
-
-        # Generate PKCE challenge
+        # PKCE
         code_verifier = generate_token(48)
-        import hashlib
         code_challenge = base64.urlsafe_b64encode(
             hashlib.sha256(code_verifier.encode()).digest()
         ).rstrip(b"=").decode()
+        state = generate_token(30)
 
-        # Build authorization URL
-        # state param required by many providers (e.g., Figma) for CSRF protection
-        from authlib.common.security import generate_token as _gen_token
-        state = _gen_token(30)
+        callback_done: asyncio.Event = asyncio.Event()
+        result: dict = {}
+
+        async def _handle_connection(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                request_line = (await reader.readline()).decode(errors="replace").strip()
+                while True:
+                    line = await reader.readline()
+                    if not line or line == b"\r\n":
+                        break
+
+                path = request_line.split(" ", 2)[1] if request_line.startswith("GET ") else ""
+                parsed = urllib.parse.urlparse(path)
+                params = urllib.parse.parse_qs(parsed.query)
+
+                if parsed.path == "/callback" and ("code" in params or "error" in params):
+                    if "error" in params:
+                        result["error"] = params["error"][0]
+                        result["error_description"] = params.get("error_description", [""])[0]
+                        status = "400 Bad Request"
+                        title = "Authorization failed"
+                        body = f"<p style='color:#ff8787'>{_html.escape(result.get('error_description') or result['error'])}</p>"
+                    else:
+                        cb_state = params.get("state", [None])[0]
+                        if cb_state != state:
+                            result["error"] = "state_mismatch"
+                            result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
+                            status = "400 Bad Request"
+                            title = "Authorization failed"
+                            body = "<p style='color:#ff8787'>State mismatch — possible CSRF attack.</p>"
+                        else:
+                            result["code"] = params["code"][0]
+                            status = "200 OK"
+                            title = "Authorization successful"
+                            body = "<p>You can close this window.</p>"
+                    callback_done.set()
+                else:
+                    status, title, body = "200 OK", "Please wait\u2026", ""
+
+                html = (
+                    "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    f"<title>{title}</title>"
+                    "<style>*{margin:0;padding:0;box-sizing:border-box}"
+                    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+                    "background:#1a1a1a;color:#e8e8e8;display:flex;align-items:center;"
+                    "justify-content:center;min-height:100vh}"
+                    ".card{background:#242424;border:1px solid #333;border-radius:16px;"
+                    "padding:48px 40px;text-align:center;max-width:420px;width:90%;"
+                    "box-shadow:0 8px 32px rgba(0,0,0,.4)}"
+                    ".logo{width:64px;height:64px;margin-bottom:32px;border-radius:12px}"
+                    "h1{font-size:28px;font-weight:600;margin-bottom:10px}"
+                    "p{font-size:15px;color:#888;line-height:1.5}"
+                    ".footer{margin-top:32px;padding-top:20px;border-top:1px solid #333}"
+                    ".footer a{color:#ff5722;text-decoration:none;font-size:13px}</style>"
+                    "</head><body><div class='card'>"
+                    "<img src='https://wjxawmrpsfuivlicnepc.supabase.co/storage/v1/object/public/newsletter/logo-blacksmith.png'"
+                    " alt='MCP Blacksmith' class='logo'>"
+                    f"<h1>{title}</h1>{body}"
+                    "<div class='footer'><a href='https://mcpblacksmith.com'>mcpblacksmith.com</a></div>"
+                    "</div></body></html>"
+                )
+                payload = html.encode()
+                response = (
+                    f"HTTP/1.1 {status}\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode() + payload
+                writer.write(response)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Bind to port with retry on EADDRINUSE
+        bound_port = base_port
+        server = None
+        for attempt in range(5):
+            try:
+                server = await asyncio.start_server(
+                    _handle_connection, "localhost", base_port + attempt
+                )
+                bound_port = base_port + attempt
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE or attempt == 4:
+                    raise
+        if server is None:
+            raise OSError(f"Could not bind to any port in range {base_port}–{base_port + 4}")
+
+        redirect_uri = f"http://localhost:{bound_port}/callback"
+
         auth_params = {
             "response_type": "code",
             "client_id": self.client_id,
@@ -539,72 +749,70 @@ class OrgOAuth2Auth:
         }
         auth_url = f"{self.auth_url}?{urllib.parse.urlencode(auth_params)}"
 
-        # Capture authorization code via local HTTP callback server
-        result: dict = {}
-
-        class CallbackHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                parsed = urllib.parse.urlparse(self.path)
-                params = urllib.parse.parse_qs(parsed.query)
-                if "code" in params:
-                    # Verify state matches to prevent CSRF
-                    callback_state = params.get("state", [None])[0]
-                    if callback_state != state:
-                        result["error"] = "state_mismatch"
-                        result["error_description"] = "OAuth2 state parameter mismatch (possible CSRF)"
-                        self.send_response(400)
-                        self.send_header("Content-type", "text/html")
-                        self.end_headers()
-                        self.wfile.write(b"<html><body><h2>Authorization failed</h2><p>State mismatch</p></body></html>")
-                        return
-                    result["code"] = params["code"][0]
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    self.wfile.write(b"<html><body><h2>Authorization successful!</h2><p>You can close this tab.</p></body></html>")
-                elif "error" in params:
-                    result["error"] = params.get("error", ["unknown"])[0]
-                    result["error_description"] = params.get("error_description", [""])[0]
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    error_desc = result.get("error_description", "")
-                    self.wfile.write(f"<html><body><h2>Authorization failed</h2><p>{error_desc}</p></body></html>".encode())
-
-            def log_message(self, format, *args):
-                pass  # Suppress server logs
-
-        server = http.server.HTTPServer(("localhost", port), CallbackHandler)
-        server_thread = threading.Thread(target=server.handle_request, daemon=True)
-        server_thread.start()
-
-        # Open browser for user authorization
-        webbrowser.open(auth_url)
-
-        # Wait for callback (120s timeout)
-        server_thread.join(timeout=120)
-        server.server_close()
+        async with server:
+            logger.info("OAuth2 callback server listening on port %d", bound_port)
+            print(f"\nAuthorize this application:\n\n  {auth_url}\n")
+            webbrowser.open(auth_url)
+            try:
+                await asyncio.wait_for(callback_done.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    "Authorization timed out (120s). "
+                    "Please try again and complete authorization in the browser."
+                )
 
         if "error" in result:
             raise ValueError(
                 f"Authorization denied: {result['error']} — {result.get('error_description', '')}"
             )
         if "code" not in result:
-            raise TimeoutError(
-                "Authorization timed out (120s). "
-                "Please try again and complete authorization in the browser."
-            )
+            raise ValueError("Authorization failed: no code received after callback")
 
-        # Exchange code for token
-        token = client.fetch_token(
-            self.token_url,
-            code=result["code"],
-            redirect_uri=redirect_uri,
-            code_verifier=code_verifier,
-        )
+        # Token exchange with client_secret_post / client_secret_basic fallback
+        loop = asyncio.get_running_loop()
+        token = None
+        last_exc: Exception | None = None
+
+        for auth_method in ("client_secret_post", "client_secret_basic"):
+            try:
+                client = OAuth2Client(
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    token_endpoint_auth_method=auth_method,
+                )
+                token = await loop.run_in_executor(
+                    None,
+                    lambda c=client: c.fetch_token(
+                        self.token_url,
+                        code=result["code"],
+                        redirect_uri=redirect_uri,
+                        code_verifier=code_verifier,
+                    ),
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                err = str(exc).lower()
+                if auth_method == "client_secret_post" and ("invalid_client" in err or "401" in err):
+                    continue
+                raise
 
         if not token or not token.get("access_token"):
-            raise ValueError("Token exchange failed — no access_token received")
+            raise ValueError(
+                "Token exchange failed — no access_token received"
+                + (f": {last_exc}" if last_exc else "")
+            )
+
+        # Scope validation — warn only, don't fail
+        returned_scope = token.get("scope", "")
+        if returned_scope:
+            missing = set(self.scopes) - set(returned_scope.split())
+            if missing:
+                logger.warning(
+                    "OAuth2 provider returned fewer scopes than requested. "
+                    "Missing: %s. Some API operations may fail.",
+                    ", ".join(sorted(missing)),
+                )
 
         self._save_token(dict(token))
         return dict(token)
@@ -622,15 +830,14 @@ class OrgOAuth2Auth:
             Dict with Authorization header (Bearer token)
         """
         # Serialize auth flow — prevent duplicate browser tabs from concurrent calls
-        if self._auth_lock is None:
-            self._auth_lock = asyncio.Lock()
         async with self._auth_lock:
             # Re-check after acquiring lock (another call may have completed auth)
             if not self.token:
                 await self.authorize()
 
             # Token expired — try refresh, then re-authorize
-            if self._is_token_expired():
+            # elif: skip expiry check if authorize() just ran above (prevents double browser tab)
+            elif self._is_token_expired():
                 if not await self._refresh_token():
                     await self.authorize()
 
@@ -647,7 +854,7 @@ class APIKeyAuth:
     """
     API Key authentication for Figma API.
 
-    Supports header, query parameter, and cookie-based API key injection.
+    Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
     """
 
@@ -657,8 +864,8 @@ class APIKeyAuth:
 
         Args:
             env_var: Environment variable name containing the API key.
-            location: Where to inject the key - 'header', 'query', or 'cookie'.
-            param_name: Name of the header, query parameter, or cookie.
+            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
+            param_name: Name of the header, query parameter, cookie, or path placeholder.
             prefix: Optional prefix before the key value (e.g., 'Bearer').
         """
         self.location = location
@@ -707,6 +914,12 @@ class APIKeyAuth:
             return {}
         return {self.param_name: self.api_key}
 
+    def get_auth_path_params(self) -> dict[str, str]:
+        """Get authentication path parameters for URL template substitution."""
+        if self.location != "path":
+            return {}
+        return {self.param_name: self.api_key}
+
 
 # ============================================================================
 # Operation Auth Requirements Map
@@ -744,11 +957,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_file_styles": [["OAuth2"], ["PersonalAccessToken"]],
     "get_style": [["OAuth2"], ["PersonalAccessToken"]],
     "list_webhooks": [["OAuth2"], ["PersonalAccessToken"]],
-    "create_webhook": [["OAuth2"], ["PersonalAccessToken"]],
     "get_webhook": [["OAuth2"], ["PersonalAccessToken"]],
-    "update_webhook": [["OAuth2"], ["PersonalAccessToken"]],
-    "delete_webhook": [["OAuth2"], ["PersonalAccessToken"]],
-    "list_webhook_requests": [["OAuth2"], ["PersonalAccessToken"]],
     "list_activity_logs": [["OrgOAuth2"]],
     "list_payments": [["PersonalAccessToken"]],
     "list_local_variables": [["OAuth2"], ["PersonalAccessToken"]],

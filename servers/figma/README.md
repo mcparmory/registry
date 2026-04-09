@@ -1,4 +1,4 @@
-# Figma API MCP Server
+# Figma MCP Server
 
 Base URL: https://api.figma.com
 ## API Info

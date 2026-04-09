@@ -5,14 +5,15 @@ Figma MCP Server
 API Info:
 - Terms of Service: https://www.figma.com/developer-terms/
 
-Generated: 2026-03-31 15:28:44 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:26 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -37,6 +38,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.figma.com")
@@ -488,11 +490,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -534,7 +540,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -736,19 +745,44 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -773,10 +807,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -870,10 +909,9 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'OAuth2',
+    'OrgOAuth2',
+    'PersonalAccessToken',
 ]
 
 # Initialize authentication handlers at server startup
@@ -921,9 +959,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -967,6 +1005,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -979,7 +1018,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -991,16 +1030,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1014,7 +1057,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Figma")
+mcp = FastMCP("Figma", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Files
 @mcp.tool()
@@ -1024,7 +1067,7 @@ async def export_file_json(
     depth: float | None = Field(None, description="Controls traversal depth into the document tree. A value of 1 returns only pages; 2 returns pages and top-level objects; omitting returns the entire tree."),
     geometry: str | None = Field(None, description="Set to include vector path data in the export for shape and vector nodes."),
     plugin_data: str | None = Field(None, description="Comma-separated list of plugin IDs and/or the string 'shared' to include plugin data written to the document. Plugin data will appear in pluginData and sharedPluginData properties."),
-    branch_data: bool | None = Field(False, description="Include branch metadata in the response, showing the main file key if this is a branch, or branch metadata if the file has branches.")
+    branch_data: bool | None = Field(None, description="Include branch metadata in the response, showing the main file key if this is a branch, or branch metadata if the file has branches."),
 ) -> dict[str, Any]:
     """Export a Figma file as JSON, including document structure, components, and optional metadata. Supports partial exports by node ID and configurable depth traversal."""
 
@@ -1038,12 +1081,6 @@ async def export_file_json(
         logging.error(f"Parameter validation failed for export_file_json: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("export_file_json", "GET", "/v1/files/{file_key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1052,6 +1089,9 @@ async def export_file_json(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("export_file_json")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("export_file_json", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1072,7 +1112,7 @@ async def get_file_nodes(
     ids: str = Field(..., description="Comma-separated list of node IDs to retrieve. The API will return data for each specified node, though some values may be null if a node ID does not exist in the file."),
     depth: float | None = Field(None, description="How many levels deep to traverse the node tree from each specified node. A value of 1 returns only direct children; omitting this parameter returns the entire subtree."),
     geometry: str | None = Field(None, description="Include vector path data in the response. Set to 'paths' to export vector geometry; omit to exclude vector data."),
-    plugin_data: str | None = Field(None, description="Comma-separated list of plugin IDs and/or the string 'shared' to include plugin data written to the document. Plugin data will be returned in pluginData and sharedPluginData properties.")
+    plugin_data: str | None = Field(None, description="Comma-separated list of plugin IDs and/or the string 'shared' to include plugin data written to the document. Plugin data will be returned in pluginData and sharedPluginData properties."),
 ) -> dict[str, Any]:
     """Retrieve specific nodes from a Figma file as JSON objects. Extract node data by providing node IDs, with optional support for vector geometry, nested traversal depth, and plugin data."""
 
@@ -1086,12 +1126,6 @@ async def get_file_nodes(
         logging.error(f"Parameter validation failed for get_file_nodes: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_file_nodes", "GET", "/v1/files/{file_key}/nodes", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/nodes", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/nodes"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1100,6 +1134,9 @@ async def get_file_nodes(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_file_nodes")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_file_nodes", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1119,8 +1156,8 @@ async def render_node_images(
     file_key: str = Field(..., description="The file to export images from. Accepts either a file key or branch key. Use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     ids: str = Field(..., description="Comma-separated list of node IDs to render. Multiple node IDs can be specified to render multiple images from the same file."),
     scale: float | None = Field(None, description="Scaling factor for the rendered image. Values between 0.01 and 4 are supported, where 1.0 represents the original size.", ge=0.01, le=4),
-    format_: Literal["jpg", "png", "svg", "pdf"] | None = Field('png', alias="format", description="Output format for the rendered image."),
-    svg_include_id: bool | None = Field(False, description="Whether to include id attributes for all SVG elements. When enabled, adds the layer name to the id attribute of each SVG element.")
+    format_: Literal["jpg", "png", "svg", "pdf"] | None = Field(None, alias="format", description="Output format for the rendered image."),
+    svg_include_id: bool | None = Field(None, description="Whether to include id attributes for all SVG elements. When enabled, adds the layer name to the id attribute of each SVG element."),
 ) -> dict[str, Any]:
     """Render images from specified nodes in a file. Returns a map of node IDs to image URLs, with null values indicating failed renders. Rendered images expire after 30 days."""
 
@@ -1134,12 +1171,6 @@ async def render_node_images(
         logging.error(f"Parameter validation failed for render_node_images: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("render_node_images", "GET", "/v1/images/{file_key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/images/{file_key}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/images/{file_key}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1148,6 +1179,9 @@ async def render_node_images(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("render_node_images")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("render_node_images", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1175,12 +1209,6 @@ async def list_image_fills(file_key: str = Field(..., description="The Figma fil
         logging.error(f"Parameter validation failed for list_image_fills: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_image_fills", "GET", "/v1/files/{file_key}/images", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/images", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/images"
     _http_headers = {}
@@ -1188,6 +1216,9 @@ async def list_image_fills(file_key: str = Field(..., description="The Figma fil
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_image_fills")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_image_fills", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1214,12 +1245,6 @@ async def get_file_metadata(file_key: str = Field(..., description="The unique i
         logging.error(f"Parameter validation failed for get_file_metadata: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_file_metadata", "GET", "/v1/files/{file_key}/meta", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/meta", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/meta"
     _http_headers = {}
@@ -1227,6 +1252,9 @@ async def get_file_metadata(file_key: str = Field(..., description="The unique i
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_file_metadata")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_file_metadata", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1253,12 +1281,6 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
         logging.error(f"Parameter validation failed for list_team_projects: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_team_projects", "GET", "/v1/teams/{team_id}/projects", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/teams/{team_id}/projects", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/teams/{team_id}/projects"
     _http_headers = {}
@@ -1266,6 +1288,9 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_team_projects")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_team_projects", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1282,7 +1307,7 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
 @mcp.tool()
 async def list_project_files(
     project_id: str = Field(..., description="The unique identifier of the project from which to retrieve files."),
-    branch_data: bool | None = Field(False, description="Include branch metadata in the response for each main file that contains branches within the project.")
+    branch_data: bool | None = Field(None, description="Include branch metadata in the response for each main file that contains branches within the project."),
 ) -> dict[str, Any]:
     """Retrieve all files within a specified project. Optionally include branch metadata for files that contain branches."""
 
@@ -1296,12 +1321,6 @@ async def list_project_files(
         logging.error(f"Parameter validation failed for list_project_files: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_project_files", "GET", "/v1/projects/{project_id}/files", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/projects/{project_id}/files", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/projects/{project_id}/files"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1310,6 +1329,9 @@ async def list_project_files(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_project_files")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_project_files", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1327,7 +1349,7 @@ async def list_project_files(
 @mcp.tool()
 async def list_file_versions(
     file_key: str = Field(..., description="The file or branch key identifying which file's version history to retrieve. Obtain the branch key using GET /v1/files/:key with the branch_data query parameter."),
-    page_size: float | None = Field(None, description="Number of version records to return per page. Defaults to 30 if not specified.", le=50)
+    page_size: float | None = Field(None, description="Number of version records to return per page. Defaults to 30 if not specified.", le=50),
 ) -> dict[str, Any]:
     """Retrieve the version history of a file to see how it has evolved over time. Use the returned version information to render a specific version via another endpoint."""
 
@@ -1341,12 +1363,6 @@ async def list_file_versions(
         logging.error(f"Parameter validation failed for list_file_versions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_versions", "GET", "/v1/files/{file_key}/versions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/versions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/versions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1355,6 +1371,9 @@ async def list_file_versions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_versions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_versions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1372,7 +1391,7 @@ async def list_file_versions(
 @mcp.tool()
 async def list_file_comments(
     file_key: str = Field(..., description="The file or branch identifier to retrieve comments from. Use the file key for the main file, or obtain a branch key via GET /v1/files/:key with the branch_data query parameter to access comments on a specific branch."),
-    as_md: bool | None = Field(None, description="When enabled, converts comments to their markdown equivalents where applicable for better formatting compatibility.")
+    as_md: bool | None = Field(None, description="When enabled, converts comments to their markdown equivalents where applicable for better formatting compatibility."),
 ) -> dict[str, Any]:
     """Retrieves all comments left on a file. Supports both file keys and branch keys for accessing comments across different file versions."""
 
@@ -1386,12 +1405,6 @@ async def list_file_comments(
         logging.error(f"Parameter validation failed for list_file_comments: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_comments", "GET", "/v1/files/{file_key}/comments", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1400,6 +1413,9 @@ async def list_file_comments(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_comments")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_comments", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1419,7 +1435,7 @@ async def add_file_comment(
     file_key: str = Field(..., description="The file identifier to add the comment to. Can be a file key or branch key; use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     message: str = Field(..., description="The text content of the comment to post."),
     comment_id: str | None = Field(None, description="The ID of the root comment to reply to. Replies to replies are not supported; only root-level comments can be replied to."),
-    client_meta: _models.Vector | _models.FrameOffset | _models.Region | _models.FrameOffsetRegion | None = Field(None, description="Metadata specifying the position or location where the comment should be placed within the file.")
+    client_meta: _models.Vector | _models.FrameOffset | _models.Region | _models.FrameOffsetRegion | None = Field(None, description="Metadata specifying the position or location where the comment should be placed within the file."),
 ) -> dict[str, Any]:
     """Posts a new comment on a file or replies to an existing root comment. Use the comment_id parameter to reply to a specific comment."""
 
@@ -1433,12 +1449,6 @@ async def add_file_comment(
         logging.error(f"Parameter validation failed for add_file_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("add_file_comment", "POST", "/v1/files/{file_key}/comments", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1447,6 +1457,9 @@ async def add_file_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_file_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_file_comment", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1464,7 +1477,7 @@ async def add_file_comment(
 @mcp.tool()
 async def delete_comment(
     file_key: str = Field(..., description="The file or branch key identifying the file containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
-    comment_id: str = Field(..., description="The unique identifier of the comment to delete.")
+    comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
 ) -> dict[str, Any]:
     """Deletes a specific comment from a file. Only the comment author is permitted to delete their own comments."""
 
@@ -1477,12 +1490,6 @@ async def delete_comment(
         logging.error(f"Parameter validation failed for delete_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_comment", "DELETE", "/v1/files/{file_key}/comments/{comment_id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments/{comment_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments/{comment_id}"
     _http_headers = {}
@@ -1490,6 +1497,9 @@ async def delete_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_comment", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1506,7 +1516,7 @@ async def delete_comment(
 @mcp.tool()
 async def list_comment_reactions(
     file_key: str = Field(..., description="The file identifier to retrieve the comment from. Can be either a file key or branch key; use `GET /v1/files/:key` with the `branch_data` query parameter to obtain a branch key if needed."),
-    comment_id: str = Field(..., description="The unique identifier of the comment to retrieve reactions from.")
+    comment_id: str = Field(..., description="The unique identifier of the comment to retrieve reactions from."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of reactions left on a specific comment. Use this to see all emoji reactions and their authors for a given comment."""
 
@@ -1519,12 +1529,6 @@ async def list_comment_reactions(
         logging.error(f"Parameter validation failed for list_comment_reactions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_comment_reactions", "GET", "/v1/files/{file_key}/comments/{comment_id}/reactions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments/{comment_id}/reactions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments/{comment_id}/reactions"
     _http_headers = {}
@@ -1532,6 +1536,9 @@ async def list_comment_reactions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_comment_reactions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_comment_reactions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1549,7 +1556,7 @@ async def list_comment_reactions(
 async def add_comment_reaction(
     file_key: str = Field(..., description="The file identifier to add the reaction to. Can be a file key or branch key; use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     comment_id: str = Field(..., description="The unique identifier of the comment to react to."),
-    emoji: str = Field(..., description="The emoji reaction as a shortcode format. Supports optional skin tone modifiers for applicable emoji. Valid shortcodes are defined in the emoji-mart native set.")
+    emoji: str = Field(..., description="The emoji reaction as a shortcode format. Supports optional skin tone modifiers for applicable emoji. Valid shortcodes are defined in the emoji-mart native set."),
 ) -> dict[str, Any]:
     """Add an emoji reaction to a file comment. Reactions allow users to quickly respond to comments with emoji expressions."""
 
@@ -1563,12 +1570,6 @@ async def add_comment_reaction(
         logging.error(f"Parameter validation failed for add_comment_reaction: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("add_comment_reaction", "POST", "/v1/files/{file_key}/comments/{comment_id}/reactions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments/{comment_id}/reactions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments/{comment_id}/reactions"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1577,6 +1578,9 @@ async def add_comment_reaction(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_comment_reaction")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_comment_reaction", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1595,7 +1599,7 @@ async def add_comment_reaction(
 async def remove_comment_reaction(
     file_key: str = Field(..., description="The file or branch key containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
     comment_id: str = Field(..., description="The unique identifier of the comment from which to remove the reaction."),
-    emoji: str = Field(..., description="The emoji reaction to remove, specified as a shortcode format. Skin tone modifiers are supported where applicable.")
+    emoji: str = Field(..., description="The emoji reaction to remove, specified as a shortcode format. Skin tone modifiers are supported where applicable."),
 ) -> dict[str, Any]:
     """Remove a reaction from a comment. Only the user who added the reaction can delete it."""
 
@@ -1609,12 +1613,6 @@ async def remove_comment_reaction(
         logging.error(f"Parameter validation failed for remove_comment_reaction: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("remove_comment_reaction", "DELETE", "/v1/files/{file_key}/comments/{comment_id}/reactions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/comments/{comment_id}/reactions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/comments/{comment_id}/reactions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1623,6 +1621,9 @@ async def remove_comment_reaction(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("remove_comment_reaction")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_comment_reaction", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1641,12 +1642,6 @@ async def remove_comment_reaction(
 async def get_current_user() -> dict[str, Any]:
     """Retrieve the profile and account information for the currently authenticated user. This endpoint requires valid authentication credentials."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_current_user", "GET", "/v1/me", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/me"
     _http_headers = {}
@@ -1654,6 +1649,9 @@ async def get_current_user() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_current_user")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_current_user", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1670,7 +1668,7 @@ async def get_current_user() -> dict[str, Any]:
 @mcp.tool()
 async def list_team_components(
     team_id: str = Field(..., description="The unique identifier of the team whose components you want to list."),
-    page_size: float | None = Field(30, description="The number of components to return per page. Specify a value between 1 and 1000 to control result set size.")
+    page_size: float | None = Field(None, description="The number of components to return per page. Specify a value between 1 and 1000 to control result set size."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of published components available in a team's component library. Use pagination to manage large result sets efficiently."""
 
@@ -1684,12 +1682,6 @@ async def list_team_components(
         logging.error(f"Parameter validation failed for list_team_components: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_team_components", "GET", "/v1/teams/{team_id}/components", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/teams/{team_id}/components", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/teams/{team_id}/components"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1698,6 +1690,9 @@ async def list_team_components(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_team_components")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_team_components", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1725,12 +1720,6 @@ async def list_file_components(file_key: str = Field(..., description="The main 
         logging.error(f"Parameter validation failed for list_file_components: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_components", "GET", "/v1/files/{file_key}/components", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/components", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/components"
     _http_headers = {}
@@ -1738,6 +1727,9 @@ async def list_file_components(file_key: str = Field(..., description="The main 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_components")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_components", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1764,12 +1756,6 @@ async def get_component(key: str = Field(..., description="The unique identifier
         logging.error(f"Parameter validation failed for get_component: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_component", "GET", "/v1/components/{key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/components/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/components/{key}"
     _http_headers = {}
@@ -1777,6 +1763,9 @@ async def get_component(key: str = Field(..., description="The unique identifier
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_component")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_component", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1793,7 +1782,7 @@ async def get_component(key: str = Field(..., description="The unique identifier
 @mcp.tool()
 async def list_component_sets(
     team_id: str = Field(..., description="The unique identifier of the team whose component sets you want to retrieve."),
-    page_size: float | None = Field(30, description="The number of component sets to return per page. Useful for controlling response size and implementing pagination.")
+    page_size: float | None = Field(None, description="The number of component sets to return per page. Useful for controlling response size and implementing pagination."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of published component sets available in a team's library. Use pagination to manage large result sets efficiently."""
 
@@ -1807,12 +1796,6 @@ async def list_component_sets(
         logging.error(f"Parameter validation failed for list_component_sets: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_component_sets", "GET", "/v1/teams/{team_id}/component_sets", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/teams/{team_id}/component_sets", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/teams/{team_id}/component_sets"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1821,6 +1804,9 @@ async def list_component_sets(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_component_sets")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_component_sets", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1848,12 +1834,6 @@ async def list_component_sets_file(file_key: str = Field(..., description="The m
         logging.error(f"Parameter validation failed for list_component_sets_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_component_sets_file", "GET", "/v1/files/{file_key}/component_sets", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/component_sets", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/component_sets"
     _http_headers = {}
@@ -1861,6 +1841,9 @@ async def list_component_sets_file(file_key: str = Field(..., description="The m
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_component_sets_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_component_sets_file", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1887,12 +1870,6 @@ async def get_component_set(key: str = Field(..., description="The unique identi
         logging.error(f"Parameter validation failed for get_component_set: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_component_set", "GET", "/v1/component_sets/{key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/component_sets/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/component_sets/{key}"
     _http_headers = {}
@@ -1900,6 +1877,9 @@ async def get_component_set(key: str = Field(..., description="The unique identi
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_component_set")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_component_set", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1916,7 +1896,7 @@ async def get_component_set(key: str = Field(..., description="The unique identi
 @mcp.tool()
 async def list_team_styles(
     team_id: str = Field(..., description="The unique identifier of the team whose styles you want to retrieve."),
-    page_size: float | None = Field(30, description="The number of styles to return per page. Adjust this value to control result set size.")
+    page_size: float | None = Field(None, description="The number of styles to return per page. Adjust this value to control result set size."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of published styles from a team's design library. Use pagination to control the number of results returned per request."""
 
@@ -1930,12 +1910,6 @@ async def list_team_styles(
         logging.error(f"Parameter validation failed for list_team_styles: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_team_styles", "GET", "/v1/teams/{team_id}/styles", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/teams/{team_id}/styles", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/teams/{team_id}/styles"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1944,6 +1918,9 @@ async def list_team_styles(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_team_styles")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_team_styles", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1971,12 +1948,6 @@ async def list_file_styles(file_key: str = Field(..., description="The main file
         logging.error(f"Parameter validation failed for list_file_styles: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_styles", "GET", "/v1/files/{file_key}/styles", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/styles", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/styles"
     _http_headers = {}
@@ -1984,6 +1955,9 @@ async def list_file_styles(file_key: str = Field(..., description="The main file
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_styles")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_styles", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2010,12 +1984,6 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
         logging.error(f"Parameter validation failed for get_style: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_style", "GET", "/v1/styles/{key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/styles/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/styles/{key}"
     _http_headers = {}
@@ -2023,6 +1991,9 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_style")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_style", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2039,7 +2010,7 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
 @mcp.tool()
 async def list_webhooks(
     context_id: str | None = Field(None, description="The unique identifier of the context to retrieve webhooks for. Cannot be used together with plan_api_id."),
-    plan_api_id: str | None = Field(None, description="The unique identifier of your plan to retrieve all webhooks across all accessible contexts. Cannot be used together with context_id. Results are paginated when using this parameter.")
+    plan_api_id: str | None = Field(None, description="The unique identifier of your plan to retrieve all webhooks across all accessible contexts. Cannot be used together with context_id. Results are paginated when using this parameter."),
 ) -> dict[str, Any]:
     """Retrieve webhooks filtered by context or plan. Use context_id to get webhooks for a specific context, or plan_api_id to retrieve all webhooks across all accessible contexts with pagination support."""
 
@@ -2052,12 +2023,6 @@ async def list_webhooks(
         logging.error(f"Parameter validation failed for list_webhooks: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_webhooks", "GET", "/v2/webhooks", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v2/webhooks"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2067,6 +2032,9 @@ async def list_webhooks(
     _auth = await _get_auth_for_operation("list_webhooks")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_webhooks", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_webhooks",
@@ -2074,55 +2042,6 @@ async def list_webhooks(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Webhooks
-@mcp.tool()
-async def create_webhook(
-    event_type: Literal["PING", "FILE_UPDATE", "FILE_VERSION_UPDATE", "FILE_DELETE", "LIBRARY_PUBLISH", "FILE_COMMENT", "DEV_MODE_STATUS_UPDATE"] = Field(..., description="The event type that triggers this webhook. Choose from file updates, deletions, library publishes, comments, dev mode changes, or a test PING event."),
-    context: str = Field(..., description="The scope level for this webhook: team-level events, project-level events, or file-level events."),
-    context_id: str = Field(..., description="The unique identifier of the team, project, or file you want to monitor for events."),
-    endpoint: str = Field(..., description="The HTTP endpoint URL that will receive POST requests when the event triggers. Must be a valid, publicly accessible URL.", max_length=2048),
-    passcode: str = Field(..., description="A secret string that Figma will include in webhook requests to your endpoint, allowing you to verify the request authenticity.", max_length=100),
-    status: Literal["ACTIVE", "PAUSED"] | None = Field(None, description="The initial state of the webhook. Set to PAUSED to prevent the automatic PING test event from being sent immediately."),
-    description: str | None = Field(None, description="A human-readable name or description for this webhook to help identify its purpose.", max_length=150)
-) -> dict[str, Any]:
-    """Create a new webhook that will POST to your endpoint when a specified event occurs. By default, a PING event is automatically sent to verify the endpoint; you can create the webhook in PAUSED status to prevent this initial test."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostWebhookRequest(
-            body=_models.PostWebhookRequestBody(event_type=event_type, context=context, context_id=context_id, endpoint=endpoint, passcode=passcode, status=status, description=description)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_webhook", "POST", "/v2/webhooks", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/v2/webhooks"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_webhook")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_webhook",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -2142,12 +2061,6 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
         logging.error(f"Parameter validation failed for get_webhook: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_webhook", "GET", "/v2/webhooks/{webhook_id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v2/webhooks/{webhook_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/webhooks/{webhook_id}"
     _http_headers = {}
@@ -2156,136 +2069,12 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
     _auth = await _get_auth_for_operation("get_webhook")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_webhook", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_webhook",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Webhooks
-@mcp.tool()
-async def update_webhook(
-    webhook_id: str = Field(..., description="The unique identifier of the webhook to update."),
-    event_type: Literal["PING", "FILE_UPDATE", "FILE_VERSION_UPDATE", "FILE_DELETE", "LIBRARY_PUBLISH", "FILE_COMMENT", "DEV_MODE_STATUS_UPDATE"] = Field(..., description="The type of event this webhook should subscribe to. Determines which Figma events will trigger POST requests to your endpoint."),
-    endpoint: str = Field(..., description="The HTTP endpoint URL that will receive POST requests when the subscribed event triggers. Must be a valid, publicly accessible URL."),
-    passcode: str = Field(..., description="A security token that Figma will include in webhook requests to verify the request authenticity. Use this to validate that incoming requests are from Figma."),
-    status: Literal["ACTIVE", "PAUSED"] | None = Field(None, description="The operational state of the webhook. Set to ACTIVE to enable event delivery or PAUSED to temporarily disable it without deletion."),
-    description: str | None = Field(None, description="A user-friendly label or description for this webhook to help identify its purpose.")
-) -> dict[str, Any]:
-    """Update an existing webhook configuration by ID. Modify the event subscription, endpoint URL, authentication passcode, status, or description."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutWebhookRequest(
-            path=_models.PutWebhookRequestPath(webhook_id=webhook_id),
-            body=_models.PutWebhookRequestBody(event_type=event_type, endpoint=endpoint, passcode=passcode, status=status, description=description)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_webhook", "PUT", "/v2/webhooks/{webhook_id}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/v2/webhooks/{webhook_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/webhooks/{webhook_id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_webhook")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_webhook",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Webhooks
-@mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any]:
-    """Permanently deletes the specified webhook. This action cannot be undone and will stop all event notifications to this webhook endpoint."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.DeleteWebhookRequest(
-            path=_models.DeleteWebhookRequestPath(webhook_id=webhook_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_webhook: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_webhook", "DELETE", "/v2/webhooks/{webhook_id}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/v2/webhooks/{webhook_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/webhooks/{webhook_id}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_webhook")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_webhook",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Webhooks
-@mcp.tool()
-async def list_webhook_requests(webhook_id: str = Field(..., description="The unique identifier of the webhook subscription whose requests you want to retrieve.")) -> dict[str, Any]:
-    """Retrieve all webhook requests sent for a specific webhook subscription within the last week. Useful for debugging webhook delivery issues and monitoring webhook activity."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetWebhookRequestsRequest(
-            path=_models.GetWebhookRequestsRequestPath(webhook_id=webhook_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_webhook_requests: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_webhook_requests", "GET", "/v2/webhooks/{webhook_id}/requests", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/v2/webhooks/{webhook_id}/requests", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/webhooks/{webhook_id}/requests"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_webhook_requests")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_webhook_requests",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -2300,8 +2089,8 @@ async def list_activity_logs(
     events: str | None = Field(None, description="Filter results to include only specified event types. Accepts comma-separated values to include multiple event types; all events are returned if unspecified."),
     start_time: float | None = Field(None, description="Unix timestamp marking the start of the time range (inclusive). Defaults to one year ago if unspecified."),
     end_time: float | None = Field(None, description="Unix timestamp marking the end of the time range (inclusive). Defaults to the current timestamp if unspecified."),
-    limit: float | None = Field(None, description="Maximum number of events to return in the response. Defaults to 1000 if unspecified.", ge=1),
-    order: Literal["asc", "desc"] | None = Field('asc', description="Sort order for events by timestamp. Use ascending order to show oldest events first, or descending order to show newest events first.")
+    limit: float | None = Field(None, description="Maximum number of events to return in the response. Defaults to 1000 if unspecified."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for events by timestamp. Use ascending order to show oldest events first, or descending order to show newest events first."),
 ) -> dict[str, Any]:
     """Retrieve a list of activity log events filtered by type, time range, and ordering. Useful for auditing, monitoring system changes, and tracking user actions."""
 
@@ -2314,12 +2103,6 @@ async def list_activity_logs(
         logging.error(f"Parameter validation failed for list_activity_logs: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_activity_logs", "GET", "/v1/activity_logs", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/activity_logs"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2328,6 +2111,9 @@ async def list_activity_logs(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_activity_logs")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_activity_logs", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2347,7 +2133,7 @@ async def list_payments(
     user_id: str | None = Field(None, description="The ID of the user whose payment information you want to retrieve. Obtain this by having the user authenticate via OAuth2 to the Figma REST API."),
     community_file_id: str | None = Field(None, description="The ID of the Community file to query. Find this in the file's Community page URL (the number after 'file/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
     plugin_id: str | None = Field(None, description="The ID of the plugin to query. Find this in the plugin's manifest or Community page URL (the number after 'plugin/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
-    widget_id: str | None = Field(None, description="The ID of the widget to query. Find this in the widget's manifest or Community page URL (the number after 'widget/'). Provide exactly one of: community_file_id, plugin_id, or widget_id.")
+    widget_id: str | None = Field(None, description="The ID of the widget to query. Find this in the widget's manifest or Community page URL (the number after 'widget/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
 ) -> dict[str, Any]:
     """Retrieve payment information for a user on a specific Community file, plugin, or widget. You can only query resources that you own."""
 
@@ -2360,12 +2146,6 @@ async def list_payments(
         logging.error(f"Parameter validation failed for list_payments: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_payments", "GET", "/v1/payments", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/payments"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2374,6 +2154,9 @@ async def list_payments(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_payments")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_payments", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2401,12 +2184,6 @@ async def list_local_variables(file_key: str = Field(..., description="The file 
         logging.error(f"Parameter validation failed for list_local_variables: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_local_variables", "GET", "/v1/files/{file_key}/variables/local", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/variables/local", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/variables/local"
     _http_headers = {}
@@ -2414,6 +2191,9 @@ async def list_local_variables(file_key: str = Field(..., description="The file 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_local_variables")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_local_variables", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2440,12 +2220,6 @@ async def list_published_variables(file_key: str = Field(..., description="The m
         logging.error(f"Parameter validation failed for list_published_variables: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_published_variables", "GET", "/v1/files/{file_key}/variables/published", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/variables/published", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/variables/published"
     _http_headers = {}
@@ -2453,6 +2227,9 @@ async def list_published_variables(file_key: str = Field(..., description="The m
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_published_variables")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_published_variables", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2472,7 +2249,7 @@ async def bulk_modify_variables(
     variable_collections: list[_models.VariableCollectionChange] | None = Field(None, alias="variableCollections", description="Array of variable collection objects to create, update, or delete. Each object must include an action property (create, update, or delete). Processed first in the request."),
     variable_modes: list[_models.VariableModeChange] | None = Field(None, alias="variableModes", description="Array of variable mode objects to create, update, or delete within collections. Each collection supports a maximum of 40 modes with names up to 40 characters. Processed second in the request."),
     variables: list[_models.VariableChange] | None = Field(None, description="Array of variable objects to create, update, or delete. Each collection supports a maximum of 5000 variables. Variable names must be unique within a collection and cannot contain special characters such as . { }. Processed third in the request."),
-    variable_mode_values: list[_models.VariableModeValue] | None = Field(None, alias="variableModeValues", description="Array of variable mode value assignments to set specific values for variables under particular modes. Variables cannot be aliased to themselves or form alias cycles. Processed last in the request.")
+    variable_mode_values: list[_models.VariableModeValue] | None = Field(None, alias="variableModeValues", description="Array of variable mode value assignments to set specific values for variables under particular modes. Variables cannot be aliased to themselves or form alias cycles. Processed last in the request."),
 ) -> dict[str, Any]:
     """Bulk create, update, and delete variables, variable collections, modes, and mode values in a file. Changes are applied atomically in a defined order: collections, then modes, then variables, then mode values."""
 
@@ -2486,12 +2263,6 @@ async def bulk_modify_variables(
         logging.error(f"Parameter validation failed for bulk_modify_variables: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("bulk_modify_variables", "POST", "/v1/files/{file_key}/variables", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/variables", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/variables"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2500,6 +2271,9 @@ async def bulk_modify_variables(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("bulk_modify_variables")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("bulk_modify_variables", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2517,7 +2291,7 @@ async def bulk_modify_variables(
 @mcp.tool()
 async def list_dev_resources(
     file_key: str = Field(..., description="The main file key to retrieve dev resources from. Branch keys are not supported."),
-    node_ids: str | None = Field(None, description="Comma-separated list of node identifiers to filter results. When specified, only dev resources attached to these nodes are returned. Omit to retrieve all dev resources in the file.")
+    node_ids: str | None = Field(None, description="Comma-separated list of node identifiers to filter results. When specified, only dev resources attached to these nodes are returned. Omit to retrieve all dev resources in the file."),
 ) -> dict[str, Any]:
     """Retrieve development resources associated with a file. Optionally filter results to specific nodes within the file."""
 
@@ -2531,12 +2305,6 @@ async def list_dev_resources(
         logging.error(f"Parameter validation failed for list_dev_resources: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_dev_resources", "GET", "/v1/files/{file_key}/dev_resources", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/dev_resources", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/dev_resources"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2545,6 +2313,9 @@ async def list_dev_resources(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_dev_resources", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2572,12 +2343,6 @@ async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyD
         logging.error(f"Parameter validation failed for create_dev_resources: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_dev_resources", "POST", "/v1/dev_resources", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/dev_resources"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2586,6 +2351,9 @@ async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyD
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_dev_resources", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2613,12 +2381,6 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
         logging.error(f"Parameter validation failed for update_dev_resources: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_dev_resources", "PUT", "/v1/dev_resources", _request_id)
-
     # Extract parameters for API call
     _http_path = "/v1/dev_resources"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2627,6 +2389,9 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_dev_resources")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_dev_resources", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2644,7 +2409,7 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
 @mcp.tool()
 async def remove_dev_resource(
     file_key: str = Field(..., description="The main file key containing the dev resource to delete. Must be a main file key, not a branch key."),
-    dev_resource_id: str = Field(..., description="The unique identifier of the dev resource to delete.")
+    dev_resource_id: str = Field(..., description="The unique identifier of the dev resource to delete."),
 ) -> dict[str, Any]:
     """Remove a dev resource from a file. This operation permanently deletes the specified dev resource and cannot be undone."""
 
@@ -2657,12 +2422,6 @@ async def remove_dev_resource(
         logging.error(f"Parameter validation failed for remove_dev_resource: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("remove_dev_resource", "DELETE", "/v1/files/{file_key}/dev_resources/{dev_resource_id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/files/{file_key}/dev_resources/{dev_resource_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/files/{file_key}/dev_resources/{dev_resource_id}"
     _http_headers = {}
@@ -2670,6 +2429,9 @@ async def remove_dev_resource(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("remove_dev_resource")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_dev_resource", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2688,7 +2450,7 @@ async def list_library_component_actions(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve analytics data."),
     group_by: Literal["component", "team"] = Field(..., description="The dimension by which to aggregate the returned analytics data."),
     start_date: str | None = Field(None, description="The earliest week to include in the analytics results, specified as an ISO 8601 date. The date will be rounded back to the nearest start of a week. Defaults to one year prior to the end date."),
-    end_date: str | None = Field(None, description="The latest week to include in the analytics results, specified as an ISO 8601 date. The date will be rounded forward to the nearest end of a week. Defaults to the most recently computed week.")
+    end_date: str | None = Field(None, description="The latest week to include in the analytics results, specified as an ISO 8601 date. The date will be rounded forward to the nearest end of a week. Defaults to the most recently computed week."),
 ) -> dict[str, Any]:
     """Retrieve analytics data for component actions within a library, aggregated by the specified dimension (component or team). Use this to analyze usage patterns and activity metrics across your design library."""
 
@@ -2702,12 +2464,6 @@ async def list_library_component_actions(
         logging.error(f"Parameter validation failed for list_library_component_actions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_component_actions", "GET", "/v1/analytics/libraries/{file_key}/component/actions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/component/actions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/component/actions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2716,6 +2472,9 @@ async def list_library_component_actions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_component_actions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_component_actions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2733,7 +2492,7 @@ async def list_library_component_actions(
 @mcp.tool()
 async def list_library_component_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve component usage analytics."),
-    group_by: Literal["component", "file"] = Field(..., description="The dimension by which to group the returned usage analytics data.")
+    group_by: Literal["component", "file"] = Field(..., description="The dimension by which to group the returned usage analytics data."),
 ) -> dict[str, Any]:
     """Retrieves analytics data on how components from a library are being used, with results grouped by the specified dimension (component or file)."""
 
@@ -2747,12 +2506,6 @@ async def list_library_component_usages(
         logging.error(f"Parameter validation failed for list_library_component_usages: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_component_usages", "GET", "/v1/analytics/libraries/{file_key}/component/usages", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/component/usages", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/component/usages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2761,6 +2514,9 @@ async def list_library_component_usages(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_component_usages")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_component_usages", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2780,7 +2536,7 @@ async def list_library_style_actions(
     file_key: str = Field(..., description="The unique identifier of the library for which to fetch style action analytics."),
     group_by: Literal["style", "team"] = Field(..., description="The dimension to group analytics results by. Choose 'style' to aggregate by individual styles or 'team' to aggregate by team."),
     start_date: str | None = Field(None, description="The earliest week to include in results, specified as an ISO 8601 date. The date will be rounded back to the nearest week start. Defaults to one year prior to the end date."),
-    end_date: str | None = Field(None, description="The latest week to include in results, specified as an ISO 8601 date. The date will be rounded forward to the nearest week end. Defaults to the most recently computed week.")
+    end_date: str | None = Field(None, description="The latest week to include in results, specified as an ISO 8601 date. The date will be rounded forward to the nearest week end. Defaults to the most recently computed week."),
 ) -> dict[str, Any]:
     """Retrieve analytics data for style actions in a library, aggregated by the specified dimension (style or team). Use date parameters to filter results to a specific time range."""
 
@@ -2794,12 +2550,6 @@ async def list_library_style_actions(
         logging.error(f"Parameter validation failed for list_library_style_actions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_style_actions", "GET", "/v1/analytics/libraries/{file_key}/style/actions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/style/actions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/style/actions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2808,6 +2558,9 @@ async def list_library_style_actions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_style_actions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_style_actions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2825,7 +2578,7 @@ async def list_library_style_actions(
 @mcp.tool()
 async def list_library_style_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve style usage analytics."),
-    group_by: Literal["style", "file"] = Field(..., description="The dimension by which to group the returned analytics data. Choose 'style' to see usage broken down by individual styles, or 'file' to see usage broken down by the files that consume those styles.")
+    group_by: Literal["style", "file"] = Field(..., description="The dimension by which to group the returned analytics data. Choose 'style' to see usage broken down by individual styles, or 'file' to see usage broken down by the files that consume those styles."),
 ) -> dict[str, Any]:
     """Retrieves analytics data on how styles are used within a library, aggregated by the specified dimension (style or file). Use this to understand style adoption and usage patterns across your design library."""
 
@@ -2839,12 +2592,6 @@ async def list_library_style_usages(
         logging.error(f"Parameter validation failed for list_library_style_usages: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_style_usages", "GET", "/v1/analytics/libraries/{file_key}/style/usages", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/style/usages", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/style/usages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2853,6 +2600,9 @@ async def list_library_style_usages(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_style_usages")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_style_usages", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2872,7 +2622,7 @@ async def list_library_variable_actions(
     file_key: str = Field(..., description="The unique identifier of the library for which to fetch variable action analytics."),
     group_by: Literal["variable", "team"] = Field(..., description="The dimension by which to group the returned analytics data."),
     start_date: str | None = Field(None, description="ISO 8601 date marking the start of the analytics period. Dates are rounded back to the nearest week start. Defaults to one year prior to the end date."),
-    end_date: str | None = Field(None, description="ISO 8601 date marking the end of the analytics period. Dates are rounded forward to the nearest week end. Defaults to the latest computed week.")
+    end_date: str | None = Field(None, description="ISO 8601 date marking the end of the analytics period. Dates are rounded forward to the nearest week end. Defaults to the latest computed week."),
 ) -> dict[str, Any]:
     """Retrieve analytics data for variable actions within a library, aggregated by the specified dimension (variable or team). Use date parameters to filter results to a specific time range."""
 
@@ -2886,12 +2636,6 @@ async def list_library_variable_actions(
         logging.error(f"Parameter validation failed for list_library_variable_actions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_variable_actions", "GET", "/v1/analytics/libraries/{file_key}/variable/actions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/variable/actions", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/variable/actions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2900,6 +2644,9 @@ async def list_library_variable_actions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_variable_actions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_variable_actions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2917,7 +2664,7 @@ async def list_library_variable_actions(
 @mcp.tool()
 async def list_library_variable_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve variable usage analytics."),
-    group_by: Literal["variable", "file"] = Field(..., description="The dimension by which to aggregate the returned variable usage data. Choose 'variable' to group by individual variables, or 'file' to group by source files.")
+    group_by: Literal["variable", "file"] = Field(..., description="The dimension by which to aggregate the returned variable usage data. Choose 'variable' to group by individual variables, or 'file' to group by source files."),
 ) -> dict[str, Any]:
     """Retrieves analytics data on how variables are used within a library, aggregated by the specified dimension (variable or file). Use this to understand variable usage patterns and dependencies."""
 
@@ -2931,12 +2678,6 @@ async def list_library_variable_usages(
         logging.error(f"Parameter validation failed for list_library_variable_usages: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_library_variable_usages", "GET", "/v1/analytics/libraries/{file_key}/variable/usages", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1/analytics/libraries/{file_key}/variable/usages", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/analytics/libraries/{file_key}/variable/usages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2945,6 +2686,9 @@ async def list_library_variable_usages(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_library_variable_usages")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_library_variable_usages", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3042,7 +2786,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python figma_api_server.py", file=sys.stderr)
+        print("  python figma_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
