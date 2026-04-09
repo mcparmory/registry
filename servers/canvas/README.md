@@ -1,6 +1,5 @@
-# Canvas API MCP Server
+# Canvas MCP Server
 
-Base URL: https://canvas.instructure.com/api
 
 ---
 
@@ -9,6 +8,7 @@ Base URL: https://canvas.instructure.com/api
 ### Quick Start (recommended)
 
 ```bash
+BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 uvx mcparmory-canvas
 ```
@@ -17,6 +17,7 @@ uvx mcparmory-canvas
 
 ```bash
 pip install mcparmory-canvas
+BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 mcparmory-canvas
 ```
@@ -32,6 +33,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-canvas"],
       "env": {
+        "BASE_URL": "https://your-instance.example.com",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
