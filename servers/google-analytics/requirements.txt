@@ -1,5 +1,5 @@
-# Google Analytics Data API - Dependencies
-# Generated: 2026-04-01 10:40:29 UTC
+# Google Analytics - Dependencies
+# Generated: 2026-04-09 17:22:55 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0

@@ -1,4 +1,4 @@
-# Google Analytics Data API MCP Server
+# Google Analytics MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-google-analytics .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Google Analytics Data API MCP Server" \
+LABEL org.opencontainers.image.title="Google Analytics MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

@@ -1,4 +1,4 @@
-# Google Analytics Data API MCP Server
+# Google Analytics MCP Server
 
 Base URL: https://analyticsdata.googleapis.com
 ## API Info

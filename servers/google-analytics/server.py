@@ -7,14 +7,15 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-01 10:40:29 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:22:55 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://analyticsdata.googleapis.com")
@@ -490,11 +492,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -536,7 +542,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -738,19 +747,68 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
+@overload
+def _parse_int(v: str | int) -> int: ...
+@overload
+def _parse_int(v: None) -> None: ...
+def _parse_int(v: str | int | None) -> int | None:
+    """Convert a string representation of an integer to a Python int.
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+    Formatted integer parameters (int32, int64, uint64, etc.) are exposed as str
+    in the tool signature to prevent JS float64 precision loss for large IDs.
+    This helper converts them back to int before Pydantic model construction.
+    None passes through for optional parameters.
+    Raises ValueError for non-integer strings or unexpected types (e.g. bool).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"Expected an integer value, got {v!r}")
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError) as _e:
+        raise ValueError(f"Expected an integer value, got {v!r}") from _e
+
+
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -775,10 +833,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -872,10 +935,7 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'OAuth2',
 ]
 
 # Initialize authentication handlers at server startup
@@ -907,9 +967,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -953,6 +1013,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -965,7 +1026,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -977,16 +1038,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1000,13 +1065,13 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Google Analytics")
+mcp = FastMCP("Google Analytics", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: properties
 @mcp.tool()
 async def run_pivot_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. This property applies to all reports in the batch, though individual requests may omit or match this value."),
-    requests: list[_models.RunPivotReportRequest] | None = Field(None, description="Array of individual pivot report requests to execute. Each request generates a separate pivot report response. Maximum of 5 requests allowed per batch.")
+    requests: list[_models.RunPivotReportRequest] | None = Field(None, description="Array of individual pivot report requests to execute. Each request generates a separate pivot report response. Maximum of 5 requests allowed per batch."),
 ) -> dict[str, Any]:
     """Execute multiple pivot reports in a single batch request for a Google Analytics property. All reports must belong to the same property, with support for up to 5 requests per batch."""
 
@@ -1020,12 +1085,6 @@ async def run_pivot_reports_batch(
         logging.error(f"Parameter validation failed for run_pivot_reports_batch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("run_pivot_reports_batch", "POST", "/v1beta/{property}:batchRunPivotReports", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:batchRunPivotReports", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:batchRunPivotReports"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1034,6 +1093,9 @@ async def run_pivot_reports_batch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("run_pivot_reports_batch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("run_pivot_reports_batch", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1051,7 +1113,7 @@ async def run_pivot_reports_batch(
 @mcp.tool()
 async def run_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. The property must be consistent across all batch requests."),
-    requests: list[_models.RunReportRequest] | None = Field(None, description="Array of individual report requests to execute. Each request generates a separate report response. Order is preserved in the response. Maximum of 5 requests allowed per batch.")
+    requests: list[_models.RunReportRequest] | None = Field(None, description="Array of individual report requests to execute. Each request generates a separate report response. Order is preserved in the response. Maximum of 5 requests allowed per batch."),
 ) -> dict[str, Any]:
     """Execute multiple analytics reports in a single batch request for a Google Analytics property. All reports must belong to the same property, with support for up to 5 requests per batch."""
 
@@ -1065,12 +1127,6 @@ async def run_reports_batch(
         logging.error(f"Parameter validation failed for run_reports_batch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("run_reports_batch", "POST", "/v1beta/{property}:batchRunReports", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:batchRunReports", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:batchRunReports"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1079,6 +1135,9 @@ async def run_reports_batch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("run_reports_batch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("run_reports_batch", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1122,7 +1181,7 @@ async def validate_report_compatibility(
     dimension_filter_not_expression: _models.FilterExpression | None = Field(None, alias="dimensionFilterNotExpression", description="A NOT expression that inverts the logic of the dimension filter."),
     metric_filter_not_expression: _models.FilterExpression | None = Field(None, alias="metricFilterNotExpression", description="A NOT expression that inverts the logic of the metric filter."),
     dimensions: list[_models.Dimension] | None = Field(None, description="The list of dimension names to validate for compatibility. Must match the dimensions used in your runReport request."),
-    metrics: list[_models.Metric] | None = Field(None, description="The list of metric names to validate for compatibility. Must match the metrics used in your runReport request.")
+    metrics: list[_models.Metric] | None = Field(None, description="The list of metric names to validate for compatibility. Must match the metrics used in your runReport request."),
 ) -> dict[str, Any]:
     """Validates whether a set of dimensions and metrics can be used together in a Core report, and returns compatible or incompatible dimensions and metrics. Use this to identify which dimensions and metrics need to be removed to create a valid report."""
 
@@ -1151,12 +1210,6 @@ async def validate_report_compatibility(
         logging.error(f"Parameter validation failed for validate_report_compatibility: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("validate_report_compatibility", "POST", "/v1beta/{property}:checkCompatibility", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:checkCompatibility", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:checkCompatibility"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1165,6 +1218,9 @@ async def validate_report_compatibility(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("validate_report_compatibility")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("validate_report_compatibility", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1192,12 +1248,6 @@ async def get_audience_export(name: str = Field(..., description="The resource i
         logging.error(f"Parameter validation failed for get_audience_export: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_audience_export", "GET", "/v1beta/{name}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{name}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{name}"
     _http_headers = {}
@@ -1205,6 +1255,9 @@ async def get_audience_export(name: str = Field(..., description="The resource i
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_audience_export")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_audience_export", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1223,9 +1276,9 @@ async def generate_pivot_report(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Found in your Google Analytics account settings."),
     accumulate: bool | None = Field(None, description="If true, accumulates results from the first touch day through the end date. Not supported for standard reports."),
     cohorts: list[_models.Cohort] | None = Field(None, description="Defines selection criteria to group users into cohorts for cohort analysis. Most cohort reports use a single cohort; multiple cohorts are distinguished by their assigned names."),
-    end_offset: int | None = Field(None, alias="endOffset", description="The end offset for the extended reporting date range in a cohort report, specified as a positive integer. The actual end date is calculated by multiplying this offset by the granularity unit (days, weeks, or months).", json_schema_extra={'format': 'int32'}),
+    end_offset: str | None = Field(None, alias="endOffset", description="The end offset for the extended reporting date range in a cohort report, specified as a positive integer. The actual end date is calculated by multiplying this offset by the granularity unit (days, weeks, or months)."),
     granularity: Literal["GRANULARITY_UNSPECIFIED", "DAILY", "WEEKLY", "MONTHLY"] | None = Field(None, description="The time unit granularity used to interpret start and end offsets in cohort reports (daily, weekly, or monthly)."),
-    start_offset: int | None = Field(None, alias="startOffset", description="The start offset for the extended reporting date range in a cohort report, specified as a positive integer. Commonly set to 0 to include data from cohort acquisition forward. The actual start date is calculated by multiplying this offset by the granularity unit.", json_schema_extra={'format': 'int32'}),
+    start_offset: str | None = Field(None, alias="startOffset", description="The start offset for the extended reporting date range in a cohort report, specified as a positive integer. Commonly set to 0 to include data from cohort acquisition forward. The actual start date is calculated by multiplying this offset by the granularity unit."),
     comparisons: list[_models.Comparison] | None = Field(None, description="Configuration for comparison columns in the report. Requires both this field and a comparisons dimension to display comparison data."),
     currency_code: str | None = Field(None, alias="currencyCode", description="ISO 4217 currency code for monetary values in the report. If unspecified, uses the property's default currency."),
     date_ranges: list[_models.DateRange] | None = Field(None, alias="dateRanges", description="Date ranges for retrieving event data. Multiple ranges can be specified to compare data across periods. Include the special 'dateRange' dimension in pivots to compare between ranges. Omit for cohort requests."),
@@ -1261,9 +1314,12 @@ async def generate_pivot_report(
     keep_empty_rows: bool | None = Field(None, alias="keepEmptyRows", description="If false, rows with all metrics equal to zero are excluded from results. If true, zero-value rows are included unless removed by filters. Only data actually recorded by the property appears in the report."),
     metrics: list[_models.Metric] | None = Field(None, description="The metrics to include in the report. At least one metric is required. All specified metrics must be used in a metric filter, order by clause, or metric expression."),
     pivots: list[_models.Pivot] | None = Field(None, description="Defines how dimensions are organized visually as rows or columns in the pivot report. All dimension names in pivots must be declared in the dimensions array. Each dimension can appear in only one pivot."),
-    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="If true, returns the current quota status for this Google Analytics property, including usage and limits.")
+    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="If true, returns the current quota status for this Google Analytics property, including usage and limits."),
 ) -> dict[str, Any]:
     """Generate a customized pivot report of Google Analytics event data with advanced dimensional analysis. Pivot reports allow dimensions to be organized in rows or columns, with support for multiple pivots to further segment and analyze your data."""
+
+    _end_offset = _parse_int(end_offset)
+    _start_offset = _parse_int(start_offset)
 
     # Construct request model with validation
     try:
@@ -1272,7 +1328,7 @@ async def generate_pivot_report(
             body=_models.RunPivotReportRequestBody(comparisons=comparisons, currency_code=currency_code, date_ranges=date_ranges, dimensions=dimensions, keep_empty_rows=keep_empty_rows, metrics=metrics, pivots=pivots, return_property_quota=return_property_quota,
                 cohort_spec=_models.RunPivotReportRequestBodyCohortSpec(cohorts=cohorts,
                     cohort_report_settings=_models.RunPivotReportRequestBodyCohortSpecCohortReportSettings(accumulate=accumulate) if any(v is not None for v in [accumulate]) else None,
-                    cohorts_range=_models.RunPivotReportRequestBodyCohortSpecCohortsRange(end_offset=end_offset, granularity=granularity, start_offset=start_offset) if any(v is not None for v in [end_offset, granularity, start_offset]) else None) if any(v is not None for v in [accumulate, cohorts, end_offset, granularity, start_offset]) else None,
+                    cohorts_range=_models.RunPivotReportRequestBodyCohortSpecCohortsRange(end_offset=_end_offset, granularity=granularity, start_offset=_start_offset) if any(v is not None for v in [end_offset, granularity, start_offset]) else None) if any(v is not None for v in [accumulate, cohorts, end_offset, granularity, start_offset]) else None,
                 dimension_filter=_models.RunPivotReportRequestBodyDimensionFilter(not_expression=dimension_filter_not_expression,
                     and_group=_models.RunPivotReportRequestBodyDimensionFilterAndGroup(expressions=dimension_filter_and_group_expressions) if any(v is not None for v in [dimension_filter_and_group_expressions]) else None,
                     or_group=_models.RunPivotReportRequestBodyDimensionFilterOrGroup(expressions=dimension_filter_or_group_expressions) if any(v is not None for v in [dimension_filter_or_group_expressions]) else None,
@@ -1294,12 +1350,6 @@ async def generate_pivot_report(
         logging.error(f"Parameter validation failed for generate_pivot_report: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("generate_pivot_report", "POST", "/v1beta/{property}:runPivotReport", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:runPivotReport", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:runPivotReport"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1308,6 +1358,9 @@ async def generate_pivot_report(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("generate_pivot_report")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("generate_pivot_report", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1341,12 +1394,12 @@ async def get_realtime_report(
     match_type: Literal["MATCH_TYPE_UNSPECIFIED", "EXACT", "BEGINS_WITH", "ENDS_WITH", "CONTAINS", "FULL_REGEXP", "PARTIAL_REGEXP"] | None = Field(None, alias="matchType", description="The matching strategy for the string filter."),
     not_expression: _models.FilterExpression | None = Field(None, alias="notExpression", description="Logical NOT expression to negate the filter condition."),
     dimensions: list[_models.Dimension] | None = Field(None, description="The dimensions to include in the report. Dimensions break down metrics by categorical values (e.g., country, device type, page path)."),
-    limit: str | None = Field(None, description="Maximum number of rows to return. Defaults to 10,000 if unspecified. API maximum is 250,000 rows per request. Must be a positive integer.", json_schema_extra={'format': 'int64'}),
+    limit: str | None = Field(None, description="Maximum number of rows to return. Defaults to 10,000 if unspecified. API maximum is 250,000 rows per request. Must be a positive integer."),
     metric_aggregations: list[Literal["METRIC_AGGREGATION_UNSPECIFIED", "TOTAL", "MINIMUM", "MAXIMUM", "COUNT"]] | None = Field(None, alias="metricAggregations", description="Aggregation methods for metrics. Aggregated values appear in rows with dimension values set to the aggregation type (e.g., RESERVED_TOTAL)."),
     metrics: list[_models.Metric] | None = Field(None, description="The metrics to include in the report. Metrics are quantitative measurements (e.g., activeUsers, eventCount, screenPageViews)."),
     minute_ranges: list[_models.MinuteRange] | None = Field(None, alias="minuteRanges", description="Time ranges in minutes to retrieve data from. If unspecified, defaults to the last 30 minutes. Multiple ranges can be requested; overlapping minutes appear in results for each range."),
     order_bys: list[_models.OrderBy] | None = Field(None, alias="orderBys", description="Specifies the sort order for report rows. Can sort by dimension values or metric values in ascending or descending order."),
-    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Whether to include the current quota status for this property in the response. Useful for monitoring API quota consumption.")
+    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Whether to include the current quota status for this property in the response. Useful for monitoring API quota consumption."),
 ) -> dict[str, Any]:
     """Retrieve a customized report of real-time event data for a Google Analytics property, showing events and usage from the present moment up to 30 minutes ago (60 minutes for GA360). Data appears in reports within seconds of being sent to Google Analytics."""
 
@@ -1369,12 +1422,6 @@ async def get_realtime_report(
         logging.error(f"Parameter validation failed for get_realtime_report: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_realtime_report", "POST", "/v1beta/{property}:runRealtimeReport", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:runRealtimeReport", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:runRealtimeReport"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1383,6 +1430,9 @@ async def get_realtime_report(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_realtime_report")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_realtime_report", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1402,9 +1452,9 @@ async def run_report(
     property_: str = Field(..., alias="property", description="A Google Analytics property identifier whose events are tracked. Specified in the URL path and not the body. To learn more, see [where to find your Property ID](https://developers.google.com/analytics/devguides/reporting/data/v1/property-id). Within a batch request, this property should either be unspecified or consistent with the batch-level property. Example: properties/1234"),
     accumulate: bool | None = Field(None, description="If true, accumulates the result from first touch day to the end day. Not supported in `RunReportRequest`."),
     cohorts: list[_models.Cohort] | None = Field(None, description="Defines the selection criteria to group users into cohorts. Most cohort reports define only a single cohort. If multiple cohorts are specified, each cohort can be recognized in the report by their name."),
-    end_offset: int | None = Field(None, alias="endOffset", description="Required. `endOffset` specifies the end date of the extended reporting date range for a cohort report. `endOffset` can be any positive integer but is commonly set to 5 to 10 so that reports contain data on the cohort for the next several granularity time periods. If `granularity` is `DAILY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset` days. If `granularity` is `WEEKLY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset * 7` days. If `granularity` is `MONTHLY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset * 30` days.", json_schema_extra={'format': 'int32'}),
+    end_offset: str | None = Field(None, alias="endOffset", description="Required. `endOffset` specifies the end date of the extended reporting date range for a cohort report. `endOffset` can be any positive integer but is commonly set to 5 to 10 so that reports contain data on the cohort for the next several granularity time periods. If `granularity` is `DAILY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset` days. If `granularity` is `WEEKLY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset * 7` days. If `granularity` is `MONTHLY`, the `endDate` of the extended reporting date range is `endDate` of the cohort plus `endOffset * 30` days."),
     granularity: Literal["GRANULARITY_UNSPECIFIED", "DAILY", "WEEKLY", "MONTHLY"] | None = Field(None, description="Required. The granularity used to interpret the `startOffset` and `endOffset` for the extended reporting date range for a cohort report."),
-    start_offset: int | None = Field(None, alias="startOffset", description="`startOffset` specifies the start date of the extended reporting date range for a cohort report. `startOffset` is commonly set to 0 so that reports contain data from the acquisition of the cohort forward. If `granularity` is `DAILY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset` days. If `granularity` is `WEEKLY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset * 7` days. If `granularity` is `MONTHLY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset * 30` days.", json_schema_extra={'format': 'int32'}),
+    start_offset: str | None = Field(None, alias="startOffset", description="`startOffset` specifies the start date of the extended reporting date range for a cohort report. `startOffset` is commonly set to 0 so that reports contain data from the acquisition of the cohort forward. If `granularity` is `DAILY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset` days. If `granularity` is `WEEKLY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset * 7` days. If `granularity` is `MONTHLY`, the `startDate` of the extended reporting date range is `startDate` of the cohort plus `startOffset * 30` days."),
     comparisons: list[_models.Comparison] | None = Field(None, description="Optional. The configuration of comparisons requested and displayed. The request only requires a comparisons field in order to receive a comparison column in the response."),
     currency_code: str | None = Field(None, alias="currencyCode", description="A currency code in ISO4217 format, such as \"AED\", \"USD\", \"JPY\". If the field is empty, the report uses the property's default currency."),
     date_ranges: list[_models.DateRange] | None = Field(None, alias="dateRanges", description="Date ranges of data to read. If multiple date ranges are requested, each response row will contain a zero based date range index. If two date ranges overlap, the event data for the overlapping days is included in the response rows for both date ranges. In a cohort request, this `dateRanges` must be unspecified."),
@@ -1434,14 +1484,17 @@ async def run_report(
     metric_filter_not_expression: _models.FilterExpression | None = Field(None, alias="metricFilterNotExpression"),
     dimensions: list[_models.Dimension] | None = Field(None, description="The dimensions requested and displayed."),
     keep_empty_rows: bool | None = Field(None, alias="keepEmptyRows", description="If false or unspecified, each row with all metrics equal to 0 will not be returned. If true, these rows will be returned if they are not separately removed by a filter. Regardless of this `keep_empty_rows` setting, only data recorded by the Google Analytics property can be displayed in a report. For example if a property never logs a `purchase` event, then a query for the `eventName` dimension and `eventCount` metric will not have a row eventName: \"purchase\" and eventCount: 0."),
-    limit: str | None = Field(None, description="The number of rows to return. If unspecified, 10,000 rows are returned. The API returns a maximum of 250,000 rows per request, no matter how many you ask for. `limit` must be positive. The API can also return fewer rows than the requested `limit`, if there aren't as many dimension values as the `limit`. For instance, there are fewer than 300 possible values for the dimension `country`, so when reporting on only `country`, you can't get more than 300 rows, even if you set `limit` to a higher value. To learn more about this pagination parameter, see [Pagination](https://developers.google.com/analytics/devguides/reporting/data/v1/basics#pagination).", json_schema_extra={'format': 'int64'}),
+    limit: str | None = Field(None, description="The number of rows to return. If unspecified, 10,000 rows are returned. The API returns a maximum of 250,000 rows per request, no matter how many you ask for. `limit` must be positive. The API can also return fewer rows than the requested `limit`, if there aren't as many dimension values as the `limit`. For instance, there are fewer than 300 possible values for the dimension `country`, so when reporting on only `country`, you can't get more than 300 rows, even if you set `limit` to a higher value. To learn more about this pagination parameter, see [Pagination](https://developers.google.com/analytics/devguides/reporting/data/v1/basics#pagination)."),
     metric_aggregations: list[Literal["METRIC_AGGREGATION_UNSPECIFIED", "TOTAL", "MINIMUM", "MAXIMUM", "COUNT"]] | None = Field(None, alias="metricAggregations", description="Aggregation of metrics. Aggregated metric values will be shown in rows where the dimension_values are set to \"RESERVED_(MetricAggregation)\". Aggregates including both comparisons and multiple date ranges will be aggregated based on the date ranges."),
     metrics: list[_models.Metric] | None = Field(None, description="The metrics requested and displayed."),
-    offset: str | None = Field(None, description="The row count of the start row. The first row is counted as row 0. When paging, the first request does not specify offset; or equivalently, sets offset to 0; the first request returns the first `limit` of rows. The second request sets offset to the `limit` of the first request; the second request returns the second `limit` of rows. To learn more about this pagination parameter, see [Pagination](https://developers.google.com/analytics/devguides/reporting/data/v1/basics#pagination).", json_schema_extra={'format': 'int64'}),
+    offset: str | None = Field(None, description="The row count of the start row. The first row is counted as row 0. When paging, the first request does not specify offset; or equivalently, sets offset to 0; the first request returns the first `limit` of rows. The second request sets offset to the `limit` of the first request; the second request returns the second `limit` of rows. To learn more about this pagination parameter, see [Pagination](https://developers.google.com/analytics/devguides/reporting/data/v1/basics#pagination)."),
     order_bys: list[_models.OrderBy] | None = Field(None, alias="orderBys", description="Specifies how rows are ordered in the response. Requests including both comparisons and multiple date ranges will have order bys applied on the comparisons."),
-    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Toggles whether to return the current state of this Google Analytics property's quota. Quota is returned in [PropertyQuota](#PropertyQuota).")
+    return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Toggles whether to return the current state of this Google Analytics property's quota. Quota is returned in [PropertyQuota](#PropertyQuota)."),
 ) -> dict[str, Any]:
     """Returns a customized report of your Google Analytics event data. Reports contain statistics derived from data collected by the Google Analytics tracking code. The data returned from the API is as a table with columns for the requested dimensions and metrics. Metrics are individual measurements of user activity on your property, such as active users or event count. Dimensions break down metrics across some common criteria, such as country or event name. For a guide to constructing requests & understanding responses, see [Creating a Report](https://developers.google.com/analytics/devguides/reporting/data/v1/basics)."""
+
+    _end_offset = _parse_int(end_offset)
+    _start_offset = _parse_int(start_offset)
 
     # Construct request model with validation
     try:
@@ -1450,7 +1503,7 @@ async def run_report(
             body=_models.RunReportRequestBody(comparisons=comparisons, currency_code=currency_code, date_ranges=date_ranges, dimensions=dimensions, keep_empty_rows=keep_empty_rows, limit=limit, metric_aggregations=metric_aggregations, metrics=metrics, offset=offset, order_bys=order_bys, return_property_quota=return_property_quota,
                 cohort_spec=_models.RunReportRequestBodyCohortSpec(cohorts=cohorts,
                     cohort_report_settings=_models.RunReportRequestBodyCohortSpecCohortReportSettings(accumulate=accumulate) if any(v is not None for v in [accumulate]) else None,
-                    cohorts_range=_models.RunReportRequestBodyCohortSpecCohortsRange(end_offset=end_offset, granularity=granularity, start_offset=start_offset) if any(v is not None for v in [end_offset, granularity, start_offset]) else None) if any(v is not None for v in [accumulate, cohorts, end_offset, granularity, start_offset]) else None,
+                    cohorts_range=_models.RunReportRequestBodyCohortSpecCohortsRange(end_offset=_end_offset, granularity=granularity, start_offset=_start_offset) if any(v is not None for v in [end_offset, granularity, start_offset]) else None) if any(v is not None for v in [accumulate, cohorts, end_offset, granularity, start_offset]) else None,
                 dimension_filter=_models.RunReportRequestBodyDimensionFilter(not_expression=dimension_filter_not_expression,
                     filter_=_models.RunReportRequestBodyDimensionFilterFilter(empty_filter=dimension_filter_filter_empty_filter, field_name=dimension_filter_filter_field_name,
                         between_filter=_models.RunReportRequestBodyDimensionFilterFilterBetweenFilter(from_value=dimension_filter_filter_between_filter_from_value, to_value=dimension_filter_filter_between_filter_to_value) if any(v is not None for v in [dimension_filter_filter_between_filter_from_value, dimension_filter_filter_between_filter_to_value]) else None,
@@ -1468,12 +1521,6 @@ async def run_report(
         logging.error(f"Parameter validation failed for run_report: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("run_report", "POST", "/v1beta/{property}:runReport", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{property}:runReport", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{property}:runReport"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1482,6 +1529,9 @@ async def run_report(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("run_report")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("run_report", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1499,8 +1549,8 @@ async def run_report(
 @mcp.tool()
 async def list_audience_exports(
     parent: str = Field(..., description="The property for which to list audience exports. Format: properties/{property}"),
-    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of audience exports to return per page. The service may return fewer than specified. Higher values are coerced to the maximum allowed.", ge=1, le=1000),
-    page_token: str | None = Field(None, alias="pageToken", description="Page token from a previous ListAudienceExports call to retrieve the next page of results. When paginating, all other parameters must match the original request.")
+    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of audience exports to return per page. The service may return fewer than specified. Higher values are coerced to the maximum allowed."),
+    page_token: str | None = Field(None, alias="pageToken", description="Page token from a previous ListAudienceExports call to retrieve the next page of results. When paginating, all other parameters must match the original request."),
 ) -> dict[str, Any]:
     """Lists all audience exports for a property, allowing you to find and reuse existing exports rather than creating duplicates. The same audience can have multiple exports representing user snapshots from different dates."""
 
@@ -1514,12 +1564,6 @@ async def list_audience_exports(
         logging.error(f"Parameter validation failed for list_audience_exports: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_audience_exports", "GET", "/v1beta/{parent}/audienceExports", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{parent}/audienceExports", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{parent}/audienceExports"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1528,6 +1572,9 @@ async def list_audience_exports(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_audience_exports")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_audience_exports", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1546,7 +1593,7 @@ async def list_audience_exports(
 async def create_audience_export(
     parent: str = Field(..., description="The parent property resource where this audience export will be created. Format: properties/{property}"),
     audience: str | None = Field(None, description="The audience resource to export. This identifies which audience's users will be included in the export. Format: properties/{property}/audiences/{audience}"),
-    dimensions: list[_models.V1betaAudienceDimension] | None = Field(None, description="The dimensions to include in the audience export response. Specifies which user attributes or characteristics will be returned in the exported data.")
+    dimensions: list[_models.V1betaAudienceDimension] | None = Field(None, description="The dimensions to include in the audience export response. Specifies which user attributes or characteristics will be returned in the exported data."),
 ) -> dict[str, Any]:
     """Creates a snapshot of users currently in an audience and initiates an asynchronous export process. Use QueryAudienceExport to retrieve the exported audience data after creation."""
 
@@ -1560,12 +1607,6 @@ async def create_audience_export(
         logging.error(f"Parameter validation failed for create_audience_export: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_audience_export", "POST", "/v1beta/{parent}/audienceExports", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{parent}/audienceExports", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{parent}/audienceExports"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1574,6 +1615,9 @@ async def create_audience_export(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_audience_export")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_audience_export", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1592,7 +1636,7 @@ async def create_audience_export(
 async def query_audience_export(
     name: str = Field(..., description="The resource name of the audience export to query. Format: properties/{property}/audienceExports/{audience_export}"),
     limit: str | None = Field(None, description="Maximum number of rows to return per request. Defaults to 10,000 if unspecified. The API returns a maximum of 250,000 rows regardless of the requested limit. Must be a positive integer."),
-    offset: str | None = Field(None, description="The zero-indexed row number to start from for pagination. Omit or set to 0 for the first request. For subsequent requests, set to the limit value from the previous response to retrieve the next batch of rows.")
+    offset: str | None = Field(None, description="The zero-indexed row number to start from for pagination. Omit or set to 0 for the first request. For subsequent requests, set to the limit value from the previous response to retrieve the next batch of rows."),
 ) -> dict[str, Any]:
     """Retrieves user data from a previously created audience export. Users must first be exported via CreateAudienceExport before they can be queried using this method."""
 
@@ -1606,12 +1650,6 @@ async def query_audience_export(
         logging.error(f"Parameter validation failed for query_audience_export: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("query_audience_export", "POST", "/v1beta/{name}:query", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/v1beta/{name}:query", _request.path.model_dump(by_alias=True)) if _request.path else "/v1beta/{name}:query"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1620,6 +1658,9 @@ async def query_audience_export(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("query_audience_export")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("query_audience_export", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1717,7 +1758,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python google_analytics_data_api_server.py", file=sys.stderr)
+        print("  python google_analytics_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
