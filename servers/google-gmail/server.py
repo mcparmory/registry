@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Google Gmail MCP Server
+Gmail API MCP Server
 
 API Info:
 - API License: Creative Commons Attribution 3.0 (http://creativecommons.org/licenses/by/3.0/)
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-02 11:32:27 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:23:45 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import json
 import logging
 import os
 import random
@@ -27,7 +28,7 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 try:
     from dotenv import load_dotenv
@@ -42,10 +43,11 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://gmail.googleapis.com")
-SERVER_NAME = "Google Gmail"
+SERVER_NAME = "Gmail API"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -493,11 +495,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -539,7 +545,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -741,6 +750,27 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -806,31 +836,44 @@ def build_gmail_query(from_address: str | None = None, to_address: str | None = 
 
     return ' '.join(query_parts)
 
-def parse_from_address(value: str | None = None) -> dict | None:
-    """Helper function for parameter transformation"""
-    if value is None:
+@overload
+def _parse_int(v: str | int) -> int: ...
+@overload
+def _parse_int(v: None) -> None: ...
+def _parse_int(v: str | int | None) -> int | None:
+    """Convert a string representation of an integer to a Python int.
+
+    Formatted integer parameters (int32, int64, uint64, etc.) are exposed as str
+    in the tool signature to prevent JS float64 precision loss for large IDs.
+    This helper converts them back to int before Pydantic model construction.
+    None passes through for optional parameters.
+    Raises ValueError for non-integer strings or unexpected types (e.g. bool).
+    """
+    if v is None:
         return None
-    value = value.strip()
-    if '<' in value and '>' in value:
-        display_name = value[:value.index('<')].strip()
-        send_as_email = value[value.index('<')+1:value.index('>')].strip()
-    else:
-        display_name = ''
-        send_as_email = value
-    if not send_as_email:
-        raise ValueError('Invalid from_address format: email address is required') from None
-    return {'displayName': display_name, 'sendAsEmail': send_as_email}
+    if isinstance(v, bool):
+        raise ValueError(f"Expected an integer value, got {v!r}")
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError) as _e:
+        raise ValueError(f"Expected an integer value, got {v!r}") from _e
 
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -855,10 +898,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -952,10 +1000,7 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'OAuth2',
 ]
 
 # Initialize authentication handlers at server startup
@@ -987,9 +1032,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -1033,6 +1078,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -1045,7 +1091,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -1057,16 +1103,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1080,7 +1130,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Google Gmail")
+mcp = FastMCP("Gmail API", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: users
 @mcp.tool()
@@ -1096,12 +1146,6 @@ async def get_profile(user_id: str = Field(..., alias="userId", description="The
         logging.error(f"Parameter validation failed for get_profile: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_profile", "GET", "/gmail/v1/users/{userId}/profile", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/profile", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/profile"
     _http_headers = {}
@@ -1109,6 +1153,9 @@ async def get_profile(user_id: str = Field(..., alias="userId", description="The
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_profile")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_profile", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1123,97 +1170,11 @@ async def get_profile(user_id: str = Field(..., alias="userId", description="The
 
 # Tags: users
 @mcp.tool()
-async def stop_push_notifications(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any]:
-    """Stop receiving push notifications for the specified user's Gmail mailbox. This disables all push notification delivery to the configured endpoint."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.StopRequest(
-            path=_models.StopRequestPath(user_id=user_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for stop_push_notifications: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("stop_push_notifications", "POST", "/gmail/v1/users/{userId}/stop", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/stop", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/stop"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("stop_push_notifications")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="stop_push_notifications",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def enable_mailbox_watch(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose mailbox to watch. Use the special value 'me' to refer to the authenticated user."),
-    label_filter_behavior: Literal["include", "exclude"] | None = Field(None, alias="labelFilterBehavior", description="Determines how the labelIds list is applied: 'include' to only notify on changes to specified labels, or 'exclude' to notify on all changes except those to specified labels."),
-    label_ids: list[str] | None = Field(None, alias="labelIds", description="List of label IDs to filter notifications. When combined with labelFilterBehavior, controls which mailbox changes trigger push notifications. If omitted, all changes are included by default."),
-    topic_name: str | None = Field(None, alias="topicName", description="The fully qualified Cloud Pub/Sub topic name where notifications will be published. The topic must already exist and Gmail must have publish permissions on it. Use the Cloud Pub/Sub v1 naming format: projects/{project-id}/topics/{topic-name}.")
-) -> dict[str, Any]:
-    """Enable or update push notifications for a Gmail mailbox by subscribing to a Cloud Pub/Sub topic. Changes matching the specified criteria will be published to the configured topic."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.WatchRequest(
-            path=_models.WatchRequestPath(user_id=user_id),
-            body=_models.WatchRequestBody(label_filter_behavior=label_filter_behavior, label_ids=label_ids, topic_name=topic_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_mailbox_watch: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("enable_mailbox_watch", "POST", "/gmail/v1/users/{userId}/watch", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/watch", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/watch"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_mailbox_watch")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="enable_mailbox_watch",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def list_drafts(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Whether to include draft messages from the SPAM and TRASH folders in the results."),
-    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of drafts to return. The default is 100 and the maximum allowed value is 500.", le=500),
-    q: str | None = Field(None, description="Filter draft messages using Gmail search query syntax. Supports the same query operators as the Gmail search box (e.g., from:, rfc822msgid:, is:unread).")
+    max_results: int | None = Field(None, alias="maxResults", description="Maximum number of drafts to return. The default is 100 and the maximum allowed value is 500."),
+    q: str | None = Field(None, description="Filter draft messages using Gmail search query syntax. Supports the same query operators as the Gmail search box (e.g., from:, rfc822msgid:, is:unread)."),
 ) -> dict[str, Any]:
     """Retrieves a list of draft messages from the user's mailbox. Supports filtering by search query and optional inclusion of drafts from spam and trash folders."""
 
@@ -1227,12 +1188,6 @@ async def list_drafts(
         logging.error(f"Parameter validation failed for list_drafts: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_drafts", "GET", "/gmail/v1/users/{userId}/drafts", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1241,6 +1196,9 @@ async def list_drafts(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_drafts")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_drafts", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1269,7 +1227,7 @@ async def create_draft(
     email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
-    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
 ) -> dict[str, Any]:
     """Creates a new email draft with the DRAFT label in Gmail. The draft can optionally include classification labels and custom label IDs."""
 
@@ -1286,12 +1244,6 @@ async def create_draft(
         logging.error(f"Parameter validation failed for create_draft: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_draft", "POST", "/gmail/v1/users/{userId}/drafts", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1301,6 +1253,9 @@ async def create_draft(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_draft")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_draft", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1320,7 +1275,7 @@ async def create_draft(
 async def get_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to retrieve."),
-    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the draft message content and metadata.")
+    format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the draft message content and metadata."),
 ) -> dict[str, Any]:
     """Retrieves a specific draft message by ID. Returns the draft in the requested format for viewing or further editing."""
 
@@ -1334,12 +1289,6 @@ async def get_draft(
         logging.error(f"Parameter validation failed for get_draft: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_draft", "GET", "/gmail/v1/users/{userId}/drafts/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/{id}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1348,6 +1297,9 @@ async def get_draft(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_draft")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_draft", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1377,7 +1329,7 @@ async def update_draft(
     email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
-    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
 ) -> dict[str, Any]:
     """Updates the content of an existing draft message. Replaces the draft's message body and metadata with the provided values."""
 
@@ -1394,12 +1346,6 @@ async def update_draft(
         logging.error(f"Parameter validation failed for update_draft: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_draft", "PUT", "/gmail/v1/users/{userId}/drafts/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/{id}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1409,6 +1355,9 @@ async def update_draft(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_draft")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_draft", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1427,7 +1376,7 @@ async def update_draft(
 @mcp.tool()
 async def delete_draft(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose draft should be deleted. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the draft message to delete.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the draft message to delete."),
 ) -> dict[str, Any]:
     """Permanently deletes a draft message without moving it to trash. This action is immediate and irreversible."""
 
@@ -1440,12 +1389,6 @@ async def delete_draft(
         logging.error(f"Parameter validation failed for delete_draft: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_draft", "DELETE", "/gmail/v1/users/{userId}/drafts/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/{id}"
     _http_headers = {}
@@ -1453,6 +1396,9 @@ async def delete_draft(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_draft")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_draft", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1481,7 +1427,7 @@ async def send_draft(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-    id_: str | None = Field(None, alias="id", description="The immutable ID of the draft.")
+    id_: str | None = Field(None, alias="id", description="The immutable ID of the draft."),
 ) -> dict[str, Any]:
     """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist and contain valid recipient information."""
 
@@ -1499,12 +1445,6 @@ async def send_draft(
         logging.error(f"Parameter validation failed for send_draft: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("send_draft", "POST", "/gmail/v1/users/{userId}/drafts/send", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/drafts/send", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/drafts/send"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1514,6 +1454,9 @@ async def send_draft(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("send_draft")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_draft", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1534,8 +1477,8 @@ async def list_mailbox_history(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     history_types: list[Literal["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]] | None = Field(None, alias="historyTypes", description="Types of history events to include in results. When specified, only changes matching these types are returned."),
     label_id: str | None = Field(None, alias="labelId", description="Filter results to only include messages with a specific label ID."),
-    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of history records to return per request. Defaults to 100 if not specified.", le=500),
-    start_history_id: str | None = Field(None, alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous response or message to retrieve all changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync. Omit this parameter for the initial sync request.")
+    max_results: int | None = Field(None, alias="maxResults", description="Maximum number of history records to return per request. Defaults to 100 if not specified."),
+    start_history_id: str | None = Field(None, alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous response or message to retrieve all changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync. Omit this parameter for the initial sync request."),
 ) -> dict[str, Any]:
     """Retrieves the chronological history of all changes to a mailbox, including message additions, deletions, and label modifications. Results are returned in chronological order by historyId and support pagination for efficient sync operations."""
 
@@ -1549,12 +1492,6 @@ async def list_mailbox_history(
         logging.error(f"Parameter validation failed for list_mailbox_history: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_mailbox_history", "GET", "/gmail/v1/users/{userId}/history", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/history", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/history"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1563,6 +1500,9 @@ async def list_mailbox_history(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_mailbox_history")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_mailbox_history", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1590,12 +1530,6 @@ async def list_labels(user_id: str = Field(..., alias="userId", description="The
         logging.error(f"Parameter validation failed for list_labels: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_labels", "GET", "/gmail/v1/users/{userId}/labels", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels"
     _http_headers = {}
@@ -1603,6 +1537,9 @@ async def list_labels(user_id: str = Field(..., alias="userId", description="The
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_labels")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_labels", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1622,7 +1559,7 @@ async def create_label(
     label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether this label appears in the label list in Gmail's web interface."),
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list in Gmail's web interface."),
     name: str | None = Field(None, description="The display name for the label as it appears in Gmail."),
-    type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type for the label. User labels are created and managed by the user and can be applied to any message or thread. System labels are internally created and cannot be modified or deleted by users.")
+    type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type for the label. User labels are created and managed by the user and can be applied to any message or thread. System labels are internally created and cannot be modified or deleted by users."),
 ) -> dict[str, Any]:
     """Creates a new custom label in Gmail for organizing messages and threads. Labels can be configured with specific visibility settings in the Gmail web interface."""
 
@@ -1636,12 +1573,6 @@ async def create_label(
         logging.error(f"Parameter validation failed for create_label: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_label", "POST", "/gmail/v1/users/{userId}/labels", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1650,6 +1581,9 @@ async def create_label(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_label")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_label", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1667,7 +1601,7 @@ async def create_label(
 @mcp.tool()
 async def get_label(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the label to retrieve.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the label to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific Gmail label by its ID. Use this to fetch detailed information about a label, such as its name, visibility settings, and other metadata."""
 
@@ -1680,12 +1614,6 @@ async def get_label(
         logging.error(f"Parameter validation failed for get_label: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_label", "GET", "/gmail/v1/users/{userId}/labels/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels/{id}"
     _http_headers = {}
@@ -1693,6 +1621,9 @@ async def get_label(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_label")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_label", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1713,7 +1644,7 @@ async def update_label(
     label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether the label appears in the label list in Gmail's web interface."),
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list in Gmail's web interface."),
     name: str | None = Field(None, description="The display name of the label as shown to the user in Gmail."),
-    type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type of the label. User labels can be modified and deleted; system labels are managed by Gmail and cannot be altered.")
+    type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type of the label. User labels can be modified and deleted; system labels are managed by Gmail and cannot be altered."),
 ) -> dict[str, Any]:
     """Updates an existing Gmail label with new properties such as display name and visibility settings. Only user-created labels can be modified; system labels cannot be changed."""
 
@@ -1727,12 +1658,6 @@ async def update_label(
         logging.error(f"Parameter validation failed for update_label: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_label", "PUT", "/gmail/v1/users/{userId}/labels/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels/{id}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1741,6 +1666,9 @@ async def update_label(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_label")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_label", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1762,7 +1690,7 @@ async def update_label_partial(
     label_list_visibility: Literal["labelShow", "labelShowIfUnread", "labelHide"] | None = Field(None, alias="labelListVisibility", description="Controls whether this label appears in the label list within Gmail's web interface."),
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within Gmail's web interface."),
     name: str | None = Field(None, description="The human-readable name displayed for this label in the Gmail interface."),
-    type_: Literal["system", "user"] | None = Field(None, alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be modified or deleted, while user labels can be fully customized.")
+    type_: Literal["system", "user"] | None = Field(None, alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be modified or deleted, while user labels can be fully customized."),
 ) -> dict[str, Any]:
     """Update properties of a Gmail label using partial update semantics. Modify visibility settings, display name, or other label attributes without replacing the entire label configuration."""
 
@@ -1776,12 +1704,6 @@ async def update_label_partial(
         logging.error(f"Parameter validation failed for update_label_partial: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_label_partial", "PATCH", "/gmail/v1/users/{userId}/labels/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels/{id}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1790,6 +1712,9 @@ async def update_label_partial(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_label_partial")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_label_partial", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1807,7 +1732,7 @@ async def update_label_partial(
 @mcp.tool()
 async def delete_label(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the label to delete.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the label to delete."),
 ) -> dict[str, Any]:
     """Permanently deletes a label and removes it from all messages and threads it is applied to. This action cannot be undone."""
 
@@ -1820,12 +1745,6 @@ async def delete_label(
         logging.error(f"Parameter validation failed for delete_label: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_label", "DELETE", "/gmail/v1/users/{userId}/labels/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/labels/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/labels/{id}"
     _http_headers = {}
@@ -1833,6 +1752,9 @@ async def delete_label(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_label")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_label", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1847,9 +1769,9 @@ async def delete_label(
 
 # Tags: users
 @mcp.tool()
-async def delete_messages(
+async def delete_messages_batch(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
-    ids: list[str] | None = Field(None, description="An array of message IDs to delete. The order of IDs is not significant.")
+    ids: list[str] | None = Field(None, description="An array of message IDs to delete. The order of IDs is not significant."),
 ) -> dict[str, Any]:
     """Permanently deletes multiple messages by their IDs. Note that this operation provides no guarantees about message existence or prior deletion status."""
 
@@ -1860,14 +1782,8 @@ async def delete_messages(
             body=_models.MessagesBatchDeleteRequestBody(ids=ids)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_messages: {_validation_err}")
+        logging.error(f"Parameter validation failed for delete_messages_batch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_messages", "POST", "/gmail/v1/users/{userId}/messages/batchDelete", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/batchDelete", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/batchDelete"
@@ -1875,12 +1791,15 @@ async def delete_messages(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_messages")
+    _auth = await _get_auth_for_operation("delete_messages_batch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_messages_batch", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="delete_messages",
+        tool_name="delete_messages_batch",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -1892,11 +1811,11 @@ async def delete_messages(
 
 # Tags: users
 @mcp.tool()
-async def modify_message_labels(
+async def update_message_labels_batch(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="Label IDs to add to the specified messages. Order is not significant."),
     ids: list[str] | None = Field(None, description="The message IDs to modify. Maximum of 1000 IDs per request."),
-    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="Label IDs to remove from the specified messages. Order is not significant.")
+    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="Label IDs to remove from the specified messages. Order is not significant."),
 ) -> dict[str, Any]:
     """Modifies labels on specified messages by adding and/or removing label IDs. Supports batch operations on up to 1000 messages per request."""
 
@@ -1907,14 +1826,8 @@ async def modify_message_labels(
             body=_models.MessagesBatchModifyRequestBody(add_label_ids=add_label_ids, ids=ids, remove_label_ids=remove_label_ids)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for modify_message_labels: {_validation_err}")
+        logging.error(f"Parameter validation failed for update_message_labels_batch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("modify_message_labels", "POST", "/gmail/v1/users/{userId}/messages/batchModify", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/batchModify", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/batchModify"
@@ -1922,12 +1835,15 @@ async def modify_message_labels(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("modify_message_labels")
+    _auth = await _get_auth_for_operation("update_message_labels_batch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_message_labels_batch", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="modify_message_labels",
+        tool_name="update_message_labels_batch",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -1943,7 +1859,7 @@ async def get_message(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     id_: str = Field(..., alias="id", description="The ID of the message to retrieve, typically obtained from messages.list, messages.insert, or messages.import operations."),
     format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the message content and structure."),
-    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to `metadata`, specify which message headers to include in the response. Headers should be provided as an array of header names.")
+    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to `metadata`, specify which message headers to include in the response. Headers should be provided as an array of header names."),
 ) -> dict[str, Any]:
     """Retrieves a specific message by ID from the user's mailbox. Supports multiple output formats including full message content, headers only, or raw RFC 2822 format."""
 
@@ -1957,12 +1873,6 @@ async def get_message(
         logging.error(f"Parameter validation failed for get_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_message", "GET", "/gmail/v1/users/{userId}/messages/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{id}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1971,6 +1881,9 @@ async def get_message(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_message", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1988,7 +1901,7 @@ async def get_message(
 @mcp.tool()
 async def delete_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be deleted. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the message to delete.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the message to delete."),
 ) -> dict[str, Any]:
     """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message for recoverable deletion instead."""
 
@@ -2001,12 +1914,6 @@ async def delete_message(
         logging.error(f"Parameter validation failed for delete_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_message", "DELETE", "/gmail/v1/users/{userId}/messages/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{id}"
     _http_headers = {}
@@ -2014,6 +1921,9 @@ async def delete_message(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_message", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2045,7 +1955,7 @@ async def import_message(
     email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
-    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
 ) -> dict[str, Any]:
     """Imports a message into the user's mailbox with standard email delivery scanning and classification. The message is processed similarly to SMTP delivery, with a maximum size limit of 150MB."""
 
@@ -2063,12 +1973,6 @@ async def import_message(
         logging.error(f"Parameter validation failed for import_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("import_message", "POST", "/gmail/v1/users/{userId}/messages/import", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/import", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/import"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2079,6 +1983,9 @@ async def import_message(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("import_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("import_message", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2100,7 +2007,7 @@ async def list_messages(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include messages from SPAM and TRASH folders in the results. Defaults to false if not specified."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="Filter results to only include messages with labels matching all specified label IDs. Messages within the same thread may have different labels. Provide as an array of label ID strings."),
-    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of messages to return per request. Defaults to 100 if not specified.", le=500),
+    max_results: int | None = Field(None, alias="maxResults", description="Maximum number of messages to return per request. Defaults to 100 if not specified."),
     from_address: str | None = Field(None, description="Filter messages from a specific sender email address"),
     to_address: str | None = Field(None, description="Filter messages to a specific recipient email address"),
     subject_contains: str | None = Field(None, description="Filter messages with subject containing this text"),
@@ -2109,7 +2016,7 @@ async def list_messages(
     is_starred: bool | None = Field(None, description="Filter starred messages only"),
     before_date: str | None = Field(None, description="Filter messages before this date (YYYY/MM/DD format)"),
     after_date: str | None = Field(None, description="Filter messages after this date (YYYY/MM/DD format)"),
-    custom_query: str | None = Field(None, description="Custom Gmail query string for advanced filters (e.g., 'rfc822msgid:<id>')")
+    custom_query: str | None = Field(None, description="Custom Gmail query string for advanced filters (e.g., 'rfc822msgid:<id>')"),
 ) -> dict[str, Any]:
     """Retrieves a list of messages from the user's mailbox, with optional filtering by labels and inclusion of spam/trash folders. Supports pagination through the maxResults parameter."""
 
@@ -2126,12 +2033,6 @@ async def list_messages(
         logging.error(f"Parameter validation failed for list_messages: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_messages", "GET", "/gmail/v1/users/{userId}/messages", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2140,6 +2041,9 @@ async def list_messages(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_messages")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_messages", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2170,7 +2074,7 @@ async def insert_message(
     email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
-    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
 ) -> dict[str, Any]:
     """Inserts a message directly into the user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send a message but adds it to the mailbox with optional metadata."""
 
@@ -2188,12 +2092,6 @@ async def insert_message(
         logging.error(f"Parameter validation failed for insert_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("insert_message", "POST", "/gmail/v1/users/{userId}/messages", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2204,6 +2102,9 @@ async def insert_message(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("insert_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("insert_message", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2225,7 +2126,7 @@ async def update_message_labels(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be modified. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to modify."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="A list of label IDs to add to the message. Maximum of 100 labels can be added in a single request."),
-    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from the message. Maximum of 100 labels can be removed in a single request.")
+    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from the message. Maximum of 100 labels can be removed in a single request."),
 ) -> dict[str, Any]:
     """Updates the labels applied to a specific message by adding and/or removing label IDs. You can modify up to 100 labels per request."""
 
@@ -2239,12 +2140,6 @@ async def update_message_labels(
         logging.error(f"Parameter validation failed for update_message_labels: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_message_labels", "POST", "/gmail/v1/users/{userId}/messages/{id}/modify", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{id}/modify", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{id}/modify"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2253,6 +2148,9 @@ async def update_message_labels(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_message_labels")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_message_labels", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2281,7 +2179,7 @@ async def send_message(
     email_body_is_html: bool | None = Field(None, description="Whether email_body is HTML (True) or plain text (False)"),
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
-    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated")
+    email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
 ) -> dict[str, Any]:
     """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered immediately to all specified recipients."""
 
@@ -2298,12 +2196,6 @@ async def send_message(
         logging.error(f"Parameter validation failed for send_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("send_message", "POST", "/gmail/v1/users/{userId}/messages/send", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/send", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/send"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2313,6 +2205,9 @@ async def send_message(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("send_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_message", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2329,9 +2224,9 @@ async def send_message(
 
 # Tags: users
 @mcp.tool()
-async def trash_message(
+async def move_message_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to reference the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the message to move to trash.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the message to move to trash."),
 ) -> dict[str, Any]:
     """Moves a specified message to the trash folder. The message can be restored from trash before permanent deletion."""
 
@@ -2341,26 +2236,23 @@ async def trash_message(
             path=_models.MessagesTrashRequestPath(user_id=user_id, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for trash_message: {_validation_err}")
+        logging.error(f"Parameter validation failed for move_message_to_trash: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("trash_message", "POST", "/gmail/v1/users/{userId}/messages/{id}/trash", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{id}/trash", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{id}/trash"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("trash_message")
+    _auth = await _get_auth_for_operation("move_message_to_trash")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("move_message_to_trash", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="trash_message",
+        tool_name="move_message_to_trash",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -2371,9 +2263,9 @@ async def trash_message(
 
 # Tags: users
 @mcp.tool()
-async def restore_message(
+async def remove_message_from_trash(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message should be restored. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the message to restore from trash.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the message to restore from trash."),
 ) -> dict[str, Any]:
     """Restores a message from the trash by removing it from the trash folder. The message will be returned to its previous labels or inbox."""
 
@@ -2383,26 +2275,23 @@ async def restore_message(
             path=_models.MessagesUntrashRequestPath(user_id=user_id, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for restore_message: {_validation_err}")
+        logging.error(f"Parameter validation failed for remove_message_from_trash: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("restore_message", "POST", "/gmail/v1/users/{userId}/messages/{id}/untrash", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{id}/untrash", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{id}/untrash"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("restore_message")
+    _auth = await _get_auth_for_operation("remove_message_from_trash")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_message_from_trash", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="restore_message",
+        tool_name="remove_message_from_trash",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -2413,10 +2302,10 @@ async def restore_message(
 
 # Tags: users
 @mcp.tool()
-async def get_attachment(
+async def get_message_attachment(
     user_id: str = Field(..., alias="userId", description="The email address of the account owner. Use the special value `me` to refer to the authenticated user's account."),
     message_id: str = Field(..., alias="messageId", description="The unique identifier of the message containing the attachment."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific attachment from a Gmail message. Use this to download or access attachment metadata by providing the message ID and attachment ID."""
 
@@ -2426,26 +2315,23 @@ async def get_attachment(
             path=_models.MessagesAttachmentsGetRequestPath(user_id=user_id, message_id=message_id, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_attachment: {_validation_err}")
+        logging.error(f"Parameter validation failed for get_message_attachment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_attachment", "GET", "/gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_attachment")
+    _auth = await _get_auth_for_operation("get_message_attachment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_message_attachment", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="get_attachment",
+        tool_name="get_message_attachment",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -2468,12 +2354,6 @@ async def get_auto_forwarding(user_id: str = Field(..., alias="userId", descript
         logging.error(f"Parameter validation failed for get_auto_forwarding: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_auto_forwarding", "GET", "/gmail/v1/users/{userId}/settings/autoForwarding", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/autoForwarding", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/autoForwarding"
     _http_headers = {}
@@ -2482,315 +2362,15 @@ async def get_auto_forwarding(user_id: str = Field(..., alias="userId", descript
     _auth = await _get_auth_for_operation("get_auto_forwarding")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_auto_forwarding", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_auto_forwarding",
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def update_auto_forwarding(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    disposition: Literal["dispositionUnspecified", "leaveInInbox", "archive", "trash", "markRead"] | None = Field(None, description="The action to take on messages after forwarding them to the target address."),
-    email_address: str | None = Field(None, alias="emailAddress", description="The email address where incoming messages will be forwarded. This address must be verified in the account's forwarding addresses list."),
-    enabled: bool | None = Field(None, description="Whether to enable automatic forwarding of all incoming mail to the specified email address.")
-) -> dict[str, Any]:
-    """Updates the auto-forwarding configuration for a Gmail account, allowing incoming messages to be automatically forwarded to a verified address. Requires domain-wide delegation authority for service account access."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsUpdateAutoForwardingRequest(
-            path=_models.SettingsUpdateAutoForwardingRequestPath(user_id=user_id),
-            body=_models.SettingsUpdateAutoForwardingRequestBody(disposition=disposition, email_address=email_address, enabled=enabled)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_auto_forwarding: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_auto_forwarding", "PUT", "/gmail/v1/users/{userId}/settings/autoForwarding", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/autoForwarding", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/autoForwarding"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_auto_forwarding")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_auto_forwarding",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def get_imap_settings(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's email address.")) -> dict[str, Any]:
-    """Retrieves the IMAP settings for a Gmail account. This includes configuration details needed to connect to the account via IMAP protocol."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsGetImapRequest(
-            path=_models.SettingsGetImapRequestPath(user_id=user_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_imap_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_imap_settings", "GET", "/gmail/v1/users/{userId}/settings/imap", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/imap", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/imap"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_imap_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_imap_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def update_imap_settings(
-    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address."),
-    auto_expunge: bool | None = Field(None, alias="autoExpunge", description="When enabled, Gmail will immediately expunge messages marked as deleted in IMAP. When disabled, Gmail waits for client confirmation before expunging."),
-    enabled: bool | None = Field(None, description="Controls whether IMAP access is enabled for this Gmail account."),
-    expunge_behavior: Literal["expungeBehaviorUnspecified", "archive", "trash", "deleteForever"] | None = Field(None, alias="expungeBehavior", description="Specifies the action to perform on messages when they are marked as deleted and expunged from the last visible IMAP folder."),
-    max_folder_size: int | None = Field(None, alias="maxFolderSize", description="Optional limit on the maximum number of messages an IMAP folder can contain. Valid values are 0 (no limit), 1000, 2000, 5000, or 10000.", json_schema_extra={'format': 'int32'})
-) -> dict[str, Any]:
-    """Updates IMAP configuration settings for a Gmail account, including enablement status, auto-expunge behavior, and folder size limits."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsUpdateImapRequest(
-            path=_models.SettingsUpdateImapRequestPath(user_id=user_id),
-            body=_models.SettingsUpdateImapRequestBody(auto_expunge=auto_expunge, enabled=enabled, expunge_behavior=expunge_behavior, max_folder_size=max_folder_size)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_imap_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_imap_settings", "PUT", "/gmail/v1/users/{userId}/settings/imap", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/imap", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/imap"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_imap_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_imap_settings",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def get_language_settings(user_id: str = Field(..., alias="userId", description="The Gmail user's email address, or use the special value \"me\" to refer to the authenticated user making the request.")) -> dict[str, Any]:
-    """Retrieves the language settings for a Gmail user account. Returns the preferred language configuration for the specified user."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsGetLanguageRequest(
-            path=_models.SettingsGetLanguageRequestPath(user_id=user_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_language_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_language_settings", "GET", "/gmail/v1/users/{userId}/settings/language", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/language", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/language"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_language_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_language_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def update_language_setting(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    display_language: str | None = Field(None, alias="displayLanguage", description="The language to display Gmail in, formatted as an RFC 3066 Language Tag. Gmail automatically selects the closest supported variant if the requested language is unavailable on the client.")
-) -> dict[str, Any]:
-    """Updates the display language for Gmail. The saved language may differ from the requested value if Gmail automatically substitutes a supported variant."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsUpdateLanguageRequest(
-            path=_models.SettingsUpdateLanguageRequestPath(user_id=user_id),
-            body=_models.SettingsUpdateLanguageRequestBody(display_language=display_language)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_language_setting: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_language_setting", "PUT", "/gmail/v1/users/{userId}/settings/language", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/language", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/language"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_language_setting")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_language_setting",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def get_pop_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value \"me\" to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
-    """Retrieves POP (Post Office Protocol) settings for a Gmail account. Returns the current POP configuration including whether POP is enabled and related preferences."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsGetPopRequest(
-            path=_models.SettingsGetPopRequestPath(user_id=user_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_pop_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_pop_settings", "GET", "/gmail/v1/users/{userId}/settings/pop", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/pop", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/pop"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_pop_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_pop_settings",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def update_pop_settings(
-    user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value \"me\" to refer to the authenticated user."),
-    access_window: Literal["accessWindowUnspecified", "disabled", "fromNowOn", "allMail"] | None = Field(None, alias="accessWindow", description="The range of messages accessible via POP, controlling which messages can be retrieved."),
-    disposition: Literal["dispositionUnspecified", "leaveInInbox", "archive", "trash", "markRead"] | None = Field(None, description="The action to perform on a message after it has been fetched via POP.")
-) -> dict[str, Any]:
-    """Updates POP (Post Office Protocol) settings for a Gmail account, including message accessibility range and post-fetch actions."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsUpdatePopRequest(
-            path=_models.SettingsUpdatePopRequestPath(user_id=user_id),
-            body=_models.SettingsUpdatePopRequestBody(access_window=access_window, disposition=disposition)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_pop_settings: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_pop_settings", "PUT", "/gmail/v1/users/{userId}/settings/pop", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/pop", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/pop"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_pop_settings")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_pop_settings",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -2810,12 +2390,6 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
         logging.error(f"Parameter validation failed for get_vacation_settings: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_vacation_settings", "GET", "/gmail/v1/users/{userId}/settings/vacation", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/vacation", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/vacation"
     _http_headers = {}
@@ -2823,6 +2397,9 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_vacation_settings")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_vacation_settings", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2837,60 +2414,9 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
 
 # Tags: users
 @mcp.tool()
-async def update_vacation_responder(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to refer to the authenticated user."),
-    enable_auto_reply: bool | None = Field(None, alias="enableAutoReply", description="Enable or disable automatic vacation replies to incoming messages."),
-    end_time: str | None = Field(None, alias="endTime", description="End time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received before this time. Must be after startTime if both are specified.", json_schema_extra={'format': 'int64'}),
-    response_body_html: str | None = Field(None, alias="responseBodyHtml", description="Vacation response message in HTML format. Gmail will sanitize the HTML before storing. Takes precedence over plain text if both are provided."),
-    response_subject: str | None = Field(None, alias="responseSubject", description="Optional subject line prefix for vacation responses. Either this or responseBodyHtml must be non-empty to enable auto-replies."),
-    restrict_to_contacts: bool | None = Field(None, alias="restrictToContacts", description="Restrict vacation replies to contacts in the user's contact list only."),
-    restrict_to_domain: bool | None = Field(None, alias="restrictToDomain", description="Restrict vacation replies to recipients within the user's domain. Only available for Google Workspace users."),
-    start_time: str | None = Field(None, alias="startTime", description="Start time for sending auto-replies as milliseconds since epoch. Auto-replies will only be sent to messages received after this time. Must be before endTime if both are specified.", json_schema_extra={'format': 'int64'})
-) -> dict[str, Any]:
-    """Configure Gmail's vacation auto-reply settings, including response message, timing window, and recipient restrictions. At least one of responseSubject or responseBodyHtml must be provided to enable auto-replies."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsUpdateVacationRequest(
-            path=_models.SettingsUpdateVacationRequestPath(user_id=user_id),
-            body=_models.SettingsUpdateVacationRequestBody(enable_auto_reply=enable_auto_reply, end_time=end_time, response_body_html=response_body_html, response_subject=response_subject, restrict_to_contacts=restrict_to_contacts, restrict_to_domain=restrict_to_domain, start_time=start_time)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_vacation_responder: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_vacation_responder", "PUT", "/gmail/v1/users/{userId}/settings/vacation", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/vacation", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/vacation"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_vacation_responder")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_vacation_responder",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def list_cse_identities(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
-    page_size: int | None = Field(20, alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries.")
+    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries."),
 ) -> dict[str, Any]:
     """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while users managing their own identities require hardware key encryption to be enabled."""
 
@@ -2904,12 +2430,6 @@ async def list_cse_identities(
         logging.error(f"Parameter validation failed for list_cse_identities: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_cse_identities", "GET", "/gmail/v1/users/{userId}/settings/cse/identities", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/identities", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/identities"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2918,6 +2438,9 @@ async def list_cse_identities(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_cse_identities")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_cse_identities", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2935,7 +2458,7 @@ async def list_cse_identities(
 @mcp.tool()
 async def create_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user."),
-    email_address: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user.")
+    email_address: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user."),
 ) -> dict[str, Any]:
     """Creates and configures a client-side encryption identity for sending encrypted mail from a user account. The S/MIME certificate is published to a shared domain-wide directory, enabling secure communication within a Google Workspace organization."""
 
@@ -2949,12 +2472,6 @@ async def create_cse_identity(
         logging.error(f"Parameter validation failed for create_cse_identity: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_cse_identity", "POST", "/gmail/v1/users/{userId}/settings/cse/identities", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/identities", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/identities"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2963,6 +2480,9 @@ async def create_cse_identity(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_cse_identity")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_cse_identity", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2980,7 +2500,7 @@ async def create_cse_identity(
 @mcp.tool()
 async def get_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to refer to the authenticated user."),
-    cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity configuration to retrieve.")
+    cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity configuration to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a client-side encryption identity configuration for a specified email address. Administrators require service account with domain-wide delegation authority, while users require hardware key encryption to be enabled."""
 
@@ -2993,12 +2513,6 @@ async def get_cse_identity(
         logging.error(f"Parameter validation failed for get_cse_identity: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_cse_identity", "GET", "/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}"
     _http_headers = {}
@@ -3006,6 +2520,9 @@ async def get_cse_identity(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_cse_identity")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cse_identity", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3022,7 +2539,7 @@ async def get_cse_identity(
 @mcp.tool()
 async def delete_cse_identity(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
-    cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity to be deleted.")
+    cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity to be deleted."),
 ) -> dict[str, Any]:
     """Permanently deletes a client-side encryption identity, preventing further use for sending encrypted messages. The identity cannot be restored; create a new identity with the same configuration if needed."""
 
@@ -3035,12 +2552,6 @@ async def delete_cse_identity(
         logging.error(f"Parameter validation failed for delete_cse_identity: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_cse_identity", "DELETE", "/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}"
     _http_headers = {}
@@ -3048,6 +2559,9 @@ async def delete_cse_identity(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_cse_identity")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cse_identity", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3065,7 +2579,7 @@ async def delete_cse_identity(
 async def update_cse_identity_keypair(
     user_id: str = Field(..., alias="userId", description="The user identifier. Use the special value `me` to refer to the authenticated user, or provide the user's primary email address."),
     email_address: str = Field(..., alias="emailAddress", description="The email address of the client-side encryption identity to update."),
-    email_address2: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user.")
+    email_address2: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user."),
 ) -> dict[str, Any]:
     """Associates a new key pair with an existing client-side encryption identity. The updated key pair must validate against Google's S/MIME certificate profiles. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
 
@@ -3079,12 +2593,6 @@ async def update_cse_identity_keypair(
         logging.error(f"Parameter validation failed for update_cse_identity_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_cse_identity_keypair", "PATCH", "/gmail/v1/users/{userId}/settings/cse/identities/{emailAddress}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/identities/{emailAddress}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/identities/{emailAddress}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -3093,6 +2601,9 @@ async def update_cse_identity_keypair(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_cse_identity_keypair")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cse_identity_keypair", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3108,9 +2619,9 @@ async def update_cse_identity_keypair(
 
 # Tags: users
 @mcp.tool()
-async def list_encryption_keypairs(
+async def list_cse_keypairs(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
-    page_size: int | None = Field(20, alias="pageSize", description="Maximum number of key pairs to return per page. If not specified, defaults to 20 entries.")
+    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of key pairs to return per page. If not specified, defaults to 20 entries."),
 ) -> dict[str, Any]:
     """Retrieves all client-side encryption key pairs for a user. Administrators with domain-wide delegation can manage keypairs for users in their organization, while individual users require hardware key encryption to be enabled."""
 
@@ -3121,14 +2632,8 @@ async def list_encryption_keypairs(
             query=_models.SettingsCseKeypairsListRequestQuery(page_size=page_size)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_encryption_keypairs: {_validation_err}")
+        logging.error(f"Parameter validation failed for list_cse_keypairs: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_encryption_keypairs", "GET", "/gmail/v1/users/{userId}/settings/cse/keypairs", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs"
@@ -3136,12 +2641,15 @@ async def list_encryption_keypairs(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_encryption_keypairs")
+    _auth = await _get_auth_for_operation("list_cse_keypairs")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_cse_keypairs", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="list_encryption_keypairs",
+        tool_name="list_cse_keypairs",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -3156,7 +2664,7 @@ async def list_encryption_keypairs(
 async def create_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     pkcs7: str | None = Field(None, description="The public key and its certificate chain in PKCS#7 format with PEM encoding and ASCII armor."),
-    private_key_metadata: list[_models.CsePrivateKeyMetadata] | None = Field(None, alias="privateKeyMetadata", description="An ordered array of metadata objects for instances of this key pair's private key. Order significance and item structure should follow the API specification.")
+    private_key_metadata: list[_models.CsePrivateKeyMetadata] | None = Field(None, alias="privateKeyMetadata", description="An ordered array of metadata objects for instances of this key pair's private key. Order significance and item structure should follow the API specification."),
 ) -> dict[str, Any]:
     """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
 
@@ -3170,12 +2678,6 @@ async def create_cse_keypair(
         logging.error(f"Parameter validation failed for create_cse_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_cse_keypair", "POST", "/gmail/v1/users/{userId}/settings/cse/keypairs", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -3184,6 +2686,9 @@ async def create_cse_keypair(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_cse_keypair")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_cse_keypair", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3201,7 +2706,7 @@ async def create_cse_keypair(
 @mcp.tool()
 async def disable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value 'me' to refer to the authenticated user."),
-    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to disable.")
+    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to disable."),
 ) -> dict[str, Any]:
     """Disables a client-side encryption key pair, preventing the user from decrypting incoming CSE messages or signing outgoing CSE mail. The key pair can be re-enabled later using enable_cse_keypair, or permanently deleted after 30 days using obliterate_cse_keypair."""
 
@@ -3214,12 +2719,6 @@ async def disable_cse_keypair(
         logging.error(f"Parameter validation failed for disable_cse_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("disable_cse_keypair", "POST", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:disable", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:disable", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:disable"
     _http_headers = {}
@@ -3227,6 +2726,9 @@ async def disable_cse_keypair(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("disable_cse_keypair")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("disable_cse_keypair", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3241,9 +2743,9 @@ async def disable_cse_keypair(
 
 # Tags: users
 @mcp.tool()
-async def enable_encryption_keypair(
+async def enable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
-    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to reactivate.")
+    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to reactivate."),
 ) -> dict[str, Any]:
     """Reactivates a previously disabled client-side encryption key pair for use with associated encryption identities. Administrators require service account with domain-wide delegation authority; end users require hardware key encryption to be enabled."""
 
@@ -3253,26 +2755,23 @@ async def enable_encryption_keypair(
             path=_models.SettingsCseKeypairsEnableRequestPath(user_id=user_id, key_pair_id=key_pair_id)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for enable_encryption_keypair: {_validation_err}")
+        logging.error(f"Parameter validation failed for enable_cse_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("enable_encryption_keypair", "POST", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:enable", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:enable", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:enable"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("enable_encryption_keypair")
+    _auth = await _get_auth_for_operation("enable_cse_keypair")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("enable_cse_keypair", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="enable_encryption_keypair",
+        tool_name="enable_cse_keypair",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -3283,9 +2782,9 @@ async def enable_encryption_keypair(
 
 # Tags: users
 @mcp.tool()
-async def get_encryption_keypair(
+async def get_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair is being retrieved. Use the special value `me` to refer to the authenticated user."),
-    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve.")
+    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a client-side encryption key pair for Gmail. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
 
@@ -3295,26 +2794,23 @@ async def get_encryption_keypair(
             path=_models.SettingsCseKeypairsGetRequestPath(user_id=user_id, key_pair_id=key_pair_id)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_encryption_keypair: {_validation_err}")
+        logging.error(f"Parameter validation failed for get_cse_keypair: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_encryption_keypair", "GET", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_encryption_keypair")
+    _auth = await _get_auth_for_operation("get_cse_keypair")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cse_keypair", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="get_encryption_keypair",
+        tool_name="get_cse_keypair",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -3325,9 +2821,9 @@ async def get_encryption_keypair(
 
 # Tags: users
 @mcp.tool()
-async def obliterate_cse_keypair(
+async def delete_cse_keypair_permanently(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value `me` to refer to the authenticated user."),
-    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to permanently delete.")
+    key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to permanently delete."),
 ) -> dict[str, Any]:
     """Permanently and immediately deletes a client-side encryption key pair. The key pair must be disabled for at least 30 days before obliteration. Once obliterated, all messages encrypted with this key become permanently inaccessible to all users."""
 
@@ -3337,26 +2833,23 @@ async def obliterate_cse_keypair(
             path=_models.SettingsCseKeypairsObliterateRequestPath(user_id=user_id, key_pair_id=key_pair_id)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for obliterate_cse_keypair: {_validation_err}")
+        logging.error(f"Parameter validation failed for delete_cse_keypair_permanently: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("obliterate_cse_keypair", "POST", "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:obliterate", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:obliterate", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}:obliterate"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("obliterate_cse_keypair")
+    _auth = await _get_auth_for_operation("delete_cse_keypair_permanently")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cse_keypair_permanently", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="obliterate_cse_keypair",
+        tool_name="delete_cse_keypair_permanently",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -3379,12 +2872,6 @@ async def list_delegates(user_id: str = Field(..., alias="userId", description="
         logging.error(f"Parameter validation failed for list_delegates: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_delegates", "GET", "/gmail/v1/users/{userId}/settings/delegates", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/delegates", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/delegates"
     _http_headers = {}
@@ -3392,6 +2879,9 @@ async def list_delegates(user_id: str = Field(..., alias="userId", description="
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_delegates")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_delegates", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3406,54 +2896,9 @@ async def list_delegates(user_id: str = Field(..., alias="userId", description="
 
 # Tags: users
 @mcp.tool()
-async def add_delegate(
-    user_id: str = Field(..., alias="userId", description="The email address of the user whose delegates are being managed. Use the special value 'me' to refer to the authenticated user."),
-    delegate_email: str | None = Field(None, alias="delegateEmail", description="The primary email address of the delegate to add. The delegate must be a member of the same Google Workspace organization as the delegator.")
-) -> dict[str, Any]:
-    """Adds a delegate to a user's Gmail account with immediate acceptance status, bypassing email verification. The delegate must be a member of the same Google Workspace organization and referred to by their primary email address."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsDelegatesCreateRequest(
-            path=_models.SettingsDelegatesCreateRequestPath(user_id=user_id),
-            body=_models.SettingsDelegatesCreateRequestBody(delegate_email=delegate_email)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for add_delegate: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("add_delegate", "POST", "/gmail/v1/users/{userId}/settings/delegates", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/delegates", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/delegates"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("add_delegate")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="add_delegate",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def get_delegate(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose delegates are being queried. Use the special value 'me' to refer to the authenticated user."),
-    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required.")
+    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required."),
 ) -> dict[str, Any]:
     """Retrieves the delegate relationship for a specified email address. This operation requires service account clients with domain-wide authority and uses the delegate's primary email address (not aliases)."""
 
@@ -3466,12 +2911,6 @@ async def get_delegate(
         logging.error(f"Parameter validation failed for get_delegate: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_delegate", "GET", "/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}"
     _http_headers = {}
@@ -3480,52 +2919,13 @@ async def get_delegate(
     _auth = await _get_auth_for_operation("get_delegate")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_delegate", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_delegate",
         method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def remove_delegate(
-    user_id: str = Field(..., alias="userId", description="The email address of the Gmail account owner. Use the special value 'me' to refer to the authenticated user."),
-    delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate to be removed from the account.")
-) -> dict[str, Any]:
-    """Removes a delegate from the user's Gmail account and revokes any associated verification. This operation requires domain-wide authority and uses the delegate's primary email address."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsDelegatesDeleteRequest(
-            path=_models.SettingsDelegatesDeleteRequestPath(user_id=user_id, delegate_email=delegate_email)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for remove_delegate: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("remove_delegate", "DELETE", "/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/delegates/{delegateEmail}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("remove_delegate")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="remove_delegate",
-        method="DELETE",
         path=_http_path,
         request_id=_request_id,
         headers=_http_headers,
@@ -3547,12 +2947,6 @@ async def list_filters(user_id: str = Field(..., alias="userId", description="Th
         logging.error(f"Parameter validation failed for list_filters: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_filters", "GET", "/gmail/v1/users/{userId}/settings/filters", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/filters", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/filters"
     _http_headers = {}
@@ -3560,6 +2954,9 @@ async def list_filters(user_id: str = Field(..., alias="userId", description="Th
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_filters")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_filters", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3574,63 +2971,9 @@ async def list_filters(user_id: str = Field(..., alias="userId", description="Th
 
 # Tags: users
 @mcp.tool()
-async def create_filter(
-    user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to refer to the authenticated user."),
-    add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="List of label IDs to automatically add to messages matching this filter."),
-    forward: str | None = Field(None, description="Email address to automatically forward matching messages to."),
-    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="List of label IDs to automatically remove from messages matching this filter."),
-    exclude_chats: bool | None = Field(None, alias="excludeChats", description="Whether to exclude chat messages from this filter."),
-    from_: str | None = Field(None, alias="from", description="The sender's display name or email address to match against. Matching is case-insensitive."),
-    has_attachment: bool | None = Field(None, alias="hasAttachment", description="Whether the message must have one or more attachments to match this filter."),
-    size_comparison: Literal["unspecified", "smaller", "larger"] | None = Field(None, alias="sizeComparison", description="The comparison operator for message size in bytes relative to the size field."),
-    subject: str | None = Field(None, description="Case-insensitive phrase to match in the message subject line. Leading and trailing whitespace is trimmed, and consecutive spaces are collapsed."),
-    to: str | None = Field(None, description="The recipient's display name or email address to match against. Matches recipients in 'to', 'cc', and 'bcc' fields. The local part of an email address (before @) is sufficient for matching. Matching is case-insensitive.")
-) -> dict[str, Any]:
-    """Creates an email filter to automatically organize, forward, or modify messages based on specified criteria. Note: A maximum of 1,000 filters can be created per user."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsFiltersCreateRequest(
-            path=_models.SettingsFiltersCreateRequestPath(user_id=user_id),
-            body=_models.SettingsFiltersCreateRequestBody(action=_models.SettingsFiltersCreateRequestBodyAction(add_label_ids=add_label_ids, forward=forward, remove_label_ids=remove_label_ids) if any(v is not None for v in [add_label_ids, forward, remove_label_ids]) else None,
-                criteria=_models.SettingsFiltersCreateRequestBodyCriteria(exclude_chats=exclude_chats, from_=from_, has_attachment=has_attachment, size_comparison=size_comparison, subject=subject, to=to) if any(v is not None for v in [exclude_chats, from_, has_attachment, size_comparison, subject, to]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_filter: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_filter", "POST", "/gmail/v1/users/{userId}/settings/filters", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/filters", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/filters"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_filter")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_filter",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def get_filter(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific Gmail filter by its ID. Use this to fetch the configuration and rules of an existing filter."""
 
@@ -3643,12 +2986,6 @@ async def get_filter(
         logging.error(f"Parameter validation failed for get_filter: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_filter", "GET", "/gmail/v1/users/{userId}/settings/filters/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/filters/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/filters/{id}"
     _http_headers = {}
@@ -3656,6 +2993,9 @@ async def get_filter(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_filter")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_filter", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3672,7 +3012,7 @@ async def get_filter(
 @mcp.tool()
 async def delete_filter(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose filter will be deleted. Use the special value \"me\" to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the filter to be deleted.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the filter to be deleted."),
 ) -> dict[str, Any]:
     """Permanently deletes a specified Gmail filter. This action is immediate and cannot be undone."""
 
@@ -3685,12 +3025,6 @@ async def delete_filter(
         logging.error(f"Parameter validation failed for delete_filter: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_filter", "DELETE", "/gmail/v1/users/{userId}/settings/filters/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/filters/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/filters/{id}"
     _http_headers = {}
@@ -3698,6 +3032,9 @@ async def delete_filter(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_filter")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_filter", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3724,12 +3061,6 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
         logging.error(f"Parameter validation failed for list_forwarding_addresses: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_forwarding_addresses", "GET", "/gmail/v1/users/{userId}/settings/forwardingAddresses", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/forwardingAddresses", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/forwardingAddresses"
     _http_headers = {}
@@ -3737,6 +3068,9 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_forwarding_addresses")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_forwarding_addresses", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3751,54 +3085,9 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
 
 # Tags: users
 @mcp.tool()
-async def create_forwarding_address(
-    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the user's email address or the special value 'me' to refer to the authenticated user."),
-    forwarding_email: str | None = Field(None, alias="forwardingEmail", description="The email address to which messages will be forwarded. This address will receive a verification message if ownership confirmation is required.")
-) -> dict[str, Any]:
-    """Creates a forwarding address for a Gmail account to automatically redirect incoming messages. If ownership verification is required, a verification message will be sent to the recipient; otherwise, the address is immediately accepted. This operation requires service account credentials with domain-wide delegation authority."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsForwardingAddressesCreateRequest(
-            path=_models.SettingsForwardingAddressesCreateRequestPath(user_id=user_id),
-            body=_models.SettingsForwardingAddressesCreateRequestBody(forwarding_email=forwarding_email)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_forwarding_address: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_forwarding_address", "POST", "/gmail/v1/users/{userId}/settings/forwardingAddresses", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/forwardingAddresses", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/forwardingAddresses"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_forwarding_address")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_forwarding_address",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def get_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user's account, or provide the user's full email address."),
-    forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved.")
+    forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved."),
 ) -> dict[str, Any]:
     """Retrieves the configuration details for a specified forwarding address associated with a Gmail account. Use this to view forwarding settings for a particular email address."""
 
@@ -3811,12 +3100,6 @@ async def get_forwarding_address(
         logging.error(f"Parameter validation failed for get_forwarding_address: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_forwarding_address", "GET", "/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}"
     _http_headers = {}
@@ -3824,6 +3107,9 @@ async def get_forwarding_address(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forwarding_address")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_forwarding_address", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3840,7 +3126,7 @@ async def get_forwarding_address(
 @mcp.tool()
 async def delete_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
-    forwarding_email: str = Field(..., alias="forwardingEmail", description="The forwarding email address to delete.")
+    forwarding_email: str = Field(..., alias="forwardingEmail", description="The forwarding email address to delete."),
 ) -> dict[str, Any]:
     """Deletes a forwarding address and revokes any associated verification. This operation requires service account credentials with domain-wide delegation authority."""
 
@@ -3853,12 +3139,6 @@ async def delete_forwarding_address(
         logging.error(f"Parameter validation failed for delete_forwarding_address: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_forwarding_address", "DELETE", "/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}"
     _http_headers = {}
@@ -3866,6 +3146,9 @@ async def delete_forwarding_address(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_forwarding_address")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_forwarding_address", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3892,12 +3175,6 @@ async def list_send_as_aliases(user_id: str = Field(..., alias="userId", descrip
         logging.error(f"Parameter validation failed for list_send_as_aliases: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_send_as_aliases", "GET", "/gmail/v1/users/{userId}/settings/sendAs", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs"
     _http_headers = {}
@@ -3905,6 +3182,9 @@ async def list_send_as_aliases(user_id: str = Field(..., alias="userId", descrip
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_send_as_aliases")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_send_as_aliases", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3919,67 +3199,9 @@ async def list_send_as_aliases(user_id: str = Field(..., alias="userId", descrip
 
 # Tags: users
 @mcp.tool()
-async def create_send_as_alias(
-    user_id: str = Field(..., alias="userId", description="The Gmail user's email address or 'me' to reference the authenticated user."),
-    is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this address as the default 'From:' address for new messages and auto-replies. Only 'true' can be written; setting this to 'true' automatically sets the previous default address to 'false'."),
-    reply_to_address: str | None = Field(None, alias="replyToAddress", description="Optional email address to include in the 'Reply-To:' header for messages sent using this alias. Leave empty to omit the 'Reply-To:' header."),
-    signature: str | None = Field(None, description="Optional HTML signature to append to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving."),
-    host: str | None = Field(None, description="The SMTP server hostname for outgoing mail validation and delivery. Required if configuring SMTP MSA settings."),
-    password: str | None = Field(None, description="The password for SMTP authentication. This write-only field is never returned in responses."),
-    port: int | None = Field(None, description="The SMTP server port number for outgoing mail. Required if configuring SMTP MSA settings.", json_schema_extra={'format': 'int32'}),
-    security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication. Required if configuring SMTP MSA settings."),
-    username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is never returned in responses."),
-    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases."),
-    from_address: str | None = Field(None, description="Sender identity in RFC 5322 format: 'Display Name <email@domain>' or just 'email@domain'")
-) -> dict[str, Any]:
-    """Creates a custom 'from' send-as alias for a Gmail account, with optional SMTP configuration validation and ownership verification. This operation is restricted to service accounts with domain-wide delegation authority."""
-
-    # Call helper functions
-    from_address_parsed = parse_from_address(from_address)
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsSendAsCreateRequest(
-            path=_models.SettingsSendAsCreateRequestPath(user_id=user_id),
-            body=_models.SettingsSendAsCreateRequestBody(is_default=is_default, reply_to_address=reply_to_address, signature=signature, treat_as_alias=treat_as_alias, display_name=from_address_parsed.get('displayName') if from_address_parsed else None, send_as_email=from_address_parsed.get('sendAsEmail') if from_address_parsed else None,
-                smtp_msa=_models.SettingsSendAsCreateRequestBodySmtpMsa(host=host, password=password, port=port, security_mode=security_mode, username=username) if any(v is not None for v in [host, password, port, security_mode, username]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_send_as_alias: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_send_as_alias", "POST", "/gmail/v1/users/{userId}/settings/sendAs", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_send_as_alias")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_send_as_alias",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
 async def get_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to retrieve.")
+    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific send-as alias configuration for a user. Returns an HTTP 404 error if the specified email address is not configured as a send-as alias."""
 
@@ -3992,12 +3214,6 @@ async def get_send_as_alias(
         logging.error(f"Parameter validation failed for get_send_as_alias: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_send_as_alias", "GET", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
     _http_headers = {}
@@ -4005,6 +3221,9 @@ async def get_send_as_alias(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_send_as_alias")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_send_as_alias", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4029,29 +3248,25 @@ async def update_send_as_alias(
     signature: str | None = Field(None, description="An optional HTML signature appended to new emails composed with this alias in Gmail's web interface. Gmail will sanitize the HTML before saving."),
     host: str | None = Field(None, description="The hostname of the SMTP server used for sending mail through this alias."),
     password: str | None = Field(None, description="The password for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses."),
-    port: int | None = Field(None, description="The port number of the SMTP server.", json_schema_extra={'format': 'int32'}),
+    port: str | None = Field(None, description="The port number of the SMTP server."),
     security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication."),
     username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses."),
-    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases.")
+    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases."),
 ) -> dict[str, Any]:
     """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. Service accounts with domain-wide delegation can update non-primary addresses; standard users can only modify their own aliases."""
+
+    _port = _parse_int(port)
 
     # Construct request model with validation
     try:
         _request = _models.SettingsSendAsUpdateRequest(
             path=_models.SettingsSendAsUpdateRequestPath(user_id=user_id, send_as_email=send_as_email),
             body=_models.SettingsSendAsUpdateRequestBody(send_as_email=send_as_email2, display_name=display_name, is_default=is_default, reply_to_address=reply_to_address, signature=signature, treat_as_alias=treat_as_alias,
-                smtp_msa=_models.SettingsSendAsUpdateRequestBodySmtpMsa(host=host, password=password, port=port, security_mode=security_mode, username=username) if any(v is not None for v in [host, password, port, security_mode, username]) else None)
+                smtp_msa=_models.SettingsSendAsUpdateRequestBodySmtpMsa(host=host, password=password, port=_port, security_mode=security_mode, username=username) if any(v is not None for v in [host, password, port, security_mode, username]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_send_as_alias: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_send_as_alias", "PUT", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
@@ -4061,6 +3276,9 @@ async def update_send_as_alias(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_send_as_alias")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_send_as_alias", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4086,29 +3304,25 @@ async def update_send_as_alias_partial(
     signature: str | None = Field(None, description="An optional HTML signature appended to new emails composed with this alias in Gmail's web interface. This signature is not added to replies or forwarded messages."),
     host: str | None = Field(None, description="The hostname of the SMTP server used to send mail through this alias."),
     password: str | None = Field(None, description="The password for SMTP authentication. This write-only field is never returned in responses and must be provided when configuring SMTP settings."),
-    port: int | None = Field(None, description="The port number of the SMTP server. Common values are 25, 465, or 587 depending on the security mode.", json_schema_extra={'format': 'int32'}),
+    port: str | None = Field(None, description="The port number of the SMTP server. Common values are 25, 465, or 587 depending on the security mode."),
     security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication. Determines how the connection to the SMTP server is encrypted or secured."),
     username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is never returned in responses and must be provided when configuring SMTP settings."),
-    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting only applies to custom 'from' aliases and affects how Gmail handles replies and threading.")
+    treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting only applies to custom 'from' aliases and affects how Gmail handles replies and threading."),
 ) -> dict[str, Any]:
     """Partially update a send-as alias configuration for a Gmail account. Use this to modify display name, default status, reply-to address, signature, SMTP settings, or alias treatment without replacing the entire resource."""
+
+    _port = _parse_int(port)
 
     # Construct request model with validation
     try:
         _request = _models.SettingsSendAsPatchRequest(
             path=_models.SettingsSendAsPatchRequestPath(user_id=user_id, send_as_email=send_as_email),
             body=_models.SettingsSendAsPatchRequestBody(send_as_email=send_as_email2, display_name=display_name, is_default=is_default, reply_to_address=reply_to_address, signature=signature, treat_as_alias=treat_as_alias,
-                smtp_msa=_models.SettingsSendAsPatchRequestBodySmtpMsa(host=host, password=password, port=port, security_mode=security_mode, username=username) if any(v is not None for v in [host, password, port, security_mode, username]) else None)
+                smtp_msa=_models.SettingsSendAsPatchRequestBodySmtpMsa(host=host, password=password, port=_port, security_mode=security_mode, username=username) if any(v is not None for v in [host, password, port, security_mode, username]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_send_as_alias_partial: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_send_as_alias_partial", "PATCH", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
@@ -4118,6 +3332,9 @@ async def update_send_as_alias_partial(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_send_as_alias_partial")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_send_as_alias_partial", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4133,51 +3350,9 @@ async def update_send_as_alias_partial(
 
 # Tags: users
 @mcp.tool()
-async def delete_send_as_alias(
-    user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to reference the authenticated user, or provide the user's email address."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to be deleted.")
-) -> dict[str, Any]:
-    """Deletes a send-as alias for a Gmail account and revokes any associated verification. This operation requires service account credentials with domain-wide delegation authority."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.SettingsSendAsDeleteRequest(
-            path=_models.SettingsSendAsDeleteRequestPath(user_id=user_id, send_as_email=send_as_email)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_send_as_alias: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_send_as_alias", "DELETE", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_send_as_alias")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_send_as_alias",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: users
-@mcp.tool()
-async def verify_send_as_alias(
+async def send_verification_email_to_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The send-as alias email address that requires verification.")
+    send_as_email: str = Field(..., alias="sendAsEmail", description="The send-as alias email address that requires verification."),
 ) -> dict[str, Any]:
     """Sends a verification email to a send-as alias address to confirm ownership. The alias must have a pending verification status and requires service account with domain-wide delegation authority."""
 
@@ -4187,26 +3362,23 @@ async def verify_send_as_alias(
             path=_models.SettingsSendAsVerifyRequestPath(user_id=user_id, send_as_email=send_as_email)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for verify_send_as_alias: {_validation_err}")
+        logging.error(f"Parameter validation failed for send_verification_email_to_send_as_alias: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("verify_send_as_alias", "POST", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/verify", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/verify", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/verify"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("verify_send_as_alias")
+    _auth = await _get_auth_for_operation("send_verification_email_to_send_as_alias")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_verification_email_to_send_as_alias", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="verify_send_as_alias",
+        tool_name="send_verification_email_to_send_as_alias",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -4220,7 +3392,7 @@ async def verify_send_as_alias(
 async def get_smime_info(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
-    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration.")
+    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration."),
 ) -> dict[str, Any]:
     """Retrieves the S/MIME configuration for a specified send-as alias. This allows you to access the details of a specific S/MIME certificate associated with an email alias."""
 
@@ -4233,12 +3405,6 @@ async def get_smime_info(
         logging.error(f"Parameter validation failed for get_smime_info: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_smime_info", "GET", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}"
     _http_headers = {}
@@ -4246,6 +3412,9 @@ async def get_smime_info(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_smime_info")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_smime_info", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4260,10 +3429,10 @@ async def get_smime_info(
 
 # Tags: users
 @mcp.tool()
-async def delete_smime_config(
+async def delete_send_as_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
-    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to delete.")
+    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to delete."),
 ) -> dict[str, Any]:
     """Deletes the S/MIME configuration for a specified send-as alias. This removes the security certificate associated with the alias used for signing and encrypting outgoing emails."""
 
@@ -4273,26 +3442,23 @@ async def delete_smime_config(
             path=_models.SettingsSendAsSmimeInfoDeleteRequestPath(user_id=user_id, send_as_email=send_as_email, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_smime_config: {_validation_err}")
+        logging.error(f"Parameter validation failed for delete_send_as_smime_config: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_smime_config", "DELETE", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_smime_config")
+    _auth = await _get_auth_for_operation("delete_send_as_smime_config")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_send_as_smime_config", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="delete_smime_config",
+        tool_name="delete_send_as_smime_config",
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
@@ -4305,7 +3471,7 @@ async def delete_smime_config(
 @mcp.tool()
 async def list_smime_configs(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
-    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address configured as a send-as alias. This is the address that appears in the From header for emails sent using this alias.")
+    send_as_email: str = Field(..., alias="sendAsEmail", description="The email address configured as a send-as alias. This is the address that appears in the From header for emails sent using this alias."),
 ) -> dict[str, Any]:
     """Lists all S/MIME configurations for a specified send-as alias. S/MIME configs define the certificates and encryption settings used when sending emails from this alias."""
 
@@ -4318,12 +3484,6 @@ async def list_smime_configs(
         logging.error(f"Parameter validation failed for list_smime_configs: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_smime_configs", "GET", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo"
     _http_headers = {}
@@ -4331,6 +3491,9 @@ async def list_smime_configs(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_smime_configs")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_smime_configs", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4345,13 +3508,13 @@ async def list_smime_configs(
 
 # Tags: users
 @mcp.tool()
-async def upload_smime_certificate(
+async def create_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that will appear in the From header for messages sent using this S/MIME alias."),
     encrypted_key_password: str | None = Field(None, alias="encryptedKeyPassword", description="Password for the encrypted private key, required if the PKCS#12 certificate is password-protected."),
-    expiration: str | None = Field(None, description="Certificate expiration timestamp in milliseconds since epoch (Unix time).", json_schema_extra={'format': 'int64'}),
+    expiration: str | None = Field(None, description="Certificate expiration timestamp in milliseconds since epoch (Unix time)."),
     is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this S/MIME certificate as the default for this send-as address."),
-    pkcs12: str | None = Field(None, description="The S/MIME certificate in PKCS#12 format. Must contain a single private/public key pair and certificate chain. The private key may be encrypted; if so, provide the password in encryptedKeyPassword.", json_schema_extra={'format': 'byte'})
+    pkcs12: str | None = Field(None, description="The S/MIME certificate in PKCS#12 format. Must contain a single private/public key pair and certificate chain. The private key may be encrypted; if so, provide the password in encryptedKeyPassword."),
 ) -> dict[str, Any]:
     """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be provided in PKCS#12 format containing a private/public key pair and certificate chain."""
 
@@ -4362,14 +3525,8 @@ async def upload_smime_certificate(
             body=_models.SettingsSendAsSmimeInfoInsertRequestBody(encrypted_key_password=encrypted_key_password, expiration=expiration, is_default=is_default, pkcs12=pkcs12)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for upload_smime_certificate: {_validation_err}")
+        logging.error(f"Parameter validation failed for create_smime_config: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("upload_smime_certificate", "POST", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo"
@@ -4377,12 +3534,15 @@ async def upload_smime_certificate(
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("upload_smime_certificate")
+    _auth = await _get_auth_for_operation("create_smime_config")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_smime_config", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="upload_smime_certificate",
+        tool_name="create_smime_config",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -4397,7 +3557,7 @@ async def upload_smime_certificate(
 async def set_default_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for mail sent using this send-as alias."),
-    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to set as default.")
+    id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to set as default."),
 ) -> dict[str, Any]:
     """Sets the default S/MIME configuration for the specified send-as alias. This determines which S/MIME certificate will be used by default when sending emails from this alias."""
 
@@ -4410,12 +3570,6 @@ async def set_default_smime_config(
         logging.error(f"Parameter validation failed for set_default_smime_config: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("set_default_smime_config", "POST", "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}/setDefault", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}/setDefault", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}/setDefault"
     _http_headers = {}
@@ -4423,6 +3577,9 @@ async def set_default_smime_config(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("set_default_smime_config")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("set_default_smime_config", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4441,7 +3598,7 @@ async def get_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread should be retrieved. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to retrieve."),
     format_: Literal["full", "metadata", "minimal"] | None = Field(None, alias="format", description="The format in which to return thread messages. Controls the level of detail included in the response."),
-    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers should be provided as an array of header names.")
+    metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers should be provided as an array of header names."),
 ) -> dict[str, Any]:
     """Retrieves a specific email thread by ID. Returns thread messages in the requested format with optional filtering of metadata headers."""
 
@@ -4455,12 +3612,6 @@ async def get_thread(
         logging.error(f"Parameter validation failed for get_thread: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_thread", "GET", "/gmail/v1/users/{userId}/threads/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads/{id}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -4469,6 +3620,9 @@ async def get_thread(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_thread")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_thread", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4486,7 +3640,7 @@ async def get_thread(
 @mcp.tool()
 async def delete_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread will be deleted. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the thread to delete.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the thread to delete."),
 ) -> dict[str, Any]:
     """Permanently deletes a thread and all messages within it. This action cannot be undone; consider using trash_thread as a safer alternative."""
 
@@ -4499,12 +3653,6 @@ async def delete_thread(
         logging.error(f"Parameter validation failed for delete_thread: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_thread", "DELETE", "/gmail/v1/users/{userId}/threads/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads/{id}"
     _http_headers = {}
@@ -4512,6 +3660,9 @@ async def delete_thread(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_thread")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_thread", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4530,8 +3681,8 @@ async def list_threads(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Include threads from the SPAM and TRASH folders in the results."),
     label_ids: list[str] | None = Field(None, alias="labelIds", description="Filter results to only return threads that have all of the specified label IDs. Provide as an array of label ID strings."),
-    max_results: int | None = Field(100, alias="maxResults", description="Maximum number of threads to return in the response.", le=500),
-    q: str | None = Field(None, description="Filter results using Gmail search query syntax (e.g., sender, subject, date filters, read status). Not supported when using the gmail.metadata scope.")
+    max_results: int | None = Field(None, alias="maxResults", description="Maximum number of threads to return in the response."),
+    q: str | None = Field(None, description="Filter results using Gmail search query syntax (e.g., sender, subject, date filters, read status). Not supported when using the gmail.metadata scope."),
 ) -> dict[str, Any]:
     """Retrieves a list of message threads from the user's mailbox, with optional filtering by labels, search query, and inclusion of spam/trash folders."""
 
@@ -4545,12 +3696,6 @@ async def list_threads(
         logging.error(f"Parameter validation failed for list_threads: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_threads", "GET", "/gmail/v1/users/{userId}/threads", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -4559,6 +3704,9 @@ async def list_threads(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_threads")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_threads", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4578,7 +3726,7 @@ async def update_thread_labels(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The ID of the thread to modify."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="A list of label IDs to add to this thread. Up to 100 labels can be added per request."),
-    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from this thread. Up to 100 labels can be removed per request.")
+    remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from this thread. Up to 100 labels can be removed per request."),
 ) -> dict[str, Any]:
     """Modifies the labels applied to a thread, affecting all messages within it. Supports adding and removing labels in a single operation."""
 
@@ -4592,12 +3740,6 @@ async def update_thread_labels(
         logging.error(f"Parameter validation failed for update_thread_labels: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_thread_labels", "POST", "/gmail/v1/users/{userId}/threads/{id}/modify", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads/{id}/modify", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads/{id}/modify"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -4606,6 +3748,9 @@ async def update_thread_labels(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_thread_labels")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_thread_labels", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4621,9 +3766,9 @@ async def update_thread_labels(
 
 # Tags: users
 @mcp.tool()
-async def trash_thread(
+async def move_thread_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to reference the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the thread to move to trash.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the thread to move to trash."),
 ) -> dict[str, Any]:
     """Moves a thread and all its associated messages to the trash. The thread and its messages can be permanently deleted or recovered from trash."""
 
@@ -4633,26 +3778,23 @@ async def trash_thread(
             path=_models.ThreadsTrashRequestPath(user_id=user_id, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for trash_thread: {_validation_err}")
+        logging.error(f"Parameter validation failed for move_thread_to_trash: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("trash_thread", "POST", "/gmail/v1/users/{userId}/threads/{id}/trash", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads/{id}/trash", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads/{id}/trash"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("trash_thread")
+    _auth = await _get_auth_for_operation("move_thread_to_trash")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("move_thread_to_trash", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="trash_thread",
+        tool_name="move_thread_to_trash",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -4663,9 +3805,9 @@ async def trash_thread(
 
 # Tags: users
 @mcp.tool()
-async def restore_thread(
+async def remove_thread_from_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
-    id_: str = Field(..., alias="id", description="The unique identifier of the thread to restore from trash.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the thread to restore from trash."),
 ) -> dict[str, Any]:
     """Restores a thread from trash by removing it and all its associated messages from the trash folder."""
 
@@ -4675,26 +3817,23 @@ async def restore_thread(
             path=_models.ThreadsUntrashRequestPath(user_id=user_id, id_=id_)
         )
     except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for restore_thread: {_validation_err}")
+        logging.error(f"Parameter validation failed for remove_thread_from_trash: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("restore_thread", "POST", "/gmail/v1/users/{userId}/threads/{id}/untrash", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/gmail/v1/users/{userId}/threads/{id}/untrash", _request.path.model_dump(by_alias=True)) if _request.path else "/gmail/v1/users/{userId}/threads/{id}/untrash"
     _http_headers = {}
 
     # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("restore_thread")
+    _auth = await _get_auth_for_operation("remove_thread_from_trash")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_thread_from_trash", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
-        tool_name="restore_thread",
+        tool_name="remove_thread_from_trash",
         method="POST",
         path=_http_path,
         request_id=_request_id,
@@ -4787,7 +3926,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python google_gmail_server.py", file=sys.stderr)
+        print("  python gmail_api_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
@@ -4889,7 +4028,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Google Gmail MCP Server")
+    parser = argparse.ArgumentParser(description="Gmail API MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -4990,7 +4129,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Google Gmail MCP Server")
+    logger.info("Starting Gmail API MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
