@@ -1,7 +1,6 @@
 # Asana MCP Server
 
 Base URL: https://app.asana.com/api/1.0
-
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 - **Contact:** Asana Support — [https://asana.com/support](https://asana.com/support)
