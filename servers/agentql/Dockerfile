@@ -1,4 +1,4 @@
-# AgentQL API MCP Server
+# AgentQL MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-agentql .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="AgentQL API MCP Server" \
+LABEL org.opencontainers.image.title="AgentQL MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

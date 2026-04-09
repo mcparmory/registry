@@ -1,7 +1,6 @@
-# AgentQL API MCP Server
+# AgentQL MCP Server
 
 Base URL: https://api.agentql.com
-
 ---
 
 ## Install
