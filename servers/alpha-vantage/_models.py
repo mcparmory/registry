@@ -1,7 +1,7 @@
 """
 Alpha Vantage Api MCP Server - Pydantic Models
 
-Generated: 2026-04-06 14:30:40 UTC
+Generated: 2026-04-09 17:13:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
