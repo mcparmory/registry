@@ -1,7 +1,7 @@
 """
 Google Maps Platform MCP Server - Pydantic Models
 
-Generated: 2026-04-07 12:02:58 UTC
+Generated: 2026-04-09 17:23:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
