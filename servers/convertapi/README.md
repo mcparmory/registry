@@ -1,7 +1,6 @@
 # ConvertAPI MCP Server
 
 Base URL: https://v2.convertapi.com
-
 ## API Info
 - **API License:** Apache 2.0 — [http://www.apache.org/licenses/LICENSE-2.0.html](http://www.apache.org/licenses/LICENSE-2.0.html)
 - **Terms of Service:** [https://www.convertapi.com/terms](https://www.convertapi.com/terms)
@@ -15,8 +14,8 @@ Base URL: https://v2.convertapi.com
 ```bash
 SECRET_BEARER_TOKEN=YOUR_SECRET_BEARER_TOKEN \
 TOKEN_BEARER_TOKEN=YOUR_TOKEN_BEARER_TOKEN \
-JWT_TOKEN=YOUR_JWT_TOKEN \
-JWT_SECRET=YOUR_JWT_SECRET \
+JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
+JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 uvx mcparmory-convertapi
 ```
 
@@ -26,8 +25,8 @@ uvx mcparmory-convertapi
 pip install mcparmory-convertapi
 SECRET_BEARER_TOKEN=YOUR_SECRET_BEARER_TOKEN \
 TOKEN_BEARER_TOKEN=YOUR_TOKEN_BEARER_TOKEN \
-JWT_TOKEN=YOUR_JWT_TOKEN \
-JWT_SECRET=YOUR_JWT_SECRET \
+JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
+JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 mcparmory-convertapi
 ```
 
@@ -44,8 +43,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "env": {
         "SECRET_BEARER_TOKEN": "YOUR_SECRET_BEARER_TOKEN",
         "TOKEN_BEARER_TOKEN": "YOUR_TOKEN_BEARER_TOKEN",
-        "JWT_TOKEN": "YOUR_JWT_TOKEN",
-        "JWT_SECRET": "YOUR_JWT_SECRET"
+        "JWT_PRIVATE_KEY": "YOUR_JWT_PRIVATE_KEY",
+        "JWT_ISSUER_ID": "YOUR_JWT_ISSUER_ID"
       }
     }
   }
@@ -60,9 +59,21 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `SECRET_BEARER_TOKEN` — Bearer token
 - `TOKEN_BEARER_TOKEN` — Bearer token
-- `JWT_TOKEN` — JWT token
-- `JWT_SECRET` — JWT secret
+- `JWT_PRIVATE_KEY` — Path to .pem file or inline PEM key
+- `JWT_ISSUER_ID` — Issuer ID (App ID, Team ID, etc.)
 Do not commit credentials to version control.
+
+### JWT Bearer
+
+This server uses **JWT Bearer authentication** — tokens are generated automatically from a private key.
+
+Set `JWT_PRIVATE_KEY` to either:
+- **File path:** `/path/to/private-key.pem`
+- **Inline PEM:** paste the full PEM content with newlines replaced by `\n`
+
+Set `JWT_ISSUER_ID` to the application/issuer ID provided by the API (e.g. GitHub App ID).
+
+Optional settings (see `.env` for details): algorithm (default RS256), expiry (default 600s), audience, key ID, token exchange URL.
 
 ---
 
