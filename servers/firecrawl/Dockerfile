@@ -1,4 +1,4 @@
-# Firecrawl API MCP Server
+# Firecrawl MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-firecrawl .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Firecrawl API MCP Server" \
+LABEL org.opencontainers.image.title="Firecrawl MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

@@ -1,4 +1,4 @@
-# Firecrawl API MCP Server
+# Firecrawl MCP Server
 
 Base URL: https://api.firecrawl.dev/v1
 ## API Info

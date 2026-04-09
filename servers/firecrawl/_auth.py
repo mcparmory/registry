@@ -1,8 +1,8 @@
 """
-Authentication module for Firecrawl API MCP server.
+Authentication module for Firecrawl MCP server.
 
-Generated: 2026-03-31 17:20:10 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:11 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
 1. Authentication class implementations (OAuth2)
@@ -98,7 +98,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_credit_usage_history": [["bearerAuth"]],
     "get_token_usage": [["bearerAuth"]],
     "list_token_usage_history": [["bearerAuth"]],
-    "get_queue_status": [["bearerAuth"]],
     "search_and_scrape_results": [["bearerAuth"]],
     "generate_llms_txt": [["bearerAuth"]],
     "get_llms_txt_generation_status": [["bearerAuth"]]

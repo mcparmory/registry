@@ -1,8 +1,8 @@
 """
-Firecrawl Api MCP Server - Pydantic Models
+Firecrawl MCP Server - Pydantic Models
 
-Generated: 2026-03-31 17:20:10 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:11 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ class BaseScrapeOptions(PermissiveModel):
     location: BaseScrapeOptionsLocation | None = Field(None, description="リクエストに対するロケーション設定です。指定されている場合、利用可能であれば適切なプロキシを使用し、対応する言語およびタイムゾーン設定を再現します。指定されていない場合は、デフォルトで 'US' が使用されます。")
     remove_base64_images: bool | None = Field(True, validation_alias="removeBase64Images", serialization_alias="removeBase64Images", description="出力から、非常に長くなりがちな Base64 画像をすべて削除します。画像の alt テキストは出力内に残りますが、URL はプレースホルダーに置き換えられます。")
     block_ads: bool | None = Field(True, validation_alias="blockAds", serialization_alias="blockAds", description="広告とクッキーポップアップのブロックを有効にします。")
-    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレ...")
+    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレジット消費します。\n - **auto**: basic プロキシでのスクレイピングが失敗した場合に、Firecrawl が自動的に enhanced プロキシで再試行します。enhanced での再試行が成功した場合、そのスクレイピングには 5 クレジットが請求されます。最初の basic での試行が成功した場合は、通常どおりのコストのみが請求されます。\n\nプロキシを指定しない場合、Firecrawl はデフォルトで basic を使用します。")
     store_in_cache: bool | None = Field(True, validation_alias="storeInCache", serialization_alias="storeInCache", description="true の場合、そのページは Firecrawl のインデックスおよびキャッシュに保存されます。スクレイピング内容がデータ保護上の懸念を伴う可能性がある場合は、これを false に設定するのが有効です。機密性の高いスクレイピングに関連する一部のパラメータ（アクションやヘッダーなど）を使用すると、このパラメータは強制的に false に設定されます。")
 
 class ScrapeAndExtractFromUrlBodyActionsItemV0(PermissiveModel):
@@ -368,7 +368,7 @@ class ScrapeAndExtractFromUrlBody(PermissiveModel):
     location: ScrapeAndExtractFromUrlBodyLocation | None = Field(None, description="リクエストに対するロケーション設定です。指定されている場合、利用可能であれば適切なプロキシを使用し、対応する言語およびタイムゾーン設定を再現します。指定されていない場合は、デフォルトで 'US' が使用されます。")
     remove_base64_images: bool | None = Field(True, validation_alias="removeBase64Images", serialization_alias="removeBase64Images", description="出力から、非常に長くなりがちな Base64 画像をすべて削除します。画像の alt テキストは出力内に残りますが、URL はプレースホルダーに置き換えられます。")
     block_ads: bool | None = Field(True, validation_alias="blockAds", serialization_alias="blockAds", description="広告とクッキーポップアップのブロックを有効にします。")
-    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレ...")
+    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレジット消費します。\n - **auto**: basic プロキシでのスクレイピングが失敗した場合に、Firecrawl が自動的に enhanced プロキシで再試行します。enhanced での再試行が成功した場合、そのスクレイピングには 5 クレジットが請求されます。最初の basic での試行が成功した場合は、通常どおりのコストのみが請求されます。\n\nプロキシを指定しない場合、Firecrawl はデフォルトで basic を使用します。")
     store_in_cache: bool | None = Field(True, validation_alias="storeInCache", serialization_alias="storeInCache", description="true の場合、そのページは Firecrawl のインデックスおよびキャッシュに保存されます。スクレイピング内容がデータ保護上の懸念を伴う可能性がある場合は、これを false に設定するのが有効です。機密性の高いスクレイピングに関連する一部のパラメータ（アクションやヘッダーなど）を使用すると、このパラメータは強制的に false に設定されます。")
     formats: list[Literal["markdown", "html", "rawHtml", "links", "screenshot", "screenshot@fullPage", "json", "changeTracking"]] | None = Field(None, description="出力に含めるフォーマット。")
     change_tracking_options: ScrapeAndExtractFromUrlBodyChangeTrackingOptions | None = Field(None, validation_alias="changeTrackingOptions", serialization_alias="changeTrackingOptions", description="変更追跡用のオプション（ベータ版）。changeTracking がフォーマットに含まれている場合にのみ有効です。変更追跡を使用する際は、markdown フォーマットも指定する必要があります。")
@@ -461,7 +461,7 @@ class ScrapeAndExtractFromUrlsBody(PermissiveModel):
     location: ScrapeAndExtractFromUrlsBodyLocation | None = Field(None, description="リクエストに対するロケーション設定です。指定されている場合、利用可能であれば適切なプロキシを使用し、対応する言語およびタイムゾーン設定を再現します。指定されていない場合は、デフォルトで 'US' が使用されます。")
     remove_base64_images: bool | None = Field(True, validation_alias="removeBase64Images", serialization_alias="removeBase64Images", description="出力から、非常に長くなりがちな Base64 画像をすべて削除します。画像の alt テキストは出力内に残りますが、URL はプレースホルダーに置き換えられます。")
     block_ads: bool | None = Field(True, validation_alias="blockAds", serialization_alias="blockAds", description="広告とクッキーポップアップのブロックを有効にします。")
-    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレ...")
+    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレジット消費します。\n - **auto**: basic プロキシでのスクレイピングが失敗した場合に、Firecrawl が自動的に enhanced プロキシで再試行します。enhanced での再試行が成功した場合、そのスクレイピングには 5 クレジットが請求されます。最初の basic での試行が成功した場合は、通常どおりのコストのみが請求されます。\n\nプロキシを指定しない場合、Firecrawl はデフォルトで basic を使用します。")
     store_in_cache: bool | None = Field(True, validation_alias="storeInCache", serialization_alias="storeInCache", description="true の場合、そのページは Firecrawl のインデックスおよびキャッシュに保存されます。スクレイピング内容がデータ保護上の懸念を伴う可能性がある場合は、これを false に設定するのが有効です。機密性の高いスクレイピングに関連する一部のパラメータ（アクションやヘッダーなど）を使用すると、このパラメータは強制的に false に設定されます。")
     formats: list[Literal["markdown", "html", "rawHtml", "links", "screenshot", "screenshot@fullPage", "json", "changeTracking"]] | None = Field(None, description="出力に含めるフォーマット。")
     change_tracking_options: ScrapeAndExtractFromUrlsBodyChangeTrackingOptions | None = Field(None, validation_alias="changeTrackingOptions", serialization_alias="changeTrackingOptions", description="変更追跡用のオプション（ベータ版）。changeTracking がフォーマットに含まれている場合にのみ有効です。変更追跡を使用する際は、markdown フォーマットも指定する必要があります。")
@@ -543,7 +543,7 @@ class ScrapeOptions(PermissiveModel):
     location: ScrapeOptionsLocation | None = Field(None, description="リクエストに対するロケーション設定です。指定されている場合、利用可能であれば適切なプロキシを使用し、対応する言語およびタイムゾーン設定を再現します。指定されていない場合は、デフォルトで 'US' が使用されます。")
     remove_base64_images: bool | None = Field(True, validation_alias="removeBase64Images", serialization_alias="removeBase64Images", description="出力から、非常に長くなりがちな Base64 画像をすべて削除します。画像の alt テキストは出力内に残りますが、URL はプレースホルダーに置き換えられます。")
     block_ads: bool | None = Field(True, validation_alias="blockAds", serialization_alias="blockAds", description="広告とクッキーポップアップのブロックを有効にします。")
-    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレ...")
+    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレジット消費します。\n - **auto**: basic プロキシでのスクレイピングが失敗した場合に、Firecrawl が自動的に enhanced プロキシで再試行します。enhanced での再試行が成功した場合、そのスクレイピングには 5 クレジットが請求されます。最初の basic での試行が成功した場合は、通常どおりのコストのみが請求されます。\n\nプロキシを指定しない場合、Firecrawl はデフォルトで basic を使用します。")
     store_in_cache: bool | None = Field(True, validation_alias="storeInCache", serialization_alias="storeInCache", description="true の場合、そのページは Firecrawl のインデックスおよびキャッシュに保存されます。スクレイピング内容がデータ保護上の懸念を伴う可能性がある場合は、これを false に設定するのが有効です。機密性の高いスクレイピングに関連する一部のパラメータ（アクションやヘッダーなど）を使用すると、このパラメータは強制的に false に設定されます。")
     formats: list[Literal["markdown", "html", "rawHtml", "links", "screenshot", "screenshot@fullPage", "json", "changeTracking"]] | None = Field(None, description="出力に含めるフォーマット。")
     change_tracking_options: ScrapeOptionsChangeTrackingOptions | None = Field(None, validation_alias="changeTrackingOptions", serialization_alias="changeTrackingOptions", description="変更追跡用のオプション（ベータ版）。changeTracking がフォーマットに含まれている場合にのみ有効です。変更追跡を使用する際は、markdown フォーマットも指定する必要があります。")
@@ -625,7 +625,7 @@ class SearchAndScrapeBodyScrapeOptions(PermissiveModel):
     location: SearchAndScrapeBodyScrapeOptionsLocation | None = Field(None, description="リクエストに対するロケーション設定です。指定されている場合、利用可能であれば適切なプロキシを使用し、対応する言語およびタイムゾーン設定を再現します。指定されていない場合は、デフォルトで 'US' が使用されます。")
     remove_base64_images: bool | None = Field(True, validation_alias="removeBase64Images", serialization_alias="removeBase64Images", description="出力から、非常に長くなりがちな Base64 画像をすべて削除します。画像の alt テキストは出力内に残りますが、URL はプレースホルダーに置き換えられます。")
     block_ads: bool | None = Field(True, validation_alias="blockAds", serialization_alias="blockAds", description="広告とクッキーポップアップのブロックを有効にします。")
-    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレ...")
+    proxy: Literal["basic", "enhanced", "auto"] | None = Field(None, description="使用するプロキシの種類を指定します。\n\n - **basic**: ボット対策がない、または基本的なボット対策のみが導入されているサイト向けのプロキシです。高速で、ほとんどの場合はこれで十分です。\n - **enhanced**: 高度なボット対策が導入されているサイト向けの強化プロキシです。速度は遅くなりますが、特定のサイトではより信頼性があります。1 リクエストあたり最大 5 クレジット消費します。\n - **auto**: basic プロキシでのスクレイピングが失敗した場合に、Firecrawl が自動的に enhanced プロキシで再試行します。enhanced での再試行が成功した場合、そのスクレイピングには 5 クレジットが請求されます。最初の basic での試行が成功した場合は、通常どおりのコストのみが請求されます。\n\nプロキシを指定しない場合、Firecrawl はデフォルトで basic を使用します。")
     store_in_cache: bool | None = Field(True, validation_alias="storeInCache", serialization_alias="storeInCache", description="true の場合、そのページは Firecrawl のインデックスおよびキャッシュに保存されます。スクレイピング内容がデータ保護上の懸念を伴う可能性がある場合は、これを false に設定するのが有効です。機密性の高いスクレイピングに関連する一部のパラメータ（アクションやヘッダーなど）を使用すると、このパラメータは強制的に false に設定されます。")
     formats: list[Literal["markdown", "html", "rawHtml", "links", "screenshot", "screenshot@fullPage", "json", "extract"]] | None = None
 

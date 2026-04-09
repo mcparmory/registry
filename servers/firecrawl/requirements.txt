@@ -1,5 +1,5 @@
-# Firecrawl API - Dependencies
-# Generated: 2026-03-31 17:20:10 UTC
+# Firecrawl - Dependencies
+# Generated: 2026-04-09 17:21:11 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0

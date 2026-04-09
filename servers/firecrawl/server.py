@@ -5,14 +5,15 @@ Firecrawl MCP Server
 API Info:
 - Contact: Firecrawl Support <support@firecrawl.dev> (https://firecrawl.dev/support)
 
-Generated: 2026-03-31 17:20:10 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:11 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -37,6 +38,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.firecrawl.dev/v1")
@@ -488,11 +490,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -534,7 +540,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -736,19 +745,44 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -773,10 +807,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -870,10 +909,7 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'bearerAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -905,9 +941,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -951,6 +987,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -963,7 +1000,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -975,16 +1012,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -998,7 +1039,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Firecrawl")
+mcp = FastMCP("Firecrawl", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Scraping
 @mcp.tool()
@@ -1014,12 +1055,6 @@ async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody =
         logging.error(f"Parameter validation failed for scrape_and_extract_webpage: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("scrape_and_extract_webpage", "POST", "/scrape", _request_id)
-
     # Extract parameters for API call
     _http_path = "/scrape"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1029,6 +1064,9 @@ async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody =
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("scrape_and_extract_webpage")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("scrape_and_extract_webpage", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1056,12 +1094,6 @@ async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = F
         logging.error(f"Parameter validation failed for scrape_and_extract_urls: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("scrape_and_extract_urls", "POST", "/batch/scrape", _request_id)
-
     # Extract parameters for API call
     _http_path = "/batch/scrape"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1071,6 +1103,9 @@ async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = F
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("scrape_and_extract_urls")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("scrape_and_extract_urls", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1086,7 +1121,7 @@ async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = F
 
 # Tags: Scraping
 @mcp.tool()
-async def get_batch_scrape_status(id_: str = Field(..., alias="id", description="The unique identifier of the batch scrape job to check status for.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def get_batch_scrape_status(id_: str = Field(..., alias="id", description="The unique identifier of the batch scrape job to check status for.")) -> dict[str, Any]:
     """Retrieve the current status and progress of a batch scraping job. Use this to monitor ongoing or completed scrape operations."""
 
     # Construct request model with validation
@@ -1098,12 +1133,6 @@ async def get_batch_scrape_status(id_: str = Field(..., alias="id", description=
         logging.error(f"Parameter validation failed for get_batch_scrape_status: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_batch_scrape_status", "GET", "/batch/scrape/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/batch/scrape/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/batch/scrape/{id}"
     _http_headers = {}
@@ -1111,6 +1140,9 @@ async def get_batch_scrape_status(id_: str = Field(..., alias="id", description=
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_batch_scrape_status")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_batch_scrape_status", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1125,7 +1157,7 @@ async def get_batch_scrape_status(id_: str = Field(..., alias="id", description=
 
 # Tags: Scraping
 @mcp.tool()
-async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job to cancel.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job to cancel.")) -> dict[str, Any]:
     """Cancels an active batch scraping job by its ID. The job will stop processing immediately and any pending tasks will be abandoned."""
 
     # Construct request model with validation
@@ -1137,12 +1169,6 @@ async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The
         logging.error(f"Parameter validation failed for cancel_batch_scrape: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("cancel_batch_scrape", "DELETE", "/batch/scrape/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/batch/scrape/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/batch/scrape/{id}"
     _http_headers = {}
@@ -1150,6 +1176,9 @@ async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_batch_scrape")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("cancel_batch_scrape", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1164,7 +1193,7 @@ async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The
 
 # Tags: Scraping
 @mcp.tool()
-async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job for which to retrieve errors.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job for which to retrieve errors.")) -> dict[str, Any]:
     """Retrieve all errors that occurred during a batch scraping job. Use this to diagnose failures and understand which URLs or data extraction steps encountered issues."""
 
     # Construct request model with validation
@@ -1176,12 +1205,6 @@ async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description
         logging.error(f"Parameter validation failed for list_batch_scrape_errors: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_batch_scrape_errors", "GET", "/batch/scrape/{id}/errors", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/batch/scrape/{id}/errors", _request.path.model_dump(by_alias=True)) if _request.path else "/batch/scrape/{id}/errors"
     _http_headers = {}
@@ -1189,6 +1212,9 @@ async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_batch_scrape_errors")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_batch_scrape_errors", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1203,7 +1229,7 @@ async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description
 
 # Tags: Crawling
 @mcp.tool()
-async def get_crawl_status(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to retrieve status for. Must be a valid UUID.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def get_crawl_status(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to retrieve status for. Must be a valid UUID.")) -> dict[str, Any]:
     """Retrieve the current status and progress of a crawl job by its unique identifier. Use this to monitor ongoing or completed web crawling operations."""
 
     # Construct request model with validation
@@ -1215,12 +1241,6 @@ async def get_crawl_status(id_: str = Field(..., alias="id", description="The un
         logging.error(f"Parameter validation failed for get_crawl_status: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_crawl_status", "GET", "/crawl/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/crawl/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/crawl/{id}"
     _http_headers = {}
@@ -1228,6 +1248,9 @@ async def get_crawl_status(id_: str = Field(..., alias="id", description="The un
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crawl_status")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_crawl_status", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1242,7 +1265,7 @@ async def get_crawl_status(id_: str = Field(..., alias="id", description="The un
 
 # Tags: Crawling
 @mcp.tool()
-async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to cancel. Must be a valid UUID.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to cancel. Must be a valid UUID.")) -> dict[str, Any]:
     """Cancel an active or pending crawl job by its ID. Once cancelled, the crawl will stop processing and cannot be resumed."""
 
     # Construct request model with validation
@@ -1254,12 +1277,6 @@ async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique
         logging.error(f"Parameter validation failed for cancel_crawl: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("cancel_crawl", "DELETE", "/crawl/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/crawl/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/crawl/{id}"
     _http_headers = {}
@@ -1267,6 +1284,9 @@ async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_crawl")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("cancel_crawl", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1281,7 +1301,7 @@ async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Crawling
 @mcp.tool()
-async def list_crawl_errors(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job for which to retrieve errors.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def list_crawl_errors(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job for which to retrieve errors.")) -> dict[str, Any]:
     """Retrieve all errors encountered during a specific crawl job. Returns detailed error information to help diagnose and troubleshoot crawling issues."""
 
     # Construct request model with validation
@@ -1293,12 +1313,6 @@ async def list_crawl_errors(id_: str = Field(..., alias="id", description="The u
         logging.error(f"Parameter validation failed for list_crawl_errors: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_crawl_errors", "GET", "/crawl/{id}/errors", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/crawl/{id}/errors", _request.path.model_dump(by_alias=True)) if _request.path else "/crawl/{id}/errors"
     _http_headers = {}
@@ -1306,6 +1320,9 @@ async def list_crawl_errors(id_: str = Field(..., alias="id", description="The u
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_crawl_errors")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_crawl_errors", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1321,24 +1338,24 @@ async def list_crawl_errors(id_: str = Field(..., alias="id", description="The u
 # Tags: Crawling
 @mcp.tool()
 async def crawl_urls(
-    url: str = Field(..., description="The base URL where crawling begins. All discovered URLs must be relative to this domain unless external link following is enabled.", json_schema_extra={'format': 'uri'}),
+    url: str = Field(..., description="The base URL where crawling begins. All discovered URLs must be relative to this domain unless external link following is enabled."),
     webhook_url: str = Field(..., alias="webhookUrl", description="Webhook endpoint that receives crawl lifecycle events: crawl.started (when crawling begins), crawl.page (for each page processed), and crawl.completed or crawl.failed (when finished). Response format matches the /scrape endpoint."),
     exclude_paths: list[str] | None = Field(None, alias="excludePaths", description="Regular expression patterns to exclude URL paths from crawling. Patterns match against the path component of URLs (e.g., 'blog/.*' excludes all blog paths). Multiple patterns can be specified as an array."),
     include_paths: list[str] | None = Field(None, alias="includePaths", description="Regular expression patterns to include only matching URL paths in crawling results. Only paths matching these patterns will be processed. Multiple patterns can be specified as an array."),
-    regex_on_full_url: bool | None = Field(False, alias="regexOnFullURL", description="When true, includePaths and excludePaths patterns match against the full URL including query parameters. When false, patterns match only the path component."),
-    max_depth: int | None = Field(10, alias="maxDepth", description="Maximum absolute depth from the base URL's path. Represents the maximum number of forward slashes allowed in discovered URL paths relative to the base."),
+    regex_on_full_url: bool | None = Field(None, alias="regexOnFullURL", description="When true, includePaths and excludePaths patterns match against the full URL including query parameters. When false, patterns match only the path component."),
+    max_depth: int | None = Field(None, alias="maxDepth", description="Maximum absolute depth from the base URL's path. Represents the maximum number of forward slashes allowed in discovered URL paths relative to the base."),
     max_discovery_depth: int | None = Field(None, alias="maxDiscoveryDepth", description="Maximum discovery depth based on link traversal order. Root pages and sitemap-discovered pages have depth 0. Each subsequent level of links increases depth by 1."),
-    ignore_query_parameters: bool | None = Field(False, alias="ignoreQueryParameters", description="When true, prevents re-crawling the same path with different query parameters. Treats URLs with identical paths but different query strings as duplicates."),
-    limit: int | None = Field(10000, description="Maximum number of pages to crawl. Crawling stops once this limit is reached."),
-    crawl_entire_domain: bool | None = Field(False, alias="crawlEntireDomain", description="When true, crawler follows internal links at any level (sibling, parent, child paths). When false, crawler only follows deeper nested paths. Set to true to comprehensively cover the entire site structure."),
-    allow_external_links: bool | None = Field(False, alias="allowExternalLinks", description="When true, crawler follows links to external domains outside the base domain. When false, only internal links are followed."),
-    allow_subdomains: bool | None = Field(False, alias="allowSubdomains", description="When true, crawler follows links to subdomains under the main domain. When false, only the primary domain is crawled."),
+    ignore_query_parameters: bool | None = Field(None, alias="ignoreQueryParameters", description="When true, prevents re-crawling the same path with different query parameters. Treats URLs with identical paths but different query strings as duplicates."),
+    limit: int | None = Field(None, description="Maximum number of pages to crawl. Crawling stops once this limit is reached."),
+    crawl_entire_domain: bool | None = Field(None, alias="crawlEntireDomain", description="When true, crawler follows internal links at any level (sibling, parent, child paths). When false, crawler only follows deeper nested paths. Set to true to comprehensively cover the entire site structure."),
+    allow_external_links: bool | None = Field(None, alias="allowExternalLinks", description="When true, crawler follows links to external domains outside the base domain. When false, only internal links are followed."),
+    allow_subdomains: bool | None = Field(None, alias="allowSubdomains", description="When true, crawler follows links to subdomains under the main domain. When false, only the primary domain is crawled."),
     delay: float | None = Field(None, description="Wait time in seconds between consecutive scraping requests. Use to respect website rate limits and avoid overwhelming target servers."),
     max_concurrency: int | None = Field(None, alias="maxConcurrency", description="Maximum number of concurrent scraping operations. Limits parallelism for this crawl job. If not specified, the team's concurrency limit applies."),
     headers: dict[str, str] | None = Field(None, description="Custom HTTP headers to include in all webhook requests sent to the webhook URL."),
     metadata: dict[str, Any] | None = Field(None, description="Custom metadata object included in all webhook payloads for this crawl. Useful for tracking, correlation, or passing context through the crawl lifecycle."),
     events: list[Literal["completed", "page", "failed", "started"]] | None = Field(None, description="Array of event types to send to the webhook URL. If not specified, all event types are sent. Valid events include crawl.started, crawl.page, crawl.completed, and crawl.failed."),
-    scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional scraping options to apply to all pages discovered during crawling. Inherits configuration from the /scrape endpoint.")
+    scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional scraping options to apply to all pages discovered during crawling. Inherits configuration from the /scrape endpoint."),
 ) -> dict[str, Any]:
     """Crawl multiple URLs from a base domain with configurable filtering, depth limits, and webhook notifications. Supports path-based inclusion/exclusion patterns, subdomain traversal, and concurrent scraping with rate limiting."""
 
@@ -1352,12 +1369,6 @@ async def crawl_urls(
         logging.error(f"Parameter validation failed for crawl_urls: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("crawl_urls", "POST", "/crawl", _request_id)
-
     # Extract parameters for API call
     _http_path = "/crawl"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1366,6 +1377,9 @@ async def crawl_urls(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("crawl_urls")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("crawl_urls", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1382,11 +1396,11 @@ async def crawl_urls(
 # Tags: Mapping
 @mcp.tool()
 async def crawl_urls_map(
-    url: str = Field(..., description="The base URL where crawling begins. Must be a valid URI.", json_schema_extra={'format': 'uri'}),
+    url: str = Field(..., description="The base URL where crawling begins. Must be a valid URI."),
     search: str | None = Field(None, description="Search query to filter mapped URLs. During alpha phase, smart search features are limited to the first 500 results, though the map operation may discover additional results beyond this limit."),
-    sitemap_only: bool | None = Field(False, alias="sitemapOnly", description="If enabled, return only links that are included in the website's sitemap."),
-    include_subdomains: bool | None = Field(True, alias="includeSubdomains", description="If enabled, include URLs from the site's subdomains in the results."),
-    limit: int | None = Field(5000, description="Maximum number of links to return. The API can discover up to 30,000 links, but results are capped at this limit.", le=30000)
+    sitemap_only: bool | None = Field(None, alias="sitemapOnly", description="If enabled, return only links that are included in the website's sitemap."),
+    include_subdomains: bool | None = Field(None, alias="includeSubdomains", description="If enabled, include URLs from the site's subdomains in the results."),
+    limit: int | None = Field(None, description="Maximum number of links to return. The API can discover up to 30,000 links, but results are capped at this limit.", le=30000),
 ) -> dict[str, Any]:
     """Crawl and map multiple URLs from a website based on specified options. Discovers all accessible links starting from a base URL, with optional filtering by search query, sitemap, subdomains, and result limits."""
 
@@ -1399,12 +1413,6 @@ async def crawl_urls_map(
         logging.error(f"Parameter validation failed for crawl_urls_map: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("crawl_urls_map", "POST", "/map", _request_id)
-
     # Extract parameters for API call
     _http_path = "/map"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1413,6 +1421,9 @@ async def crawl_urls_map(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("crawl_urls_map")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("crawl_urls_map", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1433,7 +1444,7 @@ async def extract_structured_data(
     enable_web_search: bool | None = Field(None, alias="enableWebSearch", description="Enable web search to supplement data extraction with additional information from search results."),
     include_subdomains: bool | None = Field(None, alias="includeSubdomains", description="Include subdomains of the specified URLs in the extraction scope."),
     show_sources: bool | None = Field(None, alias="showSources", description="Include source attribution in the response, showing which sources were used to extract each data point."),
-    scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional configuration options for the scraping behavior, such as timeout settings, headers, or parsing preferences.")
+    scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional configuration options for the scraping behavior, such as timeout settings, headers, or parsing preferences."),
 ) -> dict[str, Any]:
     """Extract structured data from web pages using LLM analysis. Optionally augment extraction with web search, subdomain scanning, and source attribution."""
 
@@ -1446,12 +1457,6 @@ async def extract_structured_data(
         logging.error(f"Parameter validation failed for extract_structured_data: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("extract_structured_data", "POST", "/extract", _request_id)
-
     # Extract parameters for API call
     _http_path = "/extract"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1460,6 +1465,9 @@ async def extract_structured_data(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("extract_structured_data")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("extract_structured_data", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1475,7 +1483,7 @@ async def extract_structured_data(
 
 # Tags: Extraction
 @mcp.tool()
-async def get_extraction_status(id_: str = Field(..., alias="id", description="The unique identifier of the extraction job to check status for.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def get_extraction_status(id_: str = Field(..., alias="id", description="The unique identifier of the extraction job to check status for.")) -> dict[str, Any]:
     """Retrieve the current status of a data extraction job using its unique identifier. Returns the job's progress, completion state, and any relevant metadata."""
 
     # Construct request model with validation
@@ -1487,12 +1495,6 @@ async def get_extraction_status(id_: str = Field(..., alias="id", description="T
         logging.error(f"Parameter validation failed for get_extraction_status: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_extraction_status", "GET", "/extract/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/extract/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/extract/{id}"
     _http_headers = {}
@@ -1500,6 +1502,9 @@ async def get_extraction_status(id_: str = Field(..., alias="id", description="T
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_extraction_status")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_extraction_status", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1517,12 +1522,6 @@ async def get_extraction_status(id_: str = Field(..., alias="id", description="T
 async def list_active_crawls() -> dict[str, Any]:
     """Retrieve all currently running web crawls for the authenticated team. Returns a list of active crawl operations with their current status and progress."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_active_crawls", "GET", "/crawl/active", _request_id)
-
     # Extract parameters for API call
     _http_path = "/crawl/active"
     _http_headers = {}
@@ -1530,6 +1529,9 @@ async def list_active_crawls() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_active_crawls")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_active_crawls", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1546,11 +1548,11 @@ async def list_active_crawls() -> dict[str, Any]:
 @mcp.tool()
 async def initiate_deep_research(
     query: str = Field(..., description="The research topic or question to investigate"),
-    max_depth: int | None = Field(7, alias="maxDepth", description="Controls the depth of iterative research cycles, determining how many levels of follow-up analysis to perform", ge=1, le=12),
-    max_urls: int | None = Field(20, alias="maxUrls", description="Limits the number of URLs to analyze during the research process", ge=1, le=1000),
+    max_depth: int | None = Field(None, alias="maxDepth", description="Controls the depth of iterative research cycles, determining how many levels of follow-up analysis to perform", ge=1, le=12),
+    max_urls: int | None = Field(None, alias="maxUrls", description="Limits the number of URLs to analyze during the research process", ge=1, le=1000),
     analysis_prompt: str | None = Field(None, alias="analysisPrompt", description="Custom prompt template for formatting the final analysis results in Markdown. Used to structure the output according to specific requirements"),
     system_prompt: str | None = Field(None, alias="systemPrompt", description="System prompt for controlling JSON output generation behavior and formatting"),
-    formats: list[Literal["markdown", "json"]] | None = Field(None, description="Output formats for the research results. Specifies which format types to include in the response")
+    formats: list[Literal["markdown", "json"]] | None = Field(None, description="Output formats for the research results. Specifies which format types to include in the response"),
 ) -> dict[str, Any]:
     """Initiates a comprehensive research process that iteratively analyzes multiple sources to deeply investigate a query. Returns structured findings formatted according to specified analysis requirements."""
 
@@ -1564,12 +1566,6 @@ async def initiate_deep_research(
         logging.error(f"Parameter validation failed for initiate_deep_research: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("initiate_deep_research", "POST", "/deep-research", _request_id)
-
     # Extract parameters for API call
     _http_path = "/deep-research"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1578,6 +1574,9 @@ async def initiate_deep_research(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("initiate_deep_research")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("initiate_deep_research", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1593,7 +1592,7 @@ async def initiate_deep_research(
 
 # Tags: Research
 @mcp.tool()
-async def get_deep_research_status(id_: str = Field(..., alias="id", description="The unique identifier of the research job to retrieve status for.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def get_deep_research_status(id_: str = Field(..., alias="id", description="The unique identifier of the research job to retrieve status for.")) -> dict[str, Any]:
     """Retrieve the current status and results of a deep research job. Use this to check progress and access findings from an ongoing or completed research task."""
 
     # Construct request model with validation
@@ -1605,12 +1604,6 @@ async def get_deep_research_status(id_: str = Field(..., alias="id", description
         logging.error(f"Parameter validation failed for get_deep_research_status: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_deep_research_status", "GET", "/deep-research/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/deep-research/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/deep-research/{id}"
     _http_headers = {}
@@ -1618,6 +1611,9 @@ async def get_deep_research_status(id_: str = Field(..., alias="id", description
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_deep_research_status")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_deep_research_status", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1635,12 +1631,6 @@ async def get_deep_research_status(id_: str = Field(..., alias="id", description
 async def get_team_credit_usage() -> dict[str, Any]:
     """Retrieve the remaining credit balance for the authenticated team. This shows how many credits are available for use."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_team_credit_usage", "GET", "/team/credit-usage", _request_id)
-
     # Extract parameters for API call
     _http_path = "/team/credit-usage"
     _http_headers = {}
@@ -1648,6 +1638,9 @@ async def get_team_credit_usage() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_team_credit_usage")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_team_credit_usage", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1662,7 +1655,7 @@ async def get_team_credit_usage() -> dict[str, Any]:
 
 # Tags: Billing
 @mcp.tool()
-async def list_credit_usage_history(by_api_key: bool | None = Field(False, alias="byApiKey", description="When enabled, returns credit usage history grouped by API key instead of aggregated team-level data.")) -> dict[str, Any]:
+async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns credit usage history grouped by API key instead of aggregated team-level data.")) -> dict[str, Any]:
     """Retrieve the credit usage history for the authenticated team. Optionally filter results to show credit consumption broken down by individual API keys."""
 
     # Construct request model with validation
@@ -1674,12 +1667,6 @@ async def list_credit_usage_history(by_api_key: bool | None = Field(False, alias
         logging.error(f"Parameter validation failed for list_credit_usage_history: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_credit_usage_history", "GET", "/team/credit-usage/historical", _request_id)
-
     # Extract parameters for API call
     _http_path = "/team/credit-usage/historical"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1688,6 +1675,9 @@ async def list_credit_usage_history(by_api_key: bool | None = Field(False, alias
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_credit_usage_history")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_credit_usage_history", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1706,12 +1696,6 @@ async def list_credit_usage_history(by_api_key: bool | None = Field(False, alias
 async def get_token_usage() -> dict[str, Any]:
     """Retrieve the remaining token balance for the authenticated team's Extract operations. Returns current token usage information for the team."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_token_usage", "GET", "/team/token-usage", _request_id)
-
     # Extract parameters for API call
     _http_path = "/team/token-usage"
     _http_headers = {}
@@ -1719,6 +1703,9 @@ async def get_token_usage() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_token_usage")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_token_usage", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1733,7 +1720,7 @@ async def get_token_usage() -> dict[str, Any]:
 
 # Tags: Billing
 @mcp.tool()
-async def list_token_usage_history(by_api_key: bool | None = Field(False, alias="byApiKey", description="When enabled, returns token usage broken down by each API key instead of aggregated team totals.")) -> dict[str, Any]:
+async def list_token_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns token usage broken down by each API key instead of aggregated team totals.")) -> dict[str, Any]:
     """Retrieve historical token usage data for the authenticated team. Optionally break down usage by individual API keys."""
 
     # Construct request model with validation
@@ -1745,12 +1732,6 @@ async def list_token_usage_history(by_api_key: bool | None = Field(False, alias=
         logging.error(f"Parameter validation failed for list_token_usage_history: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_token_usage_history", "GET", "/team/token-usage/historical", _request_id)
-
     # Extract parameters for API call
     _http_path = "/team/token-usage/historical"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1759,6 +1740,9 @@ async def list_token_usage_history(by_api_key: bool | None = Field(False, alias=
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_token_usage_history")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_token_usage_history", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1772,44 +1756,14 @@ async def list_token_usage_history(by_api_key: bool | None = Field(False, alias=
 
     return _response_data
 
-# Tags: Miscellaneous
-@mcp.tool()
-async def get_queue_status() -> dict[str, Any]:
-    """Retrieve current metrics and status information for the team's scrape queue, including queue depth, processing rates, and health indicators."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_queue_status", "GET", "/team/queue-status", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/team/queue-status"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_queue_status")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_queue_status",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: Search
 @mcp.tool()
 async def search_and_scrape_results(
     query: str = Field(..., description="The search query string to execute."),
-    limit: int | None = Field(5, description="Maximum number of search results to return. Valid range is 1 to 100 results.", ge=1, le=100),
+    limit: int | None = Field(None, description="Maximum number of search results to return. Valid range is 1 to 100 results.", ge=1, le=100),
     tbs: str | None = Field(None, description="Time-based search filter. Supports predefined ranges (last hour, day, week, month, year) or custom date ranges with minimum and maximum dates."),
     location: str | None = Field(None, description="Geographic location to filter search results by region or locality."),
-    scrape_options: _models.SearchAndScrapeBodyScrapeOptions | None = Field(None, alias="scrapeOptions", description="Configuration options for scraping content from search results, such as depth, timeout, or content extraction preferences.")
+    scrape_options: _models.SearchAndScrapeBodyScrapeOptions | None = Field(None, alias="scrapeOptions", description="Configuration options for scraping content from search results, such as depth, timeout, or content extraction preferences."),
 ) -> dict[str, Any]:
     """Execute a web search and optionally scrape detailed content from the results. Supports time-based filtering, location-specific searches, and customizable scraping behavior."""
 
@@ -1822,12 +1776,6 @@ async def search_and_scrape_results(
         logging.error(f"Parameter validation failed for search_and_scrape_results: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("search_and_scrape_results", "POST", "/search", _request_id)
-
     # Extract parameters for API call
     _http_path = "/search"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1836,6 +1784,9 @@ async def search_and_scrape_results(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_and_scrape_results")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("search_and_scrape_results", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1852,9 +1803,9 @@ async def search_and_scrape_results(
 # Tags: LLMs.txt
 @mcp.tool()
 async def generate_llms_txt(
-    url: str = Field(..., description="The website URL to analyze and generate the LLMs.txt file from. Must be a valid URI.", json_schema_extra={'format': 'uri'}),
-    max_urls: int | None = Field(2, alias="maxUrls", description="Maximum number of URLs to crawl and analyze from the starting URL. Controls the scope of content extraction."),
-    show_full_text: bool | None = Field(False, alias="showFullText", description="Include the complete extracted text content in the response. When disabled, returns only metadata and summary information.")
+    url: str = Field(..., description="The website URL to analyze and generate the LLMs.txt file from. Must be a valid URI."),
+    max_urls: int | None = Field(None, alias="maxUrls", description="Maximum number of URLs to crawl and analyze from the starting URL. Controls the scope of content extraction."),
+    show_full_text: bool | None = Field(None, alias="showFullText", description="Include the complete extracted text content in the response. When disabled, returns only metadata and summary information."),
 ) -> dict[str, Any]:
     """Generate an LLMs.txt file for a website to improve AI model discoverability and interaction. This operation crawls the specified URL and extracts relevant content to create a standardized LLMs.txt file."""
 
@@ -1867,12 +1818,6 @@ async def generate_llms_txt(
         logging.error(f"Parameter validation failed for generate_llms_txt: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("generate_llms_txt", "POST", "/llmstxt", _request_id)
-
     # Extract parameters for API call
     _http_path = "/llmstxt"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1881,6 +1826,9 @@ async def generate_llms_txt(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("generate_llms_txt")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("generate_llms_txt", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1896,7 +1844,7 @@ async def generate_llms_txt(
 
 # Tags: LLMs.txt
 @mcp.tool()
-async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", description="The unique identifier of the LLMs.txt generation job to retrieve status for.", json_schema_extra={'format': 'uuid'})) -> dict[str, Any]:
+async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", description="The unique identifier of the LLMs.txt generation job to retrieve status for.")) -> dict[str, Any]:
     """Retrieve the current status and results of an LLMs.txt generation job. Use this to check if a generation job has completed and access the generated content."""
 
     # Construct request model with validation
@@ -1908,12 +1856,6 @@ async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", descr
         logging.error(f"Parameter validation failed for get_llms_txt_generation_status: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_llms_txt_generation_status", "GET", "/llmstxt/{id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/llmstxt/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/llmstxt/{id}"
     _http_headers = {}
@@ -1921,6 +1863,9 @@ async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", descr
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_llms_txt_generation_status")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_llms_txt_generation_status", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2017,7 +1962,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python firecrawl_api_server.py", file=sys.stderr)
+        print("  python firecrawl_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
