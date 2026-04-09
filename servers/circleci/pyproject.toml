@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-circleci"
-version = "1.0.1"
-description = "MCP server for CircleCI API"
+version = "1.0.2"
+description = "MCP server for CircleCI"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
