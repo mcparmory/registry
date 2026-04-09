@@ -1,8 +1,8 @@
 """
-Authentication module for ElevenLabs API Documentation MCP server.
+Authentication module for ElevenLabs MCP server.
 
-Generated: 2026-03-31 17:05:14 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:47 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
 1. Authentication class implementations (OAuth2)
@@ -29,7 +29,7 @@ class APIKeyAuth:
     """
     API Key authentication for ElevenLabs API Documentation.
 
-    Supports header, query parameter, and cookie-based API key injection.
+    Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
     """
 
@@ -39,8 +39,8 @@ class APIKeyAuth:
 
         Args:
             env_var: Environment variable name containing the API key.
-            location: Where to inject the key - 'header', 'query', or 'cookie'.
-            param_name: Name of the header, query parameter, or cookie.
+            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
+            param_name: Name of the header, query parameter, cookie, or path placeholder.
             prefix: Optional prefix before the key value (e.g., 'Bearer').
         """
         self.location = location
@@ -86,6 +86,12 @@ class APIKeyAuth:
     def get_auth_cookies(self) -> dict[str, str]:
         """Get authentication cookies."""
         if self.location != "cookie":
+            return {}
+        return {self.param_name: self.api_key}
+
+    def get_auth_path_params(self) -> dict[str, str]:
+        """Get authentication path parameters for URL template substitution."""
+        if self.location != "path":
             return {}
         return {self.param_name: self.api_key}
 
@@ -198,10 +204,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_pronunciation_dictionaries": [["xi_api_key"]],
     "list_service_account_api_keys": [["xi_api_key"]],
     "create_service_account_api_key": [["xi_api_key"]],
-    "update_service_account_api_key": [["xi_api_key"]],
     "revoke_service_account_api_key": [["xi_api_key"]],
     "list_auth_connections": [["xi_api_key"]],
-    "create_auth_connection": [["xi_api_key"]],
     "delete_auth_connection": [["xi_api_key"]],
     "list_service_accounts": [["xi_api_key"]],
     "list_groups": [["xi_api_key"]],
@@ -211,19 +215,14 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "send_workspace_invite": [["xi_api_key"]],
     "send_workspace_invitations": [["xi_api_key"]],
     "revoke_workspace_invitation": [["xi_api_key"]],
-    "update_workspace_member": [["xi_api_key"]],
     "get_resource": [["xi_api_key"]],
     "grant_resource_access": [["xi_api_key"]],
     "revoke_resource_access": [["xi_api_key"]],
     "list_workspace_webhooks": [["xi_api_key"]],
-    "create_webhook": [["xi_api_key"]],
-    "update_webhook": [["xi_api_key"]],
-    "delete_webhook": [["xi_api_key"]],
     "transcribe_audio": [["xi_api_key"]],
     "get_transcript": [["xi_api_key"]],
     "delete_transcript": [["xi_api_key"]],
     "list_evaluation_criteria": [["xi_api_key"]],
-    "create_evaluation_criterion": [["xi_api_key"]],
     "get_evaluation_criterion": [["xi_api_key"]],
     "update_eval_criterion": [["xi_api_key"]],
     "delete_evaluation_criterion": [["xi_api_key"]],
@@ -236,10 +235,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_evaluation_analytics": [["xi_api_key"]],
     "get_criterion_analytics": [["xi_api_key"]],
     "get_agent_analytics": [["xi_api_key"]],
-    "create_single_use_token": [["xi_api_key"]],
     "align_audio_to_text": [["xi_api_key"]],
     "get_agent_conversation_signed_link": [["xi_api_key"]],
-    "get_webrtc_token": [["xi_api_key"]],
     "initiate_outbound_call": [["xi_api_key"]],
     "initiate_twilio_call": [["xi_api_key"]],
     "initiate_whatsapp_call": [["xi_api_key"]],
@@ -313,11 +310,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_tool": [["xi_api_key"]],
     "delete_tool": [["xi_api_key"]],
     "list_dependent_agents_tool": [["xi_api_key"]],
-    "retrieve_convai_settings": [["xi_api_key"]],
-    "update_workspace_settings": [["xi_api_key"]],
-    "get_dashboard_settings": [["xi_api_key"]],
-    "update_dashboard_charts": [["xi_api_key"]],
-    "list_secrets": [["xi_api_key"]],
     "create_workspace_secret": [["xi_api_key"]],
     "update_secret": [["xi_api_key"]],
     "delete_secret": [["xi_api_key"]],
@@ -339,7 +331,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_tool_config_override": [["xi_api_key"]],
     "get_tool_config_override": [["xi_api_key"]],
     "override_mcp_tool_config": [["xi_api_key"]],
-    "delete_mcp_tool_config_override": [["xi_api_key"]],
     "get_whatsapp_account": [["xi_api_key"]],
     "update_whatsapp_account": [["xi_api_key"]],
     "delete_whatsapp_account": [["xi_api_key"]],
@@ -372,9 +363,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_speaker_separation_status": [["xi_api_key"]],
     "separate_speakers": [["xi_api_key"]],
     "get_speaker_audio": [["xi_api_key"]],
-    "get_voice_captcha": [["xi_api_key"]],
-    "verify_voice_captcha": [["xi_api_key"]],
     "train_voice": [["xi_api_key"]],
-    "submit_voice_verification": [["xi_api_key"]],
-    "view_documentation": [["xi_api_key"]]
+    "submit_voice_verification": [["xi_api_key"]]
 }

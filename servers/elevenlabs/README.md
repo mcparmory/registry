@@ -1,4 +1,4 @@
-# ElevenLabs API Documentation MCP Server
+# ElevenLabs MCP Server
 
 
 ---
@@ -8,6 +8,7 @@
 ### Quick Start (recommended)
 
 ```bash
+BASE_URL=https://your-instance.example.com \
 API_KEY=YOUR_API_KEY \
 uvx mcparmory-elevenlabs
 ```
@@ -16,6 +17,7 @@ uvx mcparmory-elevenlabs
 
 ```bash
 pip install mcparmory-elevenlabs
+BASE_URL=https://your-instance.example.com \
 API_KEY=YOUR_API_KEY \
 mcparmory-elevenlabs
 ```
@@ -31,6 +33,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-elevenlabs"],
       "env": {
+        "BASE_URL": "https://your-instance.example.com",
         "API_KEY": "YOUR_API_KEY"
       }
     }

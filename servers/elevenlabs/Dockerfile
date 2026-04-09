@@ -1,4 +1,4 @@
-# ElevenLabs API Documentation MCP Server
+# ElevenLabs MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-elevenlabs .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="ElevenLabs API Documentation MCP Server" \
+LABEL org.opencontainers.image.title="ElevenLabs MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

@@ -1,8 +1,8 @@
 """
-Elevenlabs Api Documentation MCP Server - Pydantic Models
+Elevenlabs MCP Server - Pydantic Models
 
-Generated: 2026-03-31 17:05:14 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:47 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -67,13 +67,11 @@ __all__ = [
     "CreateAgentResponseTestRouteRequest",
     "CreateAgentRouteRequest",
     "CreateAudioNativeProjectRequest",
-    "CreateAuthConnectionRequest",
     "CreateBatchCallRequest",
     "CreateBranchRouteRequest",
     "CreateClipRequest",
     "CreateDubbingRequest",
     "CreateEnvironmentVariableRequest",
-    "CreateEvalCriterionRouteRequest",
     "CreateFileDocumentRouteRequest",
     "CreateFolderRouteRequest",
     "CreateMcpServerRouteRequest",
@@ -86,7 +84,6 @@ __all__ = [
     "CreateTextDocumentRouteRequest",
     "CreateUrlDocumentRouteRequest",
     "CreateVoiceRequest",
-    "CreateWorkspaceWebhookRouteRequest",
     "DeleteAgentDraftRouteRequest",
     "DeleteAgentRouteRequest",
     "DeleteAuthConnectionRequest",
@@ -113,7 +110,6 @@ __all__ = [
     "DeleteTranscriptByIdRequest",
     "DeleteVoiceRequest",
     "DeleteWhatsappAccountRequest",
-    "DeleteWorkspaceWebhookRouteRequest",
     "DownloadSpeechHistoryItemsRequest",
     "DubRequest",
     "DuplicateAgentRouteRequest",
@@ -122,10 +118,8 @@ __all__ = [
     "EditProjectRequest",
     "EditPvcVoiceRequest",
     "EditPvcVoiceSampleRequest",
-    "EditServiceAccountApiKeyRequest",
     "EditVoiceRequest",
     "EditVoiceSettingsRequest",
-    "EditWorkspaceWebhookRouteRequest",
     "ForcedAlignmentRequest",
     "GenerateRequest",
     "GetAgentAnalyticsRouteRequest",
@@ -172,7 +166,6 @@ __all__ = [
     "GetKnowledgeBaseSourceFileUrlRequest",
     "GetLibraryVoicesRequest",
     "GetLiveCountRequest",
-    "GetLivekitTokenRequest",
     "GetMcpRouteRequest",
     "GetMcpToolConfigOverrideRouteRequest",
     "GetOrCreateRagIndexesRequest",
@@ -188,14 +181,11 @@ __all__ = [
     "GetPvcSampleAudioRequest",
     "GetPvcSampleSpeakersRequest",
     "GetPvcSampleVisualWaveformRequest",
-    "GetPvcVoiceCaptchaRequest",
     "GetRagIndexesRequest",
     "GetResourceMetadataRequest",
-    "GetSecretsRouteRequest",
     "GetServiceAccountApiKeysRouteRequest",
     "GetSimilarLibraryVoicesRequest",
     "GetSimilarVoicesForSpeakerRequest",
-    "GetSingleUseTokenRequest",
     "GetSpeakerAudioRequest",
     "GetSpeechHistoryItemByIdRequest",
     "GetSpeechHistoryRequest",
@@ -233,7 +223,6 @@ __all__ = [
     "RefreshUrlDocumentRouteRequest",
     "RegisterTwilioCallRequest",
     "RemoveMcpServerToolApprovalRouteRequest",
-    "RemoveMcpToolConfigOverrideRouteRequest",
     "RemoveMemberRequest",
     "RemoveRulesRequest",
     "RenderRequest",
@@ -277,7 +266,6 @@ __all__ = [
     "UnshareResourceEndpointRequest",
     "UpdateAgentResponseTestRouteRequest",
     "UpdateBranchRouteRequest",
-    "UpdateDashboardSettingsRouteRequest",
     "UpdateDocumentRouteRequest",
     "UpdateEnvironmentVariableRequest",
     "UpdateEvalCriterionRouteRequest",
@@ -287,15 +275,12 @@ __all__ = [
     "UpdatePronunciationDictionariesRequest",
     "UpdateSecretRouteRequest",
     "UpdateSegmentLanguageRequest",
-    "UpdateSettingsRouteRequest",
     "UpdateSpeakerRequest",
     "UpdateToolRouteRequest",
     "UpdateWhatsappAccountRequest",
-    "UpdateWorkspaceMemberRequest",
     "UploadFileRouteRequest",
     "UploadSongRequest",
     "UsageCharactersRequest",
-    "VerifyPvcVoiceCaptchaRequest",
     "WhatsappOutboundCallRequest",
     "WhatsappOutboundMessageRequest",
     "AgentDeploymentRequestItem",
@@ -317,9 +302,6 @@ __all__ = [
     "CreateAgentRouteBodyPlatformSettings",
     "CreateAgentRouteBodyWorkflow",
     "CriterionItemRequest",
-    "DashboardCallSuccessChartModel",
-    "DashboardCriteriaChartModel",
-    "DashboardDataCollectionChartModel",
     "DataExtractionFieldRequest",
     "DialogueInput",
     "DynamicVariableAssignment",
@@ -421,8 +403,8 @@ class SoundGenerationRequestQuery(StrictModel):
 class SoundGenerationRequestBody(StrictModel):
     text: str = Field(default=..., description="Detailed text description of the sound effect to generate. Be descriptive about the audio characteristics, environment, and desired qualities.", examples=['A large, ancient wooden door slowly opening in an eerie, abandoned castle..'])
     loop: bool | None = Field(default=None, description="Enable seamless looping for the generated sound effect. Only supported with the eleven_text_to_sound_v2 model.")
-    duration_seconds: float | None = Field(default=None, description="Target duration of the generated sound in seconds. If not specified, the optimal duration will be automatically determined from the text description.", ge=0.5, le=30)
-    prompt_influence: float | None = Field(default=None, description="Controls how strictly the generation adheres to the text description. Higher values produce more consistent results but less variation; lower values allow more creative freedom.", ge=0, le=1)
+    duration_seconds: float | None = Field(default=None, description="Target duration of the generated sound in seconds. If not specified, the optimal duration will be automatically determined from the text description.")
+    prompt_influence: float | None = Field(default=None, description="Controls how strictly the generation adheres to the text description. Higher values produce more consistent results but less variation; lower values allow more creative freedom.")
     model_id: str | None = Field(default=None, description="The AI model to use for sound generation. Determines the quality and capabilities of the generated audio.", examples=['eleven_text_to_sound_v2'])
 class SoundGenerationRequest(StrictModel):
     """Generate realistic sound effects from text descriptions using advanced AI models. Perfect for video production, voice-overs, and game audio."""
@@ -726,7 +708,7 @@ class TextToVoicePreviewStreamRequest(StrictModel):
 # Operation: list_voices
 class GetUserVoicesV2RequestQuery(StrictModel):
     next_page_token: str | None = Field(default=None, description="Token for retrieving the next page of results. Use this with the has_more flag from the previous response to implement reliable pagination.", examples=['0'])
-    page_size: int | None = Field(default=None, description="Maximum number of voices to return per page. Must not exceed 100. Note that page 0 may include additional default voices.", le=100)
+    page_size: int | None = Field(default=None, description="Maximum number of voices to return per page. Must not exceed 100. Note that page 0 may include additional default voices.")
     sort: str | None = Field(default=None, description="Field to sort results by. Use 'created_at_unix' for chronological ordering or 'name' for alphabetical ordering. Note that 'created_at_unix' may not be available for older voices.", examples=['created_at_unix'])
     sort_direction: str | None = Field(default=None, description="Direction to sort results in. Use 'asc' for ascending or 'desc' for descending order.", examples=['desc'])
     voice_type: str | None = Field(default=None, description="Filter voices by type. 'non-default' includes all voices except default voices. 'saved' includes non-default voices plus any default voices added to collections.")
@@ -734,7 +716,7 @@ class GetUserVoicesV2RequestQuery(StrictModel):
     fine_tuning_state: str | None = Field(default=None, description="Filter professional voice clones by their fine-tuning state. Only applicable to professional voices.")
     collection_id: str | None = Field(default=None, description="Filter voices to only those belonging to a specific collection by its ID.")
     include_total_count: bool | None = Field(default=None, description="Include the total count of matching voices in the response. Note that this count is a live snapshot and may change between requests. Use the has_more flag for pagination instead. Only enable when you need the total count for display purposes, as it incurs a performance cost.", examples=[True])
-    voice_ids: list[str] | None = Field(default=None, description="Retrieve specific voices by their IDs. Accepts up to 100 voice IDs in a single request.", max_length=100)
+    voice_ids: list[str] | None = Field(default=None, description="Retrieve specific voices by their IDs. Accepts up to 100 voice IDs in a single request.")
 class GetUserVoicesV2Request(StrictModel):
     """Retrieve a paginated list of available voices with advanced filtering, sorting, and search capabilities. Supports filtering by voice type, category, fine-tuning state, and collection membership."""
     query: GetUserVoicesV2RequestQuery | None = None
@@ -1146,7 +1128,7 @@ class UpdateSpeakerRequestPath(StrictModel):
 class UpdateSpeakerRequestBody(StrictModel):
     speaker_name: str | None = Field(default=None, description="The display name to assign to this speaker.")
     voice_id: str | None = Field(default=None, description="The voice identifier, either from the ElevenLabs voice library or a cloning option ('track-clone' or 'clip-clone').")
-    voice_style: float | None = Field(default=None, description="The voice style intensity for supported models. Valid range is 0.0 to 1.0, defaults to 1.0.", ge=0.0, le=1.0)
+    voice_style: float | None = Field(default=None, description="The voice style intensity for supported models. Valid range is 0.0 to 1.0, defaults to 1.0.")
     languages: list[str] | None = Field(default=None, description="List of language codes to apply these speaker changes to. If empty or omitted, changes apply to all languages in the project.")
 class UpdateSpeakerRequest(StrictModel):
     """Update speaker metadata in a dubbing project, including voice selection and styling. Supports both ElevenLabs library voices and voice cloning options."""
@@ -1159,7 +1141,7 @@ class CreateSpeakerRequestPath(StrictModel):
 class CreateSpeakerRequestBody(StrictModel):
     speaker_name: str | None = Field(default=None, description="A human-readable label for this speaker to identify it within the dubbing project.")
     voice_id: str | None = Field(default=None, description="The voice identifier to use for this speaker. Can be a voice from the ElevenLabs voice library or a special clone type for custom voice cloning.")
-    voice_style: float | None = Field(default=None, description="The voice style intensity for models that support style control. Valid range is 0.0 to 1.0, with 1.0 as the default.", ge=0.0, le=1.0)
+    voice_style: float | None = Field(default=None, description="The voice style intensity for models that support style control. Valid range is 0.0 to 1.0, with 1.0 as the default.")
 class CreateSpeakerRequest(StrictModel):
     """Add a new speaker to a dubbing project with a specified voice and optional styling. Each speaker represents a distinct voice track within the dubbing resource."""
     path: CreateSpeakerRequestPath
@@ -1316,8 +1298,8 @@ class GetLibraryVoicesRequest(StrictModel):
 # Operation: find_similar_voices
 class GetSimilarLibraryVoicesRequestBody(StrictModel):
     audio_file: str | None = Field(default=None, description="Audio sample file to match against library voices. Used as the reference for similarity comparison.", json_schema_extra={'format': 'binary'})
-    similarity_threshold: float | None = Field(default=None, description="Similarity threshold for filtering results. Lower values return more similar voices. Valid range is 0 to 2.", ge=0, le=2, examples=[0.5])
-    top_k: int | None = Field(default=None, description="Maximum number of similar voices to return. If similarity_threshold is also specified, fewer voices may be returned. Valid range is 1 to 100.", ge=1, le=100, examples=[10])
+    similarity_threshold: float | None = Field(default=None, description="Similarity threshold for filtering results. Lower values return more similar voices. Valid range is 0 to 2.", examples=[0.5])
+    top_k: int | None = Field(default=None, description="Maximum number of similar voices to return. If similarity_threshold is also specified, fewer voices may be returned. Valid range is 1 to 100.", examples=[10])
 class GetSimilarLibraryVoicesRequest(StrictModel):
     """Find voices from the library that are similar to a provided audio sample. Returns a ranked list of matching voices based on similarity scoring."""
     body: GetSimilarLibraryVoicesRequestBody | None = None
@@ -1437,20 +1419,6 @@ class CreateServiceAccountApiKeyRequest(StrictModel):
     path: CreateServiceAccountApiKeyRequestPath
     body: CreateServiceAccountApiKeyRequestBody
 
-# Operation: update_service_account_api_key
-class EditServiceAccountApiKeyRequestPath(StrictModel):
-    service_account_user_id: str = Field(default=..., description="The unique identifier of the service account that owns the API key.")
-    api_key_id: str = Field(default=..., description="The unique identifier of the API key to update.")
-class EditServiceAccountApiKeyRequestBody(StrictModel):
-    is_enabled: bool = Field(default=..., description="Enable or disable the API key. When disabled, the key cannot be used for authentication.")
-    name: str = Field(default=..., description="A human-readable name for the API key used for identification and management purposes.", examples=['Sneaky Fox'])
-    permissions: list[Literal["text_to_speech", "speech_to_speech", "speech_to_text", "models_read", "models_write", "voices_read", "voices_write", "speech_history_read", "speech_history_write", "sound_generation", "audio_isolation", "voice_generation", "dubbing_read", "dubbing_write", "pronunciation_dictionaries_read", "pronunciation_dictionaries_write", "user_read", "user_write", "projects_read", "projects_write", "audio_native_read", "audio_native_write", "workspace_read", "workspace_write", "forced_alignment", "convai_read", "convai_write", "music_generation", "image_video_generation", "add_voice_from_voice_library", "create_instant_voice_clone", "create_professional_voice_clone", "publish_voice_to_voice_library", "share_voice_externally", "create_user_api_key", "workspace_analytics_full_read", "webhooks_write", "service_account_write", "group_members_manage", "workspace_members_read", "workspace_members_invite", "workspace_members_remove", "terms_of_service_accept"]] | Literal["all"] = Field(default=..., description="The set of permissions granted to this API key, controlling which operations it can perform.")
-    character_limit: int | None = Field(default=None, description="Optional monthly character limit for this API key. When set, requests that would exceed this limit will be rejected to prevent unexpected usage charges.")
-class EditServiceAccountApiKeyRequest(StrictModel):
-    """Update an existing API key for a service account, including its enabled status, name, permissions, and optional usage limits."""
-    path: EditServiceAccountApiKeyRequestPath
-    body: EditServiceAccountApiKeyRequestBody
-
 # Operation: revoke_service_account_api_key
 class DeleteServiceAccountApiKeyRequestPath(StrictModel):
     service_account_user_id: str = Field(default=..., description="The unique identifier of the service account that owns the API key to be deleted.")
@@ -1458,32 +1426,6 @@ class DeleteServiceAccountApiKeyRequestPath(StrictModel):
 class DeleteServiceAccountApiKeyRequest(StrictModel):
     """Revoke and permanently delete an API key associated with a service account. This action cannot be undone."""
     path: DeleteServiceAccountApiKeyRequestPath
-
-# Operation: create_auth_connection
-class CreateAuthConnectionRequestBody(StrictModel):
-    name: str = Field(default=..., description="Display name for the authentication connection.")
-    auth_type: Literal["oauth2_client_credentials"] | None = Field(default=None, description="Authentication protocol type to use for this connection.")
-    provider: str = Field(default=..., description="Authentication provider or service type (e.g., 'github', 'google', 'custom').")
-    client_id: str | None = Field(default=None, description="OAuth2 client ID for authenticating with the provider.")
-    token_url: str | None = Field(default=None, description="OAuth2 token endpoint URL where access tokens are obtained.")
-    scopes: list[str] | None = Field(default=None, description="List of OAuth2 scopes to request from the provider. Order may be significant depending on the provider.")
-    extra_params: dict[str, str] | None = Field(default=None, description="Additional parameters to include in OAuth2 token requests as key-value pairs.")
-    basic_auth_in_header: bool | None = Field(default=None, description="When enabled, sends OAuth2 client credentials in the Authorization header using Basic Auth encoding instead of in the request body.")
-    client_secret: str | None = Field(default=None, description="OAuth2 client secret for authenticating with the provider.")
-    custom_headers: dict[str, str] | None = Field(default=None, description="Custom HTTP headers to include in all authentication requests as key-value pairs.")
-    header_name: str | None = Field(default=None, description="Header name for API key authentication (e.g., 'x-api-key', 'authorization').")
-    token: str | None = Field(default=None, description="Bearer token or API key value for token-based authentication.")
-    username: str | None = Field(default=None, description="Username for basic authentication or other credential-based auth methods.")
-    algorithm: Literal["HS256", "HS384", "HS512", "RS256", "RS384", "RS512"] | None = Field(default=None, description="Algorithm used for JWT signing and validation.")
-    key_id: str | None = Field(default=None, description="Key ID (kid) to include in JWT header, useful for managing key rotation scenarios.")
-    issuer: str | None = Field(default=None, description="Issuer (iss) claim value to include in the JWT payload.")
-    audience: str | None = Field(default=None, description="Audience (aud) claim value to include in the JWT payload.")
-    subject: str | None = Field(default=None, description="Subject (sub) claim value to include in the JWT payload.")
-    expiration_seconds: int | None = Field(default=None, description="Token expiration time in seconds from issuance.", ge=60.0, le=86400.0)
-    secret_key: str | None = Field(default=None, description="Secret key used for signing JWTs or other cryptographic operations.")
-class CreateAuthConnectionRequest(StrictModel):
-    """Create a new authentication connection for the workspace to enable secure API integrations. Supports multiple authentication methods including OAuth2, API keys, basic auth, and JWT."""
-    body: CreateAuthConnectionRequestBody
 
 # Operation: delete_auth_connection
 class DeleteAuthConnectionRequestPath(StrictModel):
@@ -1544,15 +1486,6 @@ class DeleteInviteRequest(StrictModel):
     """Revoke an existing workspace invitation by email address. The invitation will remain visible in the recipient's inbox but will no longer be activatable to join the workspace. Only workspace members with WORKSPACE_MEMBERS_INVITE permission can perform this action."""
     body: DeleteInviteRequestBody
 
-# Operation: update_workspace_member
-class UpdateWorkspaceMemberRequestBody(StrictModel):
-    email: str = Field(default=..., description="Email address of the workspace member to update.")
-    is_locked: bool | None = Field(default=None, description="Lock or unlock the user's account to control their access to the workspace.")
-    workspace_seat_type: Literal["workspace_admin", "workspace_member", "workspace_lite_member"] | None = Field(default=None, description="The member's role and access level within the workspace.")
-class UpdateWorkspaceMemberRequest(StrictModel):
-    """Updates a workspace member's attributes such as account lock status and seat type. Only workspace administrators can perform this operation."""
-    body: UpdateWorkspaceMemberRequestBody
-
 # Operation: get_resource
 class GetResourceMetadataRequestPath(StrictModel):
     resource_id: str = Field(default=..., description="The unique identifier of the resource to retrieve.")
@@ -1597,42 +1530,12 @@ class GetWorkspaceWebhooksRouteRequest(StrictModel):
     """Retrieve all webhooks configured for a workspace. Optionally include active usage statistics for each webhook (admin-only feature)."""
     query: GetWorkspaceWebhooksRouteRequestQuery | None = None
 
-# Operation: create_webhook
-class CreateWorkspaceWebhookRouteRequestBodySettings(StrictModel):
-    auth_type: Literal["hmac"] = Field(default=..., validation_alias="auth_type", serialization_alias="auth_type", description="The authentication mechanism for securing webhook requests. Determines how the webhook endpoint validates incoming calls from the workspace.")
-    name: str = Field(default=..., validation_alias="name", serialization_alias="name", description="A human-readable name to identify this webhook within the workspace.")
-    webhook_url: str = Field(default=..., validation_alias="webhook_url", serialization_alias="webhook_url", description="The HTTPS endpoint URL that will receive webhook event callbacks. Must use HTTPS protocol for secure communication.")
-class CreateWorkspaceWebhookRouteRequestBody(StrictModel):
-    settings: CreateWorkspaceWebhookRouteRequestBodySettings
-class CreateWorkspaceWebhookRouteRequest(StrictModel):
-    """Create a new webhook for the workspace that will receive HTTP callbacks when triggered. Specify the authentication type, display name, and HTTPS callback URL."""
-    body: CreateWorkspaceWebhookRouteRequestBody
-
-# Operation: update_webhook
-class EditWorkspaceWebhookRouteRequestPath(StrictModel):
-    webhook_id: str = Field(default=..., description="The unique identifier of the webhook to update.", examples=['G007vmtq9uWYl7SUW9zGS8GZZa1K'])
-class EditWorkspaceWebhookRouteRequestBody(StrictModel):
-    is_disabled: bool = Field(default=..., description="Enable or disable the webhook. When disabled, the webhook will not receive event notifications.", examples=[True])
-    name: str = Field(default=..., description="A human-readable name for the webhook used for identification and display purposes.", examples=['My Callback Webhook'])
-    retry_enabled: bool | None = Field(default=None, description="Enable automatic retry attempts for transient failures including server errors (5xx), rate limiting (429), and request timeouts.", examples=[True])
-class EditWorkspaceWebhookRouteRequest(StrictModel):
-    """Update the configuration of a workspace webhook, including its enabled status, display name, and retry behavior for failed deliveries."""
-    path: EditWorkspaceWebhookRouteRequestPath
-    body: EditWorkspaceWebhookRouteRequestBody
-
-# Operation: delete_webhook
-class DeleteWorkspaceWebhookRouteRequestPath(StrictModel):
-    webhook_id: str = Field(default=..., description="The unique identifier of the webhook to delete.", examples=['G007vmtq9uWYl7SUW9zGS8GZZa1K'])
-class DeleteWorkspaceWebhookRouteRequest(StrictModel):
-    """Delete a workspace webhook by its unique identifier. This removes the webhook configuration and stops it from receiving events."""
-    path: DeleteWorkspaceWebhookRouteRequestPath
-
 # Operation: transcribe_audio
 class SpeechToTextRequestBody(StrictModel):
     model_id: Literal["scribe_v1", "scribe_v2"] = Field(default=..., description="The transcription model to use. Choose between scribe_v1 (standard) or scribe_v2 (enhanced with additional features like verbatim control).")
     language_code: str | None = Field(default=None, description="ISO-639-1 or ISO-639-3 language code of the audio content. Providing the language can improve transcription accuracy; if omitted, language is automatically detected.")
     tag_audio_events: bool | None = Field(default=None, description="Whether to identify and tag audio events such as laughter, footsteps, and other non-speech sounds in the transcript.")
-    num_speakers: int | None = Field(default=None, description="Maximum number of speakers expected in the audio. Helps the model predict speaker transitions more accurately. If not specified, the model uses its maximum supported speaker count (up to 32).", ge=1.0, le=32.0)
+    num_speakers: int | None = Field(default=None, description="Maximum number of speakers expected in the audio. Helps the model predict speaker transitions more accurately. If not specified, the model uses its maximum supported speaker count (up to 32).", ge=1, le=32)
     timestamps_granularity: Literal["none", "word", "character"] | None = Field(default=None, description="Timestamp precision level in the transcript. 'word' provides timestamps for each word, 'character' provides character-level timestamps within words, and 'none' omits timestamps.")
     diarize: bool | None = Field(default=None, description="Whether to perform speaker diarization to identify and label which speaker is talking at each point in the transcript.")
     diarization_threshold: float | None = Field(default=None, description="Sensitivity threshold for speaker diarization (only applies when diarize is true and num_speakers is not specified). Higher values reduce speaker fragmentation but increase the risk of merging distinct speakers; lower values do the opposite. The model selects a default threshold based on the chosen model_id if not provided.", ge=0.1, le=0.4)
@@ -1663,17 +1566,6 @@ class DeleteTranscriptByIdRequestPath(StrictModel):
 class DeleteTranscriptByIdRequest(StrictModel):
     """Permanently delete a transcript by its unique ID. This action cannot be undone."""
     path: DeleteTranscriptByIdRequestPath
-
-# Operation: create_evaluation_criterion
-class CreateEvalCriterionRouteRequestBodyDataExtractionConfig(StrictModel):
-    fields: list[DataExtractionFieldRequest] = Field(default=..., validation_alias="fields", serialization_alias="fields", description="An ordered array of fields to be evaluated. Each item specifies a data field or attribute that will be assessed against the defined criteria.")
-class CreateEvalCriterionRouteRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the evaluation criterion. Used to identify and reference this criterion in evaluation workflows.", min_length=1, max_length=200)
-    criteria: list[CriterionItemRequest] = Field(default=..., description="An ordered array of evaluation criteria to apply. Each item defines a specific aspect or metric to be evaluated.")
-    data_extraction_config: CreateEvalCriterionRouteRequestBodyDataExtractionConfig
-class CreateEvalCriterionRouteRequest(StrictModel):
-    """Create a new evaluation criterion for speech-to-text assessment. Define the criterion name and specify the evaluation criteria and fields that will be used to assess transcription quality."""
-    body: CreateEvalCriterionRouteRequestBody
 
 # Operation: get_evaluation_criterion
 class GetEvalCriterionRouteRequestPath(StrictModel):
@@ -1786,13 +1678,6 @@ class GetAgentAnalyticsRouteRequest(StrictModel):
     path: GetAgentAnalyticsRouteRequestPath
     query: GetAgentAnalyticsRouteRequestQuery | None = None
 
-# Operation: create_single_use_token
-class GetSingleUseTokenRequestPath(StrictModel):
-    token_type: Literal["realtime_scribe", "tts_websocket"] = Field(default=..., description="The type of single-use token to generate, determining which frontend service the token grants access to.")
-class GetSingleUseTokenRequest(StrictModel):
-    """Generate a time-limited single-use token with embedded authentication for frontend clients to establish secure connections. Supports real-time transcription and text-to-speech WebSocket endpoints."""
-    path: GetSingleUseTokenRequestPath
-
 # Operation: align_audio_to_text
 class ForcedAlignmentRequestBody(StrictModel):
     file_: str = Field(default=..., validation_alias="file", serialization_alias="file", description="The audio file to align with the transcript. Supports all major audio formats with a maximum file size of 1GB.", json_schema_extra={'format': 'binary'})
@@ -1810,15 +1695,6 @@ class GetConversationSignedLinkRequestQuery(StrictModel):
 class GetConversationSignedLinkRequest(StrictModel):
     """Generate a signed URL to initiate a conversation with an authorized agent. The signed URL provides secure access to start a new conversation session."""
     query: GetConversationSignedLinkRequestQuery
-
-# Operation: get_webrtc_token
-class GetLivekitTokenRequestQuery(StrictModel):
-    agent_id: str = Field(default=..., description="The unique identifier of the agent to connect with for the WebRTC session.", examples=['21m00Tcm4TlvDq8ikWAM'])
-    participant_name: str | None = Field(default=None, description="Custom name to identify the participant in the session. If omitted, the system will use the user ID as the participant identifier.")
-    branch_id: str | None = Field(default=None, description="The unique identifier of the branch context for this token request. Used to scope the session to a specific branch when applicable.")
-class GetLivekitTokenRequest(StrictModel):
-    """Obtain a WebRTC session token for establishing real-time communication with a LiveKit agent. The token enables secure peer-to-peer or server-mediated audio/video connections."""
-    query: GetLivekitTokenRequestQuery
 
 # Operation: initiate_outbound_call
 class HandleTwilioOutboundCallRequestBodyConversationInitiationClientDataConversationConfigOverrideTurn(StrictModel):
@@ -2169,7 +2045,7 @@ class CreateAgentResponseTestRouteRequestBody(StrictModel):
     tool_call_parameters: UnitTestToolCallEvaluationModelInput | None = Field(default=None, description="Criteria for evaluating tool calls made by the agent. Leave empty to skip tool call validation.")
     check_any_tool_matches: bool | None = Field(default=None, description="When true, the test passes if any tool call matches the criteria. When false, the test fails if the agent returns multiple tool calls.")
     simulation_scenario: str | None = Field(default=None, description="Description of the simulated user scenario and persona for simulation-based tests. Provides context for multi-turn conversation evaluation.")
-    simulation_max_turns: int | None = Field(default=None, description="Maximum number of conversation turns to execute in simulation tests. Controls test duration and complexity.", ge=1.0, le=50.0)
+    simulation_max_turns: int | None = Field(default=None, description="Maximum number of conversation turns to execute in simulation tests. Controls test duration and complexity.", ge=1, le=50)
     simulation_environment: str | None = Field(default=None, description="Execution environment for the simulation test. Defaults to production if not specified.")
 class CreateAgentResponseTestRouteRequest(StrictModel):
     """Creates a new test case for evaluating agent responses. Tests can validate response quality, tool usage, or simulate multi-turn conversations with configurable success criteria."""
@@ -2197,7 +2073,7 @@ class UpdateAgentResponseTestRouteRequestBody(StrictModel):
     tool_call_parameters: UnitTestToolCallEvaluationModelInput | None = Field(default=None, description="Criteria for evaluating tool calls made by the agent. If not provided, tool call validation is skipped.")
     check_any_tool_matches: bool | None = Field(default=None, description="When True, the test passes if any tool call matches the criteria. When False, the test fails if the agent returns multiple tool calls.")
     simulation_scenario: str | None = Field(default=None, description="Description of the simulation scenario and user persona for simulation-based tests.")
-    simulation_max_turns: int | None = Field(default=None, description="Maximum number of conversation turns allowed in simulation tests. Controls test duration and complexity.", ge=1.0, le=50.0)
+    simulation_max_turns: int | None = Field(default=None, description="Maximum number of conversation turns allowed in simulation tests. Controls test duration and complexity.", ge=1, le=50)
     simulation_environment: str | None = Field(default=None, description="The environment context for running the simulation test. Defaults to production if not specified.")
 class UpdateAgentResponseTestRouteRequest(StrictModel):
     """Updates an agent response test configuration by ID. Allows modification of test criteria, success/failure examples, dynamic variables, and simulation settings."""
@@ -2682,38 +2558,6 @@ class GetToolDependentAgentsRouteRequest(StrictModel):
     path: GetToolDependentAgentsRouteRequestPath
     query: GetToolDependentAgentsRouteRequestQuery | None = None
 
-# Operation: update_workspace_settings
-class UpdateSettingsRouteRequestBodyConversationInitiationClientDataWebhook(StrictModel):
-    url: str = Field(default=..., validation_alias="url", serialization_alias="url", description="The webhook endpoint URL where Convai will send configured events.")
-    request_headers: dict[str, str | ConvAiSecretLocator] = Field(default=..., validation_alias="request_headers", serialization_alias="request_headers", description="HTTP headers to include with webhook requests, such as authentication tokens or custom identifiers.")
-class UpdateSettingsRouteRequestBodyWebhooks(StrictModel):
-    post_call_webhook_id: str | None = Field(default=None, validation_alias="post_call_webhook_id", serialization_alias="post_call_webhook_id", description="Identifier for the post-call webhook configuration to associate with this workspace.")
-    events: list[Literal["transcript", "audio", "call_initiation_failure"]] | None = Field(default=None, validation_alias="events", serialization_alias="events", description="Event types to send via webhook. Select one or more from: transcript (conversation text), audio (call recordings), or call_initiation_failure (failed call attempts).")
-class UpdateSettingsRouteRequestBody(StrictModel):
-    can_use_mcp_servers: bool | None = Field(default=None, description="Enable or disable MCP (Model Context Protocol) server support for this workspace.")
-    rag_retention_period_days: int | None = Field(default=None, description="Number of days to retain RAG (Retrieval-Augmented Generation) data. Must be between 1 and 30 days.", le=30.0, gt=0.0)
-    conversation_embedding_retention_days: int | None = Field(default=None, description="Number of days to retain conversation embeddings for semantic search and analysis. Omit to use the system default of 30 days. Must be between 1 and 365 days.", le=365.0, gt=0.0)
-    default_livekit_stack: Literal["standard", "static"] | None = Field(default=None, description="LiveKit infrastructure stack to use for voice calls. Standard is the default production stack; static is for specialized deployments.")
-    conversation_initiation_client_data_webhook: UpdateSettingsRouteRequestBodyConversationInitiationClientDataWebhook
-    webhooks: UpdateSettingsRouteRequestBodyWebhooks | None = None
-class UpdateSettingsRouteRequest(StrictModel):
-    """Update Convai settings for your workspace, including webhook configuration, data retention policies, and feature enablement."""
-    body: UpdateSettingsRouteRequestBody
-
-# Operation: update_dashboard_charts
-class UpdateDashboardSettingsRouteRequestBody(StrictModel):
-    charts: list[DashboardCallSuccessChartModel | DashboardCriteriaChartModel | DashboardDataCollectionChartModel] | None = Field(default=None, description="Array of charts to display on the dashboard. Order matters and determines the layout sequence. Each chart represents a visualization component.", max_length=4)
-class UpdateDashboardSettingsRouteRequest(StrictModel):
-    """Update the charts displayed on the Convai dashboard for your workspace. You can configure up to 4 charts to customize your dashboard view."""
-    body: UpdateDashboardSettingsRouteRequestBody | None = None
-
-# Operation: list_secrets
-class GetSecretsRouteRequestQuery(StrictModel):
-    page_size: int | None = Field(default=None, description="Maximum number of secrets to return per request. Must be between 1 and 100. If not specified, all secrets are returned.", ge=1, le=100)
-class GetSecretsRouteRequest(StrictModel):
-    """Retrieve all workspace secrets for the authenticated user. Supports pagination to control the number of results returned."""
-    query: GetSecretsRouteRequestQuery | None = None
-
 # Operation: create_workspace_secret
 class CreateSecretRouteRequestBody(StrictModel):
     type_: Literal["new"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The category or classification of the secret (e.g., API key, password, token, connection string). Determines how the secret is handled and validated.")
@@ -2753,7 +2597,7 @@ class CreateBatchCallRequestBody(StrictModel):
     scheduled_time_unix: int | None = Field(default=None, description="Unix timestamp (seconds since epoch) for when to start executing the batch calls. If omitted, calls begin immediately.")
     agent_phone_number_id: str | None = Field(default=None, description="Phone number identifier associated with the agent making the calls. Required for certain call routing configurations.")
     timezone_: str | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="Timezone identifier (e.g., America/New_York, Europe/London) for interpreting scheduled_time_unix in local context.")
-    target_concurrency_limit: int | None = Field(default=None, description="Maximum number of simultaneous calls allowed in this batch. When set, this limit takes precedence over workspace or agent-level capacity settings.", ge=1.0)
+    target_concurrency_limit: int | None = Field(default=None, description="Maximum number of simultaneous calls allowed in this batch. When set, this limit takes precedence over workspace or agent-level capacity settings.", ge=1)
     whatsapp_params: CreateBatchCallRequestBodyWhatsappParams
 class CreateBatchCallRequest(StrictModel):
     """Submit a batch call request to schedule multiple outbound calls to recipients. Supports scheduling, concurrency limits, and WhatsApp permission request templates."""
@@ -2956,14 +2800,6 @@ class UpdateMcpToolConfigOverrideRouteRequest(StrictModel):
     path: UpdateMcpToolConfigOverrideRouteRequestPath
     body: UpdateMcpToolConfigOverrideRouteRequestBody | None = None
 
-# Operation: delete_mcp_tool_config_override
-class RemoveMcpToolConfigOverrideRouteRequestPath(StrictModel):
-    mcp_server_id: str = Field(default=..., description="The unique identifier of the MCP Server that contains the tool configuration to be removed.")
-    tool_name: str = Field(default=..., description="The name of the MCP tool whose configuration overrides should be deleted.")
-class RemoveMcpToolConfigOverrideRouteRequest(StrictModel):
-    """Remove configuration overrides for a specific MCP tool, restoring it to default settings. This operation deletes any custom configurations that were previously applied to the tool."""
-    path: RemoveMcpToolConfigOverrideRouteRequestPath
-
 # Operation: get_whatsapp_account
 class GetWhatsappAccountRequestPath(StrictModel):
     phone_number_id: str = Field(default=..., description="The unique identifier for the WhatsApp phone number associated with the account.")
@@ -3158,7 +2994,7 @@ class GenerateRequestBodyCompositionPlan(StrictModel):
     sections: list[SongSection] = Field(default=..., validation_alias="sections", serialization_alias="sections", description="Ordered array defining the song structure, including individual sections with their characteristics and durations.", max_length=30)
 class GenerateRequestBody(StrictModel):
     prompt: str | None = Field(default=None, description="Simple text description of the song to generate. Cannot be combined with composition_plan. Use this for quick, straightforward song generation.", max_length=4100)
-    music_length_ms: int | None = Field(default=None, description="Target song duration in milliseconds. Only used with prompt-based generation. The model will adjust to fit this duration if provided.", ge=3000.0, le=600000.0)
+    music_length_ms: int | None = Field(default=None, description="Target song duration in milliseconds. Only used with prompt-based generation. The model will adjust to fit this duration if provided.", ge=3000, le=600000)
     model_id: Literal["music_v1"] | None = Field(default=None, description="AI model version to use for music generation.")
     force_instrumental: bool | None = Field(default=None, description="When enabled, ensures the generated song contains no vocals and is purely instrumental. Only applicable with prompt-based generation.")
     use_phonetic_names: bool | None = Field(default=None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word-level timestamps.")
@@ -3183,7 +3019,7 @@ class ComposeDetailedRequestBodyCompositionPlan(StrictModel):
     sections: list[SongSection] = Field(default=..., validation_alias="sections", serialization_alias="sections", description="Ordered array of song sections for composition_plan, each with duration, style, and lyrical content specifications. Order determines playback sequence.", max_length=30)
 class ComposeDetailedRequestBody(StrictModel):
     prompt: str | None = Field(default=None, description="Text-based prompt describing the song to generate. Mutually exclusive with composition_plan. Provide creative direction, mood, genre, and lyrical themes.", max_length=4100)
-    music_length_ms: int | None = Field(default=None, description="Target song duration in milliseconds. Only applicable with prompt-based generation. If omitted, the model automatically determines length based on prompt content.", ge=3000.0, le=600000.0)
+    music_length_ms: int | None = Field(default=None, description="Target song duration in milliseconds. Only applicable with prompt-based generation. If omitted, the model automatically determines length based on prompt content.", ge=3000, le=600000)
     model_id: Literal["music_v1"] | None = Field(default=None, description="AI model version to use for music generation.")
     force_instrumental: bool | None = Field(default=None, description="When enabled, ensures the generated song contains no vocals. Only works with prompt-based generation.")
     use_phonetic_names: bool | None = Field(default=None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word timestamps.")
@@ -3209,7 +3045,7 @@ class StreamComposeRequestBodyCompositionPlan(StrictModel):
     sections: list[SongSection] = Field(default=..., validation_alias="sections", serialization_alias="sections", description="Ordered array defining distinct sections of the song, each with its own musical characteristics and transitions.", max_length=30)
 class StreamComposeRequestBody(StrictModel):
     prompt: str | None = Field(default=None, description="Simple text description to generate a song from. Mutually exclusive with composition_plan. Use English for optimal results.", max_length=4100)
-    music_length_ms: int | None = Field(default=None, description="Target duration for the generated composition in milliseconds. Only applicable when using prompt-based generation. If omitted, the model determines length based on the prompt.", ge=3000.0, le=600000.0)
+    music_length_ms: int | None = Field(default=None, description="Target duration for the generated composition in milliseconds. Only applicable when using prompt-based generation. If omitted, the model determines length based on the prompt.", ge=3000, le=600000)
     model_id: Literal["music_v1"] | None = Field(default=None, description="The generative model version to use for music composition.")
     force_instrumental: bool | None = Field(default=None, description="When enabled, ensures the generated composition contains no vocals. Only applicable with prompt-based generation.")
     use_phonetic_names: bool | None = Field(default=None, description="When enabled, proper names in the prompt are phonetically spelled for improved lyrical pronunciation while preserving original names in word-level timestamps.")
@@ -3339,23 +3175,6 @@ class GetSpeakerAudioRequestPath(StrictModel):
 class GetSpeakerAudioRequest(StrictModel):
     """Retrieve the isolated audio track for a specific speaker from a voice sample. This operation extracts and returns only the audio corresponding to the designated speaker."""
     path: GetSpeakerAudioRequestPath
-
-# Operation: get_voice_captcha
-class GetPvcVoiceCaptchaRequestPath(StrictModel):
-    voice_id: str = Field(default=..., description="The unique identifier of the voice to retrieve the captcha for. Use the voices list endpoint to discover available voice IDs.", examples=['21m00Tcm4TlvDq8ikWAM'])
-class GetPvcVoiceCaptchaRequest(StrictModel):
-    """Retrieve a CAPTCHA challenge for PVC (Programmatic Voice Conversion) voice verification. This captcha is required to authenticate and verify voice identity before using the specified voice."""
-    path: GetPvcVoiceCaptchaRequestPath
-
-# Operation: verify_voice_captcha
-class VerifyPvcVoiceCaptchaRequestPath(StrictModel):
-    voice_id: str = Field(default=..., description="The unique identifier of the voice to verify against. Use the voices list endpoint to discover available voice IDs.", examples=['21m00Tcm4TlvDq8ikWAM'])
-class VerifyPvcVoiceCaptchaRequestBody(StrictModel):
-    recording: str = Field(default=..., description="The audio recording of the user speaking the captcha phrase. Submit as binary audio data.", json_schema_extra={'format': 'binary'})
-class VerifyPvcVoiceCaptchaRequest(StrictModel):
-    """Verify a user's voice against a CAPTCHA challenge for a specific voice ID. Submit the audio recording of the user speaking the captcha phrase to complete voice verification."""
-    path: VerifyPvcVoiceCaptchaRequestPath
-    body: VerifyPvcVoiceCaptchaRequestBody
 
 # Operation: train_voice
 class RunPvcVoiceTrainingRequestPath(StrictModel):
@@ -3940,20 +3759,6 @@ Value is not validated here since it will be substituted with actual value later
     type_: Literal["dynamic"] = Field(..., validation_alias="type", serialization_alias="type")
     key: str = Field(..., description="The SIP header name (e.g., 'X-Customer-ID')", min_length=1, max_length=64, pattern="^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$")
     value: str = Field(..., description="The dynamic variable name to resolve", min_length=1)
-
-class DashboardCallSuccessChartModel(PermissiveModel):
-    name: str
-    type_: Literal["call_success"] | None = Field('call_success', validation_alias="type", serialization_alias="type")
-
-class DashboardCriteriaChartModel(PermissiveModel):
-    name: str
-    type_: Literal["criteria"] | None = Field('criteria', validation_alias="type", serialization_alias="type")
-    criteria_id: str
-
-class DashboardDataCollectionChartModel(PermissiveModel):
-    name: str
-    type_: Literal["data_collection"] | None = Field('data_collection', validation_alias="type", serialization_alias="type")
-    data_collection_id: str
 
 class DataExtractionFieldRequest(PermissiveModel):
     name: str = Field(..., min_length=1)
@@ -5251,7 +5056,7 @@ class CreateAgentRouteBodyConversationConfigTts(PermissiveModel):
     stability: float | None = Field(0.5, description="The stability of generated speech", ge=0.0, le=1.0)
     speed: float | None = Field(1.0, description="The speed of generated speech", ge=0.7, le=1.2)
     similarity_boost: float | None = Field(0.8, description="The similarity boost for generated speech", ge=0.0, le=1.0)
-    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the ...")
+    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the text will be normalized after generation, incurring slight additional latency.")
     pronunciation_dictionary_locators: list[PydanticPronunciationDictionaryVersionLocator] | None = Field(None, description="The pronunciation dictionary locators")
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigTts(PermissiveModel):
@@ -5266,7 +5071,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigTts(PermissiveM
     stability: float | None = Field(0.5, description="The stability of generated speech", ge=0.0, le=1.0)
     speed: float | None = Field(1.0, description="The speed of generated speech", ge=0.7, le=1.2)
     similarity_boost: float | None = Field(0.8, description="The similarity boost for generated speech", ge=0.0, le=1.0)
-    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the ...")
+    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the text will be normalized after generation, incurring slight additional latency.")
     pronunciation_dictionary_locators: list[PydanticPronunciationDictionaryVersionLocator] | None = Field(None, description="The pronunciation dictionary locators")
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigTts(PermissiveModel):
@@ -5281,7 +5086,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigTts(Permiss
     stability: float | None = Field(0.5, description="The stability of generated speech", ge=0.0, le=1.0)
     speed: float | None = Field(1.0, description="The speed of generated speech", ge=0.7, le=1.2)
     similarity_boost: float | None = Field(0.8, description="The similarity boost for generated speech", ge=0.0, le=1.0)
-    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the ...")
+    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field('system_prompt', description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the text will be normalized after generation, incurring slight additional latency.")
     pronunciation_dictionary_locators: list[PydanticPronunciationDictionaryVersionLocator] | None = Field(None, description="The pronunciation dictionary locators")
 
 class TestToolResultModel(PermissiveModel):
@@ -5386,7 +5191,7 @@ class TtsConversationalConfigWorkflowOverrideInput(PermissiveModel):
     stability: float | None = Field(None, description="The stability of generated speech")
     speed: float | None = Field(None, description="The speed of generated speech")
     similarity_boost: float | None = Field(None, description="The similarity boost for generated speech")
-    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field(None, description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the ...")
+    text_normalisation_type: Literal["system_prompt", "elevenlabs"] | None = Field(None, description="Method for converting numbers to words before converting text to speech. If set to SYSTEM_PROMPT, the system prompt will be updated to include normalization instructions. If set to ELEVENLABS, the text will be normalized after generation, incurring slight additional latency.")
     pronunciation_dictionary_locators: list[PydanticPronunciationDictionaryVersionLocator] | None = Field(None, description="The pronunciation dictionary locators")
 
 class TurnConfigOverride(PermissiveModel):
@@ -5493,7 +5298,7 @@ class SmbToolConfig(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     enabled: bool | None = Field(True, description="Whether this tool is enabled for the agent")
     params: SearchClientsParams | ListClientsParams | GetClientByPhoneParams | CreateClientParams | UpdateClientParams | DeleteClientParams | ListStaffParams | CreateStaffParams | UpdateStaffParams | DeleteStaffParams | ListAssetsParams | CreateAssetParams | UpdateAssetParams | DeleteAssetParams | ListServicesParams | CreateServiceParams | UpdateServiceParams | DeleteServiceParams | ListProductsParams | CreateProductParams | UpdateProductParams | DeleteProductParams | CheckServiceAvailabilityParams | CreateClientAppointmentParams | GetClientAppointmentsParams | ListCalendarEventsParams | UpdateCalendarEventParams | DeleteCalendarEventParams | ListRentalServicesParams | CheckRentalAvailabilityParams | CreateRentalBookingParams
 
@@ -5534,7 +5339,7 @@ This tool should be invoked by the LLM when it detects that the call has been
 answered by a voicemail system rather than a human. If a voicemail message
 is configured, it will be played; otherwise the call will end immediately."""
     system_tool_type: Literal["voicemail_detection"] | None = 'voicemail_detection'
-    voicemail_message: str | None = Field(None, description="Optional message to leave on voicemail when detected. If not provided, the call will end immediately when voicemail is detected. Supports dynamic variables (e.g., {{system__time}}, {{system__call_d...")
+    voicemail_message: str | None = Field(None, description="Optional message to leave on voicemail when detected. If not provided, the call will end immediately when voicemail is detected. Supports dynamic variables (e.g., {{system__time}}, {{system__call_duration_secs}}, {{custom_variable}}).")
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsEndCall(PermissiveModel):
     """The end call tool"""
@@ -5547,7 +5352,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsEndCall(Permi
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsLanguageDetection(PermissiveModel):
@@ -5561,7 +5366,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsLanguageDetec
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsPlayKeypadTouchTone(PermissiveModel):
@@ -5575,7 +5380,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsPlayKeypadTou
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsSkipTurn(PermissiveModel):
@@ -5589,7 +5394,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsSkipTurn(Perm
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsTransferToAgent(PermissiveModel):
@@ -5603,7 +5408,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsTransferToAge
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsTransferToNumber(PermissiveModel):
@@ -5617,7 +5422,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsTransferToNum
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsVoicemailDetection(PermissiveModel):
@@ -5631,7 +5436,7 @@ class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInToolsVoicemailDete
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class CreateAgentRouteBodyConversationConfigAgentPromptBuiltInTools(PermissiveModel):
@@ -5655,7 +5460,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsLanguageDetection(PermissiveModel):
@@ -5669,7 +5474,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsPlayKeypadTouchTone(PermissiveModel):
@@ -5683,7 +5488,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsSkipTurn(PermissiveModel):
@@ -5697,7 +5502,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsTransferToAgent(PermissiveModel):
@@ -5711,7 +5516,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsTransferToNumber(PermissiveModel):
@@ -5725,7 +5530,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsVoicemailDetection(PermissiveModel):
@@ -5739,7 +5544,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuil
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInTools(PermissiveModel):
@@ -5763,7 +5568,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsLanguageDetection(PermissiveModel):
@@ -5777,7 +5582,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsPlayKeypadTouchTone(PermissiveModel):
@@ -5791,7 +5596,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsSkipTurn(PermissiveModel):
@@ -5805,7 +5610,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsTransferToAgent(PermissiveModel):
@@ -5819,7 +5624,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsTransferToNumber(PermissiveModel):
@@ -5833,7 +5638,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInToolsVoicemailDetection(PermissiveModel):
@@ -5847,7 +5652,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptBuiltInTools(PermissiveModel):
@@ -5871,7 +5676,7 @@ class SystemToolConfigInput(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     params: EndCallToolConfig | LanguageDetectionToolConfig | TransferToAgentToolConfig | TransferToNumberToolConfigInput | SkipTurnToolConfig | PlayDtmfToolConfig | VoicemailDetectionToolConfig
 
 class BuiltInToolsWorkflowOverrideInput(PermissiveModel):
@@ -6044,7 +5849,7 @@ class CreateAgentRouteBodyPlatformSettings(PermissiveModel):
     testing: CreateAgentRouteBodyPlatformSettingsTesting | None = Field(None, description="Testing configuration for the agent")
     archived: bool | None = Field(False, description="Whether the agent is archived")
     guardrails: CreateAgentRouteBodyPlatformSettingsGuardrails | None = Field(None, description="Guardrails configuration for the agent")
-    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one o...")
+    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one of the supported conversation languages.")
     auth: CreateAgentRouteBodyPlatformSettingsAuth | None = Field(None, description="Settings for authentication")
     call_limits: CreateAgentRouteBodyPlatformSettingsCallLimits | None = Field(None, description="Call limits for the agent")
     privacy: CreateAgentRouteBodyPlatformSettingsPrivacy | None = Field(None, description="Privacy settings for the agent")
@@ -6109,7 +5914,7 @@ class ResubmitTestsRouteBodyAgentConfigOverridePlatformSettings(PermissiveModel)
     testing: ResubmitTestsRouteBodyAgentConfigOverridePlatformSettingsTesting | None = Field(None, description="Testing configuration for the agent")
     archived: bool | None = Field(False, description="Whether the agent is archived")
     guardrails: ResubmitTestsRouteBodyAgentConfigOverridePlatformSettingsGuardrails | None = Field(None, description="Guardrails configuration for the agent")
-    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one o...")
+    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one of the supported conversation languages.")
     auth: ResubmitTestsRouteBodyAgentConfigOverridePlatformSettingsAuth | None = Field(None, description="Settings for authentication")
     call_limits: ResubmitTestsRouteBodyAgentConfigOverridePlatformSettingsCallLimits | None = Field(None, description="Call limits for the agent")
     privacy: ResubmitTestsRouteBodyAgentConfigOverridePlatformSettingsPrivacy | None = Field(None, description="Privacy settings for the agent")
@@ -6174,7 +5979,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettings(PermissiveMo
     testing: RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettingsTesting | None = Field(None, description="Testing configuration for the agent")
     archived: bool | None = Field(False, description="Whether the agent is archived")
     guardrails: RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettingsGuardrails | None = Field(None, description="Guardrails configuration for the agent")
-    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one o...")
+    summary_language: str | None = Field(None, description="Language for all conversation analysis outputs (summaries, titles, evaluation rationales, data collection rationales). If not set, the language will be inferred from the conversation. Must be one of the supported conversation languages.")
     auth: RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettingsAuth | None = Field(None, description="Settings for authentication")
     call_limits: RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettingsCallLimits | None = Field(None, description="Call limits for the agent")
     privacy: RunAgentTestSuiteRouteBodyAgentConfigOverridePlatformSettingsPrivacy | None = Field(None, description="Privacy settings for the agent")
@@ -6270,9 +6075,9 @@ class ApiIntegrationWebhookToolConfigInput(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     dynamic_variables: DynamicVariablesConfig | None = Field(None, description="Configuration for dynamic variables")
-    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' ru...")
+    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' runs the tool in the background without blocking - best for long-running operations.")
     tool_version: str | None = Field('1.0.0', description="The version of the API integration tool")
     api_integration_id: str
     api_integration_connection_id: str
@@ -6338,11 +6143,11 @@ class ClientToolConfigInput(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     parameters: ObjectJsonSchemaPropertyInput | None = Field(None, description="Schema for any parameters to pass to the client")
-    expects_response: bool | None = Field(False, description="If true, calling this tool should block the conversation until the client responds with some response which is passed to the llm. If false then we will continue the conversation without waiting for...")
+    expects_response: bool | None = Field(False, description="If true, calling this tool should block the conversation until the client responds with some response which is passed to the llm. If false then we will continue the conversation without waiting for the client to respond, this is useful to show content to a user but not block the conversation")
     dynamic_variables: DynamicVariablesConfig | None = Field(None, description="Configuration for dynamic variables")
-    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' ru...")
+    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' runs the tool in the background without blocking - best for long-running operations.")
 
 class ConversationHistoryTranscriptCommonModelInput(PermissiveModel):
     role: Literal["user", "agent"]
@@ -6418,7 +6223,7 @@ class CreateAgentRouteBodyConversationConfigAgentPrompt(PermissiveModel):
     custom_llm: CreateAgentRouteBodyConversationConfigAgentPromptCustomLlm | None = Field(None, description="Definition for a custom LLM if LLM field is set to 'CUSTOM_LLM'")
     ignore_default_personality: bool | None = Field(False, description="Whether to remove the default personality lines from the system prompt")
     rag: CreateAgentRouteBodyConversationConfigAgentPromptRag | None = Field(None, description="Configuration for RAG")
-    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', '...")
+    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', 'Europe/London', 'UTC').")
     backup_llm_config: BackupLlmDefault | BackupLlmDisabled | BackupLlmOverride | None = Field(None, description="Configuration for backup LLM cascading. Can be disabled, use system defaults, or specify custom order.")
     cascade_timeout_seconds: float | None = Field(8.0, description="Time in seconds before cascading to backup LLM. Must be between 2 and 15 seconds.", ge=2.0, le=15.0)
     tools: list[WebhookToolConfigInput | ClientToolConfigInput | SystemToolConfigInput | McpToolConfigInput | ApiIntegrationWebhookToolConfigInput | SmbToolConfig] | None = Field(None, description="A list of tools that the agent can use over the course of the conversation, use tool_ids instead")
@@ -6440,7 +6245,7 @@ class McpToolConfigInput(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     integration_type: Literal["mcp_server", "mcp_integration"] = Field(..., description="The type of MCP tool")
     parameters: ObjectJsonSchemaPropertyInput | None = Field(None, description="Schema for any parameters the LLM needs to provide to the MCP tool.")
     approval_policy: Literal["auto_approve_all", "require_approval_all", "require_approval_per_tool"] | None = Field('require_approval_all', description="The approval policy for the MCP tool")
@@ -6449,7 +6254,7 @@ class McpToolConfigInput(PermissiveModel):
     mcp_server_id: str = Field(..., description="The id of the MCP server to call")
     mcp_server_name: str = Field(..., description="The name of the MCP server to call")
     mcp_input_schema: dict[str, Any] | None = Field(None, description="Original inputSchema dict for consistent hashing")
-    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' ru...")
+    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' runs the tool in the background without blocking - best for long-running operations.")
     input_overrides: dict[str, ConstantSchemaOverride | DynamicVariableSchemaOverride | LlmSchemaOverride] | None = Field(None, description="Input parameter overrides for this tool")
 
 class ObjectJsonSchemaPropertyInput(StrictModel):
@@ -6479,7 +6284,7 @@ class PromptAgentApiModelWorkflowOverrideInput(PermissiveModel):
     custom_llm: CustomLlm | None = Field(None, description="Definition for a custom LLM if LLM field is set to 'CUSTOM_LLM'")
     ignore_default_personality: bool | None = Field(None, description="Whether to remove the default personality lines from the system prompt")
     rag: RagConfigWorkflowOverride | None = Field(None, description="Configuration for RAG")
-    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', '...")
+    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', 'Europe/London', 'UTC').")
     backup_llm_config: BackupLlmDefault | BackupLlmDisabled | BackupLlmOverride | None = Field(None, description="Configuration for backup LLM cascading. Can be disabled, use system defaults, or specify custom order.")
     cascade_timeout_seconds: float | None = Field(None, description="Time in seconds before cascading to backup LLM. Must be between 2 and 15 seconds.")
     tools: list[WebhookToolConfigInput | ClientToolConfigInput | SystemToolConfigInput | McpToolConfigInput | ApiIntegrationWebhookToolConfigInput | SmbToolConfig] | None = Field(None, description="A list of tools that the agent can use over the course of the conversation, use tool_ids instead")
@@ -6524,7 +6329,7 @@ class ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPrompt(Per
     custom_llm: ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptCustomLlm | None = Field(None, description="Definition for a custom LLM if LLM field is set to 'CUSTOM_LLM'")
     ignore_default_personality: bool | None = Field(False, description="Whether to remove the default personality lines from the system prompt")
     rag: ResubmitTestsRouteBodyAgentConfigOverrideConversationConfigAgentPromptRag | None = Field(None, description="Configuration for RAG")
-    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', '...")
+    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', 'Europe/London', 'UTC').")
     backup_llm_config: BackupLlmDefault | BackupLlmDisabled | BackupLlmOverride | None = Field(None, description="Configuration for backup LLM cascading. Can be disabled, use system defaults, or specify custom order.")
     cascade_timeout_seconds: float | None = Field(8.0, description="Time in seconds before cascading to backup LLM. Must be between 2 and 15 seconds.", ge=2.0, le=15.0)
     tools: list[WebhookToolConfigInput | ClientToolConfigInput | SystemToolConfigInput | McpToolConfigInput | ApiIntegrationWebhookToolConfigInput | SmbToolConfig] | None = Field(None, description="A list of tools that the agent can use over the course of the conversation, use tool_ids instead")
@@ -6574,7 +6379,7 @@ class RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPrompt
     custom_llm: RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptCustomLlm | None = Field(None, description="Definition for a custom LLM if LLM field is set to 'CUSTOM_LLM'")
     ignore_default_personality: bool | None = Field(False, description="Whether to remove the default personality lines from the system prompt")
     rag: RunAgentTestSuiteRouteBodyAgentConfigOverrideConversationConfigAgentPromptRag | None = Field(None, description="Configuration for RAG")
-    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', '...")
+    timezone_: str | None = Field(None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for displaying current time in system prompt. If set, the current time will be included in the system prompt using this timezone. Must be a valid timezone name (e.g., 'America/New_York', 'Europe/London', 'UTC').")
     backup_llm_config: BackupLlmDefault | BackupLlmDisabled | BackupLlmOverride | None = Field(None, description="Configuration for backup LLM cascading. Can be disabled, use system defaults, or specify custom order.")
     cascade_timeout_seconds: float | None = Field(8.0, description="Time in seconds before cascading to backup LLM. Must be between 2 and 15 seconds.", ge=2.0, le=15.0)
     tools: list[WebhookToolConfigInput | ClientToolConfigInput | SystemToolConfigInput | McpToolConfigInput | ApiIntegrationWebhookToolConfigInput | SmbToolConfig] | None = Field(None, description="A list of tools that the agent can use over the course of the conversation, use tool_ids instead")
@@ -6612,9 +6417,9 @@ class WebhookToolConfigInput(PermissiveModel):
     assignments: list[DynamicVariableAssignment] | None = Field(None, description="Configuration for extracting values from tool responses and assigning them to dynamic variables")
     tool_call_sound: Literal["typing", "elevator1", "elevator2", "elevator3", "elevator4"] | None = Field(None, description="Predefined tool call sound type to play during tool execution. If not specified, no tool call sound will be played.")
     tool_call_sound_behavior: Literal["auto", "always"] | None = Field('auto', description="Determines when the tool call sound should play. 'auto' only plays when there's pre-tool speech, 'always' plays for every tool call.")
-    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an...")
+    tool_error_handling_mode: Literal["auto", "summarized", "passthrough", "hide"] | None = Field('auto', description="Controls how tool errors are processed before being shared with the agent. 'auto' determines handling based on tool type (summarized for native integrations, hide for others), 'summarized' sends an LLM-generated summary, 'passthrough' sends the raw error, 'hide' does not share the error with the agent.")
     dynamic_variables: DynamicVariablesConfig | None = Field(None, description="Configuration for dynamic variables")
-    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' ru...")
+    execution_mode: Literal["immediate", "post_tool_speech", "async"] | None = Field('immediate', description="Determines when and how the tool executes: 'immediate' executes the tool right away when requested by the LLM, 'post_tool_speech' waits for the agent to finish speaking before executing, 'async' runs the tool in the background without blocking - best for long-running operations.")
     api_schema: WebhookToolApiSchemaConfigInput = Field(..., description="The schema for the outgoing webhoook, including parameters and URL specification")
 
 class WorkflowEdgeModelInput(PermissiveModel):
@@ -6798,9 +6603,6 @@ CustomGuardrailConfig.model_rebuild()
 CustomLlm.model_rebuild()
 CustomSipHeader.model_rebuild()
 CustomSipHeaderWithDynamicVariable.model_rebuild()
-DashboardCallSuccessChartModel.model_rebuild()
-DashboardCriteriaChartModel.model_rebuild()
-DashboardDataCollectionChartModel.model_rebuild()
 DataExtractionFieldRequest.model_rebuild()
 DeleteAssetParams.model_rebuild()
 DeleteCalendarEventParams.model_rebuild()
