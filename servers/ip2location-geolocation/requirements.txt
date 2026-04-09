@@ -1,5 +1,5 @@
 # IP2Location.io IP Geolocation API - Dependencies
-# Generated: 2026-04-08 08:29:21 UTC
+# Generated: 2026-04-09 17:24:47 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0
