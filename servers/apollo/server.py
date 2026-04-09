@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Apollo REST API MCP Server
-Generated: 2026-04-06 15:44:00 UTC
+Generated: 2026-04-09 17:13:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -486,11 +486,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -532,7 +536,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -811,10 +818,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -2942,33 +2954,6 @@ async def update_call(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: Miscellaneous
-@mcp.tool()
-async def get_api_usage_stats() -> dict[str, Any]:
-    """Retrieve your team's API usage statistics and current rate limits across all endpoints. This endpoint shows usage metrics and rate limit thresholds (per minute, hour, and day) based on your Apollo pricing plan and requires a master API key for authentication."""
-
-    # Extract parameters for API call
-    _http_path = "/api/v1/usage_stats/api_usage_stats"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_api_usage_stats")
-    _http_headers.update(_auth.get("headers", {}))
-
-    _request_id = str(uuid.uuid4())
-    _log_tool_invocation("get_api_usage_stats", "POST", _http_path, _request_id)
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_api_usage_stats",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 

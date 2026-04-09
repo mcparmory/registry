@@ -1,7 +1,7 @@
 """
 Authentication module for Apollo REST API MCP server.
 
-Generated: 2026-04-06 15:44:00 UTC
+Generated: 2026-04-09 17:13:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -562,7 +562,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_phone_call": [["apiKey"]],
     "search_phone_calls": [["apiKey"]],
     "update_call": [["apiKey"]],
-    "get_api_usage_stats": [["apiKey"]],
     "list_users": [["apiKey"]],
     "list_email_accounts": [["apiKey"]],
     "list_lists": [["apiKey"]],
