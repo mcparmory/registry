@@ -1,4 +1,4 @@
-# E2B API MCP Server
+# E2B MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-e2b .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="E2B API MCP Server" \
+LABEL org.opencontainers.image.title="E2B MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

@@ -1,4 +1,4 @@
-# E2B API MCP Server
+# E2B MCP Server
 
 Base URL: https://api.e2b.app
 ---
@@ -8,7 +8,7 @@ Base URL: https://api.e2b.app
 ### Quick Start (recommended)
 
 ```bash
-API_KEY_AUTH_API_KEY=YOUR_API_KEY_AUTH_API_KEY \
+API_KEY_AUTH=YOUR_API_KEY_AUTH \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 SUPABASE1_TOKEN_AUTH_API_KEY=YOUR_SUPABASE1_TOKEN_AUTH_API_KEY \
 SUPABASE2_TEAM_AUTH_API_KEY=YOUR_SUPABASE2_TEAM_AUTH_API_KEY \
@@ -20,7 +20,7 @@ uvx mcparmory-e2b
 
 ```bash
 pip install mcparmory-e2b
-API_KEY_AUTH_API_KEY=YOUR_API_KEY_AUTH_API_KEY \
+API_KEY_AUTH=YOUR_API_KEY_AUTH \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 SUPABASE1_TOKEN_AUTH_API_KEY=YOUR_SUPABASE1_TOKEN_AUTH_API_KEY \
 SUPABASE2_TEAM_AUTH_API_KEY=YOUR_SUPABASE2_TEAM_AUTH_API_KEY \
@@ -39,7 +39,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-e2b"],
       "env": {
-        "API_KEY_AUTH_API_KEY": "YOUR_API_KEY_AUTH_API_KEY",
+        "API_KEY_AUTH": "YOUR_API_KEY_AUTH",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
         "SUPABASE1_TOKEN_AUTH_API_KEY": "YOUR_SUPABASE1_TOKEN_AUTH_API_KEY",
         "SUPABASE2_TEAM_AUTH_API_KEY": "YOUR_SUPABASE2_TEAM_AUTH_API_KEY",
@@ -56,7 +56,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY_AUTH_API_KEY` — API Key Authentication (X-API-Key)
+- `API_KEY_AUTH` — API Key Authentication (X-API-Key)
 - `BEARER_TOKEN` — Bearer token
 - `SUPABASE1_TOKEN_AUTH_API_KEY` — API Key Authentication (X-Supabase-Token)
 - `SUPABASE2_TEAM_AUTH_API_KEY` — API Key Authentication (X-Supabase-Team)
