@@ -5,7 +5,7 @@ Grafana MCP Server
 API Info:
 - Contact: Grafana Labs <hello@grafana.com> (https://grafana.com)
 
-Generated: 2026-04-09 11:49:20 UTC
+Generated: 2026-04-09 17:24:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -497,6 +497,8 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -9107,6 +9109,7 @@ async def update_contact_point(
     settings: dict[str, Any] = Field(..., description="Configuration settings specific to the contact point type. Structure and required fields vary based on the notification channel type selected."),
     type_: Literal["alertmanager", "dingding", "discord", "email", "googlechat", "kafka", "line", "opsgenie", "pagerduty", "pushover", "sensugo", "slack", "teams", "telegram", "threema", "victorops", "webhook", "wecom"] = Field(..., alias="type", description="The notification channel type for this contact point. Supported types include webhook, email, Slack, PagerDuty, Telegram, Discord, and other integration platforms."),
     disable_resolve_message: bool | None = Field(None, alias="disableResolveMessage", description="Whether to disable message resolution notifications. Defaults to false, meaning resolution messages are sent by default."),
+    name: str | None = Field(None, description="Name is used as grouping key in the UI. Contact points with the\nsame name will be grouped in the UI."),
 ) -> dict[str, Any]:
     """Update an existing contact point configuration with new settings and notification type. Allows modification of contact point details such as notification channel type and delivery preferences."""
 
@@ -9114,7 +9117,7 @@ async def update_contact_point(
     try:
         _request = _models.RoutePutContactpointRequest(
             path=_models.RoutePutContactpointRequestPath(uid=uid),
-            body=_models.RoutePutContactpointRequestBody(disable_resolve_message=disable_resolve_message, settings=settings, type_=type_)
+            body=_models.RoutePutContactpointRequestBody(disable_resolve_message=disable_resolve_message, settings=settings, type_=type_, name=name)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_contact_point: {_validation_err}")

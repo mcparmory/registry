@@ -1,7 +1,7 @@
 """
 Grafana MCP Server - Pydantic Models
 
-Generated: 2026-04-09 11:49:20 UTC
+Generated: 2026-04-09 17:24:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1848,6 +1848,7 @@ class RoutePutContactpointRequestBody(StrictModel):
     disable_resolve_message: bool | None = Field(default=None, validation_alias="disableResolveMessage", serialization_alias="disableResolveMessage", description="Whether to disable message resolution notifications. Defaults to false, meaning resolution messages are sent by default.")
     settings: dict[str, Any] = Field(default=..., description="Configuration settings specific to the contact point type. Structure and required fields vary based on the notification channel type selected.")
     type_: Literal["alertmanager", "dingding", "discord", "email", "googlechat", "kafka", "line", "opsgenie", "pagerduty", "pushover", "sensugo", "slack", "teams", "telegram", "threema", "victorops", "webhook", "wecom"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The notification channel type for this contact point. Supported types include webhook, email, Slack, PagerDuty, Telegram, Discord, and other integration platforms.")
+    name: str | None = Field(default=None, description="Name is used as grouping key in the UI. Contact points with the\nsame name will be grouped in the UI.")
 class RoutePutContactpointRequest(StrictModel):
     """Update an existing contact point configuration with new settings and notification type. Allows modification of contact point details such as notification channel type and delivery preferences."""
     path: RoutePutContactpointRequestPath

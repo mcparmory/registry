@@ -1,7 +1,7 @@
 """
 Authentication module for Grafana MCP server.
 
-Generated: 2026-04-09 11:49:20 UTC
+Generated: 2026-04-09 17:24:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
