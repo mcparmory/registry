@@ -1,7 +1,7 @@
 """
 Launchdarkly Rest Api MCP Server - Pydantic Models
 
-Generated: 2026-04-09 15:57:34 UTC
+Generated: 2026-04-09 17:06:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -77,7 +77,6 @@ __all__ = [
     "GetAiConfigTargetingRequest",
     "GetAiConfigVariationRequest",
     "GetAiToolRequest",
-    "GetAllHoldoutsRequest",
     "GetAllReleasePipelinesRequest",
     "GetAllReleaseProgressionsForReleasePipelineRequest",
     "GetAnnouncementsPublicRequest",
@@ -97,10 +96,7 @@ __all__ = [
     "GetContextInstanceSegmentsMembershipByEnvRequest",
     "GetContextInstancesRequest",
     "GetContextKindsByProjectKeyRequest",
-    "GetContextsClientsideUsageRequest",
     "GetContextsRequest",
-    "GetContextsServersideUsageRequest",
-    "GetContextsTotalUsageRequest",
     "GetCustomRoleRequest",
     "GetCustomWorkflowRequest",
     "GetDeploymentFrequencyChartRequest",
@@ -109,7 +105,6 @@ __all__ = [
     "GetDestinationRequest",
     "GetEnvironmentRequest",
     "GetEnvironmentsByProjectRequest",
-    "GetEvaluationsUsageRequest",
     "GetEventsUsageRequest",
     "GetExperimentationSettingsRequest",
     "GetExperimentRequest",
@@ -132,8 +127,6 @@ __all__ = [
     "GetFlagFollowersRequest",
     "GetFlagStatusChartRequest",
     "GetFollowersByProjEnvRequest",
-    "GetHoldoutByIdRequest",
-    "GetHoldoutRequest",
     "GetInsightGroupRequest",
     "GetInsightGroupsRequest",
     "GetInsightsScoresRequest",
@@ -141,7 +134,6 @@ __all__ = [
     "GetLeadTimeChartRequest",
     "GetLinkedResourcesRequest",
     "GetLinkedViewsRequest",
-    "GetMauTotalUsageRequest",
     "GetMemberRequest",
     "GetMetricGroupRequest",
     "GetMetricGroupsRequest",
@@ -166,8 +158,6 @@ __all__ = [
     "GetSegmentsRequest",
     "GetStaleFlagsChartRequest",
     "GetStatisticsRequest",
-    "GetStreamUsageBySdkVersionRequest",
-    "GetStreamUsageSdkversionRequest",
     "GetSubscriptionByIdRequest",
     "GetSubscriptionsRequest",
     "GetTagsRequest",
@@ -209,10 +199,8 @@ __all__ = [
     "PatchExpiringUserTargetsForSegmentRequest",
     "PatchExpiringUserTargetsRequest",
     "PatchFeatureFlagRequest",
-    "PatchFlagConfigApprovalRequest",
     "PatchFlagConfigScheduledChangeRequest",
     "PatchFlagDefaultsByProjectRequest",
-    "PatchHoldoutRequest",
     "PatchInsightGroupRequest",
     "PatchMemberRequest",
     "PatchMembersRequest",
@@ -226,7 +214,6 @@ __all__ = [
     "PatchRepositoryRequest",
     "PatchSegmentRequest",
     "PatchTeamRequest",
-    "PatchTeamsRequest",
     "PatchTokenRequest",
     "PatchTriggerWorkflowRequest",
     "PatchWebhookRequest",
@@ -249,7 +236,6 @@ __all__ = [
     "PostFlagConfigScheduledChangesRequest",
     "PostFlagCopyConfigApprovalRequest",
     "PostGenerateProjectEnvWarehouseDestinationKeyPairRequest",
-    "PostHoldoutRequest",
     "PostMembersRequest",
     "PostMemberTeamsRequest",
     "PostMetricRequest",
@@ -1393,62 +1379,6 @@ class GetFollowersByProjEnvRequest(StrictModel):
     """Retrieve all followers across feature flags within a specific project and environment. This returns the list of users or teams monitoring flag changes in that environment."""
     path: GetFollowersByProjEnvRequestPath
 
-# Operation: list_holdouts
-class GetAllHoldoutsRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the project containing the holdouts.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment within the project from which to retrieve holdouts.", json_schema_extra={'format': 'string'})
-class GetAllHoldoutsRequest(StrictModel):
-    """Retrieve all holdouts configured for a specific project and environment. Holdouts are used to exclude users or segments from experiments or feature rollouts."""
-    path: GetAllHoldoutsRequestPath
-
-# Operation: create_holdout
-class PostHoldoutRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the project where the holdout will be created.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment within the project where the holdout will be created.", json_schema_extra={'format': 'string'})
-class PostHoldoutRequestBody(StrictModel):
-    name: str | None = Field(default=None, description="A human-readable name for the holdout to help identify it in the UI and reports.")
-    key: str | None = Field(default=None, description="A unique identifier for the holdout used in API calls and programmatic references.")
-    randomizationunit: str | None = Field(default=None, description="The unit used to randomly assign users to the holdout, such as 'user' for individual users or other entity types.")
-    attributes: list[str] | None = Field(default=None, description="A list of attribute names (e.g., 'country', 'device', 'os') that can be used to segment and analyze the holdout's results.")
-    holdoutamount: str | None = Field(default=None, description="The percentage of the audience allocated to the holdout, specified as a numeric string (e.g., '10' for 10%).")
-    primarymetrickey: str | None = Field(default=None, description="The identifier of the primary metric used to evaluate the holdout's effectiveness.")
-    metrics: list[MetricInput] | None = Field(default=None, description="An array of metric objects containing detailed configuration for secondary metrics to track alongside the primary metric.")
-    prerequisiteflagkey: str | None = Field(default=None, description="The identifier of a feature flag that must be enabled for users to be included in the holdout, creating a dependency between the flag and holdout.")
-class PostHoldoutRequest(StrictModel):
-    """Create a new holdout experiment in the specified project and environment. A holdout is a control group that remains unaffected by feature flags or experiments, allowing you to measure the true impact of changes."""
-    path: PostHoldoutRequestPath
-    body: PostHoldoutRequestBody | None = None
-
-# Operation: get_holdout_by_id
-class GetHoldoutByIdRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the project containing the holdout experiment.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment within the project where the holdout experiment exists.", json_schema_extra={'format': 'string'})
-    holdout_id: str = Field(default=..., validation_alias="holdoutId", serialization_alias="holdoutId", description="The unique identifier of the holdout experiment to retrieve.", json_schema_extra={'format': 'string'})
-class GetHoldoutByIdRequest(StrictModel):
-    """Retrieve a specific holdout experiment by its ID within a project and environment. Use this to fetch detailed information about a holdout configuration."""
-    path: GetHoldoutByIdRequestPath
-
-# Operation: get_holdout
-class GetHoldoutRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the holdout.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment within the project where the holdout is configured.", json_schema_extra={'format': 'string'})
-    holdout_key: str = Field(default=..., validation_alias="holdoutKey", serialization_alias="holdoutKey", description="The unique identifier for the holdout experiment to retrieve.", json_schema_extra={'format': 'string'})
-class GetHoldoutRequest(StrictModel):
-    """Retrieve detailed information about a specific holdout experiment, including its current iteration, treatments, and metrics. Optionally expand the response to include draft iterations, historical iterations, and related experiment data."""
-    path: GetHoldoutRequestPath
-
-# Operation: update_holdout
-class PatchHoldoutRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The project key that contains the holdout. Used to identify which project the holdout belongs to.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The environment key where the holdout exists. Used to identify which environment the holdout is configured in.", json_schema_extra={'format': 'string'})
-    holdout_key: str = Field(default=..., validation_alias="holdoutKey", serialization_alias="holdoutKey", description="The holdout key that uniquely identifies the holdout to update within the project and environment.", json_schema_extra={'format': 'string'})
-class PatchHoldoutRequestBody(StrictModel):
-    instructions: list[Instruction] = Field(default=..., description="An array of semantic patch instruction objects that define the updates to apply. Each instruction object must include a `kind` field specifying the operation (endHoldout, removeExperiment, updateDescription, or updateName), and some operations require an additional `value` field. An optional `comment` field can be included at the root level to describe the change.")
-class PatchHoldoutRequest(StrictModel):
-    """Updates an existing holdout by applying semantic patch instructions. Supports operations to modify the holdout's name and description, remove experiments, or end the holdout entirely."""
-    path: PatchHoldoutRequestPath
-    body: PatchHoldoutRequestBody
-
 # Operation: reset_mobile_key_for_environment
 class ResetEnvironmentMobileKeyRequestPath(StrictModel):
     project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the project containing the environment.", json_schema_extra={'format': 'string'})
@@ -1585,16 +1515,6 @@ class GetApprovalForFlagRequestPath(StrictModel):
 class GetApprovalForFlagRequest(StrictModel):
     """Retrieve a specific approval request for a feature flag in a given environment. Use this to check the status and details of a pending or completed approval workflow."""
     path: GetApprovalForFlagRequestPath
-
-# Operation: update_flag_approval_request
-class PatchFlagConfigApprovalRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The project key that contains the feature flag.", json_schema_extra={'format': 'string'})
-    feature_flag_key: str = Field(default=..., validation_alias="featureFlagKey", serialization_alias="featureFlagKey", description="The feature flag key associated with the approval request.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The environment key where the flag approval request exists.", json_schema_extra={'format': 'string'})
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the approval request to update.", json_schema_extra={'format': 'string'})
-class PatchFlagConfigApprovalRequest(StrictModel):
-    """Update an approval request for a feature flag using semantic patch operations. Supports adding reviewers and updating the approval request description."""
-    path: PatchFlagConfigApprovalRequestPath
 
 # Operation: delete_approval_request_for_flag
 class DeleteApprovalRequestForFlagRequestPath(StrictModel):
@@ -2162,13 +2082,6 @@ class PostTeamRequest(StrictModel):
     """Create a new team in LaunchDarkly with optional members, custom roles, and permission grants. Supports expanding the response to include members, roles, projects, and maintainers."""
     body: PostTeamRequestBody
 
-# Operation: update_teams
-class PatchTeamsRequestBody(StrictModel):
-    instructions: list[Instruction] = Field(default=..., description="Array of instruction objects that define the update operations. Each instruction must include a `kind` field specifying the action (addMembersToTeams or addAllMembersToTeams) and relevant parameters. For addMembersToTeams, provide memberIDs and teamKeys. For addAllMembersToTeams, provide teamKeys and optional filters (filterLastSeen, filterQuery, filterRoles, filterTeamKey, ignoredMemberIDs).")
-class PatchTeamsRequest(StrictModel):
-    """Perform bulk updates to teams using semantic patch instructions. Supports adding members to teams or adding all members (with optional filtering) to teams."""
-    body: PatchTeamsRequestBody
-
 # Operation: get_team
 class GetTeamRequestPath(StrictModel):
     team_key: str = Field(default=..., validation_alias="teamKey", serialization_alias="teamKey", description="The unique identifier for the team. Use this key to fetch the specific team's details.", json_schema_extra={'format': 'string'})
@@ -2259,35 +2172,6 @@ class ResetTokenRequest(StrictModel):
     path: ResetTokenRequestPath
     query: ResetTokenRequestQuery | None = None
 
-# Operation: get_clientside_context_usage
-class GetContextsClientsideUsageRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start timestamp for the data series in Unix milliseconds. Defaults to the beginning of the current month if not specified.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="End timestamp for the data series in Unix milliseconds. Defaults to the current time if not specified.", json_schema_extra={'format': 'string'})
-    project_key: str | None = Field(default=None, validation_alias="projectKey", serialization_alias="projectKey", description="Filter results by one or more project keys. Specify multiple times to include multiple projects.", json_schema_extra={'format': 'string'})
-    environment_key: str | None = Field(default=None, validation_alias="environmentKey", serialization_alias="environmentKey", description="Filter results by one or more environment keys. Requires exactly one `projectKey` to be specified. Specify multiple times to include multiple environments.", json_schema_extra={'format': 'string'})
-    sdk_name: str | None = Field(default=None, validation_alias="sdkName", serialization_alias="sdkName", description="Filter results by one or more SDK names. Specify multiple times to include multiple SDKs.", json_schema_extra={'format': 'string'})
-    anonymous: str | None = Field(default=None, description="Filter results by anonymous context status. Accepts `true` or `false`. Specify multiple times to include both values.", json_schema_extra={'format': 'string'})
-    group_by: str | None = Field(default=None, validation_alias="groupBy", serialization_alias="groupBy", description="Group results by one or more dimensions. Valid options are `projectId`, `environmentId`, `sdkName`, `sdkAppId`, or `anonymousV2`. Context kind is always included as a grouping dimension. Specify multiple times to group by multiple dimensions.", json_schema_extra={'format': 'string'})
-    aggregation_type: str | None = Field(default=None, validation_alias="aggregationType", serialization_alias="aggregationType", description="Aggregation method for the time series data. Defaults to `month_to_date`. Choose from `month_to_date`, `incremental`, or `rolling_30d`.", json_schema_extra={'format': 'string'})
-    granularity: str | None = Field(default=None, description="Data granularity for the time series. Defaults to `daily`. Supported values depend on aggregation type: `month_to_date` supports `daily` and `monthly`; `incremental` and `rolling_30d` support `daily` only.", json_schema_extra={'format': 'string'})
-class GetContextsClientsideUsageRequest(StrictModel):
-    """Retrieve a detailed time series of context key usage counts from client-side SDKs, including non-primary context kinds. Use this endpoint for granular usage breakdowns across multiple dimensions beyond primary-only aggregations, with support for up to 365 days of historical data."""
-    query: GetContextsClientsideUsageRequestQuery | None = None
-
-# Operation: get_evaluations_usage_for_flag
-class GetEvaluationsUsageRequestPath(StrictModel):
-    project_key: str = Field(default=..., validation_alias="projectKey", serialization_alias="projectKey", description="The unique identifier for the project containing the feature flag.", json_schema_extra={'format': 'string'})
-    environment_key: str = Field(default=..., validation_alias="environmentKey", serialization_alias="environmentKey", description="The unique identifier for the environment where the flag is being evaluated.", json_schema_extra={'format': 'string'})
-    feature_flag_key: str = Field(default=..., validation_alias="featureFlagKey", serialization_alias="featureFlagKey", description="The unique identifier for the feature flag to retrieve usage metrics for.", json_schema_extra={'format': 'string'})
-class GetEvaluationsUsageRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="The start timestamp for the data series in ISO 8601 format. Defaults to 30 days before the current time if not specified.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="The end timestamp for the data series in ISO 8601 format. Defaults to the current time if not specified.", json_schema_extra={'format': 'string'})
-    tz: str | None = Field(default=None, description="The timezone identifier (e.g., UTC, America/New_York) used to determine day boundaries when returning daily-granularity data.", json_schema_extra={'format': 'string'})
-class GetEvaluationsUsageRequest(StrictModel):
-    """Retrieve time-series evaluation metrics for a feature flag, showing how many times it was evaluated and which variations were returned. Data granularity automatically adjusts based on the requested time range: minute-level for the past 2 hours, hourly for the past 2 days, and daily thereafter."""
-    path: GetEvaluationsUsageRequestPath
-    query: GetEvaluationsUsageRequestQuery | None = None
-
 # Operation: get_events_usage_by_type
 class GetEventsUsageRequestPath(StrictModel):
     type_: str = Field(default=..., validation_alias="type", serialization_alias="type", description="The event category to retrieve usage data for. Must be either 'received' (events received by the system) or 'published' (events published by the system).", json_schema_extra={'format': 'string'})
@@ -2298,73 +2182,6 @@ class GetEventsUsageRequest(StrictModel):
     """Retrieve time-series data showing how many times a flag was evaluated and which variation resulted from each evaluation. Data granularity automatically adjusts based on age: minutely for the past 2 hours, hourly for the past 2 days, and daily for older data."""
     path: GetEventsUsageRequestPath
     query: GetEventsUsageRequestQuery | None = None
-
-# Operation: get_serverside_context_usage
-class GetContextsServersideUsageRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start timestamp for the usage data series in Unix seconds. Defaults to the beginning of the current month if not specified.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="End timestamp for the usage data series in Unix seconds. Defaults to the current time if not specified.", json_schema_extra={'format': 'string'})
-    project_key: str | None = Field(default=None, validation_alias="projectKey", serialization_alias="projectKey", description="Filter results by one or more project keys. Specify multiple times to include multiple projects.", json_schema_extra={'format': 'string'})
-    environment_key: str | None = Field(default=None, validation_alias="environmentKey", serialization_alias="environmentKey", description="Filter results by one or more environment keys. Requires exactly one `projectKey` to be specified. Specify multiple times to include multiple environments.", json_schema_extra={'format': 'string'})
-    sdk_name: str | None = Field(default=None, validation_alias="sdkName", serialization_alias="sdkName", description="Filter results by one or more SDK names. Specify multiple times to include multiple SDKs.", json_schema_extra={'format': 'string'})
-    anonymous: str | None = Field(default=None, description="Filter results by anonymous context status. Accepts `true` or `false`. Specify multiple times to include both values.", json_schema_extra={'format': 'string'})
-    group_by: str | None = Field(default=None, validation_alias="groupBy", serialization_alias="groupBy", description="Group results by one or more dimensions (contextKind is always included). Valid options: `projectId`, `environmentId`, `sdkName`, `sdkAppId`, `anonymousV2`. Specify multiple times to group by multiple dimensions.", json_schema_extra={'format': 'string'})
-    aggregation_type: str | None = Field(default=None, validation_alias="aggregationType", serialization_alias="aggregationType", description="Aggregation method for the time series data. Defaults to `month_to_date`. Options: `month_to_date` (cumulative within month), `incremental` (period-over-period), `rolling_30d` (30-day rolling window).", json_schema_extra={'format': 'string'})
-    granularity: str | None = Field(default=None, description="Data granularity for the time series. Defaults to `daily`. Supported values depend on aggregationType: `month_to_date` and `incremental` support `daily` and `monthly`; `rolling_30d` supports `daily` only.", json_schema_extra={'format': 'string'})
-class GetContextsServersideUsageRequest(StrictModel):
-    """Retrieve a detailed time series of server-side context key usage across your LaunchDarkly account, including non-primary context kinds. Supports flexible time ranges (up to 365 days), filtering by project/environment/SDK, and multi-dimensional grouping for granular usage analysis."""
-    query: GetContextsServersideUsageRequestQuery | None = None
-
-# Operation: get_stream_usage_by_sdk_version
-class GetStreamUsageBySdkVersionRequestPath(StrictModel):
-    source: str = Field(default=..., description="The source type for streaming connections. Must be either 'client' (for client-side SDKs) or 'server' (for server-side SDKs).", json_schema_extra={'format': 'string'})
-class GetStreamUsageBySdkVersionRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="The start timestamp for the data series. If omitted, defaults to 24 hours before the 'to' timestamp. Use ISO 8601 format.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="The end timestamp for the data series. If omitted, defaults to the current time. Use ISO 8601 format.", json_schema_extra={'format': 'string'})
-    tz: str | None = Field(default=None, description="The timezone to apply when determining day boundaries in daily data responses. Specify using standard timezone identifiers (e.g., 'America/New_York', 'UTC').", json_schema_extra={'format': 'string'})
-    sdk: str | None = Field(default=None, description="Optional filter to return only usage data for a specific SDK name. If provided, only series matching this SDK identifier will be included in the response.", json_schema_extra={'format': 'string'})
-class GetStreamUsageBySdkVersionRequest(StrictModel):
-    """Retrieve streaming connection usage metrics for LaunchDarkly, broken down by SDK type and version across specified time periods. Data granularity automatically adjusts based on the requested time range: minute-level for the past 2 hours, hourly for the past 2 days, and daily thereafter."""
-    path: GetStreamUsageBySdkVersionRequestPath
-    query: GetStreamUsageBySdkVersionRequestQuery | None = None
-
-# Operation: list_stream_sdk_versions
-class GetStreamUsageSdkversionRequestPath(StrictModel):
-    source: str = Field(default=..., description="The type of streaming connection source to query. Must be either 'client' for client-side SDKs or 'server' for server-side SDKs.", json_schema_extra={'format': 'string'})
-class GetStreamUsageSdkversionRequest(StrictModel):
-    """Retrieve all SDK versions that have connected to LaunchDarkly streaming endpoints from your account within the past 60 days, organized by SDK name and version."""
-    path: GetStreamUsageSdkversionRequestPath
-
-# Operation: get_contexts_total_usage
-class GetContextsTotalUsageRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start timestamp for the usage data series in Unix milliseconds. Defaults to the beginning of the current month if not specified.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="End timestamp for the usage data series in Unix milliseconds. Defaults to the current time if not specified.", json_schema_extra={'format': 'string'})
-    project_key: str | None = Field(default=None, validation_alias="projectKey", serialization_alias="projectKey", description="Filter results by one or more project keys. Specify multiple times to include multiple projects.", json_schema_extra={'format': 'string'})
-    environment_key: str | None = Field(default=None, validation_alias="environmentKey", serialization_alias="environmentKey", description="Filter results by one or more environment keys. Requires exactly one `projectKey` to be specified. Specify multiple times to include multiple environments.", json_schema_extra={'format': 'string'})
-    sdk_name: str | None = Field(default=None, validation_alias="sdkName", serialization_alias="sdkName", description="Filter results by one or more SDK names. Specify multiple times to include multiple SDKs.", json_schema_extra={'format': 'string'})
-    sdk_type: str | None = Field(default=None, validation_alias="sdkType", serialization_alias="sdkType", description="Filter results by one or more SDK types. Specify multiple times to include multiple SDK types.", json_schema_extra={'format': 'string'})
-    anonymous: str | None = Field(default=None, description="Filter results by anonymity status. Accepts `true` or `false`. Specify multiple times to include both anonymous and non-anonymous contexts.", json_schema_extra={'format': 'string'})
-    group_by: str | None = Field(default=None, validation_alias="groupBy", serialization_alias="groupBy", description="Group results by one or more dimensions in addition to the always-included `contextKind`. Valid dimensions are `projectId`, `environmentId`, `sdkName`, `sdkType`, `sdkAppId`, or `anonymousV2`. Specify multiple times to group by multiple dimensions.", json_schema_extra={'format': 'string'})
-    aggregation_type: str | None = Field(default=None, validation_alias="aggregationType", serialization_alias="aggregationType", description="Aggregation method for the time series data. Choose `month_to_date` (default) for data from the start of the current month, `incremental` for cumulative totals, or `rolling_30d` for a 30-day rolling window.", json_schema_extra={'format': 'string'})
-    granularity: str | None = Field(default=None, description="Data granularity for the time series. Defaults to `daily`. Supported values depend on `aggregationType`: `month_to_date` supports `daily` and `monthly`; `incremental` and `rolling_30d` support `daily` only.", json_schema_extra={'format': 'string'})
-class GetContextsTotalUsageRequest(StrictModel):
-    """Retrieve a detailed time series of context key usage across your LaunchDarkly account, including all context kinds beyond primary-only aggregation. Supports filtering by project, environment, SDK, and anonymity status with configurable time ranges up to 365 days and multiple aggregation strategies."""
-    query: GetContextsTotalUsageRequestQuery | None = None
-
-# Operation: get_mau_total_usage
-class GetMauTotalUsageRequestQuery(StrictModel):
-    from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start timestamp for the data series in Unix milliseconds. Defaults to the beginning of the current month if not specified.", json_schema_extra={'format': 'string'})
-    to: str | None = Field(default=None, description="End timestamp for the data series in Unix milliseconds. Defaults to the current time if not specified.", json_schema_extra={'format': 'string'})
-    project_key: str | None = Field(default=None, validation_alias="projectKey", serialization_alias="projectKey", description="Filter results by one or more project keys. Specify multiple times to include multiple projects.", json_schema_extra={'format': 'string'})
-    environment_key: str | None = Field(default=None, validation_alias="environmentKey", serialization_alias="environmentKey", description="Filter results by one or more environment keys. Requires exactly one `projectKey` to be specified. Specify multiple times to include multiple environments.", json_schema_extra={'format': 'string'})
-    sdk_name: str | None = Field(default=None, validation_alias="sdkName", serialization_alias="sdkName", description="Filter results by one or more SDK names. Specify multiple times to include multiple SDKs.", json_schema_extra={'format': 'string'})
-    sdk_type: str | None = Field(default=None, validation_alias="sdkType", serialization_alias="sdkType", description="Filter results by one or more SDK types. Specify multiple times to include multiple SDK types.", json_schema_extra={'format': 'string'})
-    anonymous: str | None = Field(default=None, description="Filter results by anonymity status. Valid values are `true` or `false`. Specify multiple times to include both anonymous and non-anonymous data.", json_schema_extra={'format': 'string'})
-    group_by: str | None = Field(default=None, validation_alias="groupBy", serialization_alias="groupBy", description="Group results by one or more dimensions: `projectId`, `environmentId`, `sdkName`, `sdkType`, `sdkAppId`, or `anonymousV2`. Specify multiple times to create multi-dimensional groupings.", json_schema_extra={'format': 'string'})
-    aggregation_type: str | None = Field(default=None, validation_alias="aggregationType", serialization_alias="aggregationType", description="Aggregation method for the time series data. Valid values are `month_to_date` (default), `incremental`, or `rolling_30d`. Affects supported granularity options.", json_schema_extra={'format': 'string'})
-    granularity: str | None = Field(default=None, description="Data granularity for the time series. Defaults to `daily`. Supported values depend on aggregation type: `month_to_date` supports `daily` and `monthly`; `incremental` and `rolling_30d` support `daily` only.", json_schema_extra={'format': 'string'})
-class GetMauTotalUsageRequest(StrictModel):
-    """Retrieve a time series of Monthly Active User (MAU) context key usage for your account's primary context kind. Data can be filtered by project, environment, SDK, and anonymity status, with support for multiple aggregation types and grouping dimensions."""
-    query: GetMauTotalUsageRequestQuery | None = None
 
 # Operation: get_webhook
 class GetWebhookRequestPath(StrictModel):
@@ -3993,20 +3810,6 @@ class UrlPost(PermissiveModel):
     substring: str | None = None
     pattern: str | None = None
 
-class User(PermissiveModel):
-    key: str | None = Field(None, description="The user key. This is the only mandatory user attribute.")
-    secondary: str | None = Field(None, description="If provided, used with the user key to generate a variation in percentage rollouts")
-    ip: str | None = Field(None, description="The user's IP address")
-    country: str | None = Field(None, description="The user's country")
-    email: str | None = Field(None, description="The user's email")
-    first_name: str | None = Field(None, validation_alias="firstName", serialization_alias="firstName", description="The user's first name")
-    last_name: str | None = Field(None, validation_alias="lastName", serialization_alias="lastName", description="The user's last name")
-    avatar: str | None = Field(None, description="An absolute URL to an avatar image.")
-    name: str | None = Field(None, description="The user's full name")
-    anonymous: bool | None = Field(None, description="Whether the user is anonymous. If true, this user does not appear on the Contexts list in the LaunchDarkly user interface.")
-    custom: dict[str, Any] | None = Field(None, description="Any other custom attributes for this user. Custom attributes contain any other user data that you would like to use to conditionally target your users.")
-    private_attrs: list[str] | None = Field(None, validation_alias="privateAttrs", serialization_alias="privateAttrs", description="A list of attribute names that are marked as private. You can use these attributes in targeting rules and segments. If you are using a server-side SDK, the SDK will not send the private attribute back to LaunchDarkly. If you are using a client-side SDK, the SDK will send the private attribute back to LaunchDarkly for evaluation. However, the SDK won't send the attribute to LaunchDarkly in events data, LaunchDarkly won't store the private attribute, and the private attribute will not appear on the Contexts list.")
-
 class Variation(PermissiveModel):
     id_: str | None = Field(None, validation_alias="_id", serialization_alias="_id", description="The ID of the variation. Leave empty when you are creating a flag.")
     value: Any = Field(..., description="The value of the variation. For boolean flags, this must be <code>true</code> or <code>false</code>. For multivariate flags, this may be a string, number, or JSON object.")
@@ -4322,7 +4125,6 @@ TokenSummary.model_rebuild()
 TreatmentInput.model_rebuild()
 TreatmentParameterInput.model_rebuild()
 UrlPost.model_rebuild()
-User.model_rebuild()
 Variation.model_rebuild()
 View.model_rebuild()
 ViewLinkRequestFilter.model_rebuild()

@@ -1,7 +1,7 @@
 """
 Authentication module for LaunchDarkly REST API MCP server.
 
-Generated: 2026-04-09 15:57:34 UTC
+Generated: 2026-04-09 17:06:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -217,11 +217,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_experiment": [["ApiKey"]],
     "update_experiment": [["ApiKey"]],
     "list_flag_followers_by_project_environment": [["ApiKey"]],
-    "list_holdouts": [["ApiKey"]],
-    "create_holdout": [["ApiKey"]],
-    "get_holdout_by_id": [["ApiKey"]],
-    "get_holdout": [["ApiKey"]],
-    "update_holdout": [["ApiKey"]],
     "reset_mobile_key_for_environment": [["ApiKey"]],
     "evaluate_context_instance_segment_memberships": [["ApiKey"]],
     "get_experimentation_settings": [["ApiKey"]],
@@ -234,7 +229,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_approval_request_for_feature_flag": [["ApiKey"]],
     "create_flag_copy_approval_request": [["ApiKey"]],
     "get_approval_request_for_flag": [["ApiKey"]],
-    "update_flag_approval_request": [["ApiKey"]],
     "delete_approval_request_for_flag": [["ApiKey"]],
     "apply_approval_request_for_flag": [["ApiKey"]],
     "review_approval_request_for_flag": [["ApiKey"]],
@@ -289,7 +283,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_expiring_user_targets_for_segment": [["ApiKey"]],
     "list_teams": [["ApiKey"]],
     "create_team": [["ApiKey"]],
-    "update_teams": [["ApiKey"]],
     "get_team": [["ApiKey"]],
     "update_team": [["ApiKey"]],
     "delete_team": [["ApiKey"]],
@@ -301,15 +294,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_token": [["ApiKey"]],
     "delete_token": [["ApiKey"]],
     "reset_token": [["ApiKey"]],
-    "get_clientside_context_usage": [["ApiKey"]],
-    "get_evaluations_usage_for_flag": [["ApiKey"]],
     "get_events_usage_by_type": [["ApiKey"]],
-    "list_sdk_versions_details": [["ApiKey"]],
-    "get_serverside_context_usage": [["ApiKey"]],
-    "get_stream_usage_by_sdk_version": [["ApiKey"]],
-    "list_stream_sdk_versions": [["ApiKey"]],
-    "get_contexts_total_usage": [["ApiKey"]],
-    "get_mau_total_usage": [["ApiKey"]],
     "list_webhooks": [["ApiKey"]],
     "get_webhook": [["ApiKey"]],
     "update_webhook": [["ApiKey"]],
