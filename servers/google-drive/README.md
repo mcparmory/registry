@@ -1,4 +1,4 @@
-# Google Drive API MCP Server
+# Google Drive MCP Server
 
 Base URL: https://www.googleapis.com/drive/v3
 ## API Info

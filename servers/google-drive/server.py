@@ -7,8 +7,8 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-01 16:01:15 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:23:28 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +40,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.googleapis.com/drive/v3")
@@ -491,11 +492,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None  # Disable cookie persistence for multi-tenant safety
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -537,7 +542,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -739,6 +747,27 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -768,16 +797,44 @@ def parse_video_dimensions(value: str | None = None) -> dict | None:
     except (ValueError, IndexError) as e:
         raise ValueError(f'Video dimensions must be in WIDTHxHEIGHT format (e.g., "1920x1080"), got: {value}') from e
 
+@overload
+def _parse_int(v: str | int) -> int: ...
+@overload
+def _parse_int(v: None) -> None: ...
+def _parse_int(v: str | int | None) -> int | None:
+    """Convert a string representation of an integer to a Python int.
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+    Formatted integer parameters (int32, int64, uint64, etc.) are exposed as str
+    in the tool signature to prevent JS float64 precision loss for large IDs.
+    This helper converts them back to int before Pydantic model construction.
+    None passes through for optional parameters.
+    Raises ValueError for non-integer strings or unexpected types (e.g. bool).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"Expected an integer value, got {v!r}")
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError) as _e:
+        raise ValueError(f"Expected an integer value, got {v!r}") from _e
+
+
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -802,10 +859,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -899,10 +961,7 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'OAuth2',
 ]
 
 # Initialize authentication handlers at server startup
@@ -934,9 +993,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -980,6 +1039,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -992,7 +1052,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -1004,16 +1064,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1027,7 +1091,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Google Drive")
+mcp = FastMCP("Google Drive", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: about
 @mcp.tool()
@@ -1043,12 +1107,6 @@ async def get_user_info(fields: str | None = Field(None, description="Selector s
         logging.error(f"Parameter validation failed for get_user_info: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_user_info", "GET", "/about", _request_id)
-
     # Extract parameters for API call
     _http_path = "/about"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1057,6 +1115,9 @@ async def get_user_info(fields: str | None = Field(None, description="Selector s
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_user_info")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_info", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1074,7 +1135,7 @@ async def get_user_info(fields: str | None = Field(None, description="Selector s
 @mcp.tool()
 async def get_access_proposal(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file or item associated with the access proposal."),
-    proposal_id: str = Field(..., alias="proposalId", description="The unique identifier of the access proposal to retrieve.")
+    proposal_id: str = Field(..., alias="proposalId", description="The unique identifier of the access proposal to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific access proposal for a file by its ID. Use this to check the status and details of pending access requests."""
 
@@ -1087,12 +1148,6 @@ async def get_access_proposal(
         logging.error(f"Parameter validation failed for get_access_proposal: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_access_proposal", "GET", "/files/{fileId}/accessproposals/{proposalId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/accessproposals/{proposalId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/accessproposals/{proposalId}"
     _http_headers = {}
@@ -1100,6 +1155,9 @@ async def get_access_proposal(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_access_proposal")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_access_proposal", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1117,7 +1175,7 @@ async def get_access_proposal(
 async def list_access_proposals(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file for which to list access proposals."),
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of access proposals to return per page. Defaults to a server-defined limit if not specified."),
-    page_token: str | None = Field(None, alias="pageToken", description="A continuation token from a previous paginated response to retrieve the next set of results.")
+    page_token: str | None = Field(None, alias="pageToken", description="A continuation token from a previous paginated response to retrieve the next set of results."),
 ) -> dict[str, Any]:
     """Retrieve pending access proposals for a file. Only users with approver permissions can list access proposals; other users will receive a 403 error."""
 
@@ -1131,12 +1189,6 @@ async def list_access_proposals(
         logging.error(f"Parameter validation failed for list_access_proposals: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_access_proposals", "GET", "/files/{fileId}/accessproposals", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/accessproposals", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/accessproposals"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1145,6 +1197,9 @@ async def list_access_proposals(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_access_proposals")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_access_proposals", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1166,7 +1221,7 @@ async def resolve_access_proposal(
     action: Literal["ACTION_UNSPECIFIED", "ACCEPT", "DENY"] | None = Field(None, description="The action to take on the access proposal: accept to grant access, deny to reject it, or unspecified for no action."),
     role: list[str] | None = Field(None, description="The roles to grant the requester when accepting the proposal. Required when action is ACCEPT. Specify as an array of role identifiers."),
     send_notification: bool | None = Field(None, alias="sendNotification", description="Whether to send an email notification to the requester when the proposal is accepted or denied."),
-    view: str | None = Field(None, description="The view context for this proposal, if it belongs to a view. Only the published view is supported.")
+    view: str | None = Field(None, description="The view context for this proposal, if it belongs to a view. Only the published view is supported."),
 ) -> dict[str, Any]:
     """Approves or denies a pending access proposal for a file. The approver can specify allowed roles when accepting and optionally notify the requester of the decision."""
 
@@ -1180,12 +1235,6 @@ async def resolve_access_proposal(
         logging.error(f"Parameter validation failed for resolve_access_proposal: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("resolve_access_proposal", "POST", "/files/{fileId}/accessproposals/{proposalId}:resolve", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/accessproposals/{proposalId}:resolve", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/accessproposals/{proposalId}:resolve"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1194,6 +1243,9 @@ async def resolve_access_proposal(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("resolve_access_proposal")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("resolve_access_proposal", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1211,7 +1263,7 @@ async def resolve_access_proposal(
 @mcp.tool()
 async def get_approval(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the approval."),
-    approval_id: str = Field(..., alias="approvalId", description="The unique identifier of the approval to retrieve.")
+    approval_id: str = Field(..., alias="approvalId", description="The unique identifier of the approval to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific approval by its ID from a file. Use this to fetch details about an approval request or decision."""
 
@@ -1224,12 +1276,6 @@ async def get_approval(
         logging.error(f"Parameter validation failed for get_approval: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_approval", "GET", "/files/{fileId}/approvals/{approvalId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/approvals/{approvalId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/approvals/{approvalId}"
     _http_headers = {}
@@ -1237,6 +1283,9 @@ async def get_approval(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_approval")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_approval", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1254,7 +1303,7 @@ async def get_approval(
 async def list_approvals(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file for which to retrieve approvals."),
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of approvals to return per page. Defaults to 100 if not specified."),
-    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response's nextPageToken field to retrieve the next page of results.")
+    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response's nextPageToken field to retrieve the next page of results."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of approvals associated with a specific file. Use pagination parameters to control result size and navigate through multiple pages."""
 
@@ -1268,12 +1317,6 @@ async def list_approvals(
         logging.error(f"Parameter validation failed for list_approvals: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_approvals", "GET", "/files/{fileId}/approvals", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/approvals", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/approvals"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1283,92 +1326,12 @@ async def list_approvals(
     _auth = await _get_auth_for_operation("list_approvals")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_approvals", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_approvals",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def get_app(app_id: str = Field(..., alias="appId", description="The unique identifier of the app to retrieve.")) -> dict[str, Any]:
-    """Retrieves detailed information about a specific app by its ID. Use this to fetch app metadata and configuration details."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsGetRequest(
-            path=_models.AppsGetRequestPath(app_id=app_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_app: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_app", "GET", "/apps/{appId}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/apps/{appId}", _request.path.model_dump(by_alias=True)) if _request.path else "/apps/{appId}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_app")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_app",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: apps
-@mcp.tool()
-async def list_apps(
-    app_filter_extensions: str | None = Field(None, alias="appFilterExtensions", description="Comma-separated list of file extensions to filter results. Only apps capable of opening at least one of the specified extensions are returned. When combined with languageCode, results are merged from both filters."),
-    language_code: str | None = Field(None, alias="languageCode", description="Language or locale code for localizing app metadata in the response, specified using BCP 47 format with optional Unicode LDML extensions.")
-) -> dict[str, Any]:
-    """Retrieves a list of apps installed for the authenticated user, optionally filtered by file extensions or localized to a specific language. Useful for discovering available applications and their capabilities."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.AppsListRequest(
-            query=_models.AppsListRequestQuery(app_filter_extensions=app_filter_extensions, language_code=language_code)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_apps: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_apps", "GET", "/apps", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/apps"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_apps")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_apps",
         method="GET",
         path=_http_path,
         request_id=_request_id,
@@ -1383,12 +1346,6 @@ async def list_apps(
 async def get_change_start_page_token() -> dict[str, Any]:
     """Retrieves the starting page token for listing future changes in Google Drive. Use this token to begin monitoring changes that occur after the current moment."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_change_start_page_token", "GET", "/changes/startPageToken", _request_id)
-
     # Extract parameters for API call
     _http_path = "/changes/startPageToken"
     _http_headers = {}
@@ -1396,6 +1353,9 @@ async def get_change_start_page_token() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_change_start_page_token")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_change_start_page_token", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1418,7 +1378,7 @@ async def list_changes(
     include_permissions_for_view: str | None = Field(None, alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response."),
     include_removed: bool | None = Field(None, alias="includeRemoved", description="Include change entries indicating items have been removed, such as through deletion or loss of access."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of changes to return per page.", ge=1, le=1000),
-    restrict_to_my_drive: bool | None = Field(None, alias="restrictToMyDrive", description="Restrict results to changes within the My Drive hierarchy, excluding changes to application data or shared files not added to My Drive.")
+    restrict_to_my_drive: bool | None = Field(None, alias="restrictToMyDrive", description="Restrict results to changes within the My Drive hierarchy, excluding changes to application data or shared files not added to My Drive."),
 ) -> dict[str, Any]:
     """Retrieves a list of changes for a user's My Drive or shared drive, enabling tracking of file modifications, deletions, and access changes. Use page tokens to iterate through results."""
 
@@ -1431,12 +1391,6 @@ async def list_changes(
         logging.error(f"Parameter validation failed for list_changes: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_changes", "GET", "/changes", _request_id)
-
     # Extract parameters for API call
     _http_path = "/changes"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1445,6 +1399,9 @@ async def list_changes(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_changes")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_changes", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1458,115 +1415,6 @@ async def list_changes(
 
     return _response_data
 
-# Tags: changes
-@mcp.tool()
-async def subscribe_to_changes(
-    page_token: str = Field(..., alias="pageToken", description="Pagination token from a previous list request. Use the 'nextPageToken' value from the prior response or call getStartPageToken to obtain the initial token for tracking changes from a specific point."),
-    include_corpus_removals: bool | None = Field(None, alias="includeCorpusRemovals", description="Include the file resource in change entries even if the file was removed from the changes list, provided the user still has access to it at request time."),
-    include_items_from_all_drives: bool | None = Field(None, alias="includeItemsFromAllDrives", description="Include changes from both My Drive and shared drives in the results."),
-    include_labels: str | None = Field(None, alias="includeLabels", description="Comma-separated list of label IDs to include in the labelInfo section of the response."),
-    include_permissions_for_view: str | None = Field(None, alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response. Only 'published' is a supported value."),
-    include_removed: bool | None = Field(None, alias="includeRemoved", description="Include change entries indicating items have been removed, such as through deletion or loss of access."),
-    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of changes to return per page.", ge=1, le=1000),
-    restrict_to_my_drive: bool | None = Field(None, alias="restrictToMyDrive", description="Restrict results to changes within the My Drive hierarchy, excluding changes to files in Application Data or shared files not added to My Drive."),
-    address: str | None = Field(None, description="The URL endpoint where push notifications will be delivered for this subscription channel."),
-    expiration: str | None = Field(None, description="Expiration time for this notification channel, expressed as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64'}),
-    params: dict[str, str] | None = Field(None, description="Additional parameters controlling delivery channel behavior and notification settings."),
-    payload: bool | None = Field(None, description="Whether to include the full resource payload in each notification message."),
-    token: str | None = Field(None, description="An arbitrary string token that will be included with each notification delivered over this channel for identification or validation purposes."),
-    type_: str | None = Field(None, alias="type", description="The type of delivery mechanism used for this channel. Valid values are \"web_hook\" or \"webhook\"."),
-    id_: str | None = Field(None, alias="id", description="A UUID or similar unique string that identifies this channel.")
-) -> dict[str, Any]:
-    """Subscribes to push notifications for changes to files and folders in a user's Drive. Allows real-time monitoring of Drive activity through a specified notification channel."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ChangesWatchRequest(
-            query=_models.ChangesWatchRequestQuery(page_token=page_token, include_corpus_removals=include_corpus_removals, include_items_from_all_drives=include_items_from_all_drives, include_labels=include_labels, include_permissions_for_view=include_permissions_for_view, include_removed=include_removed, page_size=page_size, restrict_to_my_drive=restrict_to_my_drive),
-            body=_models.ChangesWatchRequestBody(address=address, expiration=expiration, params=params, payload=payload, token=token, type_=type_, id_=id_)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for subscribe_to_changes: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("subscribe_to_changes", "POST", "/changes/watch", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/changes/watch"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("subscribe_to_changes")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="subscribe_to_changes",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: channels
-@mcp.tool()
-async def stop_channel(
-    address: str | None = Field(None, description="The delivery address for this notification channel, such as a webhook URL or callback endpoint where notifications were being sent."),
-    expiration: str | None = Field(None, description="The expiration time of the notification channel, expressed as a Unix timestamp in milliseconds. Indicates when the channel subscription will automatically expire.", json_schema_extra={'format': 'int64'}),
-    params: dict[str, str] | None = Field(None, description="Additional parameters that control the behavior and configuration of the delivery channel."),
-    payload: bool | None = Field(None, description="Indicates whether the notification payload (resource data) should be included with each notification delivered over this channel."),
-    token: str | None = Field(None, description="An arbitrary string token that is delivered with each notification to help identify and validate the channel at the receiving endpoint."),
-    id_: str | None = Field(None, alias="id", description="A UUID or similar unique string that identifies this channel."),
-    resource_id: str | None = Field(None, alias="resourceId", description="An opaque ID that identifies the resource being watched on this channel. Stable across different API versions.")
-) -> dict[str, Any]:
-    """Stops watching resources through a notification channel and ceases delivery of resource change notifications. This operation is used to clean up push notification subscriptions when monitoring is no longer needed."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.ChannelsStopRequest(
-            body=_models.ChannelsStopRequestBody(address=address, expiration=expiration, params=params, payload=payload, token=token, id_=id_, resource_id=resource_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for stop_channel: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("stop_channel", "POST", "/channels/stop", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/channels/stop"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("stop_channel")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="stop_channel",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: comments
 @mcp.tool()
 async def list_comments(
@@ -1575,7 +1423,7 @@ async def list_comments(
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of comments to return in a single page of results.", ge=1, le=100),
     page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response's `nextPageToken` field to retrieve the next page of results."),
     start_modified_time: str | None = Field(None, alias="startModifiedTime", description="Filter results to only include comments modified on or after this timestamp, specified in RFC 3339 date-time format."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves all comments on a file, with options to filter by modification time and include deleted comments. The `fields` parameter must be specified to define which comment fields to return."""
 
@@ -1589,12 +1437,6 @@ async def list_comments(
         logging.error(f"Parameter validation failed for list_comments: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_comments", "GET", "/files/{fileId}/comments", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1603,6 +1445,9 @@ async def list_comments(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_comments")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_comments", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1623,7 +1468,7 @@ async def create_comment(
     fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
     content: str | None = Field(None, description="The plain text content of the comment. HTML content will be generated from this plain text for display purposes."),
     anchor_start_index: int | None = Field(None, description="The start index of the anchor region in the document"),
-    anchor_end_index: int | None = Field(None, description="The end index of the anchor region in the document")
+    anchor_end_index: int | None = Field(None, description="The end index of the anchor region in the document"),
 ) -> dict[str, Any]:
     """Creates a comment on a file in Google Drive. The `fields` parameter must be set to specify which fields to return in the response."""
 
@@ -1641,12 +1486,6 @@ async def create_comment(
         logging.error(f"Parameter validation failed for create_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_comment", "POST", "/files/{fileId}/comments", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1656,6 +1495,9 @@ async def create_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_comment", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1676,7 +1518,7 @@ async def get_comment(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the comment."),
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment to retrieve."),
     include_deleted: bool | None = Field(None, alias="includeDeleted", description="Whether to include deleted comments in the response. Deleted comments will be returned without their original content."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves a specific comment from a file by its ID. Supports optional retrieval of deleted comments, which will have their original content removed."""
 
@@ -1690,12 +1532,6 @@ async def get_comment(
         logging.error(f"Parameter validation failed for get_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_comment", "GET", "/files/{fileId}/comments/{commentId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1704,6 +1540,9 @@ async def get_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_comment", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1725,7 +1564,7 @@ async def update_comment(
     fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
     content: str | None = Field(None, description="The plain text content to set for the comment. This field updates the comment's text content."),
     anchor_start_index: int | None = Field(None, description="The start index of the anchor region in the document"),
-    anchor_end_index: int | None = Field(None, description="The end index of the anchor region in the document")
+    anchor_end_index: int | None = Field(None, description="The end index of the anchor region in the document"),
 ) -> dict[str, Any]:
     """Updates an existing comment in a file using patch semantics, allowing you to modify the comment's content. The `fields` parameter must be set to specify which fields to return in the response."""
 
@@ -1743,12 +1582,6 @@ async def update_comment(
         logging.error(f"Parameter validation failed for update_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_comment", "PATCH", "/files/{fileId}/comments/{commentId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1758,6 +1591,9 @@ async def update_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_comment", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1777,7 +1613,7 @@ async def update_comment(
 async def delete_comment(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the comment to delete."),
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment to delete."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Deletes a comment from a file. The comment and all associated replies will be permanently removed."""
 
@@ -1791,12 +1627,6 @@ async def delete_comment(
         logging.error(f"Parameter validation failed for delete_comment: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_comment", "DELETE", "/files/{fileId}/comments/{commentId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1805,6 +1635,9 @@ async def delete_comment(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_comment")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_comment", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1824,7 +1657,7 @@ async def list_shared_drives(
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of shared drives to return in a single page of results. Useful for controlling response size and implementing pagination.", ge=1, le=100),
     page_token: str | None = Field(None, alias="pageToken", description="Token for retrieving the next page of results. Use the pageToken from the previous response to continue pagination."),
     q: str | None = Field(None, description="Search query to filter shared drives by name, description, or other attributes. Supports combining multiple search terms for refined results."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="When set to true, issues the request with domain administrator privileges to retrieve all shared drives within the administrator's domain, rather than only user-accessible drives.")
+    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="When set to true, issues the request with domain administrator privileges to retrieve all shared drives within the administrator's domain, rather than only user-accessible drives."),
 ) -> dict[str, Any]:
     """Retrieves a list of shared drives accessible to the user, with optional filtering by search query and pagination support. Domain administrators can retrieve all shared drives within their domain by setting useDomainAdminAccess to true."""
 
@@ -1837,12 +1670,6 @@ async def list_shared_drives(
         logging.error(f"Parameter validation failed for list_shared_drives: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_shared_drives", "GET", "/drives", _request_id)
-
     # Extract parameters for API call
     _http_path = "/drives"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1851,6 +1678,9 @@ async def list_shared_drives(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_shared_drives")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_shared_drives", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1876,7 +1706,7 @@ async def create_shared_drive(
     domain_users_only: bool | None = Field(None, alias="domainUsersOnly", description="Whether access to this shared drive and its contents is restricted to users of the domain that owns the drive. Other sharing policies outside this drive may override this restriction."),
     drive_members_only: bool | None = Field(None, alias="driveMembersOnly", description="Whether access to items inside this shared drive is restricted exclusively to its members."),
     sharing_folders_requires_organizer_permission: bool | None = Field(None, alias="sharingFoldersRequiresOrganizerPermission", description="Whether only users with the organizer role can share folders. If false, both organizer and file organizer roles can share folders."),
-    theme_id: str | None = Field(None, alias="themeId", description="The ID of a predefined theme that sets the background image and color for the shared drive. Available themes can be retrieved from the drive.about.get endpoint. Cannot be used together with colorRgb or backgroundImageFile.")
+    theme_id: str | None = Field(None, alias="themeId", description="The ID of a predefined theme that sets the background image and color for the shared drive. Available themes can be retrieved from the drive.about.get endpoint. Cannot be used together with colorRgb or backgroundImageFile."),
 ) -> dict[str, Any]:
     """Creates a new shared drive with specified configuration and access restrictions. Use a unique requestId to ensure idempotent creation and avoid duplicates."""
 
@@ -1891,12 +1721,6 @@ async def create_shared_drive(
         logging.error(f"Parameter validation failed for create_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_shared_drive", "POST", "/drives", _request_id)
-
     # Extract parameters for API call
     _http_path = "/drives"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1906,6 +1730,9 @@ async def create_shared_drive(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_shared_drive", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1924,7 +1751,7 @@ async def create_shared_drive(
 @mcp.tool()
 async def get_shared_drive(
     drive_id: str = Field(..., alias="driveId", description="The unique identifier of the shared drive to retrieve."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="If true, issues the request with domain administrator privileges, allowing access to shared drives within your domain even if you're not a direct member.")
+    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="If true, issues the request with domain administrator privileges, allowing access to shared drives within your domain even if you're not a direct member."),
 ) -> dict[str, Any]:
     """Retrieves metadata for a shared drive by its ID. Use domain administrator access to retrieve drives belonging to your organization's domain."""
 
@@ -1938,12 +1765,6 @@ async def get_shared_drive(
         logging.error(f"Parameter validation failed for get_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_shared_drive", "GET", "/drives/{driveId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/drives/{driveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/drives/{driveId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1952,6 +1773,9 @@ async def get_shared_drive(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_shared_drive", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1979,7 +1803,7 @@ async def update_shared_drive(
     domain_users_only: bool | None = Field(None, alias="domainUsersOnly", description="If true, restricts access to the shared drive and all its contents to users belonging to the same domain as the shared drive. Other sharing policies may override this restriction."),
     drive_members_only: bool | None = Field(None, alias="driveMembersOnly", description="If true, restricts access to items within the shared drive to its members only, preventing external sharing."),
     sharing_folders_requires_organizer_permission: bool | None = Field(None, alias="sharingFoldersRequiresOrganizerPermission", description="If true, only users with the organizer role can share folders within the shared drive. If false, both organizer and file organizer roles can share folders."),
-    theme_id: str | None = Field(None, alias="themeId", description="The ID of a predefined theme to apply to the shared drive, which sets both the background image and color. Available themes can be retrieved from the drive.about.get endpoint. This is a write-only field and cannot be used together with colorRgb or backgroundImageFile in the same request.")
+    theme_id: str | None = Field(None, alias="themeId", description="The ID of a predefined theme to apply to the shared drive, which sets both the background image and color. Available themes can be retrieved from the drive.about.get endpoint. This is a write-only field and cannot be used together with colorRgb or backgroundImageFile in the same request."),
 ) -> dict[str, Any]:
     """Updates the metadata and settings for a shared drive, including name, appearance, visibility, and access restrictions. Requires the shared drive ID and appropriate permissions to modify the specified properties."""
 
@@ -1996,12 +1820,6 @@ async def update_shared_drive(
         logging.error(f"Parameter validation failed for update_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_shared_drive", "PATCH", "/drives/{driveId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/drives/{driveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/drives/{driveId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2011,6 +1829,9 @@ async def update_shared_drive(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_shared_drive", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2030,7 +1851,7 @@ async def update_shared_drive(
 async def delete_shared_drive(
     drive_id: str = Field(..., alias="driveId", description="The unique identifier of the shared drive to delete."),
     allow_item_deletion: bool | None = Field(None, alias="allowItemDeletion", description="Whether to automatically delete all items contained within the shared drive. This option requires domain admin access to be enabled and is only applicable when the requester has domain administrator privileges."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="Whether to issue the request with domain administrator privileges. When enabled, the requester must be an administrator of the domain to which the shared drive belongs, granting access to perform administrative operations.")
+    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="Whether to issue the request with domain administrator privileges. When enabled, the requester must be an administrator of the domain to which the shared drive belongs, granting access to perform administrative operations."),
 ) -> dict[str, Any]:
     """Permanently deletes a shared drive for which the user is an organizer. The shared drive must not contain any untrashed items unless item deletion is explicitly enabled with domain admin access."""
 
@@ -2044,12 +1865,6 @@ async def delete_shared_drive(
         logging.error(f"Parameter validation failed for delete_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_shared_drive", "DELETE", "/drives/{driveId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/drives/{driveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/drives/{driveId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2058,6 +1873,9 @@ async def delete_shared_drive(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_shared_drive", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2085,12 +1903,6 @@ async def hide_shared_drive(drive_id: str = Field(..., alias="driveId", descript
         logging.error(f"Parameter validation failed for hide_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("hide_shared_drive", "POST", "/drives/{driveId}/hide", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/drives/{driveId}/hide", _request.path.model_dump(by_alias=True)) if _request.path else "/drives/{driveId}/hide"
     _http_headers = {}
@@ -2098,6 +1910,9 @@ async def hide_shared_drive(drive_id: str = Field(..., alias="driveId", descript
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("hide_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("hide_shared_drive", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2124,12 +1939,6 @@ async def unhide_shared_drive(drive_id: str = Field(..., alias="driveId", descri
         logging.error(f"Parameter validation failed for unhide_shared_drive: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("unhide_shared_drive", "POST", "/drives/{driveId}/unhide", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/drives/{driveId}/unhide", _request.path.model_dump(by_alias=True)) if _request.path else "/drives/{driveId}/unhide"
     _http_headers = {}
@@ -2137,6 +1946,9 @@ async def unhide_shared_drive(drive_id: str = Field(..., alias="driveId", descri
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unhide_shared_drive")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("unhide_shared_drive", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2160,7 +1972,7 @@ async def copy_file(
     ocr_language: str | None = Field(None, alias="ocrLanguage", description="A language hint for OCR processing during image import, specified as an ISO 639-1 language code."),
     app_properties: dict[str, str] | None = Field(None, alias="appProperties", description="Custom key-value pairs private to the requesting application. Entries with null values are cleared during copy operations. Requires OAuth 2 authentication to retrieve; API keys cannot access private properties."),
     indexable_text: str | None = Field(None, alias="indexableText", description="Text content to be indexed for improved fullText search results. Limited to 128 KB and may contain HTML elements."),
-    image: str | None = Field(None, description="The thumbnail image data encoded using URL-safe Base64 format.", json_schema_extra={'format': 'byte'}),
+    image: str | None = Field(None, description="The thumbnail image data encoded using URL-safe Base64 format."),
     thumbnail_mime_type: str | None = Field(None, alias="thumbnailMimeType", description="The MIME type of the thumbnail image."),
     mime_type: str | None = Field(None, alias="mimeType", description="The MIME type of the file. Google Drive automatically detects an appropriate MIME type from uploaded content if not provided. The value cannot be changed unless a new revision is uploaded. Files created with Google Doc MIME types have their content imported if supported."),
     content_restrictions: list[_models.ContentRestriction] | None = Field(None, alias="contentRestrictions", description="Restrictions applied to file content access. Only populated when content restrictions are in effect."),
@@ -2177,7 +1989,7 @@ async def copy_file(
     starred: bool | None = Field(None, description="Whether the file is marked as starred by the user."),
     trashed: bool | None = Field(None, description="Whether the file is in the trash, either directly or through a trashed parent folder. Only the file owner can trash files; other users cannot view files in the owner's trash."),
     writers_can_share: bool | None = Field(None, alias="writersCanShare", description="Whether users with writer-only permission can modify the file's sharing permissions. Not applicable to files in shared drives."),
-    video_dimensions: str | None = Field(None, description="Video dimensions in WIDTHxHEIGHT format (e.g., '1920x1080')")
+    video_dimensions: str | None = Field(None, description="Video dimensions in WIDTHxHEIGHT format (e.g., '1920x1080')"),
 ) -> dict[str, Any]:
     """Creates a copy of a file with optional updates applied using patch semantics. The copied file inherits permissions from its parent folder unless otherwise specified."""
 
@@ -2200,12 +2012,6 @@ async def copy_file(
         logging.error(f"Parameter validation failed for copy_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("copy_file", "POST", "/files/{fileId}/copy", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/copy", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/copy"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2215,6 +2021,9 @@ async def copy_file(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("copy_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("copy_file", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2238,7 +2047,7 @@ async def list_files(
     order_by: str | None = Field(None, alias="orderBy", description="A comma-separated list of sort keys to order results. Each key sorts ascending by default; append 'desc' to reverse order. Valid keys include createdTime, folder, modifiedByMeTime, modifiedTime, name, name_natural, quotaBytesUsed, recency, sharedWithMeTime, starred, and viewedByMeTime."),
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of files to return per page. Partial or empty result pages may be returned before reaching the end of the file list.", ge=1, le=1000),
     page_token: str | None = Field(None, alias="pageToken", description="The pagination token from a previous response's nextPageToken field to retrieve the next page of results."),
-    q: str | None = Field(None, description="A search query to filter file results using supported search syntax for files and folders.")
+    q: str | None = Field(None, description="A search query to filter file results using supported search syntax for files and folders."),
 ) -> dict[str, Any]:
     """Retrieves a list of the user's files with support for searching, filtering, and sorting. By default, all files including trashed items are returned; use the trashed parameter to exclude deleted files."""
 
@@ -2251,12 +2060,6 @@ async def list_files(
         logging.error(f"Parameter validation failed for list_files: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_files", "GET", "/files", _request_id)
-
     # Extract parameters for API call
     _http_path = "/files"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2265,6 +2068,9 @@ async def list_files(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_files")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_files", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2289,7 +2095,7 @@ async def create_file(
     use_content_as_indexable_text: bool | None = Field(None, alias="useContentAsIndexableText", description="Use the uploaded file content as searchable indexable text to improve full-text query results."),
     app_properties: dict[str, str] | None = Field(None, alias="appProperties", description="Custom key-value pairs private to your application. Entries with null values are removed during updates. Requires OAuth 2 authentication to retrieve."),
     indexable_text: str | None = Field(None, alias="indexableText", description="Text content to index for improved full-text search results. Limited to 128 KB and may contain HTML elements."),
-    image: str | None = Field(None, description="Thumbnail image data encoded as URL-safe Base64.", json_schema_extra={'format': 'byte'}),
+    image: str | None = Field(None, description="Thumbnail image data encoded as URL-safe Base64."),
     thumbnail_mime_type: str | None = Field(None, alias="thumbnailMimeType", description="MIME type of the thumbnail image."),
     mime_type: str | None = Field(None, alias="mimeType", description="MIME type of the file. Google Drive automatically detects an appropriate type from uploaded content if not specified. Cannot be changed unless a new revision is uploaded. Google Docs MIME types trigger content import if supported."),
     content_restrictions: list[_models.ContentRestriction] | None = Field(None, alias="contentRestrictions", description="Content access restrictions applied to the file. Only populated if restrictions exist."),
@@ -2298,10 +2104,10 @@ async def create_file(
     restricted_for_readers: bool | None = Field(None, alias="restrictedForReaders", description="Restrict download and copy access for readers."),
     restricted_for_writers: bool | None = Field(None, alias="restrictedForWriters", description="Restrict download and copy access for writers. When enabled, download is also restricted for readers."),
     folder_color_rgb: str | None = Field(None, alias="folderColorRgb", description="RGB hex color code for folder or folder shortcut appearance. Supported colors are available in the about resource's folderColorPalette; unsupported colors default to the closest available option."),
-    image_media_metadata_height: int | None = Field(None, alias="imageMediaMetadataHeight", description="Height of the image in pixels.", json_schema_extra={'format': 'int32'}),
-    video_media_metadata_height: int | None = Field(None, alias="videoMediaMetadataHeight", description="Height of the video in pixels.", json_schema_extra={'format': 'int32'}),
-    image_media_metadata_width: int | None = Field(None, alias="imageMediaMetadataWidth", description="Width of the image in pixels.", json_schema_extra={'format': 'int32'}),
-    video_media_metadata_width: int | None = Field(None, alias="videoMediaMetadataWidth", description="Width of the video in pixels.", json_schema_extra={'format': 'int32'}),
+    image_media_metadata_height: str | None = Field(None, alias="imageMediaMetadataHeight", description="Height of the image in pixels."),
+    video_media_metadata_height: str | None = Field(None, alias="videoMediaMetadataHeight", description="Height of the video in pixels."),
+    image_media_metadata_width: str | None = Field(None, alias="imageMediaMetadataWidth", description="Width of the image in pixels."),
+    video_media_metadata_width: str | None = Field(None, alias="videoMediaMetadataWidth", description="Width of the video in pixels."),
     inherited_permissions_disabled: bool | None = Field(None, alias="inheritedPermissionsDisabled", description="Disable inherited permissions for this file. By default, files inherit permissions from their parent folder."),
     name: str | None = Field(None, description="Display name of the file. Not required to be unique within a folder. For immutable items like shared drive roots, this value is constant."),
     parents: list[str] | None = Field(None, description="ID of the parent folder containing the file. A file can have only one parent. If omitted during creation, the file is placed in the user's My Drive root folder."),
@@ -2309,9 +2115,14 @@ async def create_file(
     target_id: str | None = Field(None, alias="targetId", description="ID of the file this shortcut points to. Only applicable when creating shortcuts with MIME type 'application/vnd.google-apps.shortcut'."),
     starred: bool | None = Field(None, description="Mark the file as starred in the user's Drive."),
     trashed: bool | None = Field(None, description="Move the file to trash. Only the file owner can trash files; other users cannot see trashed files in the owner's trash."),
-    writers_can_share: bool | None = Field(None, alias="writersCanShare", description="Allow users with writer permission to modify the file's sharing permissions. Not applicable to files in shared drives.")
+    writers_can_share: bool | None = Field(None, alias="writersCanShare", description="Allow users with writer permission to modify the file's sharing permissions. Not applicable to files in shared drives."),
 ) -> dict[str, Any]:
     """Creates a new file in Google Drive with optional metadata, content restrictions, and organizational properties. Supports file uploads up to 5,120 GB with any valid MIME type, and allows creation of shortcuts to existing files."""
+
+    _image_media_metadata_height = _parse_int(image_media_metadata_height)
+    _video_media_metadata_height = _parse_int(video_media_metadata_height)
+    _image_media_metadata_width = _parse_int(image_media_metadata_width)
+    _video_media_metadata_width = _parse_int(video_media_metadata_width)
 
     # Construct request model with validation
     try:
@@ -2321,19 +2132,13 @@ async def create_file(
                 content_hints=_models.FilesCreateRequestBodyContentHints(indexable_text=indexable_text,
                     thumbnail=_models.FilesCreateRequestBodyContentHintsThumbnail(image=image, mime_type=thumbnail_mime_type) if any(v is not None for v in [image, thumbnail_mime_type]) else None) if any(v is not None for v in [indexable_text, image, thumbnail_mime_type]) else None,
                 download_restrictions=_models.FilesCreateRequestBodyDownloadRestrictions(item_download_restriction=_models.FilesCreateRequestBodyDownloadRestrictionsItemDownloadRestriction(restricted_for_readers=restricted_for_readers, restricted_for_writers=restricted_for_writers) if any(v is not None for v in [restricted_for_readers, restricted_for_writers]) else None) if any(v is not None for v in [restricted_for_readers, restricted_for_writers]) else None,
-                image_media_metadata=_models.FilesCreateRequestBodyImageMediaMetadata(height=image_media_metadata_height, width=image_media_metadata_width) if any(v is not None for v in [image_media_metadata_height, image_media_metadata_width]) else None,
-                video_media_metadata=_models.FilesCreateRequestBodyVideoMediaMetadata(height=video_media_metadata_height, width=video_media_metadata_width) if any(v is not None for v in [video_media_metadata_height, video_media_metadata_width]) else None,
+                image_media_metadata=_models.FilesCreateRequestBodyImageMediaMetadata(height=_image_media_metadata_height, width=_image_media_metadata_width) if any(v is not None for v in [image_media_metadata_height, image_media_metadata_width]) else None,
+                video_media_metadata=_models.FilesCreateRequestBodyVideoMediaMetadata(height=_video_media_metadata_height, width=_video_media_metadata_width) if any(v is not None for v in [video_media_metadata_height, video_media_metadata_width]) else None,
                 shortcut_details=_models.FilesCreateRequestBodyShortcutDetails(target_id=target_id) if any(v is not None for v in [target_id]) else None)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_file", "POST", "/files", _request_id)
 
     # Extract parameters for API call
     _http_path = "/files"
@@ -2344,6 +2149,9 @@ async def create_file(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_file", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2363,7 +2171,7 @@ async def create_file(
 async def get_file(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to retrieve."),
     include_labels: str | None = Field(None, alias="includeLabels", description="Comma-separated list of label IDs to include in the labelInfo section of the response."),
-    include_permissions_for_view: str | None = Field(None, alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response.")
+    include_permissions_for_view: str | None = Field(None, alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response."),
 ) -> dict[str, Any]:
     """Retrieve a file's metadata or content by ID. Use alt=media to download file contents, or use the export operation for Google Docs, Sheets, and Slides formats."""
 
@@ -2377,12 +2185,6 @@ async def get_file(
         logging.error(f"Parameter validation failed for get_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_file", "GET", "/files/{fileId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2391,6 +2193,9 @@ async def get_file(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_file", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2417,7 +2222,7 @@ async def update_file(
     use_content_as_indexable_text: bool | None = Field(None, alias="useContentAsIndexableText", description="Whether to use the uploaded content as indexable text for fullText search queries."),
     app_properties: dict[str, str] | None = Field(None, alias="appProperties", description="Arbitrary key-value pairs private to the requesting app. Entries with null values are cleared. Requires OAuth 2 authentication; API keys cannot retrieve private properties."),
     indexable_text: str | None = Field(None, alias="indexableText", description="Text to be indexed for improved fullText search queries. Limited to 128 KB and may contain HTML elements."),
-    image: str | None = Field(None, description="Thumbnail data encoded with URL-safe Base64.", json_schema_extra={'format': 'byte'}),
+    image: str | None = Field(None, description="Thumbnail data encoded with URL-safe Base64."),
     thumbnail_mime_type: str | None = Field(None, alias="thumbnailMimeType", description="The MIME type of the thumbnail image."),
     mime_type: str | None = Field(None, alias="mimeType", description="The MIME type of the file. Google Drive auto-detects if not provided. Cannot be changed unless a new revision is uploaded. Google Doc MIME types trigger content import if supported."),
     content_restrictions: list[_models.ContentRestriction] | None = Field(None, alias="contentRestrictions", description="Restrictions for accessing the file's content. Only populated if restrictions exist."),
@@ -2433,7 +2238,7 @@ async def update_file(
     target_id: str | None = Field(None, alias="targetId", description="The ID of the file that this shortcut points to. Can only be set during file creation."),
     starred: bool | None = Field(None, description="Whether the user has starred the file."),
     trashed: bool | None = Field(None, description="Whether the file has been trashed, either explicitly or from a trashed parent folder. Only the owner can trash files; other users cannot see files in the owner's trash."),
-    writers_can_share: bool | None = Field(None, alias="writersCanShare", description="Whether users with writer permission can modify the file's permissions. Not populated for items in shared drives.")
+    writers_can_share: bool | None = Field(None, alias="writersCanShare", description="Whether users with writer permission can modify the file's permissions. Not populated for items in shared drives."),
 ) -> dict[str, Any]:
     """Updates a file's metadata, content, or both using patch semantics. Only populate fields you want to modify; some fields like modifiedDate are updated automatically. Supports file uploads up to 5,120 GB."""
 
@@ -2452,12 +2257,6 @@ async def update_file(
         logging.error(f"Parameter validation failed for update_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_file", "PATCH", "/files/{fileId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2467,6 +2266,9 @@ async def update_file(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_file", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2495,12 +2297,6 @@ async def delete_file(file_id: str = Field(..., alias="fileId", description="The
         logging.error(f"Parameter validation failed for delete_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_file", "DELETE", "/files/{fileId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}"
     _http_headers = {}
@@ -2508,6 +2304,9 @@ async def delete_file(file_id: str = Field(..., alias="fileId", description="The
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_file", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2524,7 +2323,7 @@ async def delete_file(file_id: str = Field(..., alias="fileId", description="The
 @mcp.tool()
 async def download_file(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to download."),
-    revision_id: str | None = Field(None, alias="revisionId", description="The specific revision of the file to download. Only applicable for blob files, Google Docs, and Google Sheets. Returns an error if the file type does not support revision-specific downloads.")
+    revision_id: str | None = Field(None, alias="revisionId", description="The specific revision of the file to download. Only applicable for blob files, Google Docs, and Google Sheets. Returns an error if the file type does not support revision-specific downloads."),
 ) -> dict[str, Any]:
     """Downloads the content of a file from Google Drive. Operations are valid for 24 hours from the time of creation."""
 
@@ -2538,12 +2337,6 @@ async def download_file(
         logging.error(f"Parameter validation failed for download_file: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("download_file", "POST", "/files/{fileId}/download", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/download", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/download"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2552,6 +2345,9 @@ async def download_file(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("download_file")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("download_file", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2570,12 +2366,6 @@ async def download_file(
 async def empty_trash() -> dict[str, Any]:
     """Permanently deletes all of the user's trashed files. This action cannot be undone and will remove all items currently in the trash."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("empty_trash", "DELETE", "/files/trash", _request_id)
-
     # Extract parameters for API call
     _http_path = "/files/trash"
     _http_headers = {}
@@ -2583,6 +2373,9 @@ async def empty_trash() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("empty_trash")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("empty_trash", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2599,7 +2392,7 @@ async def empty_trash() -> dict[str, Any]:
 @mcp.tool()
 async def export_document(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to export."),
-    mime_type: str = Field(..., alias="mimeType", description="The MIME type format for the exported document. Refer to the supported export formats for Google Workspace documents to determine valid MIME types for your file type.")
+    mime_type: str = Field(..., alias="mimeType", description="The MIME type format for the exported document. Refer to the supported export formats for Google Workspace documents to determine valid MIME types for your file type."),
 ) -> dict[str, Any]:
     """Exports a Google Workspace document to a specified format and returns the exported content as bytes. The exported content is limited to 10 MB."""
 
@@ -2613,12 +2406,6 @@ async def export_document(
         logging.error(f"Parameter validation failed for export_document: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("export_document", "GET", "/files/{fileId}/export", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/export", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/export"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2627,6 +2414,9 @@ async def export_document(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("export_document")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("export_document", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2644,7 +2434,7 @@ async def export_document(
 @mcp.tool()
 async def generate_file_ids(
     count: int | None = Field(None, description="The number of file IDs to generate. Must be between 1 and 1000 IDs per request.", ge=1, le=1000),
-    space: str | None = Field(None, description="The storage space where generated IDs can be used to create files. Defaults to 'drive' for standard Google Drive storage.")
+    space: str | None = Field(None, description="The storage space where generated IDs can be used to create files. Defaults to 'drive' for standard Google Drive storage."),
 ) -> dict[str, Any]:
     """Generates a batch of file IDs for use in subsequent file creation or copy operations. These pre-generated IDs enable efficient file management workflows in Google Drive or App Data Folder."""
 
@@ -2657,12 +2447,6 @@ async def generate_file_ids(
         logging.error(f"Parameter validation failed for generate_file_ids: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("generate_file_ids", "GET", "/files/generateIds", _request_id)
-
     # Extract parameters for API call
     _http_path = "/files/generateIds"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2671,6 +2455,9 @@ async def generate_file_ids(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("generate_file_ids")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("generate_file_ids", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2688,8 +2475,8 @@ async def generate_file_ids(
 @mcp.tool()
 async def list_file_labels(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file whose labels you want to retrieve."),
-    max_results: int | None = Field(100, alias="maxResults", description="The maximum number of labels to return in a single page of results. Defaults to 100 if not specified.", ge=1, le=100),
-    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response's nextPageToken field to retrieve the next page of results.")
+    max_results: int | None = Field(None, alias="maxResults", description="The maximum number of labels to return in a single page of results. Defaults to 100 if not specified.", ge=1, le=100),
+    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response's nextPageToken field to retrieve the next page of results."),
 ) -> dict[str, Any]:
     """Retrieves all labels applied to a specific file. Supports pagination to handle large label sets across multiple pages."""
 
@@ -2703,12 +2490,6 @@ async def list_file_labels(
         logging.error(f"Parameter validation failed for list_file_labels: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_labels", "GET", "/files/{fileId}/listLabels", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/listLabels", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/listLabels"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2717,6 +2498,9 @@ async def list_file_labels(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_labels")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_labels", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2734,7 +2518,7 @@ async def list_file_labels(
 @mcp.tool()
 async def update_file_labels(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file whose labels should be modified."),
-    label_modifications: list[_models.LabelModification] | None = Field(None, alias="labelModifications", description="An ordered list of label modifications to apply to the file. Each modification specifies a label field and the values to set, add, or remove.")
+    label_modifications: list[_models.LabelModification] | None = Field(None, alias="labelModifications", description="An ordered list of label modifications to apply to the file. Each modification specifies a label field and the values to set, add, or remove."),
 ) -> dict[str, Any]:
     """Updates the labels applied to a file by adding, modifying, or removing label fields. Returns the list of labels that were successfully added or modified."""
 
@@ -2748,12 +2532,6 @@ async def update_file_labels(
         logging.error(f"Parameter validation failed for update_file_labels: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_file_labels", "POST", "/files/{fileId}/modifyLabels", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/modifyLabels", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/modifyLabels"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2762,6 +2540,9 @@ async def update_file_labels(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file_labels")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_file_labels", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2775,101 +2556,6 @@ async def update_file_labels(
 
     return _response_data
 
-# Tags: files
-@mcp.tool()
-async def subscribe_file_changes(
-    file_id: str = Field(..., alias="fileId", description="The unique identifier of the file to monitor for changes."),
-    include_labels: str | None = Field(None, alias="includeLabels", description="Comma-separated list of label IDs to include in the labelInfo section of responses."),
-    include_permissions_for_view: str | None = Field(None, alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response. Only the published view is currently supported."),
-    address: str | None = Field(None, description="The target address where change notifications will be delivered for this subscription channel."),
-    expiration: str | None = Field(None, description="The expiration time for this notification channel, expressed as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64'}),
-    params: dict[str, str] | None = Field(None, description="Additional configuration parameters that control the behavior and delivery characteristics of the notification channel."),
-    payload: bool | None = Field(None, description="Whether to include the full resource payload in each notification. When true, notifications contain complete file data; when false, only change metadata is sent."),
-    token: str | None = Field(None, description="An arbitrary string token that will be included with each notification delivered over this channel, useful for identifying the subscription source."),
-    type_: str | None = Field(None, alias="type", description="The type of delivery mechanism used for this channel. Valid values are \"web_hook\" or \"webhook\"."),
-    id_: str | None = Field(None, alias="id", description="A UUID or similar unique string that identifies this channel.")
-) -> dict[str, Any]:
-    """Subscribes to real-time notifications for changes to a specific file. Notifications are delivered to a specified address whenever the file is modified."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.FilesWatchRequest(
-            path=_models.FilesWatchRequestPath(file_id=file_id),
-            query=_models.FilesWatchRequestQuery(include_labels=include_labels, include_permissions_for_view=include_permissions_for_view),
-            body=_models.FilesWatchRequestBody(address=address, expiration=expiration, params=params, payload=payload, token=token, type_=type_, id_=id_)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for subscribe_file_changes: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("subscribe_file_changes", "POST", "/files/{fileId}/watch", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/files/{fileId}/watch", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/watch"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("subscribe_file_changes")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="subscribe_file_changes",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: operations
-@mcp.tool()
-async def get_operation(name: str = Field(..., description="The resource name of the operation to retrieve, typically in the format projects/{project}/locations/{location}/operations/{operation}.")) -> dict[str, Any]:
-    """Retrieves the latest state of a long-running operation. Use this method to poll operation results at intervals as recommended by the API service."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.OperationsGetRequest(
-            path=_models.OperationsGetRequestPath(name=name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_operation: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_operation", "GET", "/operations/{name}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/operations/{name}", _request.path.model_dump(by_alias=True)) if _request.path else "/operations/{name}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_operation")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_operation",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: permissions
 @mcp.tool()
 async def list_file_permissions(
@@ -2878,7 +2564,7 @@ async def list_file_permissions(
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of permissions to return per page. For shared drive files, defaults to 100 if not specified; for other files, returns the entire list.", ge=1, le=100),
     page_token: str | None = Field(None, alias="pageToken", description="The pagination token from a previous response's nextPageToken field. Use this to retrieve the next page of results."),
     use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="When set to true, issues the request with domain administrator privileges. Only applicable when the fileId refers to a shared drive and the requester is a domain administrator."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves all permissions for a file or shared drive, including access levels and sharing settings. Supports pagination and optional filtering for published views."""
 
@@ -2892,12 +2578,6 @@ async def list_file_permissions(
         logging.error(f"Parameter validation failed for list_file_permissions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_permissions", "GET", "/files/{fileId}/permissions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/permissions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2906,6 +2586,9 @@ async def list_file_permissions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_file_permissions")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_permissions", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2931,11 +2614,11 @@ async def create_file_permission(
     allow_file_discovery: bool | None = Field(None, alias="allowFileDiscovery", description="Whether the permission allows the file to be discovered through search results. Only applies to permissions with type domain or anyone."),
     domain: str | None = Field(None, description="The domain name to which this permission applies. Used when granting access to an entire domain."),
     email_address: str | None = Field(None, alias="emailAddress", description="The email address of the user or group receiving this permission."),
-    expiration_time: str | None = Field(None, alias="expirationTime", description="The date and time when this permission automatically expires. Must be a future date no more than one year away. Only applicable to user and group permissions.", json_schema_extra={'format': 'date-time'}),
+    expiration_time: str | None = Field(None, alias="expirationTime", description="The date and time when this permission automatically expires. Must be a future date no more than one year away. Only applicable to user and group permissions."),
     inherited_permissions_disabled: bool | None = Field(None, alias="inheritedPermissionsDisabled", description="When set to true, only organizers, owners, and users with direct permissions can access the item. Inherited permissions from parent folders are disabled."),
     role: str | None = Field(None, description="The access level granted by this permission. Common roles include owner, organizer, fileOrganizer, writer, commenter, and reader."),
     view: str | None = Field(None, description="The view scope for this permission. Published indicates a publishedReader role; metadata indicates the item is visible only in the metadata view with limited access. Metadata view is only supported on folders."),
-    type_: str | None = Field(None, alias="type", description="The type of the grantee. Supported values include: * `user` * `group` * `domain` * `anyone` When creating a permission, if `type` is `user` or `group`, you must provide an `emailAddress` for the user or group. If `type` is `domain`, you must provide a `domain`. If `type` is `anyone`, no extra information is required.")
+    type_: str | None = Field(None, alias="type", description="The type of the grantee. Supported values include: * `user` * `group` * `domain` * `anyone` When creating a permission, if `type` is `user` or `group`, you must provide an `emailAddress` for the user or group. If `type` is `domain`, you must provide a `domain`. If `type` is `anyone`, no extra information is required."),
 ) -> dict[str, Any]:
     """Grants access to a file or shared drive by creating a new permission. Supports sharing with users, groups, domains, or the public, with optional ownership transfer and notification settings."""
 
@@ -2950,12 +2633,6 @@ async def create_file_permission(
         logging.error(f"Parameter validation failed for create_file_permission: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_file_permission", "POST", "/files/{fileId}/permissions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/permissions", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/permissions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -2965,6 +2642,9 @@ async def create_file_permission(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_file_permission")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_file_permission", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2985,7 +2665,7 @@ async def get_permission(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file for which you want to retrieve the permission."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the permission to retrieve."),
     use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="If true, issues the request as a domain administrator, granting access when the file is a shared drive and the requester is an administrator of that shared drive's domain."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves a specific permission for a file by its ID. Use this to inspect sharing settings and access details for a particular file permission."""
 
@@ -2999,12 +2679,6 @@ async def get_permission(
         logging.error(f"Parameter validation failed for get_permission: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_permission", "GET", "/files/{fileId}/permissions/{permissionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/permissions/{permissionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/permissions/{permissionId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3013,6 +2687,9 @@ async def get_permission(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_permission")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_permission", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3038,10 +2715,10 @@ async def update_file_permission(
     allow_file_discovery: bool | None = Field(None, alias="allowFileDiscovery", description="Whether this permission allows the file to be discovered through search. Only applicable for permissions of type 'domain' or 'anyone'."),
     domain: str | None = Field(None, description="The domain to which this permission applies."),
     email_address: str | None = Field(None, alias="emailAddress", description="The email address of the user or group to which this permission applies."),
-    expiration_time: str | None = Field(None, alias="expirationTime", description="The expiration date and time for this permission in RFC 3339 format. Can only be set on user and group permissions, must be in the future, and cannot exceed one year from now.", json_schema_extra={'format': 'date-time'}),
+    expiration_time: str | None = Field(None, alias="expirationTime", description="The expiration date and time for this permission in RFC 3339 format. Can only be set on user and group permissions, must be in the future, and cannot exceed one year from now."),
     inherited_permissions_disabled: bool | None = Field(None, alias="inheritedPermissionsDisabled", description="When true, restricts access to only organizers, owners, and users with permissions added directly on the item. Inherited permissions are disabled."),
     role: str | None = Field(None, description="The role granted by this permission. Valid roles include: owner, organizer, fileOrganizer, writer, commenter, and reader."),
-    view: str | None = Field(None, description="The view scope for this permission. Supported values are 'published' (permission role is publishedReader) and 'metadata' (item visible only to metadata view with limited access). The metadata view is only supported on folders.")
+    view: str | None = Field(None, description="The view scope for this permission. Supported values are 'published' (permission role is publishedReader) and 'metadata' (item visible only to metadata view with limited access). The metadata view is only supported on folders."),
 ) -> dict[str, Any]:
     """Updates a file or shared drive permission using patch semantics. Supports modifying role, expiration, ownership transfer, and access settings. Note: Concurrent operations on the same file are not supported; only the last update applies."""
 
@@ -3056,12 +2733,6 @@ async def update_file_permission(
         logging.error(f"Parameter validation failed for update_file_permission: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_file_permission", "PATCH", "/files/{fileId}/permissions/{permissionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/permissions/{permissionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/permissions/{permissionId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3071,6 +2742,9 @@ async def update_file_permission(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file_permission")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_file_permission", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3091,7 +2765,7 @@ async def delete_permission(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file or shared drive from which the permission will be removed."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the permission to be deleted."),
     use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="When set to true, issues the request with domain administrator privileges. Requires the file to be a shared drive and the requester to be a domain administrator of the domain owning that shared drive."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Removes a specific permission from a file or shared drive. Note that concurrent permission operations on the same file are not supported; only the last update will be applied."""
 
@@ -3105,12 +2779,6 @@ async def delete_permission(
         logging.error(f"Parameter validation failed for delete_permission: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_permission", "DELETE", "/files/{fileId}/permissions/{permissionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/permissions/{permissionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/permissions/{permissionId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3119,6 +2787,9 @@ async def delete_permission(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_permission")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_permission", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3140,7 +2811,7 @@ async def list_replies(
     include_deleted: bool | None = Field(None, alias="includeDeleted", description="Whether to include deleted replies in the results. Deleted replies will not contain their original content."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of replies to return in a single page of results.", ge=1, le=100),
     page_token: str | None = Field(None, alias="pageToken", description="Pagination token from the previous response's nextPageToken field to retrieve the next page of results."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves all replies to a specific comment on a file. Supports pagination and optional inclusion of deleted replies."""
 
@@ -3154,12 +2825,6 @@ async def list_replies(
         logging.error(f"Parameter validation failed for list_replies: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_replies", "GET", "/files/{fileId}/comments/{commentId}/replies", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}/replies", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}/replies"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3168,6 +2833,9 @@ async def list_replies(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_replies")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_replies", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3188,7 +2856,7 @@ async def create_comment_reply(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment to which the reply is being added."),
     fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
     action: str | None = Field(None, description="The action to perform on the parent comment. Use this to resolve or reopen a comment instead of adding reply content."),
-    content: str | None = Field(None, description="The plain text content of the reply. Required if no action is specified. The content will be displayed as plain text in the API response.")
+    content: str | None = Field(None, description="The plain text content of the reply. Required if no action is specified. The content will be displayed as plain text in the API response."),
 ) -> dict[str, Any]:
     """Creates a reply to an existing comment on a file. Replies can either add content or perform actions like resolving or reopening the parent comment."""
 
@@ -3203,12 +2871,6 @@ async def create_comment_reply(
         logging.error(f"Parameter validation failed for create_comment_reply: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_comment_reply", "POST", "/files/{fileId}/comments/{commentId}/replies", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}/replies", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}/replies"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3218,6 +2880,9 @@ async def create_comment_reply(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_comment_reply")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_comment_reply", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3239,7 +2904,7 @@ async def get_reply(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment that contains the reply."),
     reply_id: str = Field(..., alias="replyId", description="The unique identifier of the reply to retrieve."),
     include_deleted: bool | None = Field(None, alias="includeDeleted", description="Whether to include deleted replies in the response. Deleted replies are returned without their original content."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Retrieves a specific reply to a comment on a file. Optionally includes deleted replies, which are returned without their original content."""
 
@@ -3253,12 +2918,6 @@ async def get_reply(
         logging.error(f"Parameter validation failed for get_reply: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_reply", "GET", "/files/{fileId}/comments/{commentId}/replies/{replyId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}/replies/{replyId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}/replies/{replyId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3267,6 +2926,9 @@ async def get_reply(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_reply")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_reply", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3288,7 +2950,7 @@ async def update_reply(
     reply_id: str = Field(..., alias="replyId", description="The unique identifier of the reply to update."),
     fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
     action: str | None = Field(None, description="The action this reply performs on the parent comment. Use to resolve or reopen a comment thread."),
-    content: str | None = Field(None, description="The plain text content of the reply. Required if no action is specified. Note: use htmlContent for display purposes.")
+    content: str | None = Field(None, description="The plain text content of the reply. Required if no action is specified. Note: use htmlContent for display purposes."),
 ) -> dict[str, Any]:
     """Updates a reply on a comment in a file using patch semantics. Supports modifying reply content or changing the reply's action status (resolve/reopen) relative to the parent comment."""
 
@@ -3303,12 +2965,6 @@ async def update_reply(
         logging.error(f"Parameter validation failed for update_reply: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_reply", "PATCH", "/files/{fileId}/comments/{commentId}/replies/{replyId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}/replies/{replyId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}/replies/{replyId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3318,6 +2974,9 @@ async def update_reply(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_reply")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_reply", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3338,7 +2997,7 @@ async def delete_reply(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the comment with the reply to delete."),
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment containing the reply to delete."),
     reply_id: str = Field(..., alias="replyId", description="The unique identifier of the reply to delete."),
-    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response.")
+    fields: str | None = Field(None, description="Selector specifying which fields to include in a partial response."),
 ) -> dict[str, Any]:
     """Deletes a reply from a comment on a file. This operation permanently removes the specified reply and cannot be undone."""
 
@@ -3352,12 +3011,6 @@ async def delete_reply(
         logging.error(f"Parameter validation failed for delete_reply: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_reply", "DELETE", "/files/{fileId}/comments/{commentId}/replies/{replyId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/comments/{commentId}/replies/{replyId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/comments/{commentId}/replies/{replyId}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3366,6 +3019,9 @@ async def delete_reply(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_reply")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_reply", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3383,7 +3039,7 @@ async def delete_reply(
 @mcp.tool()
 async def get_file_revision(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the revision."),
-    revision_id: str = Field(..., alias="revisionId", description="The unique identifier of the specific revision to retrieve.")
+    revision_id: str = Field(..., alias="revisionId", description="The unique identifier of the specific revision to retrieve."),
 ) -> dict[str, Any]:
     """Retrieves a specific file revision's metadata or content by its ID. Use this to access historical versions of a file for review, recovery, or comparison purposes."""
 
@@ -3396,12 +3052,6 @@ async def get_file_revision(
         logging.error(f"Parameter validation failed for get_file_revision: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_file_revision", "GET", "/files/{fileId}/revisions/{revisionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/revisions/{revisionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/revisions/{revisionId}"
     _http_headers = {}
@@ -3409,6 +3059,9 @@ async def get_file_revision(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_file_revision")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_file_revision", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3427,7 +3080,7 @@ async def update_file_revision(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the revision to update."),
     revision_id: str = Field(..., alias="revisionId", description="The unique identifier of the revision to update."),
     keep_forever: bool | None = Field(None, alias="keepForever", description="Whether to permanently retain this revision in the file's history. When enabled, the revision will not be automatically deleted after 30 days. Limited to a maximum of 200 retained revisions per file. Only applicable to files with binary content in Drive."),
-    publish_auto: bool | None = Field(None, alias="publishAuto", description="Whether to automatically republish subsequent revisions of this file. Only applicable to Google Docs, Sheets, and Slides files.")
+    publish_auto: bool | None = Field(None, alias="publishAuto", description="Whether to automatically republish subsequent revisions of this file. Only applicable to Google Docs, Sheets, and Slides files."),
 ) -> dict[str, Any]:
     """Updates a file revision's metadata using patch semantics, allowing you to preserve revisions indefinitely or configure auto-republishing behavior for Docs Editors files."""
 
@@ -3441,12 +3094,6 @@ async def update_file_revision(
         logging.error(f"Parameter validation failed for update_file_revision: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_file_revision", "PATCH", "/files/{fileId}/revisions/{revisionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/revisions/{revisionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/revisions/{revisionId}"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -3455,6 +3102,9 @@ async def update_file_revision(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_file_revision")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_file_revision", "PATCH", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3472,7 +3122,7 @@ async def update_file_revision(
 @mcp.tool()
 async def delete_file_revision(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file containing the revision to delete."),
-    revision_id: str = Field(..., alias="revisionId", description="The unique identifier of the specific file revision to permanently delete.")
+    revision_id: str = Field(..., alias="revisionId", description="The unique identifier of the specific file revision to permanently delete."),
 ) -> dict[str, Any]:
     """Permanently deletes a specific version of a file. Only binary files (images, videos, etc.) support revision deletion; revisions for Google Docs, Sheets, and the last remaining file version cannot be deleted."""
 
@@ -3485,12 +3135,6 @@ async def delete_file_revision(
         logging.error(f"Parameter validation failed for delete_file_revision: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_file_revision", "DELETE", "/files/{fileId}/revisions/{revisionId}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/revisions/{revisionId}", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/revisions/{revisionId}"
     _http_headers = {}
@@ -3498,6 +3142,9 @@ async def delete_file_revision(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_file_revision")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_file_revision", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3515,7 +3162,7 @@ async def delete_file_revision(
 async def list_file_revisions(
     file_id: str = Field(..., alias="fileId", description="The unique identifier of the file whose revisions you want to list."),
     page_size: int | None = Field(None, alias="pageSize", description="The maximum number of revisions to return in a single page of results.", ge=1, le=1000),
-    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response to retrieve the next page of results. Use the 'nextPageToken' value returned from the prior request.")
+    page_token: str | None = Field(None, alias="pageToken", description="A pagination token from a previous response to retrieve the next page of results. Use the 'nextPageToken' value returned from the prior request."),
 ) -> dict[str, Any]:
     """Retrieves a list of revisions for a specified file. Note that the revision history may be incomplete for files with extensive revision histories, and older revisions might be omitted from the response."""
 
@@ -3529,12 +3176,6 @@ async def list_file_revisions(
         logging.error(f"Parameter validation failed for list_file_revisions: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_file_revisions", "GET", "/files/{fileId}/revisions", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/files/{fileId}/revisions", _request.path.model_dump(by_alias=True)) if _request.path else "/files/{fileId}/revisions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -3544,6 +3185,9 @@ async def list_file_revisions(
     _auth = await _get_auth_for_operation("list_file_revisions")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_file_revisions", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="list_file_revisions",
@@ -3551,254 +3195,6 @@ async def list_file_revisions(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: teamdrives
-@mcp.tool()
-async def list_team_drives(
-    page_size: int | None = Field(None, alias="pageSize", description="Maximum number of Team Drives to return per page.", ge=1, le=100),
-    page_token: str | None = Field(None, alias="pageToken", description="Token for retrieving the next page of Team Drives in paginated results."),
-    q: str | None = Field(None, description="Query string to filter Team Drives by name or other searchable attributes."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="When true, issues the request with domain administrator privileges to return all Team Drives within the administrator's domain.")
-) -> dict[str, Any]:
-    """Retrieves a list of Team Drives. Note: This operation is deprecated; use list_drives instead for new implementations."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.TeamdrivesListRequest(
-            query=_models.TeamdrivesListRequestQuery(page_size=page_size, page_token=page_token, q=q, use_domain_admin_access=use_domain_admin_access)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_team_drives: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_team_drives", "GET", "/teamdrives", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/teamdrives"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_team_drives")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_team_drives",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: teamdrives
-@mcp.tool()
-async def create_team_drive(
-    request_id: str = Field(..., alias="requestId", description="A unique identifier (such as a UUID) for this request that ensures idempotent creation. If the same requestId is used multiple times, duplicate Team Drives will not be created; instead, a 409 error will be returned if the Team Drive already exists."),
-    background_image_file_id: str | None = Field(None, alias="backgroundImageFileId", description="The ID of an existing image file in Drive to use as the Team Drive's background image."),
-    id_: str | None = Field(None, alias="id", description="The ID to assign to this Team Drive, which also serves as the ID of the top-level folder. If not specified, an ID will be generated automatically."),
-    color_rgb: str | None = Field(None, alias="colorRgb", description="The color of this Team Drive expressed as an RGB hex string. This can only be set on update requests that do not specify a themeId."),
-    name: str | None = Field(None, description="The display name for this Team Drive."),
-    admin_managed_restrictions: bool | None = Field(None, alias="adminManagedRestrictions", description="Whether administrative privileges are required to modify restrictions on this Team Drive."),
-    copy_requires_writer_permission: bool | None = Field(None, alias="copyRequiresWriterPermission", description="Whether copying, printing, and downloading files inside this Team Drive should be disabled for readers and commenters. When enabled, this restriction overrides the same setting for individual files within the Team Drive."),
-    domain_users_only: bool | None = Field(None, alias="domainUsersOnly", description="Whether access to this Team Drive and its contents is restricted to users of the domain that owns the Team Drive. Other sharing policies outside this Team Drive may override this restriction."),
-    sharing_folders_requires_organizer_permission: bool | None = Field(None, alias="sharingFoldersRequiresOrganizerPermission", description="Whether only users with the organizer role can share folders within this Team Drive. If false, both organizer and file organizer roles can share folders."),
-    team_members_only: bool | None = Field(None, alias="teamMembersOnly", description="Whether access to items inside this Team Drive is restricted to members of this Team Drive."),
-    theme_id: str | None = Field(None, alias="themeId", description="The ID of a theme that defines the background image and color for this Team Drive. Available themes can be retrieved from the drive.about.get endpoint. When not specified, a random theme is selected. This is a write-only field and cannot be used together with colorRgb or backgroundImageFile.")
-) -> dict[str, Any]:
-    """Creates a new Team Drive with specified configuration, branding, and access restrictions. This operation is deprecated; use create_drive instead for new implementations."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.TeamdrivesCreateRequest(
-            query=_models.TeamdrivesCreateRequestQuery(request_id=request_id),
-            body=_models.TeamdrivesCreateRequestBody(id_=id_, color_rgb=color_rgb, name=name, theme_id=theme_id,
-                background_image_file=_models.TeamdrivesCreateRequestBodyBackgroundImageFile(id_=background_image_file_id) if any(v is not None for v in [background_image_file_id]) else None,
-                restrictions=_models.TeamdrivesCreateRequestBodyRestrictions(admin_managed_restrictions=admin_managed_restrictions, copy_requires_writer_permission=copy_requires_writer_permission, domain_users_only=domain_users_only, sharing_folders_requires_organizer_permission=sharing_folders_requires_organizer_permission, team_members_only=team_members_only) if any(v is not None for v in [admin_managed_restrictions, copy_requires_writer_permission, domain_users_only, sharing_folders_requires_organizer_permission, team_members_only]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_team_drive: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_team_drive", "POST", "/teamdrives", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/teamdrives"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_team_drive")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_team_drive",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: teamdrives
-@mcp.tool()
-async def get_team_drive(
-    team_drive_id: str = Field(..., alias="teamDriveId", description="The unique identifier of the Team Drive to retrieve."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="If true, issue the request with domain administrator privileges, granting access if the requester is an administrator of the domain that owns the Team Drive.")
-) -> dict[str, Any]:
-    """Retrieve metadata and details for a specific Team Drive. Note: This operation is deprecated; use get_drive instead for new implementations."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.TeamdrivesGetRequest(
-            path=_models.TeamdrivesGetRequestPath(team_drive_id=team_drive_id),
-            query=_models.TeamdrivesGetRequestQuery(use_domain_admin_access=use_domain_admin_access)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_team_drive: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_team_drive", "GET", "/teamdrives/{teamDriveId}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/teamdrives/{teamDriveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/teamdrives/{teamDriveId}"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_team_drive")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_team_drive",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: teamdrives
-@mcp.tool()
-async def update_team_drive(
-    team_drive_id: str = Field(..., alias="teamDriveId", description="The unique identifier of the Team Drive to update."),
-    use_domain_admin_access: bool | None = Field(None, alias="useDomainAdminAccess", description="If true, issue the request with domain administrator privileges, granting access if the requester is an administrator of the domain that owns the Team Drive."),
-    background_image_file_id: str | None = Field(None, alias="backgroundImageFileId", description="The ID of an image file stored in Drive to set as the Team Drive's background image."),
-    id_: str | None = Field(None, alias="id", description="The unique identifier of this Team Drive, which corresponds to the ID of its top-level folder."),
-    color_rgb: str | None = Field(None, alias="colorRgb", description="The color of the Team Drive as an RGB hex string. Cannot be set together with `themeId`."),
-    name: str | None = Field(None, description="The display name of the Team Drive."),
-    admin_managed_restrictions: bool | None = Field(None, alias="adminManagedRestrictions", description="If true, administrative privileges are required to modify restrictions on this Team Drive."),
-    copy_requires_writer_permission: bool | None = Field(None, alias="copyRequiresWriterPermission", description="If true, disables copy, print, and download options for readers and commenters within this Team Drive, overriding file-level settings."),
-    domain_users_only: bool | None = Field(None, alias="domainUsersOnly", description="If true, restricts access to this Team Drive and its contents to users of the domain that owns it. Other sharing policies may override this restriction."),
-    sharing_folders_requires_organizer_permission: bool | None = Field(None, alias="sharingFoldersRequiresOrganizerPermission", description="If true, only users with the organizer role can share folders; if false, both organizer and file organizer roles can share folders."),
-    team_members_only: bool | None = Field(None, alias="teamMembersOnly", description="If true, restricts access to items within this Team Drive to members of the Team Drive."),
-    theme_id: str | None = Field(None, alias="themeId", description="The ID of a theme that defines the Team Drive's background image and color. Available themes can be retrieved from the `about.get` response. Cannot be set together with `colorRgb` or `backgroundImageFile`. This is a write-only field.")
-) -> dict[str, Any]:
-    """Update the properties and settings of a Team Drive, including name, color, theme, and access restrictions. Note: This operation is deprecated; use `update_drive` instead."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.TeamdrivesUpdateRequest(
-            path=_models.TeamdrivesUpdateRequestPath(team_drive_id=team_drive_id),
-            query=_models.TeamdrivesUpdateRequestQuery(use_domain_admin_access=use_domain_admin_access),
-            body=_models.TeamdrivesUpdateRequestBody(id_=id_, color_rgb=color_rgb, name=name, theme_id=theme_id,
-                background_image_file=_models.TeamdrivesUpdateRequestBodyBackgroundImageFile(id_=background_image_file_id) if any(v is not None for v in [background_image_file_id]) else None,
-                restrictions=_models.TeamdrivesUpdateRequestBodyRestrictions(admin_managed_restrictions=admin_managed_restrictions, copy_requires_writer_permission=copy_requires_writer_permission, domain_users_only=domain_users_only, sharing_folders_requires_organizer_permission=sharing_folders_requires_organizer_permission, team_members_only=team_members_only) if any(v is not None for v in [admin_managed_restrictions, copy_requires_writer_permission, domain_users_only, sharing_folders_requires_organizer_permission, team_members_only]) else None)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_team_drive: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_team_drive", "PATCH", "/teamdrives/{teamDriveId}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/teamdrives/{teamDriveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/teamdrives/{teamDriveId}"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_team_drive")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_team_drive",
-        method="PATCH",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: teamdrives
-@mcp.tool()
-async def delete_team_drive(team_drive_id: str = Field(..., alias="teamDriveId", description="The unique identifier of the Team Drive to delete.")) -> dict[str, Any]:
-    """Permanently delete a Team Drive. Note: This operation is deprecated; use delete_drive instead for new implementations."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.TeamdrivesDeleteRequest(
-            path=_models.TeamdrivesDeleteRequestPath(team_drive_id=team_drive_id)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for delete_team_drive: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_team_drive", "DELETE", "/teamdrives/{teamDriveId}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/teamdrives/{teamDriveId}", _request.path.model_dump(by_alias=True)) if _request.path else "/teamdrives/{teamDriveId}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("delete_team_drive")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="delete_team_drive",
-        method="DELETE",
-        path=_http_path,
-        request_id=_request_id,
         headers=_http_headers,
     )
 
@@ -3888,7 +3284,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python google_drive_api_server.py", file=sys.stderr)
+        print("  python google_drive_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

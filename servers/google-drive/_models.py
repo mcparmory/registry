@@ -1,8 +1,8 @@
 """
-Google Drive Api MCP Server - Pydantic Models
+Google Drive MCP Server - Pydantic Models
 
-Generated: 2026-04-01 16:01:15 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:23:28 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -19,11 +19,7 @@ __all__ = [
     "AccessproposalsResolveRequest",
     "ApprovalsGetRequest",
     "ApprovalsListRequest",
-    "AppsGetRequest",
-    "AppsListRequest",
     "ChangesListRequest",
-    "ChangesWatchRequest",
-    "ChannelsStopRequest",
     "CommentsCreateRequest",
     "CommentsDeleteRequest",
     "CommentsGetRequest",
@@ -47,8 +43,6 @@ __all__ = [
     "FilesListRequest",
     "FilesModifyLabelsRequest",
     "FilesUpdateRequest",
-    "FilesWatchRequest",
-    "OperationsGetRequest",
     "PermissionsCreateRequest",
     "PermissionsDeleteRequest",
     "PermissionsGetRequest",
@@ -63,11 +57,6 @@ __all__ = [
     "RevisionsGetRequest",
     "RevisionsListRequest",
     "RevisionsUpdateRequest",
-    "TeamdrivesCreateRequest",
-    "TeamdrivesDeleteRequest",
-    "TeamdrivesGetRequest",
-    "TeamdrivesListRequest",
-    "TeamdrivesUpdateRequest",
     "ContentRestriction",
     "LabelModification",
 ]
@@ -135,21 +124,6 @@ class ApprovalsListRequest(StrictModel):
     path: ApprovalsListRequestPath
     query: ApprovalsListRequestQuery | None = None
 
-# Operation: get_app
-class AppsGetRequestPath(StrictModel):
-    app_id: str = Field(default=..., validation_alias="appId", serialization_alias="appId", description="The unique identifier of the app to retrieve.")
-class AppsGetRequest(StrictModel):
-    """Retrieves detailed information about a specific app by its ID. Use this to fetch app metadata and configuration details."""
-    path: AppsGetRequestPath
-
-# Operation: list_apps
-class AppsListRequestQuery(StrictModel):
-    app_filter_extensions: str | None = Field(default=None, validation_alias="appFilterExtensions", serialization_alias="appFilterExtensions", description="Comma-separated list of file extensions to filter results. Only apps capable of opening at least one of the specified extensions are returned. When combined with languageCode, results are merged from both filters.")
-    language_code: str | None = Field(default=None, validation_alias="languageCode", serialization_alias="languageCode", description="Language or locale code for localizing app metadata in the response, specified using BCP 47 format with optional Unicode LDML extensions.")
-class AppsListRequest(StrictModel):
-    """Retrieves a list of apps installed for the authenticated user, optionally filtered by file extensions or localized to a specific language. Useful for discovering available applications and their capabilities."""
-    query: AppsListRequestQuery | None = None
-
 # Operation: list_changes
 class ChangesListRequestQuery(StrictModel):
     page_token: str = Field(default=..., validation_alias="pageToken", serialization_alias="pageToken", description="Pagination token from the previous response's nextPageToken field or from getStartPageToken to continue listing changes on the next page.")
@@ -163,42 +137,6 @@ class ChangesListRequestQuery(StrictModel):
 class ChangesListRequest(StrictModel):
     """Retrieves a list of changes for a user's My Drive or shared drive, enabling tracking of file modifications, deletions, and access changes. Use page tokens to iterate through results."""
     query: ChangesListRequestQuery
-
-# Operation: subscribe_to_changes
-class ChangesWatchRequestQuery(StrictModel):
-    page_token: str = Field(default=..., validation_alias="pageToken", serialization_alias="pageToken", description="Pagination token from a previous list request. Use the 'nextPageToken' value from the prior response or call getStartPageToken to obtain the initial token for tracking changes from a specific point.")
-    include_corpus_removals: bool | None = Field(default=None, validation_alias="includeCorpusRemovals", serialization_alias="includeCorpusRemovals", description="Include the file resource in change entries even if the file was removed from the changes list, provided the user still has access to it at request time.")
-    include_items_from_all_drives: bool | None = Field(default=None, validation_alias="includeItemsFromAllDrives", serialization_alias="includeItemsFromAllDrives", description="Include changes from both My Drive and shared drives in the results.")
-    include_labels: str | None = Field(default=None, validation_alias="includeLabels", serialization_alias="includeLabels", description="Comma-separated list of label IDs to include in the labelInfo section of the response.")
-    include_permissions_for_view: str | None = Field(default=None, validation_alias="includePermissionsForView", serialization_alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response. Only 'published' is a supported value.")
-    include_removed: bool | None = Field(default=None, validation_alias="includeRemoved", serialization_alias="includeRemoved", description="Include change entries indicating items have been removed, such as through deletion or loss of access.")
-    page_size: int | None = Field(default=None, validation_alias="pageSize", serialization_alias="pageSize", description="Maximum number of changes to return per page.", ge=1, le=1000)
-    restrict_to_my_drive: bool | None = Field(default=None, validation_alias="restrictToMyDrive", serialization_alias="restrictToMyDrive", description="Restrict results to changes within the My Drive hierarchy, excluding changes to files in Application Data or shared files not added to My Drive.")
-class ChangesWatchRequestBody(StrictModel):
-    address: str | None = Field(default=None, description="The URL endpoint where push notifications will be delivered for this subscription channel.")
-    expiration: str | None = Field(default=None, description="Expiration time for this notification channel, expressed as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64'})
-    params: dict[str, str] | None = Field(default=None, description="Additional parameters controlling delivery channel behavior and notification settings.")
-    payload: bool | None = Field(default=None, description="Whether to include the full resource payload in each notification message.")
-    token: str | None = Field(default=None, description="An arbitrary string token that will be included with each notification delivered over this channel for identification or validation purposes.")
-    type_: str | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The type of delivery mechanism used for this channel. Valid values are \"web_hook\" or \"webhook\".")
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="A UUID or similar unique string that identifies this channel.")
-class ChangesWatchRequest(StrictModel):
-    """Subscribes to push notifications for changes to files and folders in a user's Drive. Allows real-time monitoring of Drive activity through a specified notification channel."""
-    query: ChangesWatchRequestQuery
-    body: ChangesWatchRequestBody | None = None
-
-# Operation: stop_channel
-class ChannelsStopRequestBody(StrictModel):
-    address: str | None = Field(default=None, description="The delivery address for this notification channel, such as a webhook URL or callback endpoint where notifications were being sent.")
-    expiration: str | None = Field(default=None, description="The expiration time of the notification channel, expressed as a Unix timestamp in milliseconds. Indicates when the channel subscription will automatically expire.", json_schema_extra={'format': 'int64'})
-    params: dict[str, str] | None = Field(default=None, description="Additional parameters that control the behavior and configuration of the delivery channel.")
-    payload: bool | None = Field(default=None, description="Indicates whether the notification payload (resource data) should be included with each notification delivered over this channel.")
-    token: str | None = Field(default=None, description="An arbitrary string token that is delivered with each notification to help identify and validate the channel at the receiving endpoint.")
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="A UUID or similar unique string that identifies this channel.")
-    resource_id: str | None = Field(default=None, validation_alias="resourceId", serialization_alias="resourceId", description="An opaque ID that identifies the resource being watched on this channel. Stable across different API versions.")
-class ChannelsStopRequest(StrictModel):
-    """Stops watching resources through a notification channel and ceases delivery of resource change notifications. This operation is used to clean up push notification subscriptions when monitoring is no longer needed."""
-    body: ChannelsStopRequestBody | None = None
 
 # Operation: list_comments
 class CommentsListRequestPath(StrictModel):
@@ -584,33 +522,6 @@ class FilesModifyLabelsRequest(StrictModel):
     path: FilesModifyLabelsRequestPath
     body: FilesModifyLabelsRequestBody | None = None
 
-# Operation: subscribe_file_changes
-class FilesWatchRequestPath(StrictModel):
-    file_id: str = Field(default=..., validation_alias="fileId", serialization_alias="fileId", description="The unique identifier of the file to monitor for changes.")
-class FilesWatchRequestQuery(StrictModel):
-    include_labels: str | None = Field(default=None, validation_alias="includeLabels", serialization_alias="includeLabels", description="Comma-separated list of label IDs to include in the labelInfo section of responses.")
-    include_permissions_for_view: str | None = Field(default=None, validation_alias="includePermissionsForView", serialization_alias="includePermissionsForView", description="Specifies which additional view's permissions to include in the response. Only the published view is currently supported.")
-class FilesWatchRequestBody(StrictModel):
-    address: str | None = Field(default=None, description="The target address where change notifications will be delivered for this subscription channel.")
-    expiration: str | None = Field(default=None, description="The expiration time for this notification channel, expressed as a Unix timestamp in milliseconds.", json_schema_extra={'format': 'int64'})
-    params: dict[str, str] | None = Field(default=None, description="Additional configuration parameters that control the behavior and delivery characteristics of the notification channel.")
-    payload: bool | None = Field(default=None, description="Whether to include the full resource payload in each notification. When true, notifications contain complete file data; when false, only change metadata is sent.")
-    token: str | None = Field(default=None, description="An arbitrary string token that will be included with each notification delivered over this channel, useful for identifying the subscription source.")
-    type_: str | None = Field(default=None, validation_alias="type", serialization_alias="type", description="The type of delivery mechanism used for this channel. Valid values are \"web_hook\" or \"webhook\".")
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="A UUID or similar unique string that identifies this channel.")
-class FilesWatchRequest(StrictModel):
-    """Subscribes to real-time notifications for changes to a specific file. Notifications are delivered to a specified address whenever the file is modified."""
-    path: FilesWatchRequestPath
-    query: FilesWatchRequestQuery | None = None
-    body: FilesWatchRequestBody | None = None
-
-# Operation: get_operation
-class OperationsGetRequestPath(StrictModel):
-    name: str = Field(default=..., description="The resource name of the operation to retrieve, typically in the format projects/{project}/locations/{location}/operations/{operation}.")
-class OperationsGetRequest(StrictModel):
-    """Retrieves the latest state of a long-running operation. Use this method to poll operation results at intervals as recommended by the API service."""
-    path: OperationsGetRequestPath
-
 # Operation: list_file_permissions
 class PermissionsListRequestPath(StrictModel):
     file_id: str = Field(default=..., validation_alias="fileId", serialization_alias="fileId", description="The unique identifier of the file or shared drive whose permissions you want to retrieve.")
@@ -805,88 +716,12 @@ class RevisionsListRequest(StrictModel):
     path: RevisionsListRequestPath
     query: RevisionsListRequestQuery | None = None
 
-# Operation: list_team_drives
-class TeamdrivesListRequestQuery(StrictModel):
-    page_size: int | None = Field(default=None, validation_alias="pageSize", serialization_alias="pageSize", description="Maximum number of Team Drives to return per page.", ge=1, le=100)
-    page_token: str | None = Field(default=None, validation_alias="pageToken", serialization_alias="pageToken", description="Token for retrieving the next page of Team Drives in paginated results.")
-    q: str | None = Field(default=None, description="Query string to filter Team Drives by name or other searchable attributes.")
-    use_domain_admin_access: bool | None = Field(default=None, validation_alias="useDomainAdminAccess", serialization_alias="useDomainAdminAccess", description="When true, issues the request with domain administrator privileges to return all Team Drives within the administrator's domain.")
-class TeamdrivesListRequest(StrictModel):
-    """Retrieves a list of Team Drives. Note: This operation is deprecated; use list_drives instead for new implementations."""
-    query: TeamdrivesListRequestQuery | None = None
-
-# Operation: create_team_drive
-class TeamdrivesCreateRequestQuery(StrictModel):
-    request_id: str = Field(default=..., validation_alias="requestId", serialization_alias="requestId", description="A unique identifier (such as a UUID) for this request that ensures idempotent creation. If the same requestId is used multiple times, duplicate Team Drives will not be created; instead, a 409 error will be returned if the Team Drive already exists.")
-class TeamdrivesCreateRequestBodyBackgroundImageFile(StrictModel):
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="The ID of an existing image file in Drive to use as the Team Drive's background image.")
-class TeamdrivesCreateRequestBodyRestrictions(StrictModel):
-    admin_managed_restrictions: bool | None = Field(default=None, validation_alias="adminManagedRestrictions", serialization_alias="adminManagedRestrictions", description="Whether administrative privileges are required to modify restrictions on this Team Drive.")
-    copy_requires_writer_permission: bool | None = Field(default=None, validation_alias="copyRequiresWriterPermission", serialization_alias="copyRequiresWriterPermission", description="Whether copying, printing, and downloading files inside this Team Drive should be disabled for readers and commenters. When enabled, this restriction overrides the same setting for individual files within the Team Drive.")
-    domain_users_only: bool | None = Field(default=None, validation_alias="domainUsersOnly", serialization_alias="domainUsersOnly", description="Whether access to this Team Drive and its contents is restricted to users of the domain that owns the Team Drive. Other sharing policies outside this Team Drive may override this restriction.")
-    sharing_folders_requires_organizer_permission: bool | None = Field(default=None, validation_alias="sharingFoldersRequiresOrganizerPermission", serialization_alias="sharingFoldersRequiresOrganizerPermission", description="Whether only users with the organizer role can share folders within this Team Drive. If false, both organizer and file organizer roles can share folders.")
-    team_members_only: bool | None = Field(default=None, validation_alias="teamMembersOnly", serialization_alias="teamMembersOnly", description="Whether access to items inside this Team Drive is restricted to members of this Team Drive.")
-class TeamdrivesCreateRequestBody(StrictModel):
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="The ID to assign to this Team Drive, which also serves as the ID of the top-level folder. If not specified, an ID will be generated automatically.")
-    color_rgb: str | None = Field(default=None, validation_alias="colorRgb", serialization_alias="colorRgb", description="The color of this Team Drive expressed as an RGB hex string. This can only be set on update requests that do not specify a themeId.")
-    name: str | None = Field(default=None, description="The display name for this Team Drive.")
-    theme_id: str | None = Field(default=None, validation_alias="themeId", serialization_alias="themeId", description="The ID of a theme that defines the background image and color for this Team Drive. Available themes can be retrieved from the drive.about.get endpoint. When not specified, a random theme is selected. This is a write-only field and cannot be used together with colorRgb or backgroundImageFile.")
-    background_image_file: TeamdrivesCreateRequestBodyBackgroundImageFile | None = Field(default=None, validation_alias="backgroundImageFile", serialization_alias="backgroundImageFile")
-    restrictions: TeamdrivesCreateRequestBodyRestrictions | None = None
-class TeamdrivesCreateRequest(StrictModel):
-    """Creates a new Team Drive with specified configuration, branding, and access restrictions. This operation is deprecated; use create_drive instead for new implementations."""
-    query: TeamdrivesCreateRequestQuery
-    body: TeamdrivesCreateRequestBody | None = None
-
-# Operation: get_team_drive
-class TeamdrivesGetRequestPath(StrictModel):
-    team_drive_id: str = Field(default=..., validation_alias="teamDriveId", serialization_alias="teamDriveId", description="The unique identifier of the Team Drive to retrieve.")
-class TeamdrivesGetRequestQuery(StrictModel):
-    use_domain_admin_access: bool | None = Field(default=None, validation_alias="useDomainAdminAccess", serialization_alias="useDomainAdminAccess", description="If true, issue the request with domain administrator privileges, granting access if the requester is an administrator of the domain that owns the Team Drive.")
-class TeamdrivesGetRequest(StrictModel):
-    """Retrieve metadata and details for a specific Team Drive. Note: This operation is deprecated; use get_drive instead for new implementations."""
-    path: TeamdrivesGetRequestPath
-    query: TeamdrivesGetRequestQuery | None = None
-
-# Operation: update_team_drive
-class TeamdrivesUpdateRequestPath(StrictModel):
-    team_drive_id: str = Field(default=..., validation_alias="teamDriveId", serialization_alias="teamDriveId", description="The unique identifier of the Team Drive to update.")
-class TeamdrivesUpdateRequestQuery(StrictModel):
-    use_domain_admin_access: bool | None = Field(default=None, validation_alias="useDomainAdminAccess", serialization_alias="useDomainAdminAccess", description="If true, issue the request with domain administrator privileges, granting access if the requester is an administrator of the domain that owns the Team Drive.")
-class TeamdrivesUpdateRequestBodyBackgroundImageFile(StrictModel):
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="The ID of an image file stored in Drive to set as the Team Drive's background image.")
-class TeamdrivesUpdateRequestBodyRestrictions(StrictModel):
-    admin_managed_restrictions: bool | None = Field(default=None, validation_alias="adminManagedRestrictions", serialization_alias="adminManagedRestrictions", description="If true, administrative privileges are required to modify restrictions on this Team Drive.")
-    copy_requires_writer_permission: bool | None = Field(default=None, validation_alias="copyRequiresWriterPermission", serialization_alias="copyRequiresWriterPermission", description="If true, disables copy, print, and download options for readers and commenters within this Team Drive, overriding file-level settings.")
-    domain_users_only: bool | None = Field(default=None, validation_alias="domainUsersOnly", serialization_alias="domainUsersOnly", description="If true, restricts access to this Team Drive and its contents to users of the domain that owns it. Other sharing policies may override this restriction.")
-    sharing_folders_requires_organizer_permission: bool | None = Field(default=None, validation_alias="sharingFoldersRequiresOrganizerPermission", serialization_alias="sharingFoldersRequiresOrganizerPermission", description="If true, only users with the organizer role can share folders; if false, both organizer and file organizer roles can share folders.")
-    team_members_only: bool | None = Field(default=None, validation_alias="teamMembersOnly", serialization_alias="teamMembersOnly", description="If true, restricts access to items within this Team Drive to members of the Team Drive.")
-class TeamdrivesUpdateRequestBody(StrictModel):
-    id_: str | None = Field(default=None, validation_alias="id", serialization_alias="id", description="The unique identifier of this Team Drive, which corresponds to the ID of its top-level folder.")
-    color_rgb: str | None = Field(default=None, validation_alias="colorRgb", serialization_alias="colorRgb", description="The color of the Team Drive as an RGB hex string. Cannot be set together with `themeId`.")
-    name: str | None = Field(default=None, description="The display name of the Team Drive.")
-    theme_id: str | None = Field(default=None, validation_alias="themeId", serialization_alias="themeId", description="The ID of a theme that defines the Team Drive's background image and color. Available themes can be retrieved from the `about.get` response. Cannot be set together with `colorRgb` or `backgroundImageFile`. This is a write-only field.")
-    background_image_file: TeamdrivesUpdateRequestBodyBackgroundImageFile | None = Field(default=None, validation_alias="backgroundImageFile", serialization_alias="backgroundImageFile")
-    restrictions: TeamdrivesUpdateRequestBodyRestrictions | None = None
-class TeamdrivesUpdateRequest(StrictModel):
-    """Update the properties and settings of a Team Drive, including name, color, theme, and access restrictions. Note: This operation is deprecated; use `update_drive` instead."""
-    path: TeamdrivesUpdateRequestPath
-    query: TeamdrivesUpdateRequestQuery | None = None
-    body: TeamdrivesUpdateRequestBody | None = None
-
-# Operation: delete_team_drive
-class TeamdrivesDeleteRequestPath(StrictModel):
-    team_drive_id: str = Field(default=..., validation_alias="teamDriveId", serialization_alias="teamDriveId", description="The unique identifier of the Team Drive to delete.")
-class TeamdrivesDeleteRequest(StrictModel):
-    """Permanently delete a Team Drive. Note: This operation is deprecated; use delete_drive instead for new implementations."""
-    path: TeamdrivesDeleteRequestPath
-
 # ============================================================================
 # Component Models
 # ============================================================================
 
 class AppIcons(PermissiveModel):
-    category: str | None = Field(None, description="Category of the icon. Allowed values are: * `application` - The icon for the application. * `document` - The icon for a file associated with the app. * `documentShared` - The icon for a shared file...")
+    category: str | None = Field(None, description="Category of the icon. Allowed values are: * `application` - The icon for the application. * `document` - The icon for a file associated with the app. * `documentShared` - The icon for a shared file associated with the app.")
     icon_url: str | None = Field(None, validation_alias="iconUrl", serialization_alias="iconUrl", description="URL for the icon.")
     size: int | None = Field(None, description="Size of the icon. Represented as the maximum of the width and height.", json_schema_extra={'format': 'int32'})
 
@@ -925,9 +760,9 @@ class DownloadRestriction(PermissiveModel):
 class DriveBackgroundImageFile(PermissiveModel):
     """An image file and cropping parameters from which a background image for this shared drive is set. This is a write only field; it can only be set on `drive.drives.update` requests that don't set `themeId`. When specified, all fields of the `backgroundImageFile` must be set."""
     id_: str | None = Field(None, validation_alias="id", serialization_alias="id", description="The ID of an image file in Google Drive to use for the background image.")
-    width: float | None = Field(None, description="The width of the cropped image in the closed range of 0 to 1. This value represents the width of the cropped image divided by the width of the entire image. The height is computed by applying a wid...", json_schema_extra={'format': 'float'})
-    x_coordinate: float | None = Field(None, validation_alias="xCoordinate", serialization_alias="xCoordinate", description="The X coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the horizontal distance from the left si...", json_schema_extra={'format': 'float'})
-    y_coordinate: float | None = Field(None, validation_alias="yCoordinate", serialization_alias="yCoordinate", description="The Y coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the vertical distance from the top side ...", json_schema_extra={'format': 'float'})
+    width: float | None = Field(None, description="The width of the cropped image in the closed range of 0 to 1. This value represents the width of the cropped image divided by the width of the entire image. The height is computed by applying a width to height aspect ratio of 80 to 9. The resulting image must be at least 1280 pixels wide and 144 pixels high.", json_schema_extra={'format': 'float'})
+    x_coordinate: float | None = Field(None, validation_alias="xCoordinate", serialization_alias="xCoordinate", description="The X coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the horizontal distance from the left side of the entire image to the left side of the cropping area divided by the width of the entire image.", json_schema_extra={'format': 'float'})
+    y_coordinate: float | None = Field(None, validation_alias="yCoordinate", serialization_alias="yCoordinate", description="The Y coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the vertical distance from the top side of the entire image to the top side of the cropping area divided by the height of the entire image.", json_schema_extra={'format': 'float'})
 
 class DriveCapabilities(PermissiveModel):
     """Output only. Capabilities the current user has on this shared drive."""
@@ -956,15 +791,15 @@ class DriveCapabilities(PermissiveModel):
 class DriveRestrictions(PermissiveModel):
     """A set of restrictions that apply to this shared drive or items inside this shared drive. Note that restrictions can't be set when creating a shared drive. To add a restriction, first create a shared drive and then use `drives.update` to add restrictions."""
     admin_managed_restrictions: bool | None = Field(None, validation_alias="adminManagedRestrictions", serialization_alias="adminManagedRestrictions", description="Whether administrative privileges on this shared drive are required to modify restrictions.")
-    copy_requires_writer_permission: bool | None = Field(None, validation_alias="copyRequiresWriterPermission", serialization_alias="copyRequiresWriterPermission", description="Whether the options to copy, print, or download files inside this shared drive, should be disabled for readers and commenters. When this restriction is set to `true`, it will override the similarly...")
-    domain_users_only: bool | None = Field(None, validation_alias="domainUsersOnly", serialization_alias="domainUsersOnly", description="Whether access to this shared drive and items inside this shared drive is restricted to users of the domain to which this shared drive belongs. This restriction may be overridden by other sharing p...")
+    copy_requires_writer_permission: bool | None = Field(None, validation_alias="copyRequiresWriterPermission", serialization_alias="copyRequiresWriterPermission", description="Whether the options to copy, print, or download files inside this shared drive, should be disabled for readers and commenters. When this restriction is set to `true`, it will override the similarly named field to `true` for any file inside this shared drive.")
+    domain_users_only: bool | None = Field(None, validation_alias="domainUsersOnly", serialization_alias="domainUsersOnly", description="Whether access to this shared drive and items inside this shared drive is restricted to users of the domain to which this shared drive belongs. This restriction may be overridden by other sharing policies controlled outside of this shared drive.")
     download_restriction: DownloadRestriction | None = Field(None, validation_alias="downloadRestriction", serialization_alias="downloadRestriction", description="Download restrictions applied by shared drive managers.")
     drive_members_only: bool | None = Field(None, validation_alias="driveMembersOnly", serialization_alias="driveMembersOnly", description="Whether access to items inside this shared drive is restricted to its members.")
     sharing_folders_requires_organizer_permission: bool | None = Field(None, validation_alias="sharingFoldersRequiresOrganizerPermission", serialization_alias="sharingFoldersRequiresOrganizerPermission", description="If true, only users with the organizer role can share folders. If false, users with either the organizer role or the file organizer role can share folders.")
 
 class Drive(PermissiveModel):
     """Representation of a shared drive. Some resource methods (such as `drives.update`) require a `driveId`. Use the `drives.list` method to retrieve the ID for a shared drive."""
-    background_image_file: DriveBackgroundImageFile | None = Field(None, validation_alias="backgroundImageFile", serialization_alias="backgroundImageFile", description="An image file and cropping parameters from which a background image for this shared drive is set. This is a write only field; it can only be set on `drive.drives.update` requests that don't set `th...")
+    background_image_file: DriveBackgroundImageFile | None = Field(None, validation_alias="backgroundImageFile", serialization_alias="backgroundImageFile", description="An image file and cropping parameters from which a background image for this shared drive is set. This is a write only field; it can only be set on `drive.drives.update` requests that don't set `themeId`. When specified, all fields of the `backgroundImageFile` must be set.")
     background_image_link: str | None = Field(None, validation_alias="backgroundImageLink", serialization_alias="backgroundImageLink", description="Output only. A short-lived link to this shared drive's background image.")
     capabilities: DriveCapabilities | None = Field(None, description="Output only. Capabilities the current user has on this shared drive.")
     color_rgb: str | None = Field(None, validation_alias="colorRgb", serialization_alias="colorRgb", description="The color of this shared drive as an RGB hex string. It can only be set on a `drive.drives.update` request that does not set `themeId`.")
@@ -974,8 +809,8 @@ class Drive(PermissiveModel):
     kind: str | None = Field('drive#drive', description="Output only. Identifies what kind of resource this is. Value: the fixed string `\"drive#drive\"`.")
     name: str | None = Field(None, description="The name of this shared drive.")
     org_unit_id: str | None = Field(None, validation_alias="orgUnitId", serialization_alias="orgUnitId", description="Output only. The organizational unit of this shared drive. This field is only populated on `drives.list` responses when the `useDomainAdminAccess` parameter is set to `true`.")
-    restrictions: DriveRestrictions | None = Field(None, description="A set of restrictions that apply to this shared drive or items inside this shared drive. Note that restrictions can't be set when creating a shared drive. To add a restriction, first create a share...")
-    theme_id: str | None = Field(None, validation_alias="themeId", serialization_alias="themeId", description="The ID of the theme from which the background image and color will be set. The set of possible `driveThemes` can be retrieved from a `drive.about.get` response. When not specified on a `drive.drive...")
+    restrictions: DriveRestrictions | None = Field(None, description="A set of restrictions that apply to this shared drive or items inside this shared drive. Note that restrictions can't be set when creating a shared drive. To add a restriction, first create a shared drive and then use `drives.update` to add restrictions.")
+    theme_id: str | None = Field(None, validation_alias="themeId", serialization_alias="themeId", description="The ID of the theme from which the background image and color will be set. The set of possible `driveThemes` can be retrieved from a `drive.about.get` response. When not specified on a `drive.drives.create` request, a random theme is chosen from which the background image and color are set. This is a write-only field; it can only be set on requests that don't set `colorRgb` or `backgroundImageFile`.")
 
 class LabelFieldModification(PermissiveModel):
     """A modification to a label's field."""
@@ -1006,7 +841,7 @@ class User(PermissiveModel):
 
 class ContentRestriction(PermissiveModel):
     """A restriction for accessing the content of the file."""
-    owner_restricted: bool | None = Field(None, validation_alias="ownerRestricted", serialization_alias="ownerRestricted", description="Whether the content restriction can only be modified or removed by a user who owns the file. For files in shared drives, any user with `organizer` capabilities can modify or remove this content res...")
+    owner_restricted: bool | None = Field(None, validation_alias="ownerRestricted", serialization_alias="ownerRestricted", description="Whether the content restriction can only be modified or removed by a user who owns the file. For files in shared drives, any user with `organizer` capabilities can modify or remove this content restriction.")
     read_only: bool | None = Field(None, validation_alias="readOnly", serialization_alias="readOnly", description="Whether the content of the file is read-only. If a file is read-only, a new revision of the file may not be added, comments may not be added or modified, and the title of the file may not be modified.")
     reason: str | None = Field(None, description="Reason for why the content of the file is restricted. This is only mutable on requests that also set `readOnly=true`.")
     restricting_user: User | None = Field(None, validation_alias="restrictingUser", serialization_alias="restrictingUser", description="Output only. The user who set the content restriction. Only populated if `readOnly=true`.")
