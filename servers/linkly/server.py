@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Linkly API Specification MCP Server
-Generated: 2026-04-09 18:37:41 UTC
+Generated: 2026-04-09 19:17:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1141,13 +1141,14 @@ async def create_or_update_link(
     spam: bool | None = Field(None, description="Mark the link as spam or suspicious content."),
     tiktok_pixel_id: str | None = Field(None, description="TikTok Pixel ID for conversion tracking and audience building on TikTok."),
     url: str | None = Field(None, description="Destination URL to redirect to. Required when creating a new link; must be a valid URI."),
+    workspace_id: int | None = Field(None, description="Workspace ID"),
 ) -> dict[str, Any]:
     """Create a new shortened link or update an existing one. Provide `url` and `workspace_id` to create; provide `id` and fields to update. Supports custom slugs, UTM parameters, tracking pixels, Open Graph metadata, and conditional redirect rules."""
 
     # Construct request model with validation
     try:
         _request = _models.CreateOrUpdateLinkRequest(
-            body=_models.CreateOrUpdateLinkRequestBody(block_bots=block_bots, body_tags=body_tags, cloaking=cloaking, deleted=deleted, enabled=enabled, fb_pixel_id=fb_pixel_id, forward_params=forward_params, ga4_tag_id=ga4_tag_id, gtm_id=gtm_id, head_tags=head_tags, hide_referrer=hide_referrer, id_=id_, linkify_words=linkify_words, name=name, note=note, og_description=og_description, og_image=og_image, og_title=og_title, replacements=replacements, rules=rules, slug=slug, spam=spam, tiktok_pixel_id=tiktok_pixel_id, url=url)
+            body=_models.CreateOrUpdateLinkRequestBody(block_bots=block_bots, body_tags=body_tags, cloaking=cloaking, deleted=deleted, enabled=enabled, fb_pixel_id=fb_pixel_id, forward_params=forward_params, ga4_tag_id=ga4_tag_id, gtm_id=gtm_id, head_tags=head_tags, hide_referrer=hide_referrer, id_=id_, linkify_words=linkify_words, name=name, note=note, og_description=og_description, og_image=og_image, og_title=og_title, replacements=replacements, rules=rules, slug=slug, spam=spam, tiktok_pixel_id=tiktok_pixel_id, url=url, workspace_id=workspace_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for create_or_update_link: {_validation_err}")
@@ -1179,13 +1180,17 @@ async def create_or_update_link(
 
 # Tags: Links
 @mcp.tool()
-async def get_link_analytics(id_: str = Field(..., alias="id", description="The unique identifier of the link to retrieve. Use the link ID provided when the link was created.")) -> dict[str, Any]:
+async def get_link_analytics(
+    id_: str = Field(..., alias="id", description="The unique identifier of the link to retrieve. Use the link ID provided when the link was created."),
+    workspace_id: str | None = Field(None, description="Workspace ID. Optional when using OAuth2 Bearer token."),
+) -> dict[str, Any]:
     """Retrieve detailed information about a specific link, including click statistics, UTM parameters, and configuration settings."""
 
     # Construct request model with validation
     try:
         _request = _models.GetLink2Request(
-            path=_models.GetLink2RequestPath(id_=id_)
+            path=_models.GetLink2RequestPath(id_=id_),
+            query=_models.GetLink2RequestQuery(workspace_id=workspace_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_link_analytics: {_validation_err}")
@@ -1193,7 +1198,7 @@ async def get_link_analytics(id_: str = Field(..., alias="id", description="The 
 
     # Extract parameters for API call
     _http_path = _build_path("/api/v1/link/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/api/v1/link/{id}"
-    _http_query = {}
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_link_analytics")

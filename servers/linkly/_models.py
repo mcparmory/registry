@@ -1,7 +1,7 @@
 """
 Linkly Api Specification MCP Server - Pydantic Models
 
-Generated: 2026-04-09 18:37:41 UTC
+Generated: 2026-04-09 19:17:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -81,6 +81,7 @@ class CreateOrUpdateLinkRequestBody(StrictModel):
     spam: bool | None = Field(default=None, description="Mark the link as spam or suspicious content.")
     tiktok_pixel_id: str | None = Field(default=None, description="TikTok Pixel ID for conversion tracking and audience building on TikTok.")
     url: str | None = Field(default=None, description="Destination URL to redirect to. Required when creating a new link; must be a valid URI.", json_schema_extra={'format': 'uri'})
+    workspace_id: int | None = Field(default=None, description="Workspace ID")
 class CreateOrUpdateLinkRequest(StrictModel):
     """Create a new shortened link or update an existing one. Provide `url` and `workspace_id` to create; provide `id` and fields to update. Supports custom slugs, UTM parameters, tracking pixels, Open Graph metadata, and conditional redirect rules."""
     body: CreateOrUpdateLinkRequestBody | None = None
@@ -88,9 +89,12 @@ class CreateOrUpdateLinkRequest(StrictModel):
 # Operation: get_link_analytics
 class GetLink2RequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the link to retrieve. Use the link ID provided when the link was created.")
+class GetLink2RequestQuery(StrictModel):
+    workspace_id: str | None = Field(default=None, description="Workspace ID. Optional when using OAuth2 Bearer token.")
 class GetLink2Request(StrictModel):
     """Retrieve detailed information about a specific link, including click statistics, UTM parameters, and configuration settings."""
     path: GetLink2RequestPath
+    query: GetLink2RequestQuery | None = None
 
 # Operation: list_webhooks_for_link
 class ListLinkWebhooksRequestPath(StrictModel):

@@ -1,7 +1,7 @@
 """
 Linkly Api Specification MCP Server - Validators
 
-Generated: 2026-04-09 18:37:41 UTC
+Generated: 2026-04-09 19:17:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
