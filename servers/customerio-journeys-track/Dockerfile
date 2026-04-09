@@ -1,4 +1,4 @@
-# Journeys Track API MCP Server
+# Customer.io Journeys Track MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-customerio-journeys-track .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Journeys Track API MCP Server" \
+LABEL org.opencontainers.image.title="Customer.io Journeys Track MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

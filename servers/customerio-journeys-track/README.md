@@ -1,7 +1,6 @@
-# Journeys Track API MCP Server
+# Customer.io Journeys Track MCP Server
 
 Base URL: https://track.customer.io
-
 ---
 
 ## Install
