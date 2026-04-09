@@ -1,8 +1,8 @@
 """
-Files.com Api MCP Server - Pydantic Models
+Files.com MCP Server - Pydantic Models
 
-Generated: 2026-04-01 18:20:53 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:20:43 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from _validators import PermissiveModel, StrictModel
 from pydantic import Field
 
 __all__ = [
-    "ApiKeyUpdateCurrentRequest",
     "BehaviorListForPathRequest",
     "DeleteApiKeysIdRequest",
     "DeleteAs2PartnersIdRequest",
@@ -68,7 +67,6 @@ __all__ = [
     "GetAutomationsRequest",
     "GetBandwidthSnapshotsRequest",
     "GetBehaviorsIdRequest",
-    "GetBehaviorsRequest",
     "GetBundleDownloadsRequest",
     "GetBundleNotificationsIdRequest",
     "GetBundleNotificationsRequest",
@@ -121,15 +119,12 @@ __all__ = [
     "GetRemoteServersRequest",
     "GetRequestsFoldersPathRequest",
     "GetRequestsRequest",
-    "GetSettingsChangesRequest",
     "GetSftpHostKeysIdRequest",
     "GetSftpHostKeysRequest",
     "GetSiteApiKeysRequest",
     "GetSiteDnsRecordsRequest",
     "GetSiteIpAddressesRequest",
     "GetSsoStrategiesIdRequest",
-    "GetSsoStrategiesRequest",
-    "GetStylesPathRequest",
     "GetUsageDailySnapshotsRequest",
     "GetUsageSnapshotsRequest",
     "GetUserApiKeysRequest",
@@ -155,7 +150,6 @@ __all__ = [
     "PatchAs2PartnersIdRequest",
     "PatchAs2StationsIdRequest",
     "PatchAutomationsIdRequest",
-    "PatchBehaviorsIdRequest",
     "PatchBundleNotificationsIdRequest",
     "PatchBundlesIdRequest",
     "PatchClickwrapsIdRequest",
@@ -171,7 +165,6 @@ __all__ = [
     "PatchPublicKeysIdRequest",
     "PatchRemoteServersIdRequest",
     "PatchSftpHostKeysIdRequest",
-    "PatchSiteRequest",
     "PatchStylesPathRequest",
     "PatchUserRequest",
     "PatchUsersIdRequest",
@@ -180,10 +173,6 @@ __all__ = [
     "PostApiKeysRequest",
     "PostAs2PartnersRequest",
     "PostAs2StationsRequest",
-    "PostAutomationsRequest",
-    "PostBehaviorsRequest",
-    "PostBehaviorsWebhookTestRequest",
-    "PostBundleNotificationsRequest",
     "PostBundleRecipientsRequest",
     "PostBundlesIdShareRequest",
     "PostBundlesRequest",
@@ -206,10 +195,8 @@ __all__ = [
     "PostRemoteServersIdConfigurationFileRequest",
     "PostRemoteServersRequest",
     "PostRequestsRequest",
-    "PostSessionsRequest",
     "PostSftpHostKeysRequest",
     "PostSiteApiKeysRequest",
-    "PostSiteTestWebhookRequest",
     "PostSsoStrategiesIdSyncRequest",
     "PostUserApiKeysRequest",
     "PostUserPublicKeysRequest",
@@ -231,14 +218,6 @@ __all__ = [
     "PatchRemoteServersIdBodyRackspace",
     "PatchRemoteServersIdBodyS3Compatible",
     "PatchRemoteServersIdBodyWasabi",
-    "PatchSiteBodyAllowed2faMethod",
-    "PatchSiteBodyBundle",
-    "PatchSiteBodyColor2",
-    "PatchSiteBodyLdap",
-    "PatchSiteBodyPassword",
-    "PatchSiteBodySftp",
-    "PatchSiteBodySmtp",
-    "PatchSiteBodyWelcomeEmail",
     "PostFormFieldSetsBodyFormFieldsItem",
     "PostRemoteServersBodyAws",
     "PostRemoteServersBodyAzureBlobStorage",
@@ -291,15 +270,6 @@ class PostActionWebhookFailuresIdRetryRequestPath(StrictModel):
 class PostActionWebhookFailuresIdRetryRequest(StrictModel):
     """Retry a failed action webhook by its failure ID. This operation allows you to re-attempt delivery of a webhook that previously failed."""
     path: PostActionWebhookFailuresIdRetryRequestPath
-
-# Operation: update_api_key
-class ApiKeyUpdateCurrentRequestBody(StrictModel):
-    expires_at: str | None = Field(default=None, description="Set when this API key should expire. After this date, the key will no longer be valid for authentication.", json_schema_extra={'format': 'date-time'})
-    name: str | None = Field(default=None, description="A human-readable label for this API key to help you identify it among multiple keys.")
-    permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(default=None, description="The permission level for this API key. `desktop_app` restricts access to file and share link operations only. `full` grants complete access. Other specialized permission sets may be available for specific integrations.")
-class ApiKeyUpdateCurrentRequest(StrictModel):
-    """Update the current API key's configuration including expiration date, display name, and permission scope. Requires authentication using an API key."""
-    body: ApiKeyUpdateCurrentRequestBody | None = None
 
 # Operation: list_api_keys
 class GetApiKeysRequestQuery(StrictModel):
@@ -486,25 +456,6 @@ class GetAutomationsRequest(StrictModel):
     """Retrieve a paginated list of automations with optional filtering and sorting. Use this to view all automations in your account, including deleted ones if needed."""
     query: GetAutomationsRequestQuery | None = None
 
-# Operation: create_automation
-class PostAutomationsRequestBody(StrictModel):
-    automation: Literal["create_folder", "request_file", "request_move", "copy_newest_file", "delete_file", "copy_file", "move_file", "as2_send", "run_sync"] = Field(default=..., description="The type of automation to create, which determines the action performed when the automation runs.")
-    description: str | None = Field(default=None, description="A descriptive label for this automation to help identify its purpose.")
-    destinations: list[str] | None = Field(default=None, description="Target locations where the automation action will be applied. Accepts folder paths as strings or objects specifying both folder and optional file paths.")
-    disabled: bool | None = Field(default=None, description="When true, prevents this automation from running while keeping its configuration intact.")
-    interval: str | None = Field(default=None, description="Predefined interval for recurring automation execution. Choose from standard intervals like daily, weekly, monthly, or quarterly.")
-    name: str | None = Field(default=None, description="A human-readable name for this automation.")
-    schedule: dict[str, Any] | None = Field(default=None, description="Custom schedule configuration for fine-grained control over when the automation runs, including specific days, times, and timezone.")
-    source: str | None = Field(default=None, description="The file or folder path where the automation will monitor for changes or retrieve files from.")
-    sync_ids: str | None = Field(default=None, description="Comma-separated list of sync IDs to associate with this automation, enabling coordination with file synchronization tasks.")
-    trigger: Literal["realtime", "daily", "custom_schedule", "webhook", "email", "action"] | None = Field(default=None, description="The event that initiates automation execution. Use realtime for immediate response, daily for scheduled runs, custom_schedule for fine-grained timing, or webhook/email/action for external triggers.")
-    trigger_actions: list[str] | None = Field(default=None, description="When trigger is set to action, specify which file operations should activate the automation. Valid operations are create, read, update, destroy, move, and copy.")
-    user_ids: str | None = Field(default=None, description="Comma-separated list of user IDs to associate with this automation, restricting it to specific users.")
-    value: dict[str, Any] | None = Field(default=None, description="Automation-type-specific configuration options provided as key-value pairs to customize behavior.")
-class PostAutomationsRequest(StrictModel):
-    """Create a new automation to perform scheduled or triggered actions on files and folders. Automations can run on custom schedules, in real-time, or via webhooks to automate file operations like copying, moving, deleting, or requesting files."""
-    body: PostAutomationsRequestBody
-
 # Operation: get_automation
 class GetAutomationsIdRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the automation to retrieve.", json_schema_extra={'format': 'int32'})
@@ -548,26 +499,6 @@ class GetBandwidthSnapshotsRequest(StrictModel):
     """Retrieve a paginated list of bandwidth snapshots. Results can be sorted by the logged timestamp in ascending or descending order."""
     query: GetBandwidthSnapshotsRequestQuery | None = None
 
-# Operation: list_behaviors
-class GetBehaviorsRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of behavior records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
-    sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Only the `behavior` field is supported for sorting.")
-class GetBehaviorsRequest(StrictModel):
-    """Retrieve a paginated list of all behaviors. Results can be sorted by behavior name in ascending or descending order."""
-    query: GetBehaviorsRequestQuery | None = None
-
-# Operation: create_behavior
-class PostBehaviorsRequestBody(StrictModel):
-    attachment_file: str | None = Field(default=None, description="Binary file attachment required by certain behavior types. For example, the watermark behavior requires a watermark image file.", json_schema_extra={'format': 'binary'})
-    behavior: str = Field(default=..., description="The type of behavior to create, which determines the configuration and processing applied to files in the folder.")
-    description: str | None = Field(default=None, description="Optional description explaining the purpose or details of this behavior.")
-    name: str | None = Field(default=None, description="Optional display name for this behavior.")
-    path: str = Field(default=..., description="The folder path where this behavior will be applied. Behaviors are scoped to specific folder locations.")
-    value: str | None = Field(default=None, description="Configuration value for the behavior. The structure and type (integer, array, or object) depends on the behavior type. Refer to behavior type documentation for valid value formats.")
-class PostBehaviorsRequest(StrictModel):
-    """Create a new behavior for a folder path. Behaviors automate actions on files, such as webhooks or watermarking, and may require configuration values or supporting files."""
-    body: PostBehaviorsRequestBody
-
 # Operation: list_behaviors_by_path
 class BehaviorListForPathRequestPath(StrictModel):
     path: str = Field(default=..., description="The folder path where behaviors are located. This path determines the starting point for the behavior listing.")
@@ -580,37 +511,12 @@ class BehaviorListForPathRequest(StrictModel):
     path: BehaviorListForPathRequestPath
     query: BehaviorListForPathRequestQuery | None = None
 
-# Operation: test_webhook_behavior
-class PostBehaviorsWebhookTestRequestBody(StrictModel):
-    action: str | None = Field(default=None, description="The action type to include in the test request body.")
-    encoding: str | None = Field(default=None, description="The HTTP content encoding format for the test request body. Determines how the request payload is formatted.")
-    headers: dict[str, Any] | None = Field(default=None, description="Custom HTTP headers to include in the test request. Provide as key-value pairs.")
-    method: str | None = Field(default=None, description="The HTTP method to use for the test request.")
-    url: str = Field(default=..., description="The webhook endpoint URL to test. Must be a valid, accessible HTTP or HTTPS URL.")
-class PostBehaviorsWebhookTestRequest(StrictModel):
-    """Validate a webhook endpoint by sending a test request. Useful for verifying webhook configuration and connectivity before deploying to production."""
-    body: PostBehaviorsWebhookTestRequestBody
-
 # Operation: get_behavior
 class GetBehaviorsIdRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the behavior to retrieve.", json_schema_extra={'format': 'int32'})
 class GetBehaviorsIdRequest(StrictModel):
     """Retrieve detailed information about a specific behavior by its ID."""
     path: GetBehaviorsIdRequestPath
-
-# Operation: update_behavior
-class PatchBehaviorsIdRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the behavior to update.", json_schema_extra={'format': 'int32'})
-class PatchBehaviorsIdRequestBody(StrictModel):
-    attachment_delete: bool | None = Field(default=None, description="Set to true to remove any file currently attached to this behavior.")
-    attachment_file: str | None = Field(default=None, description="A file to attach to this behavior. Some behavior types require specific file formats (e.g., watermark behavior requires an image file).", json_schema_extra={'format': 'binary'})
-    description: str | None = Field(default=None, description="A human-readable description explaining the purpose or details of this behavior.")
-    name: str | None = Field(default=None, description="A human-readable name for this behavior.")
-    value: str | None = Field(default=None, description="The configuration value for this behavior. The structure and type depend on the behavior type and can be an integer, array, or object. Refer to behavior type documentation for valid value formats.")
-class PatchBehaviorsIdRequest(StrictModel):
-    """Update an existing behavior configuration, including its name, description, value, and optional file attachment. This operation allows modification of behavior properties and management of associated files."""
-    path: PatchBehaviorsIdRequestPath
-    body: PatchBehaviorsIdRequestBody | None = None
 
 # Operation: delete_behavior
 class DeleteBehaviorsIdRequestPath(StrictModel):
@@ -636,15 +542,6 @@ class GetBundleNotificationsRequestQuery(StrictModel):
 class GetBundleNotificationsRequest(StrictModel):
     """Retrieve a paginated list of notifications for a specific bundle or all bundles. Use pagination parameters to control result size and retrieval."""
     query: GetBundleNotificationsRequestQuery | None = None
-
-# Operation: create_bundle_notification
-class PostBundleNotificationsRequestBody(StrictModel):
-    bundle_id: int = Field(default=..., description="The unique identifier of the bundle for which to create notification settings.", json_schema_extra={'format': 'int32'})
-    notify_on_registration: bool | None = Field(default=None, description="Enable notifications when a registration action occurs on this bundle.")
-    notify_on_upload: bool | None = Field(default=None, description="Enable notifications when an upload action occurs on this bundle.")
-class PostBundleNotificationsRequest(StrictModel):
-    """Create notification settings for a bundle to trigger alerts on specific actions. Configure which events (registration or upload) should generate notifications for the specified bundle."""
-    body: PostBundleNotificationsRequestBody
 
 # Operation: get_bundle_notification
 class GetBundleNotificationsIdRequestPath(StrictModel):
@@ -1244,7 +1141,7 @@ class HistoryListForFileRequestQuery(StrictModel):
     start_at: str | None = Field(default=None, description="Filter to only include history entries created on or after this date and time.", json_schema_extra={'format': 'date-time'})
     end_at: str | None = Field(default=None, description="Filter to only include history entries created on or before this date and time.", json_schema_extra={'format': 'date-time'})
     display: str | None = Field(default=None, description="Control the detail level of returned records. Use `full` for complete details or `parent` for parent-only information.")
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Maximum is 10,000; 1,000 or less is recommended.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Maximum is 10,000; 1,000 or less is recommended.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Use object notation (e.g., `sort_by[user_id]=desc`). Valid fields are `user_id` and `created_at`.")
 class HistoryListForFileRequest(StrictModel):
     """Retrieve the change history for a specific file, with optional filtering by date range and customizable sorting and pagination."""
@@ -1270,7 +1167,7 @@ class HistoryListLoginsRequestQuery(StrictModel):
     start_at: str | None = Field(default=None, description="Filter to exclude login records before this date and time. Leave blank to include all earlier entries.", json_schema_extra={'format': 'date-time'})
     end_at: str | None = Field(default=None, description="Filter to exclude login records after this date and time. Leave blank to include all later entries.", json_schema_extra={'format': 'date-time'})
     display: str | None = Field(default=None, description="Control the response format. Use `full` for complete details or `parent` for parent-level information only.")
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended maximum is 1,000 for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended maximum is 1,000 for optimal performance.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Use format `sort_by[field_name]=direction` where field_name is `user_id` or `created_at` and direction is `asc` or `desc`.")
 class HistoryListLoginsRequest(StrictModel):
     """Retrieve a paginated list of site login history with optional filtering by date range and sorting capabilities."""
@@ -1283,7 +1180,7 @@ class HistoryListForUserRequestQuery(StrictModel):
     start_at: str | None = Field(default=None, description="Filter to exclude history entries created before this date and time. Leave blank to include all earlier entries.", json_schema_extra={'format': 'date-time'})
     end_at: str | None = Field(default=None, description="Filter to exclude history entries created after this date and time. Leave blank to include all later entries.", json_schema_extra={'format': 'date-time'})
     display: str | None = Field(default=None, description="Control the detail level of returned records. Use `full` for complete details or `parent` for parent-only information.")
-    per_page: int | None = Field(default=None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Use field names `user_id` or `created_at` with direction indicators.")
 class HistoryListForUserRequest(StrictModel):
     """Retrieve a paginated list of history records for a specific user, with optional filtering by date range and customizable sorting and display format."""
@@ -1361,7 +1258,7 @@ class GetInboxRegistrationsRequest(StrictModel):
 
 # Operation: list_inbox_uploads
 class GetInboxUploadsRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Only `created_at` is supported as a valid sort field.")
     inbox_registration_id: int | None = Field(default=None, description="Filter uploads by the associated inbox registration ID.", json_schema_extra={'format': 'int32'})
     inbox_id: int | None = Field(default=None, description="Filter uploads by the associated inbox ID.", json_schema_extra={'format': 'int32'})
@@ -1427,7 +1324,7 @@ class DeleteLocksPathRequest(StrictModel):
 
 # Operation: list_message_comment_reactions
 class GetMessageCommentReactionsRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     message_comment_id: int = Field(default=..., description="The ID of the message comment for which to retrieve reactions.", json_schema_extra={'format': 'int32'})
 class GetMessageCommentReactionsRequest(StrictModel):
     """Retrieve all reactions added to a specific message comment. Results are paginated and can be controlled via the per_page parameter."""
@@ -1714,7 +1611,7 @@ class DeletePublicKeysIdRequest(StrictModel):
 
 # Operation: list_bandwidth_snapshots_remote
 class GetRemoteBandwidthSnapshotsRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Use the field name as the key and 'asc' or 'desc' as the value. Valid sortable field is 'logged_at'.")
 class GetRemoteBandwidthSnapshotsRequest(StrictModel):
     """Retrieve a paginated list of remote bandwidth snapshots. Results can be sorted by the logged timestamp in ascending or descending order."""
@@ -1838,7 +1735,7 @@ class PostRemoteServersIdConfigurationFileRequest(StrictModel):
 
 # Operation: list_requests
 class GetRequestsRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Only the `destination` field is supported for sorting.")
     mine: bool | None = Field(default=None, description="Filter to show only requests belonging to the current user. Defaults to true for non-admin users.")
 class GetRequestsRequest(StrictModel):
@@ -1872,22 +1769,6 @@ class DeleteRequestsIdRequestPath(StrictModel):
 class DeleteRequestsIdRequest(StrictModel):
     """Delete a specific request by its ID. This operation permanently removes the request from the system."""
     path: DeleteRequestsIdRequestPath
-
-# Operation: create_session
-class PostSessionsRequestBody(StrictModel):
-    otp: str | None = Field(default=None, description="One-time password or code from the user's 2FA device, required if two-factor authentication is enabled for this account.")
-    partial_session_id: str | None = Field(default=None, description="Identifier for resuming a login flow that was previously started but not completed, typically from a prior authentication attempt.")
-class PostSessionsRequest(StrictModel):
-    """Authenticate a user and create a session. Supports two-factor authentication via OTP and resuming partially-completed logins."""
-    body: PostSessionsRequestBody | None = None
-
-# Operation: list_settings_changes
-class GetSettingsChangesRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.", json_schema_extra={'format': 'int32'})
-    sort_by: dict[str, Any] | None = Field(default=None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are api_key_id, created_at, or user_id.")
-class GetSettingsChangesRequest(StrictModel):
-    """Retrieve a paginated list of settings changes with optional sorting. Use this to audit configuration modifications across your account."""
-    query: GetSettingsChangesRequestQuery | None = None
 
 # Operation: list_sftp_host_keys
 class GetSftpHostKeysRequestQuery(StrictModel):
@@ -1929,91 +1810,6 @@ class DeleteSftpHostKeysIdRequest(StrictModel):
     """Delete an SFTP host key by its ID. This operation permanently removes the specified host key from the system."""
     path: DeleteSftpHostKeysIdRequestPath
 
-# Operation: update_site_settings
-class PatchSiteRequestBody(StrictModel):
-    active_sftp_host_key_id: int | None = Field(default=None, description="ID of the custom SFTP host key currently in use for secure file transfers.", json_schema_extra={'format': 'int32'})
-    allow_bundle_names: bool | None = Field(default=None, description="Allow users to manually specify custom names when creating bundles for file sharing.")
-    allowed_countries: str | None = Field(default=None, description="Restrict access to users from specific countries. Provide as comma-separated ISO 3166-1 alpha-2 country codes.")
-    allowed_ips: str | None = Field(default=None, description="Restrict access to specific IP addresses or CIDR ranges. Provide as a list of IP addresses or ranges.")
-    ask_about_overwrites: bool | None = Field(default=None, description="When disabled, automatically rename conflicting files instead of prompting users for overwrite confirmation in the web interface.")
-    custom_namespace: bool | None = Field(default=None, description="Indicates whether this site uses a custom namespace for user management separate from the default.")
-    days_to_retain_backups: int | None = Field(default=None, description="Number of days to retain deleted files in backup before permanent removal.", json_schema_extra={'format': 'int32'})
-    default_time_zone: str | None = Field(default=None, description="Set the default timezone for the site, affecting how timestamps are displayed to users.")
-    desktop_app: bool | None = Field(default=None, description="Enable the desktop application for file synchronization and management.")
-    disable_2fa_with_delay: bool | None = Field(default=None, description="Initiate the process of disabling two-factor authentication across the site. This is a gradual process for security.")
-    disable_files_certificate_generation: bool | None = Field(default=None, description="Prevent Files.com from automatically setting CAA DNS records needed for SSL certificate generation on custom domains.")
-    disable_password_reset: bool | None = Field(default=None, description="Disable the password reset functionality, requiring administrators to reset user passwords instead.")
-    disable_users_from_inactivity_period_days: int | None = Field(default=None, description="Automatically disable user accounts if they show no activity within the specified number of days. Set to 0 to disable this feature.", json_schema_extra={'format': 'int32'})
-    disallowed_countries: str | None = Field(default=None, description="Block access from users in specific countries. Provide as comma-separated ISO 3166-1 alpha-2 country codes.")
-    domain: str | None = Field(default=None, description="Custom domain name for the site instead of using the default subdomain.")
-    domain_hsts_header: bool | None = Field(default=None, description="Send HTTP Strict Transport Security (HSTS) header when visitors access the site through a custom domain to enforce HTTPS.")
-    domain_letsencrypt_chain: str | None = Field(default=None, description="Specify which Let's Encrypt certificate chain to use when registering SSL certificates for the custom domain.")
-    email: str | None = Field(default=None, description="Primary email address for the site, used for administrative communications and notifications.")
-    folder_permissions_groups_only: bool | None = Field(default=None, description="Restrict folder permissions to be assigned only to groups rather than individual users.")
-    ftp_enabled: bool | None = Field(default=None, description="Enable FTP (File Transfer Protocol) access for users.")
-    icon128_delete: bool | None = Field(default=None, description="Delete the 128x128 pixel icon file currently used for site branding.")
-    icon128_file: str | None = Field(default=None, description="Upload a 128x128 pixel icon file for site branding. Accepts binary image data.", json_schema_extra={'format': 'binary'})
-    icon16_delete: bool | None = Field(default=None, description="Delete the 16x16 pixel favicon file currently used for site branding.")
-    icon16_file: str | None = Field(default=None, description="Upload a 16x16 pixel favicon file for site branding. Accepts binary image data.", json_schema_extra={'format': 'binary'})
-    icon32_delete: bool | None = Field(default=None, description="Delete the 32x32 pixel icon file currently used for site branding.")
-    icon32_file: str | None = Field(default=None, description="Upload a 32x32 pixel icon file for site branding. Accepts binary image data.", json_schema_extra={'format': 'binary'})
-    icon48_delete: bool | None = Field(default=None, description="Delete the 48x48 pixel icon file currently used for site branding.")
-    icon48_file: str | None = Field(default=None, description="Upload a 48x48 pixel icon file for site branding. Accepts binary image data.", json_schema_extra={'format': 'binary'})
-    immutable_files: bool | None = Field(default=None, description="Prevent files from being modified, deleted, or renamed once uploaded to the site.")
-    include_password_in_welcome_email: bool | None = Field(default=None, description="Include the user's password in welcome emails sent to newly created accounts.")
-    language: str | None = Field(default=None, description="Set the default language for the site interface and user communications.")
-    login_help_text: str | None = Field(default=None, description="Custom help text displayed on the login page to assist users.")
-    logo_delete: bool | None = Field(default=None, description="Delete the logo image file currently used for site branding.")
-    logo_file: str | None = Field(default=None, description="Upload a logo image file for site branding. Accepts binary image data.", json_schema_extra={'format': 'binary'})
-    max_prior_passwords: int | None = Field(default=None, description="Number of previous passwords to prevent users from reusing when changing their password.", json_schema_extra={'format': 'int32'})
-    mobile_app: bool | None = Field(default=None, description="Enable the mobile application for file access and management on mobile devices.")
-    motd_text: str | None = Field(default=None, description="Message of the day displayed to users when they connect via FTP or SFTP protocols.")
-    motd_use_for_ftp: bool | None = Field(default=None, description="Display the message of the day to users connecting via FTP.")
-    motd_use_for_sftp: bool | None = Field(default=None, description="Display the message of the day to users connecting via SFTP.")
-    name: str | None = Field(default=None, description="Display name for the site used in branding and user-facing communications.")
-    non_sso_groups_allowed: bool | None = Field(default=None, description="Allow site administrators to manually create, modify, and delete groups. When disabled, groups can only be managed through SSO providers.")
-    non_sso_users_allowed: bool | None = Field(default=None, description="Allow site administrators to manually create, modify, and delete user accounts. When disabled, users can only be managed through SSO providers.")
-    office_integration_available: bool | None = Field(default=None, description="Enable Office for the web integration, allowing users to edit and view Microsoft Office documents directly in the browser.")
-    office_integration_type: str | None = Field(default=None, description="Specify which Office integration application to use for editing and viewing Microsoft Office documents.")
-    opt_out_global: bool | None = Field(default=None, description="Restrict server usage to the United States region only for data residency and compliance requirements.")
-    overage_notify: bool | None = Field(default=None, description="Send email notifications to the site email address when storage usage exceeds the account quota.")
-    pin_all_remote_servers_to_site_region: bool | None = Field(default=None, description="Route all internal communications with remote servers through the site's primary region, overriding individual remote server settings.")
-    reply_to_email: str | None = Field(default=None, description="Email address to use as the reply-to address for outgoing site emails.")
-    require_2fa: bool | None = Field(default=None, description="Require all users to set up and use two-factor authentication for account access.")
-    require_2fa_user_type: str | None = Field(default=None, description="Specify which user types are required to use two-factor authentication when the site-wide requirement is enabled.")
-    session_expiry_minutes: int | None = Field(default=None, description="Duration in minutes before user sessions automatically expire and require re-authentication.", json_schema_extra={'format': 'int32'})
-    session_pinned_by_ip: bool | None = Field(default=None, description="Lock user sessions to the IP address from which they were created, requiring re-authentication if the IP changes.")
-    sharing_enabled: bool | None = Field(default=None, description="Enable bundle creation and file sharing functionality for users.")
-    show_request_access_link: bool | None = Field(default=None, description="Display a request access link for users who lack permission to view certain resources.")
-    site_footer: str | None = Field(default=None, description="Custom HTML or text to display in the footer of the site interface.")
-    site_header: str | None = Field(default=None, description="Custom HTML or text to display in the header of the site interface.")
-    ssl_required: bool | None = Field(default=None, description="Require all connections to the site to use SSL/TLS encryption. Disabling this is a security risk.")
-    subdomain: str | None = Field(default=None, description="Subdomain under the Files.com domain for accessing the site (e.g., 'mycompany' for mycompany.files.com).")
-    tls_disabled: bool | None = Field(default=None, description="Allow insecure TLS and SFTP cipher suites. Enabling this is a security risk and should only be used for legacy system compatibility.")
-    uploads_via_email_authentication: bool | None = Field(default=None, description="Require incoming emails to inboxes to pass SPF, DKIM, and DMARC authentication checks.")
-    use_provided_modified_at: bool | None = Field(default=None, description="Allow users uploading files to specify a custom modification timestamp instead of using the current time.")
-    user_lockout: bool | None = Field(default=None, description="Lock user accounts after a specified number of failed login attempts within a time window.")
-    user_requests_enabled: bool | None = Field(default=None, description="Enable the user requests feature, allowing users to request access to resources they don't have permission to view.")
-    user_requests_notify_admins: bool | None = Field(default=None, description="Send email notifications to site administrators when a user submits an access request.")
-    welcome_custom_text: str | None = Field(default=None, description="Custom text to include in the welcome email sent to newly created user accounts.")
-    welcome_screen: str | None = Field(default=None, description="Control whether a welcome screen is displayed to users upon first login.")
-    windows_mode_ftp: bool | None = Field(default=None, description="Enable Windows emulation mode for FTP connections to provide Windows-style file system behavior.")
-    ldap: PatchSiteBodyLdap | None = Field(default=None, description="LDAP authentication and directory sync settings")
-    smtp: PatchSiteBodySmtp | None = Field(default=None, description="Custom SMTP server settings for outbound email")
-    allowed_2fa_method: PatchSiteBodyAllowed2faMethod | None = Field(default=None, description="Allowed two-factor authentication methods")
-    password: PatchSiteBodyPassword | None = Field(default=None, description="Password complexity and validity requirements")
-    bundle: PatchSiteBodyBundle | None = Field(default=None, description="Bundle (file sharing) configuration")
-    user_lockout2: bool | None = Field(default=None, description="User lockout settings for failed login attempts")
-    color2: PatchSiteBodyColor2 | None = Field(default=None, description="Site branding color customization")
-    desktop_app2: bool | None = Field(default=None, description="Desktop app access and session settings")
-    mobile_app2: bool | None = Field(default=None, description="Mobile app access and session settings")
-    sftp: PatchSiteBodySftp | None = Field(default=None, description="SFTP server settings")
-    welcome_email: PatchSiteBodyWelcomeEmail | None = Field(default=None, description="Welcome email configuration for new users")
-    bundle_watermark_value: dict[str, Any] | None = Field(default=None, description="Preview watermark settings applied to all bundle items. Uses the same keys as Behavior.value")
-class PatchSiteRequest(StrictModel):
-    """Update comprehensive site configuration settings including security policies, authentication methods, branding, integrations, and protocol enablement. This operation allows administrators to modify all aspects of site behavior and appearance."""
-    body: PatchSiteRequestBody | None = None
-
 # Operation: list_api_keys_site
 class GetSiteApiKeysRequestQuery(StrictModel):
     per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
@@ -2029,7 +1825,7 @@ class PostSiteApiKeysRequestBody(StrictModel):
     name: str | None = Field(default=None, description="An internal name for this API key to help you identify and manage it.")
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(default=None, description="The permission level for this API key, controlling which operations it can perform. Desktop app keys are limited to file and share link operations, while full keys have unrestricted access.")
 class PostSiteApiKeysRequest(StrictModel):
-    """Create a new API key for authenticating requests to the Files.com API. Configure the key's name, expiration date, description, and permission level to control its access scope."""
+    """Create a new API key for authenticating requests to the Files.com. Configure the key's name, expiration date, description, and permission level to control its access scope."""
     body: PostSiteApiKeysRequestBody | None = None
 
 # Operation: list_dns_records_site
@@ -2046,24 +1842,6 @@ class GetSiteIpAddressesRequest(StrictModel):
     """Retrieve a paginated list of IP addresses associated with the current site. Use the per_page parameter to control result set size."""
     query: GetSiteIpAddressesRequestQuery | None = None
 
-# Operation: test_webhook_site
-class PostSiteTestWebhookRequestBody(StrictModel):
-    action: str | None = Field(default=None, description="Action type to include in the test request body.")
-    encoding: str | None = Field(default=None, description="HTTP encoding format for the request body: JSON, XML, or RAW (form data).")
-    headers: dict[str, Any] | None = Field(default=None, description="Custom HTTP headers to include in the test request as key-value pairs.")
-    method: str | None = Field(default=None, description="HTTP method to use for the test request.")
-    url: str = Field(default=..., description="The webhook endpoint URL to test.")
-class PostSiteTestWebhookRequest(StrictModel):
-    """Test a webhook endpoint by sending a test request with configurable HTTP method, encoding, headers, and payload. Validates webhook connectivity and configuration."""
-    body: PostSiteTestWebhookRequestBody
-
-# Operation: list_sso_strategies
-class GetSsoStrategiesRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.", json_schema_extra={'format': 'int32'})
-class GetSsoStrategiesRequest(StrictModel):
-    """Retrieve a paginated list of SSO (Single Sign-On) strategies configured in the system. Use the per_page parameter to control result set size."""
-    query: GetSsoStrategiesRequestQuery | None = None
-
 # Operation: get_sso_strategy
 class GetSsoStrategiesIdRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the SSO strategy to retrieve.", json_schema_extra={'format': 'int32'})
@@ -2077,13 +1855,6 @@ class PostSsoStrategiesIdSyncRequestPath(StrictModel):
 class PostSsoStrategiesIdSyncRequest(StrictModel):
     """Synchronize provisioning data between the local system and the remote SSO server for the specified strategy. This operation ensures user and group data are up-to-date across both systems."""
     path: PostSsoStrategiesIdSyncRequestPath
-
-# Operation: get_style
-class GetStylesPathRequestPath(StrictModel):
-    path: str = Field(default=..., description="The hierarchical path identifier for the style resource (e.g., 'theme/dark', 'colors/primary'). Use forward slashes to denote nested paths.")
-class GetStylesPathRequest(StrictModel):
-    """Retrieve a specific style configuration by its path. Returns the style details for the requested path."""
-    path: GetStylesPathRequestPath
 
 # Operation: update_style
 class PatchStylesPathRequestPath(StrictModel):
@@ -2235,7 +2006,7 @@ class DeleteUserRequestsIdRequest(StrictModel):
 
 # Operation: list_users
 class GetUsersRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", le=10000, json_schema_extra={'format': 'int32'})
+    per_page: int | None = Field(default=None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.", json_schema_extra={'format': 'int32'})
     ids: str | None = Field(default=None, description="Filter results by one or more user IDs using comma-separated values.")
     q_username: str | None = Field(default=None, validation_alias="q[username]", serialization_alias="q[username]", description="Filter results to users whose username matches the provided value.")
     q_email: str | None = Field(default=None, validation_alias="q[email]", serialization_alias="q[email]", description="Filter results to users whose email address matches the provided value.")
@@ -2526,85 +2297,6 @@ class PatchRemoteServersIdBodyWasabi(PermissiveModel):
     wasabi_region: str | None = Field(None, description="Wasabi region")
     wasabi_secret_key: str | None = Field(None, description="Wasabi secret key.")
 
-class PatchSiteBodyAllowed2faMethod(PermissiveModel):
-    """Allowed two-factor authentication methods"""
-    allowed_2fa_method_bypass_for_ftp_sftp_dav: bool | None = Field(None, description="Are users allowed to configure their two factor authentication to be bypassed for FTP/SFTP/WebDAV?")
-    allowed_2fa_method_sms: bool | None = Field(None, description="Is SMS two factor authentication allowed?")
-    allowed_2fa_method_totp: bool | None = Field(None, description="Is TOTP two factor authentication allowed?")
-    allowed_2fa_method_u2f: bool | None = Field(None, description="Is U2F two factor authentication allowed?")
-    allowed_2fa_method_webauthn: bool | None = Field(None, description="Is WebAuthn two factor authentication allowed?")
-    allowed_2fa_method_yubi: bool | None = Field(None, description="Is yubikey two factor authentication allowed?")
-
-class PatchSiteBodyBundle(PermissiveModel):
-    """Bundle (file sharing) configuration"""
-    bundle_activity_notifications: str | None = Field(None, description="Do Bundle owners receive activity notifications?")
-    bundle_expiration: int | None = Field(None, description="Site-wide Bundle expiration in days", json_schema_extra={'format': 'int32'})
-    bundle_password_required: bool | None = Field(None, description="Do Bundles require password protection?")
-    bundle_registration_notifications: str | None = Field(None, description="Do Bundle owners receive registration notification?")
-    bundle_require_share_recipient: bool | None = Field(None, description="Do Bundles require recipients for sharing?")
-    bundle_upload_receipt_notifications: str | None = Field(None, description="Do Bundle uploaders receive upload confirmation notifications?")
-    bundle_watermark_attachment_delete: bool | None = Field(None, description="If true, will delete the file stored in bundle_watermark_attachment")
-    bundle_watermark_attachment_file: str | None = Field(None, json_schema_extra={'format': 'binary'})
-
-class PatchSiteBodyColor2(PermissiveModel):
-    """Site branding color customization"""
-    color2_link: str | None = Field(None, description="Top bar link color")
-    color2_text: str | None = Field(None, description="Page link and button color")
-    color2_top: str | None = Field(None, description="Top bar background color")
-    color2_top_text: str | None = Field(None, description="Top bar text color")
-
-class PatchSiteBodyLdap(PermissiveModel):
-    """LDAP authentication and directory sync settings"""
-    ldap_base_dn: str | None = Field(None, description="Base DN for looking up users in LDAP server")
-    ldap_domain: str | None = Field(None, description="Domain name that will be appended to usernames")
-    ldap_enabled: bool | None = Field(None, description="Main LDAP setting: is LDAP enabled?")
-    ldap_group_action: str | None = Field(None, description="Should we sync groups from LDAP server?")
-    ldap_group_exclusion: str | None = Field(None, description="Comma or newline separated list of group names (with optional wildcards) to exclude when syncing.")
-    ldap_group_inclusion: str | None = Field(None, description="Comma or newline separated list of group names (with optional wildcards) to include when syncing.")
-    ldap_host: str | None = Field(None, description="LDAP host")
-    ldap_host_2: str | None = Field(None, description="LDAP backup host")
-    ldap_host_3: str | None = Field(None, description="LDAP backup host")
-    ldap_port: int | None = Field(None, description="LDAP port", json_schema_extra={'format': 'int32'})
-    ldap_secure: bool | None = Field(None, description="Use secure LDAP?")
-    ldap_type: str | None = Field(None, description="LDAP type")
-    ldap_user_action: str | None = Field(None, description="Should we sync users from LDAP server?")
-    ldap_user_include_groups: str | None = Field(None, description="Comma or newline separated list of group names (with optional wildcards) - if provided, only users in these groups will be added or synced.")
-    ldap_username: str | None = Field(None, description="Username for signing in to LDAP server.")
-    ldap_username_field: str | None = Field(None, description="LDAP username field")
-
-class PatchSiteBodyPassword(PermissiveModel):
-    """Password complexity and validity requirements"""
-    password_min_length: int | None = Field(None, description="Shortest password length for users", json_schema_extra={'format': 'int32'})
-    password_require_letter: bool | None = Field(None, description="Require a letter in passwords?")
-    password_require_mixed: bool | None = Field(None, description="Require lower and upper case letters in passwords?")
-    password_require_number: bool | None = Field(None, description="Require a number in passwords?")
-    password_require_special: bool | None = Field(None, description="Require special characters in password?")
-    password_require_unbreached: bool | None = Field(None, description="Require passwords that have not been previously breached? (see https://haveibeenpwned.com/)")
-    password_requirements_apply_to_bundles: bool | None = Field(None, description="Require bundles' passwords, and passwords for other items (inboxes, public shares, etc.) to conform to the same requirements as users' passwords?")
-    password_validity_days: int | None = Field(None, description="Number of days password is valid", json_schema_extra={'format': 'int32'})
-
-class PatchSiteBodySftp(PermissiveModel):
-    """SFTP server settings"""
-    sftp_enabled: bool | None = Field(None, description="Is SFTP enabled?")
-    sftp_host_key_type: str | None = Field(None, description="Sftp Host Key Type")
-    sftp_insecure_ciphers: bool | None = Field(None, description="Are Insecure Ciphers allowed for SFTP?  Note:  Settting TLS Disabled -> True will always allow insecure ciphers for SFTP as well.  Enabling this is insecure.")
-    sftp_user_root_enabled: bool | None = Field(None, description="Use user FTP roots also for SFTP?")
-
-class PatchSiteBodySmtp(PermissiveModel):
-    """Custom SMTP server settings for outbound email"""
-    smtp_address: str | None = Field(None, description="SMTP server hostname or IP")
-    smtp_authentication: str | None = Field(None, description="SMTP server authentication type")
-    smtp_from: str | None = Field(None, description="From address to use when mailing through custom SMTP")
-    smtp_password: str | None = Field(None, description="Password for SMTP server.")
-    smtp_port: int | None = Field(None, description="SMTP server port", json_schema_extra={'format': 'int32'})
-    smtp_username: str | None = Field(None, description="SMTP server username")
-
-class PatchSiteBodyWelcomeEmail(PermissiveModel):
-    """Welcome email configuration for new users"""
-    welcome_email_cc: str | None = Field(None, description="Include this email in welcome emails if enabled")
-    welcome_email_enabled: bool | None = Field(None, description="Will the welcome email be sent to new users?")
-    welcome_email_subject: str | None = Field(None, description="Include this email subject in welcome emails if enabled")
-
 class PostFormFieldSetsBodyFormFieldsItem(PermissiveModel):
     default_option: str | None = Field(None, description="Default option to be preselected in the dropdown or radio.")
     field_type: str | None = Field(None, description="Type of field: text, text_area, dropdown, or radio")
@@ -2683,14 +2375,6 @@ PatchRemoteServersIdBodyGoogleCloudStorage.model_rebuild()
 PatchRemoteServersIdBodyRackspace.model_rebuild()
 PatchRemoteServersIdBodyS3Compatible.model_rebuild()
 PatchRemoteServersIdBodyWasabi.model_rebuild()
-PatchSiteBodyAllowed2faMethod.model_rebuild()
-PatchSiteBodyBundle.model_rebuild()
-PatchSiteBodyColor2.model_rebuild()
-PatchSiteBodyLdap.model_rebuild()
-PatchSiteBodyPassword.model_rebuild()
-PatchSiteBodySftp.model_rebuild()
-PatchSiteBodySmtp.model_rebuild()
-PatchSiteBodyWelcomeEmail.model_rebuild()
 PostFormFieldSetsBodyFormFieldsItem.model_rebuild()
 PostRemoteServersBodyAws.model_rebuild()
 PostRemoteServersBodyAzureBlobStorage.model_rebuild()

@@ -1,5 +1,5 @@
-# Files.com API - Dependencies
-# Generated: 2026-04-01 18:20:53 UTC
+# Files.com - Dependencies
+# Generated: 2026-04-09 17:20:43 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0

@@ -1,4 +1,4 @@
-# Files.com API MCP Server
+# Files.com MCP Server
 
 Base URL: http://app.files.com/api/rest/v1
 ## API Info
