@@ -1,7 +1,6 @@
-# BambooHR API MCP Server
+# BambooHR MCP Server
 
 Base URL: https://companySubDomain.bamboohr.com
-
 ---
 
 ## Install

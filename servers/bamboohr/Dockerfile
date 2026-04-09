@@ -1,4 +1,4 @@
-# BambooHR API MCP Server
+# BambooHR MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-bamboohr .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="BambooHR API MCP Server" \
+LABEL org.opencontainers.image.title="BambooHR MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
