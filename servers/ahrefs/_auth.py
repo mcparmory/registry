@@ -1,7 +1,7 @@
 """
 Authentication module for Ahrefs API MCP server.
 
-Generated: 2026-04-05 19:42:41 UTC
+Generated: 2026-04-09 17:13:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -196,7 +196,5 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_gsc_keywords": [["bearerAuth"]],
     "get_page_history": [["bearerAuth"]],
     "list_gsc_pages": [["bearerAuth"]],
-    "list_anonymous_queries": [["bearerAuth"]],
-    "list_crawler_ips": [["bearerAuth"]],
-    "list_crawler_ip_ranges": [["bearerAuth"]]
+    "list_anonymous_queries": [["bearerAuth"]]
 }
