@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-clickup"
-version = "1.0.1"
-description = "MCP server for ClickUp API v2 Reference"
+version = "1.0.2"
+description = "MCP server for ClickUp"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

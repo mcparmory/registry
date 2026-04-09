@@ -1,4 +1,4 @@
-# ClickUp API v2 Reference MCP Server
+# ClickUp MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-clickup .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="ClickUp API v2 Reference MCP Server" \
+LABEL org.opencontainers.image.title="ClickUp MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

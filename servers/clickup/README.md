@@ -1,7 +1,6 @@
-# ClickUp API v2 Reference MCP Server
+# ClickUp MCP Server
 
 Base URL: https://api.clickup.com/api
-
 ---
 
 ## Install
