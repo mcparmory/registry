@@ -6,14 +6,15 @@ API Info:
 - API License: CC BY-SA 4.0 (https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
 - Terms of Service: https://about.gitlab.com/terms/
 
-Generated: 2026-03-31 18:45:04 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:51 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 try:
     from dotenv import load_dotenv
@@ -38,6 +39,7 @@ import _models
 import httpx
 import pydantic
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.gitlab.com/api/v4")
@@ -489,12 +491,15 @@ async def _make_request(
             base_url=BASE_URL,
             timeout=HTTPX_TIMEOUT,
             limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
-            cookies=None,  # Disable cookie persistence for multi-tenant safety
-            follow_redirects=True
+            cookies=None,
+            follow_redirects=True,
         )
 
     if headers is None:
         headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
 
 
     if rate_limiter is not None:
@@ -536,7 +541,10 @@ async def _make_request(
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
             _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
-            _content = body if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
             response = await client.request(
                 method=method,
                 url=path,
@@ -738,19 +746,68 @@ async def _make_request(
     raise ConnectionError(error_message)
 
 # ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
+@overload
+def _parse_int(v: str | int) -> int: ...
+@overload
+def _parse_int(v: None) -> None: ...
+def _parse_int(v: str | int | None) -> int | None:
+    """Convert a string representation of an integer to a Python int.
 
-def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str) -> None:
-    """Log tool invocation."""
+    Formatted integer parameters (int32, int64, uint64, etc.) are exposed as str
+    in the tool signature to prevent JS float64 precision loss for large IDs.
+    This helper converts them back to int before Pydantic model construction.
+    None passes through for optional parameters.
+    Raises ValueError for non-integer strings or unexpected types (e.g. bool).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"Expected an integer value, got {v!r}")
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError) as _e:
+        raise ValueError(f"Expected an integer value, got {v!r}") from _e
+
+
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
     logging.info(
         f"Tool invoked: {tool_name}",
         extra={
             "request_id": request_id,
             "tool": tool_name,
             "method": method,
-            "path": path,
+            "path": log_path,
             "timeout": DEFAULT_TIMEOUT
         }
     )
@@ -775,10 +832,15 @@ def _build_path(
     result = template
     for key, value in path_params.items():
         result = result.replace("{" + key + "}", str(value))
-    # Normalize double slashes that occur when a path param value itself starts
-    # with "/" and the template already has a preceding "/" (e.g. "/{path}" + "/foo")
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
     while "//" in result:
-        result = result.replace("//", "/")
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
     return result
 
 async def _execute_tool_request(
@@ -872,10 +934,7 @@ async def _execute_tool_request(
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'oauth2',
-    'openIdConnect',
-    'http',
-    'apiKey',
+    'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -907,9 +966,9 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         operation_id: The operation ID (tool name) to get auth for
 
     Returns:
-        Dictionary with 'headers', 'params', 'cookies' keys containing auth data
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
     """
-    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}}
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
 
     # Get auth requirements for this operation from auth module
     # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
@@ -953,6 +1012,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
         headers = {}
         params = {}
         cookies = {}
+        path_params = {}
         all_succeeded = True
 
         # Handle AND group (multiple schemes in same list - all must succeed)
@@ -965,7 +1025,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 break
 
             try:
-                # Try all injection methods (headers, params, cookies)
+                # Try all injection methods (headers, params, cookies, path_params)
                 # OAuth2 methods are async (token refresh/authorize); others are sync.
                 import inspect as _inspect
                 if hasattr(handler, 'get_auth_headers'):
@@ -977,16 +1037,20 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
                 if hasattr(handler, 'get_auth_cookies'):
                     _c = handler.get_auth_cookies()
                     cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
             except Exception as e:
                 logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
                 all_succeeded = False
                 break
 
         # If all schemes in AND group succeeded, use this auth
-        if all_succeeded and (headers or params or cookies):
+        if all_succeeded and (headers or params or cookies or path_params):
             result["headers"] = headers
             result["params"] = params
             result["cookies"] = cookies
+            result["path_params"] = path_params
             logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
             return result
 
@@ -1000,30 +1064,26 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("GitLab")
+mcp = FastMCP("GitLab", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: badges
 @mcp.tool()
 async def get_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group owns the badge you want to retrieve."),
-    badge_id: int = Field(..., description="The unique identifier of the badge within the group.", json_schema_extra={'format': 'int32'})
+    badge_id: str = Field(..., description="The unique identifier of the badge within the group."),
 ) -> dict[str, Any]:
     """Retrieves a specific badge belonging to a group. This allows you to fetch details about a badge that has been assigned to a group."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4GroupsIdBadgesBadgeIdRequest(
-            path=_models.GetApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id)
+            path=_models.GetApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_group_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_group_badge", "GET", "/groups/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges/{badge_id}"
@@ -1032,6 +1092,9 @@ async def get_group_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_group_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_group_badge", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1048,28 +1111,24 @@ async def get_group_badge(
 @mcp.tool()
 async def update_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group owned by the authenticated user."),
-    badge_id: int = Field(..., description="The unique identifier of the badge to update.", json_schema_extra={'format': 'int32'}),
+    badge_id: str = Field(..., description="The unique identifier of the badge to update."),
     link_url: str | None = Field(None, description="The URL where the badge link should direct users."),
     image_url: str | None = Field(None, description="The URL of the image to display as the badge."),
-    name: str | None = Field(None, description="A descriptive name for the badge.")
+    name: str | None = Field(None, description="A descriptive name for the badge."),
 ) -> dict[str, Any]:
     """Updates an existing badge for a group. Allows modification of the badge's name, image URL, and link URL."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4GroupsIdBadgesBadgeIdRequest(
-            path=_models.PutApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id),
+            path=_models.PutApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id),
             body=_models.PutApiV4GroupsIdBadgesBadgeIdRequestBody(link_url=link_url, image_url=image_url, name=name)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_group_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_group_badge", "PUT", "/groups/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges/{badge_id}"
@@ -1079,6 +1138,9 @@ async def update_group_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_group_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_group_badge", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1096,24 +1158,20 @@ async def update_group_badge(
 @mcp.tool()
 async def remove_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group the badge should be removed from."),
-    badge_id: int = Field(..., description="The unique identifier of the badge to remove from the group.", json_schema_extra={'format': 'int32'})
+    badge_id: str = Field(..., description="The unique identifier of the badge to remove from the group."),
 ) -> dict[str, Any]:
     """Removes a badge from a group. This allows administrators to delete badges that are no longer needed or relevant to the group."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4GroupsIdBadgesBadgeIdRequest(
-            path=_models.DeleteApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id)
+            path=_models.DeleteApiV4GroupsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for remove_group_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("remove_group_badge", "DELETE", "/groups/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges/{badge_id}"
@@ -1122,6 +1180,9 @@ async def remove_group_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("remove_group_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_group_badge", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1138,26 +1199,22 @@ async def remove_group_badge(
 @mcp.tool()
 async def list_group_badges(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's badges to retrieve."),
-    per_page: int | None = Field(20, description="Number of badges to return per page for pagination.", json_schema_extra={'format': 'int32'}),
-    name: str | None = Field(None, description="Filter badges by name. Returns only badges matching the specified name.")
+    per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
+    name: str | None = Field(None, description="Filter badges by name. Returns only badges matching the specified name."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of badges for a group that are viewable by the authenticated user. Introduced in GitLab 10.6."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4GroupsIdBadgesRequest(
             path=_models.GetApiV4GroupsIdBadgesRequestPath(id_=id_),
-            query=_models.GetApiV4GroupsIdBadgesRequestQuery(per_page=per_page, name=name)
+            query=_models.GetApiV4GroupsIdBadgesRequestQuery(per_page=_per_page, name=name)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_group_badges: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_group_badges", "GET", "/groups/{id}/badges", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/badges", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges"
@@ -1167,6 +1224,9 @@ async def list_group_badges(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_group_badges")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_group_badges", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1186,7 +1246,7 @@ async def add_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. You can use either the numeric group ID or the full URL-encoded group path (e.g., 'my-group' or 'parent-group%2Fchild-group')."),
     link_url: str = Field(..., description="The URL where the badge image links to when clicked. This should be a valid HTTP or HTTPS URL."),
     image_url: str = Field(..., description="The URL of the badge image to display. This should be a valid HTTP or HTTPS URL pointing to an image file."),
-    name: str | None = Field(None, description="A descriptive name for the badge to help identify its purpose. This is displayed as alt text and in the group's badge management interface.")
+    name: str | None = Field(None, description="A descriptive name for the badge to help identify its purpose. This is displayed as alt text and in the group's badge management interface."),
 ) -> dict[str, Any]:
     """Adds a badge to a group to display custom branding or status indicators. The badge will be visible on the group's profile page."""
 
@@ -1200,12 +1260,6 @@ async def add_group_badge(
         logging.error(f"Parameter validation failed for add_group_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("add_group_badge", "POST", "/groups/{id}/badges", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/badges", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1214,6 +1268,9 @@ async def add_group_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_group_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_group_badge", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1227,74 +1284,24 @@ async def add_group_badge(
 
     return _response_data
 
-# Tags: badges
-@mcp.tool()
-async def preview_group_badge(
-    id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group the badge preview is for."),
-    link_url: str = Field(..., description="The URL where the badge link should direct users when clicked."),
-    image_url: str = Field(..., description="The URL of the badge image to be displayed.")
-) -> dict[str, Any]:
-    """Generate a preview of a badge for a group using the provided link and image URLs. This allows you to see how the badge will render before applying it to the group."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4GroupsIdBadgesRenderRequest(
-            path=_models.GetApiV4GroupsIdBadgesRenderRequestPath(id_=id_),
-            query=_models.GetApiV4GroupsIdBadgesRenderRequestQuery(link_url=link_url, image_url=image_url)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for preview_group_badge: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("preview_group_badge", "GET", "/groups/{id}/badges/render", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/groups/{id}/badges/render", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/badges/render"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("preview_group_badge")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="preview_group_badge",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: access_requests
 @mcp.tool()
 async def deny_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access request should be denied."),
-    user_id: int = Field(..., description="The user ID of the person whose access request is being denied.", json_schema_extra={'format': 'int32'})
+    user_id: str = Field(..., description="The user ID of the person whose access request is being denied."),
 ) -> dict[str, Any]:
     """Denies an access request from a user to join a group. The access request is removed and the user is not granted group membership."""
+
+    _user_id = _parse_int(user_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4GroupsIdAccessRequestsUserIdRequest(
-            path=_models.DeleteApiV4GroupsIdAccessRequestsUserIdRequestPath(id_=id_, user_id=user_id)
+            path=_models.DeleteApiV4GroupsIdAccessRequestsUserIdRequestPath(id_=id_, user_id=_user_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for deny_group_access_request: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("deny_group_access_request", "DELETE", "/groups/{id}/access_requests/{user_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/access_requests/{user_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/access_requests/{user_id}"
@@ -1303,6 +1310,9 @@ async def deny_group_access_request(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("deny_group_access_request")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("deny_group_access_request", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1319,26 +1329,23 @@ async def deny_group_access_request(
 @mcp.tool()
 async def approve_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. Use the numeric group ID or the full URL-encoded path (e.g., 'my-group' or 'parent-group%2Fmy-group')."),
-    user_id: int = Field(..., description="The numeric ID of the user whose access request is being approved."),
-    access_level: int | None = Field(30, description="The access level to grant the user upon approval. Specifies the user's role and permissions within the group (e.g., Developer, Maintainer).", json_schema_extra={'format': 'int32'})
+    user_id: str = Field(..., description="The numeric ID of the user whose access request is being approved."),
+    access_level: str | None = Field(None, description="The access level to grant the user upon approval. Specifies the user's role and permissions within the group (e.g., Developer, Maintainer)."),
 ) -> dict[str, Any]:
     """Approves a pending access request for a user to join a group. The authenticated user must own the group to perform this action."""
+
+    _user_id = _parse_int(user_id)
+    _access_level = _parse_int(access_level)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4GroupsIdAccessRequestsUserIdApproveRequest(
-            path=_models.PutApiV4GroupsIdAccessRequestsUserIdApproveRequestPath(id_=id_, user_id=user_id),
-            body=_models.PutApiV4GroupsIdAccessRequestsUserIdApproveRequestBody(access_level=access_level)
+            path=_models.PutApiV4GroupsIdAccessRequestsUserIdApproveRequestPath(id_=id_, user_id=_user_id),
+            body=_models.PutApiV4GroupsIdAccessRequestsUserIdApproveRequestBody(access_level=_access_level)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for approve_group_access_request: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("approve_group_access_request", "PUT", "/groups/{id}/access_requests/{user_id}/approve", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/access_requests/{user_id}/approve", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/access_requests/{user_id}/approve"
@@ -1348,6 +1355,9 @@ async def approve_group_access_request(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("approve_group_access_request")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("approve_group_access_request", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1365,25 +1375,21 @@ async def approve_group_access_request(
 @mcp.tool()
 async def list_group_access_requests(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access requests to retrieve."),
-    per_page: int | None = Field(20, description="Number of access requests to return per page for pagination.", json_schema_extra={'format': 'int32'})
+    per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of pending access requests for a group. This allows group owners to review and manage user requests to join the group."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4GroupsIdAccessRequestsRequest(
             path=_models.GetApiV4GroupsIdAccessRequestsRequestPath(id_=id_),
-            query=_models.GetApiV4GroupsIdAccessRequestsRequestQuery(per_page=per_page)
+            query=_models.GetApiV4GroupsIdAccessRequestsRequestQuery(per_page=_per_page)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_group_access_requests: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_group_access_requests", "GET", "/groups/{id}/access_requests", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/access_requests", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/access_requests"
@@ -1393,6 +1399,9 @@ async def list_group_access_requests(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_group_access_requests")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_group_access_requests", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1420,12 +1429,6 @@ async def request_group_access(id_: str = Field(..., alias="id", description="Th
         logging.error(f"Parameter validation failed for request_group_access: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("request_group_access", "POST", "/groups/{id}/access_requests", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/groups/{id}/access_requests", _request.path.model_dump(by_alias=True)) if _request.path else "/groups/{id}/access_requests"
     _http_headers = {}
@@ -1433,6 +1436,9 @@ async def request_group_access(id_: str = Field(..., alias="id", description="Th
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("request_group_access")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("request_group_access", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1459,12 +1465,6 @@ async def delete_merged_branches(id_: str = Field(..., alias="id", description="
         logging.error(f"Parameter validation failed for delete_merged_branches: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_merged_branches", "DELETE", "/projects/{id}/repository/merged_branches", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/merged_branches", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/merged_branches"
     _http_headers = {}
@@ -1472,6 +1472,9 @@ async def delete_merged_branches(id_: str = Field(..., alias="id", description="
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_merged_branches")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_merged_branches", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1488,24 +1491,20 @@ async def delete_merged_branches(id_: str = Field(..., alias="id", description="
 @mcp.tool()
 async def get_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
-    branch: int = Field(..., description="The name of the branch to retrieve.", json_schema_extra={'format': 'int32'})
+    branch: str = Field(..., description="The name of the branch to retrieve."),
 ) -> dict[str, Any]:
     """Retrieve details for a specific branch in a repository. Returns branch information including commit details and protection status."""
+
+    _branch = _parse_int(branch)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdRepositoryBranchesBranchRequest(
-            path=_models.GetApiV4ProjectsIdRepositoryBranchesBranchRequestPath(id_=id_, branch=branch)
+            path=_models.GetApiV4ProjectsIdRepositoryBranchesBranchRequestPath(id_=id_, branch=_branch)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_branch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_branch", "GET", "/projects/{id}/repository/branches/{branch}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches/{branch}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches/{branch}"
@@ -1514,6 +1513,9 @@ async def get_branch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_branch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_branch", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1530,7 +1532,7 @@ async def get_branch(
 @mcp.tool()
 async def delete_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path."),
-    branch: str = Field(..., description="The name of the branch to delete.")
+    branch: str = Field(..., description="The name of the branch to delete."),
 ) -> dict[str, Any]:
     """Delete a branch from a project repository. This operation permanently removes the specified branch."""
 
@@ -1543,12 +1545,6 @@ async def delete_branch(
         logging.error(f"Parameter validation failed for delete_branch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_branch", "DELETE", "/projects/{id}/repository/branches/{branch}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches/{branch}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches/{branch}"
     _http_headers = {}
@@ -1556,6 +1552,9 @@ async def delete_branch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_branch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_branch", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1572,7 +1571,7 @@ async def delete_branch(
 @mcp.tool()
 async def check_branch_exists(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded path of the project."),
-    branch: str = Field(..., description="The name of the branch to check for existence in the repository.")
+    branch: str = Field(..., description="The name of the branch to check for existence in the repository."),
 ) -> dict[str, Any]:
     """Verify whether a specific branch exists in a project repository. Returns a successful response if the branch is found, otherwise returns a 404 error."""
 
@@ -1585,12 +1584,6 @@ async def check_branch_exists(
         logging.error(f"Parameter validation failed for check_branch_exists: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("check_branch_exists", "HEAD", "/projects/{id}/repository/branches/{branch}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches/{branch}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches/{branch}"
     _http_headers = {}
@@ -1598,6 +1591,9 @@ async def check_branch_exists(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_branch_exists")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("check_branch_exists", "HEAD", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1614,26 +1610,22 @@ async def check_branch_exists(
 @mcp.tool()
 async def list_repository_branches(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., 'group%2Fproject')."),
-    per_page: int | None = Field(20, description="Number of branches to return per page for pagination.", json_schema_extra={'format': 'int32'}),
-    sort: Literal["name_asc", "updated_asc", "updated_desc"] | None = Field(None, description="Sort the returned branches by name in ascending order, or by last update time in ascending or descending order.")
+    per_page: str | None = Field(None, description="Number of branches to return per page for pagination."),
+    sort: Literal["name_asc", "updated_asc", "updated_desc"] | None = Field(None, description="Sort the returned branches by name in ascending order, or by last update time in ascending or descending order."),
 ) -> dict[str, Any]:
     """Retrieve a list of branches from a project's repository. Supports pagination and sorting by branch name or last update time."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdRepositoryBranchesRequest(
             path=_models.GetApiV4ProjectsIdRepositoryBranchesRequestPath(id_=id_),
-            query=_models.GetApiV4ProjectsIdRepositoryBranchesRequestQuery(per_page=per_page, sort=sort)
+            query=_models.GetApiV4ProjectsIdRepositoryBranchesRequestQuery(per_page=_per_page, sort=sort)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_repository_branches: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_repository_branches", "GET", "/projects/{id}/repository/branches", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches"
@@ -1643,6 +1635,9 @@ async def list_repository_branches(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_repository_branches")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_repository_branches", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1661,7 +1656,7 @@ async def list_repository_branches(
 async def create_branch(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     branch: str = Field(..., description="The name for the new branch to be created."),
-    ref: str = Field(..., description="The commit SHA or existing branch name from which to create the new branch.")
+    ref: str = Field(..., description="The commit SHA or existing branch name from which to create the new branch."),
 ) -> dict[str, Any]:
     """Create a new branch in a project from a specified commit SHA or existing branch. The new branch will be created with the given name and point to the specified reference."""
 
@@ -1675,12 +1670,6 @@ async def create_branch(
         logging.error(f"Parameter validation failed for create_branch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_branch", "POST", "/projects/{id}/repository/branches", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -1689,6 +1678,9 @@ async def create_branch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_branch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_branch", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1706,7 +1698,7 @@ async def create_branch(
 @mcp.tool()
 async def unprotect_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
-    branch: str = Field(..., description="The name of the branch to unprotect.")
+    branch: str = Field(..., description="The name of the branch to unprotect."),
 ) -> dict[str, Any]:
     """Remove protection from a branch in a project, allowing it to be modified or deleted. This operation reverses any branch protection rules that were previously applied."""
 
@@ -1719,12 +1711,6 @@ async def unprotect_branch(
         logging.error(f"Parameter validation failed for unprotect_branch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("unprotect_branch", "PUT", "/projects/{id}/repository/branches/{branch}/unprotect", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches/{branch}/unprotect", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches/{branch}/unprotect"
     _http_headers = {}
@@ -1732,6 +1718,9 @@ async def unprotect_branch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("unprotect_branch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("unprotect_branch", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1750,7 +1739,7 @@ async def protect_branch(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     branch: str = Field(..., description="The name of the branch to protect."),
     developers_can_push: bool | None = Field(None, description="Allow developers to push commits to this branch."),
-    developers_can_merge: bool | None = Field(None, description="Allow developers to merge pull requests into this branch.")
+    developers_can_merge: bool | None = Field(None, description="Allow developers to merge pull requests into this branch."),
 ) -> dict[str, Any]:
     """Protect a branch by restricting push and merge permissions. Configure whether developers can push to or merge into the specified branch."""
 
@@ -1764,12 +1753,6 @@ async def protect_branch(
         logging.error(f"Parameter validation failed for protect_branch: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("protect_branch", "PUT", "/projects/{id}/repository/branches/{branch}/protect", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/repository/branches/{branch}/protect", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/repository/branches/{branch}/protect"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -1778,6 +1761,9 @@ async def protect_branch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("protect_branch")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("protect_branch", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1795,24 +1781,20 @@ async def protect_branch(
 @mcp.tool()
 async def get_project_badge(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
-    badge_id: int = Field(..., description="The unique identifier of the badge to retrieve.", json_schema_extra={'format': 'int32'})
+    badge_id: str = Field(..., description="The unique identifier of the badge to retrieve."),
 ) -> dict[str, Any]:
     """Retrieve a specific badge associated with a project. This allows you to fetch details about a project badge by its ID."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdBadgesBadgeIdRequest(
-            path=_models.GetApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id)
+            path=_models.GetApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_project_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_project_badge", "GET", "/projects/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges/{badge_id}"
@@ -1821,6 +1803,9 @@ async def get_project_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_project_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_project_badge", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1837,28 +1822,24 @@ async def get_project_badge(
 @mcp.tool()
 async def update_project_badge(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    badge_id: int = Field(..., description="The unique identifier of the badge to update.", json_schema_extra={'format': 'int32'}),
+    badge_id: str = Field(..., description="The unique identifier of the badge to update."),
     link_url: str | None = Field(None, description="The URL that the badge links to when clicked."),
     image_url: str | None = Field(None, description="The URL of the image to display as the badge."),
-    name: str | None = Field(None, description="A descriptive name for the badge.")
+    name: str | None = Field(None, description="A descriptive name for the badge."),
 ) -> dict[str, Any]:
     """Updates an existing badge for a project. Allows modification of the badge's name, image URL, and link URL."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4ProjectsIdBadgesBadgeIdRequest(
-            path=_models.PutApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id),
+            path=_models.PutApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id),
             body=_models.PutApiV4ProjectsIdBadgesBadgeIdRequestBody(link_url=link_url, image_url=image_url, name=name)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_project_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_project_badge", "PUT", "/projects/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges/{badge_id}"
@@ -1868,6 +1849,9 @@ async def update_project_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_project_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_project_badge", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1885,24 +1869,20 @@ async def update_project_badge(
 @mcp.tool()
 async def delete_badge(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
-    badge_id: int = Field(..., description="The unique identifier of the badge to remove from the project.", json_schema_extra={'format': 'int32'})
+    badge_id: str = Field(..., description="The unique identifier of the badge to remove from the project."),
 ) -> dict[str, Any]:
     """Removes a badge from a project. This operation permanently deletes the specified badge and its association with the project."""
+
+    _badge_id = _parse_int(badge_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4ProjectsIdBadgesBadgeIdRequest(
-            path=_models.DeleteApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=badge_id)
+            path=_models.DeleteApiV4ProjectsIdBadgesBadgeIdRequestPath(id_=id_, badge_id=_badge_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for delete_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_badge", "DELETE", "/projects/{id}/badges/{badge_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/badges/{badge_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges/{badge_id}"
@@ -1911,6 +1891,9 @@ async def delete_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_badge", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1927,26 +1910,22 @@ async def delete_badge(
 @mcp.tool()
 async def list_project_badges(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
-    per_page: int | None = Field(20, description="Number of badges to return per page for pagination.", json_schema_extra={'format': 'int32'}),
-    name: str | None = Field(None, description="Filter badges by name. Returns only badges whose name matches the provided value.")
+    per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
+    name: str | None = Field(None, description="Filter badges by name. Returns only badges whose name matches the provided value."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of badges for a project that are visible to the authenticated user. This endpoint was introduced in GitLab 10.6."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdBadgesRequest(
             path=_models.GetApiV4ProjectsIdBadgesRequestPath(id_=id_),
-            query=_models.GetApiV4ProjectsIdBadgesRequestQuery(per_page=per_page, name=name)
+            query=_models.GetApiV4ProjectsIdBadgesRequestQuery(per_page=_per_page, name=name)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_project_badges: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_project_badges", "GET", "/projects/{id}/badges", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/badges", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges"
@@ -1956,6 +1935,9 @@ async def list_project_badges(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_project_badges")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_project_badges", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1975,7 +1957,7 @@ async def create_project_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the project. Accepts both integer IDs and string paths."),
     link_url: str = Field(..., description="The URL that the badge links to when clicked."),
     image_url: str = Field(..., description="The URL of the badge image to display."),
-    name: str | None = Field(None, description="A descriptive name for the badge to identify its purpose.")
+    name: str | None = Field(None, description="A descriptive name for the badge to identify its purpose."),
 ) -> dict[str, Any]:
     """Adds a new badge to a project. Badges are visual indicators that can link to external URLs and are displayed on the project page."""
 
@@ -1989,12 +1971,6 @@ async def create_project_badge(
         logging.error(f"Parameter validation failed for create_project_badge: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_project_badge", "POST", "/projects/{id}/badges", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/badges", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2003,6 +1979,9 @@ async def create_project_badge(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_project_badge")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_project_badge", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2016,74 +1995,24 @@ async def create_project_badge(
 
     return _response_data
 
-# Tags: badges
-@mcp.tool()
-async def preview_badge(
-    id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
-    link_url: str = Field(..., description="The destination URL that the badge will link to when clicked."),
-    image_url: str = Field(..., description="The URL of the badge image to be rendered.")
-) -> dict[str, Any]:
-    """Generate a preview of a badge for a project by rendering it with the specified image and link URLs. Useful for validating badge configuration before deployment."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4ProjectsIdBadgesRenderRequest(
-            path=_models.GetApiV4ProjectsIdBadgesRenderRequestPath(id_=id_),
-            query=_models.GetApiV4ProjectsIdBadgesRenderRequestQuery(link_url=link_url, image_url=image_url)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for preview_badge: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("preview_badge", "GET", "/projects/{id}/badges/render", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/projects/{id}/badges/render", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/badges/render"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("preview_badge")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="preview_badge",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: access_requests
 @mcp.tool()
 async def deny_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    user_id: int = Field(..., description="The numeric ID of the user whose access request should be denied.", json_schema_extra={'format': 'int32'})
+    user_id: str = Field(..., description="The numeric ID of the user whose access request should be denied."),
 ) -> dict[str, Any]:
     """Denies an access request from a user for the specified project. This removes the user's pending access request and prevents them from gaining project access through this request."""
+
+    _user_id = _parse_int(user_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4ProjectsIdAccessRequestsUserIdRequest(
-            path=_models.DeleteApiV4ProjectsIdAccessRequestsUserIdRequestPath(id_=id_, user_id=user_id)
+            path=_models.DeleteApiV4ProjectsIdAccessRequestsUserIdRequestPath(id_=id_, user_id=_user_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for deny_access_request: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("deny_access_request", "DELETE", "/projects/{id}/access_requests/{user_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/access_requests/{user_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/access_requests/{user_id}"
@@ -2092,6 +2021,9 @@ async def deny_access_request(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("deny_access_request")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("deny_access_request", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2108,26 +2040,23 @@ async def deny_access_request(
 @mcp.tool()
 async def approve_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    user_id: int = Field(..., description="The user ID of the person whose access request is being approved."),
-    access_level: int | None = Field(30, description="The access level to grant the user upon approval. Valid levels range from 10 (Guest) to 50 (Owner).", json_schema_extra={'format': 'int32'})
+    user_id: str = Field(..., description="The user ID of the person whose access request is being approved."),
+    access_level: str | None = Field(None, description="The access level to grant the user upon approval. Valid levels range from 10 (Guest) to 50 (Owner)."),
 ) -> dict[str, Any]:
     """Approves a pending access request for a user to join the project. Optionally specify the access level to grant; defaults to Developer role."""
+
+    _user_id = _parse_int(user_id)
+    _access_level = _parse_int(access_level)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4ProjectsIdAccessRequestsUserIdApproveRequest(
-            path=_models.PutApiV4ProjectsIdAccessRequestsUserIdApproveRequestPath(id_=id_, user_id=user_id),
-            body=_models.PutApiV4ProjectsIdAccessRequestsUserIdApproveRequestBody(access_level=access_level)
+            path=_models.PutApiV4ProjectsIdAccessRequestsUserIdApproveRequestPath(id_=id_, user_id=_user_id),
+            body=_models.PutApiV4ProjectsIdAccessRequestsUserIdApproveRequestBody(access_level=_access_level)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for approve_access_request: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("approve_access_request", "PUT", "/projects/{id}/access_requests/{user_id}/approve", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/access_requests/{user_id}/approve", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/access_requests/{user_id}/approve"
@@ -2137,6 +2066,9 @@ async def approve_access_request(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("approve_access_request")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("approve_access_request", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2154,25 +2086,21 @@ async def approve_access_request(
 @mcp.tool()
 async def list_access_requests(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject)."),
-    per_page: int | None = Field(20, description="Number of access requests to return per page for pagination.", json_schema_extra={'format': 'int32'})
+    per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
 ) -> dict[str, Any]:
     """Retrieves a list of access requests for a project. Access requests allow users to request membership in a project."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdAccessRequestsRequest(
             path=_models.GetApiV4ProjectsIdAccessRequestsRequestPath(id_=id_),
-            query=_models.GetApiV4ProjectsIdAccessRequestsRequestQuery(per_page=per_page)
+            query=_models.GetApiV4ProjectsIdAccessRequestsRequestQuery(per_page=_per_page)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_access_requests: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_access_requests", "GET", "/projects/{id}/access_requests", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/access_requests", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/access_requests"
@@ -2182,6 +2110,9 @@ async def list_access_requests(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_access_requests")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_access_requests", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2209,12 +2140,6 @@ async def request_project_access(id_: str = Field(..., alias="id", description="
         logging.error(f"Parameter validation failed for request_project_access: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("request_project_access", "POST", "/projects/{id}/access_requests", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/access_requests", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/access_requests"
     _http_headers = {}
@@ -2222,6 +2147,9 @@ async def request_project_access(id_: str = Field(..., alias="id", description="
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("request_project_access")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("request_project_access", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2238,28 +2166,25 @@ async def request_project_access(id_: str = Field(..., alias="id", description="
 @mcp.tool()
 async def update_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    alert_iid: int = Field(..., description="The internal ID of the alert containing the metric image.", json_schema_extra={'format': 'int32'}),
-    metric_image_id: int = Field(..., description="The unique identifier of the metric image to update.", json_schema_extra={'format': 'int32'}),
+    alert_iid: str = Field(..., description="The internal ID of the alert containing the metric image."),
+    metric_image_id: str = Field(..., description="The unique identifier of the metric image to update."),
     url: str | None = Field(None, description="The URL where the metric image or additional metric information can be viewed."),
-    url_text: str | None = Field(None, description="A descriptive label or caption for the metric image or its associated URL.")
+    url_text: str | None = Field(None, description="A descriptive label or caption for the metric image or its associated URL."),
 ) -> dict[str, Any]:
     """Update the metric image associated with an alert, including its display URL and descriptive text for reference."""
+
+    _alert_iid = _parse_int(alert_iid)
+    _metric_image_id = _parse_int(metric_image_id)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequest(
-            path=_models.PutApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequestPath(id_=id_, alert_iid=alert_iid, metric_image_id=metric_image_id),
+            path=_models.PutApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequestPath(id_=id_, alert_iid=_alert_iid, metric_image_id=_metric_image_id),
             body=_models.PutApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequestBody(url=url, url_text=url_text)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_alert_metric_image: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_alert_metric_image", "PUT", "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}"
@@ -2269,6 +2194,9 @@ async def update_alert_metric_image(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_alert_metric_image")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_alert_metric_image", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2287,25 +2215,22 @@ async def update_alert_metric_image(
 @mcp.tool()
 async def delete_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    alert_iid: int = Field(..., description="The internal ID (IID) of the alert from which to remove the metric image.", json_schema_extra={'format': 'int32'}),
-    metric_image_id: int = Field(..., description="The numeric ID of the metric image to delete.", json_schema_extra={'format': 'int32'})
+    alert_iid: str = Field(..., description="The internal ID (IID) of the alert from which to remove the metric image."),
+    metric_image_id: str = Field(..., description="The numeric ID of the metric image to delete."),
 ) -> dict[str, Any]:
     """Remove a metric image associated with an alert in a project. This operation permanently deletes the specified metric image from the alert's collection."""
+
+    _alert_iid = _parse_int(alert_iid)
+    _metric_image_id = _parse_int(metric_image_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequest(
-            path=_models.DeleteApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequestPath(id_=id_, alert_iid=alert_iid, metric_image_id=metric_image_id)
+            path=_models.DeleteApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesMetricImageIdRequestPath(id_=id_, alert_iid=_alert_iid, metric_image_id=_metric_image_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for delete_alert_metric_image: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_alert_metric_image", "DELETE", "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/{metric_image_id}"
@@ -2314,6 +2239,9 @@ async def delete_alert_metric_image(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_alert_metric_image")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_alert_metric_image", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2330,24 +2258,20 @@ async def delete_alert_metric_image(
 @mcp.tool()
 async def list_alert_metric_images(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    alert_iid: int = Field(..., description="The internal ID of the alert for which to retrieve associated metric images.", json_schema_extra={'format': 'int32'})
+    alert_iid: str = Field(..., description="The internal ID of the alert for which to retrieve associated metric images."),
 ) -> dict[str, Any]:
     """Retrieve metric images associated with a specific alert in a project. Metric images provide visual context for alert conditions and their impact."""
+
+    _alert_iid = _parse_int(alert_iid)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest(
-            path=_models.GetApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath(id_=id_, alert_iid=alert_iid)
+            path=_models.GetApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath(id_=id_, alert_iid=_alert_iid)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_alert_metric_images: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_alert_metric_images", "GET", "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/alert_management_alerts/{alert_iid}/metric_images", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images"
@@ -2356,6 +2280,9 @@ async def list_alert_metric_images(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_alert_metric_images")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_alert_metric_images", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2372,28 +2299,24 @@ async def list_alert_metric_images(
 @mcp.tool()
 async def upload_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    alert_iid: int = Field(..., description="The internal ID of the alert to attach the metric image to.", json_schema_extra={'format': 'int32'}),
+    alert_iid: str = Field(..., description="The internal ID of the alert to attach the metric image to."),
     file_: str = Field(..., alias="file", description="The image file to upload. Supported formats are typically PNG, JPG, and GIF."),
     url: str | None = Field(None, description="Optional URL to view additional metric information or the source of the metric data."),
-    url_text: str | None = Field(None, description="Optional descriptive text explaining the metric image content or the linked URL.")
+    url_text: str | None = Field(None, description="Optional descriptive text explaining the metric image content or the linked URL."),
 ) -> dict[str, Any]:
     """Upload a metric image to an alert for visualization and documentation purposes. Optionally include a URL and description to provide context about the metric data."""
+
+    _alert_iid = _parse_int(alert_iid)
 
     # Construct request model with validation
     try:
         _request = _models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest(
-            path=_models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath(id_=id_, alert_iid=alert_iid),
+            path=_models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath(id_=id_, alert_iid=_alert_iid),
             body=_models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestBody(file_=file_, url=url, url_text=url_text)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for upload_alert_metric_image: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("upload_alert_metric_image", "POST", "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/alert_management_alerts/{alert_iid}/metric_images", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images"
@@ -2403,6 +2326,9 @@ async def upload_alert_metric_image(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("upload_alert_metric_image")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("upload_alert_metric_image", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2417,202 +2343,25 @@ async def upload_alert_metric_image(
 
     return _response_data
 
-# Tags: alert_management
-@mcp.tool()
-async def authorize_alert_metric_image(
-    id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
-    alert_iid: int = Field(..., description="The internal ID of the alert to which the metric image will be attached.", json_schema_extra={'format': 'int32'})
-) -> dict[str, Any]:
-    """Authorize and prepare a metric image file for upload to an alert. This initiates the upload process for attaching metric images to alert management alerts."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequest(
-            path=_models.PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequestPath(id_=id_, alert_iid=alert_iid)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for authorize_alert_metric_image: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("authorize_alert_metric_image", "POST", "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/authorize", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/authorize", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/alert_management_alerts/{alert_iid}/metric_images/authorize"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("authorize_alert_metric_image")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="authorize_alert_metric_image",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: batched_background_migrations
-@mcp.tool()
-async def get_batched_background_migration(
-    id_: int = Field(..., alias="id", description="The unique identifier of the batched background migration to retrieve.", json_schema_extra={'format': 'int32'}),
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The database instance to query. Defaults to the main database if not specified.")
-) -> dict[str, Any]:
-    """Retrieve details of a specific batched background migration by its ID. Use this to monitor the status and progress of database migrations running in the background."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4AdminBatchedBackgroundMigrationsIdRequest(
-            path=_models.GetApiV4AdminBatchedBackgroundMigrationsIdRequestPath(id_=id_),
-            query=_models.GetApiV4AdminBatchedBackgroundMigrationsIdRequestQuery(database=database)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_batched_background_migration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_batched_background_migration", "GET", "/admin/batched_background_migrations/{id}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/admin/batched_background_migrations/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/batched_background_migrations/{id}"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_batched_background_migration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_batched_background_migration",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: batched_background_migrations
-@mcp.tool()
-async def list_batched_background_migrations(database: Literal["main", "ci", "embedding", "geo"] | None = Field('main', description="The database to query for background migrations. Defaults to the main database if not specified.")) -> dict[str, Any]:
-    """Retrieve the list of batched background migrations for a specified database. Batched background migrations are long-running data migrations that are executed in batches to minimize performance impact."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4AdminBatchedBackgroundMigrationsRequest(
-            query=_models.GetApiV4AdminBatchedBackgroundMigrationsRequestQuery(database=database)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_batched_background_migrations: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_batched_background_migrations", "GET", "/admin/batched_background_migrations", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/admin/batched_background_migrations"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_batched_background_migrations")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_batched_background_migrations",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: batched_background_migrations
-@mcp.tool()
-async def resume_batched_background_migration(
-    id_: int = Field(..., alias="id", description="The unique identifier of the batched background migration to resume.", json_schema_extra={'format': 'int32'}),
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field('main', description="The database where the batched background migration is running. Defaults to 'main' if not specified.")
-) -> dict[str, Any]:
-    """Resume a paused batched background migration by its ID. Specify the database if the migration is not on the default 'main' database."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequest(
-            path=_models.PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestPath(id_=id_),
-            body=_models.PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestBody(database=database)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for resume_batched_background_migration: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("resume_batched_background_migration", "PUT", "/admin/batched_background_migrations/{id}/resume", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/admin/batched_background_migrations/{id}/resume", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/batched_background_migrations/{id}/resume"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("resume_batched_background_migration")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="resume_batched_background_migration",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: batched_background_migrations
 @mcp.tool()
 async def pause_batched_background_migration(
-    id_: int = Field(..., alias="id", description="The unique identifier of the batched background migration to pause.", json_schema_extra={'format': 'int32'}),
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The database instance where the batched background migration is running. Defaults to 'main' if not specified.")
+    id_: str = Field(..., alias="id", description="The unique identifier of the batched background migration to pause."),
+    database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The database instance where the batched background migration is running. Defaults to 'main' if not specified."),
 ) -> dict[str, Any]:
     """Pause an active batched background migration by its ID. The migration can be resumed later from where it was paused."""
+
+    _id_ = _parse_int(id_)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequest(
-            path=_models.PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequestPath(id_=id_),
+            path=_models.PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequestPath(id_=_id_),
             body=_models.PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequestBody(database=database)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for pause_batched_background_migration: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("pause_batched_background_migration", "PUT", "/admin/batched_background_migrations/{id}/pause", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/admin/batched_background_migrations/{id}/pause", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/batched_background_migrations/{id}/pause"
@@ -2622,6 +2371,9 @@ async def pause_batched_background_migration(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("pause_batched_background_migration")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("pause_batched_background_migration", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2649,12 +2401,6 @@ async def get_admin_ci_variable(key: str = Field(..., description="The unique id
         logging.error(f"Parameter validation failed for get_admin_ci_variable: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_admin_ci_variable", "GET", "/admin/ci/variables/{key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/admin/ci/variables/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/ci/variables/{key}"
     _http_headers = {}
@@ -2663,61 +2409,15 @@ async def get_admin_ci_variable(key: str = Field(..., description="The unique id
     _auth = await _get_auth_for_operation("get_admin_ci_variable")
     _http_headers.update(_auth.get("headers", {}))
 
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_admin_ci_variable", "GET", _http_path, _request_id)
+
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
         tool_name="get_admin_ci_variable",
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: pipeline_composition
-@mcp.tool()
-async def update_admin_ci_variable(
-    key: str = Field(..., description="The unique identifier key of the CI/CD variable to update."),
-    value: str | None = Field(None, description="The new value to assign to the variable."),
-    protected: bool | None = Field(None, description="Whether the variable should be protected, restricting its use to protected branches and tags only."),
-    masked: bool | None = Field(None, description="Whether the variable value should be masked in job logs to prevent accidental exposure of sensitive data."),
-    raw: bool | None = Field(None, description="Whether the variable will be expanded during job execution. When false, the variable is treated as a literal string."),
-    variable_type: Literal["env_var", "file"] | None = Field(None, description="The type of variable, determining how it is handled during job execution.")
-) -> dict[str, Any]:
-    """Update an instance-level CI/CD variable. Modify the value, protection status, masking behavior, expansion mode, or type of an existing admin-level variable."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutApiV4AdminCiVariablesKeyRequest(
-            path=_models.PutApiV4AdminCiVariablesKeyRequestPath(key=key),
-            body=_models.PutApiV4AdminCiVariablesKeyRequestBody(value=value, protected=protected, masked=masked, raw=raw, variable_type=variable_type)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_admin_ci_variable: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_admin_ci_variable", "PUT", "/admin/ci/variables/{key}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/admin/ci/variables/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/ci/variables/{key}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_admin_ci_variable")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_admin_ci_variable",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
         headers=_http_headers,
     )
 
@@ -2737,12 +2437,6 @@ async def delete_instance_variable(key: str = Field(..., description="The unique
         logging.error(f"Parameter validation failed for delete_instance_variable: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_instance_variable", "DELETE", "/admin/ci/variables/{key}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/admin/ci/variables/{key}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/ci/variables/{key}"
     _http_headers = {}
@@ -2750,6 +2444,9 @@ async def delete_instance_variable(key: str = Field(..., description="The unique
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_instance_variable")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_instance_variable", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2764,23 +2461,19 @@ async def delete_instance_variable(key: str = Field(..., description="The unique
 
 # Tags: pipeline_composition
 @mcp.tool()
-async def list_instance_variables(per_page: int | None = Field(20, description="Maximum number of variables to return per page. Use this to control pagination when retrieving large result sets.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def list_instance_variables(per_page: str | None = Field(None, description="Maximum number of variables to return per page. Use this to control pagination when retrieving large result sets.")) -> dict[str, Any]:
     """Retrieve all instance-level CI/CD variables available across the GitLab instance. These variables are accessible to all projects and groups."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4AdminCiVariablesRequest(
-            query=_models.GetApiV4AdminCiVariablesRequestQuery(per_page=per_page)
+            query=_models.GetApiV4AdminCiVariablesRequestQuery(per_page=_per_page)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_instance_variables: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_instance_variables", "GET", "/admin/ci/variables", _request_id)
 
     # Extract parameters for API call
     _http_path = "/admin/ci/variables"
@@ -2790,6 +2483,9 @@ async def list_instance_variables(per_page: int | None = Field(20, description="
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_instance_variables")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_instance_variables", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2811,7 +2507,7 @@ async def create_instance_variable(
     protected: bool | None = Field(None, description="When enabled, the variable is only available to protected branches and tags, preventing exposure in unprotected environments."),
     masked: bool | None = Field(None, description="When enabled, the variable value is masked in job logs and API responses to prevent accidental exposure of sensitive data."),
     raw: bool | None = Field(None, description="When enabled, the variable value is treated as a literal string and not expanded. When disabled, variable references are expanded during job execution."),
-    variable_type: Literal["env_var", "file"] | None = Field(None, description="Specifies whether the variable stores an environment value or a file path.")
+    variable_type: Literal["env_var", "file"] | None = Field(None, description="Specifies whether the variable stores an environment value or a file path."),
 ) -> dict[str, Any]:
     """Create a new instance-level CI/CD variable that is available to all projects. Instance variables are useful for storing secrets and configuration values needed across your entire GitLab instance."""
 
@@ -2824,12 +2520,6 @@ async def create_instance_variable(
         logging.error(f"Parameter validation failed for create_instance_variable: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_instance_variable", "POST", "/admin/ci/variables", _request_id)
-
     # Extract parameters for API call
     _http_path = "/admin/ci/variables"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -2838,6 +2528,9 @@ async def create_instance_variable(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_instance_variable")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_instance_variable", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2851,67 +2544,21 @@ async def create_instance_variable(
 
     return _response_data
 
-# Tags: admin
-@mcp.tool()
-async def get_table_dictionary(
-    database_name: Literal["main", "ci"] = Field(..., description="The database to query. Must be either the main production database or the CI testing database."),
-    table_name: str = Field(..., description="The name of the table whose dictionary details should be retrieved.")
-) -> dict[str, Any]:
-    """Retrieve detailed dictionary metadata for a specific table, including its schema and structure information from the specified database."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequest(
-            path=_models.GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequestPath(database_name=database_name, table_name=table_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for get_table_dictionary: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_table_dictionary", "GET", "/admin/databases/{database_name}/dictionary/tables/{table_name}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/admin/databases/{database_name}/dictionary/tables/{table_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/databases/{database_name}/dictionary/tables/{table_name}"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_table_dictionary")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_table_dictionary",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: clusters
 @mcp.tool()
-async def get_cluster(cluster_id: int = Field(..., description="The unique identifier of the cluster to retrieve.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def get_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to retrieve.")) -> dict[str, Any]:
     """Retrieve details for a single instance cluster by its ID. This operation requires GitLab 13.2 or later."""
+
+    _cluster_id = _parse_int(cluster_id)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4AdminClustersClusterIdRequest(
-            path=_models.GetApiV4AdminClustersClusterIdRequestPath(cluster_id=cluster_id)
+            path=_models.GetApiV4AdminClustersClusterIdRequestPath(cluster_id=_cluster_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_cluster: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_cluster", "GET", "/admin/clusters/{cluster_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/admin/clusters/{cluster_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/clusters/{cluster_id}"
@@ -2920,6 +2567,9 @@ async def get_cluster(cluster_id: int = Field(..., description="The unique ident
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_cluster")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cluster", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2935,32 +2585,29 @@ async def get_cluster(cluster_id: int = Field(..., description="The unique ident
 # Tags: clusters
 @mcp.tool()
 async def update_cluster(
-    cluster_id: int = Field(..., description="The unique identifier of the cluster to update."),
+    cluster_id: str = Field(..., description="The unique identifier of the cluster to update."),
     name: str | None = Field(None, description="The display name for the cluster."),
     enabled: bool | None = Field(None, description="Enable or disable GitLab's connection to the Kubernetes cluster."),
     environment_scope: str | None = Field(None, description="The environment associated with this cluster deployment."),
     namespace_per_environment: bool | None = Field(None, description="When enabled, each environment is deployed to a separate Kubernetes namespace for isolation."),
     domain: str | None = Field(None, description="The base domain for the cluster, used for generating application URLs."),
-    management_project_id: int | None = Field(None, description="The ID of the GitLab project that manages this cluster's resources and configurations."),
-    managed: bool | None = Field(None, description="When enabled, GitLab automatically manages Kubernetes namespaces and service accounts for this cluster.")
+    management_project_id: str | None = Field(None, description="The ID of the GitLab project that manages this cluster's resources and configurations."),
+    managed: bool | None = Field(None, description="When enabled, GitLab automatically manages Kubernetes namespaces and service accounts for this cluster."),
 ) -> dict[str, Any]:
     """Update an existing instance cluster configuration. Modify cluster settings such as name, connectivity status, environment scope, and management preferences."""
+
+    _cluster_id = _parse_int(cluster_id)
+    _management_project_id = _parse_int(management_project_id)
 
     # Construct request model with validation
     try:
         _request = _models.PutApiV4AdminClustersClusterIdRequest(
-            path=_models.PutApiV4AdminClustersClusterIdRequestPath(cluster_id=cluster_id),
-            body=_models.PutApiV4AdminClustersClusterIdRequestBody(name=name, enabled=enabled, environment_scope=environment_scope, namespace_per_environment=namespace_per_environment, domain=domain, management_project_id=management_project_id, managed=managed)
+            path=_models.PutApiV4AdminClustersClusterIdRequestPath(cluster_id=_cluster_id),
+            body=_models.PutApiV4AdminClustersClusterIdRequestBody(name=name, enabled=enabled, environment_scope=environment_scope, namespace_per_environment=namespace_per_environment, domain=domain, management_project_id=_management_project_id, managed=managed)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for update_cluster: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_cluster", "PUT", "/admin/clusters/{cluster_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/admin/clusters/{cluster_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/clusters/{cluster_id}"
@@ -2970,6 +2617,9 @@ async def update_cluster(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_cluster")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cluster", "PUT", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2985,23 +2635,19 @@ async def update_cluster(
 
 # Tags: clusters
 @mcp.tool()
-async def delete_cluster(cluster_id: int = Field(..., description="The unique identifier of the cluster to delete.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def delete_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to delete.")) -> dict[str, Any]:
     """Delete an instance cluster from GitLab. This removes the cluster configuration but does not delete any resources within the connected Kubernetes cluster itself."""
+
+    _cluster_id = _parse_int(cluster_id)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4AdminClustersClusterIdRequest(
-            path=_models.DeleteApiV4AdminClustersClusterIdRequestPath(cluster_id=cluster_id)
+            path=_models.DeleteApiV4AdminClustersClusterIdRequestPath(cluster_id=_cluster_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for delete_cluster: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_cluster", "DELETE", "/admin/clusters/{cluster_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/admin/clusters/{cluster_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/clusters/{cluster_id}"
@@ -3010,6 +2656,9 @@ async def delete_cluster(cluster_id: int = Field(..., description="The unique id
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_cluster")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cluster", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3032,26 +2681,22 @@ async def add_kubernetes_cluster(
     environment_scope: str | None = Field(None, description="The environment scope this cluster is associated with, such as production or staging. Use * to match all environments."),
     namespace_per_environment: bool | None = Field(None, description="Whether to deploy each environment to its own isolated Kubernetes namespace for better resource separation and security."),
     domain: str | None = Field(None, description="The base domain for applications deployed to this cluster."),
-    management_project_id: int | None = Field(None, description="The GitLab project ID that will manage this cluster's namespaces and service accounts.", json_schema_extra={'format': 'int32'}),
+    management_project_id: str | None = Field(None, description="The GitLab project ID that will manage this cluster's namespaces and service accounts."),
     managed: bool | None = Field(None, description="Whether GitLab automatically manages Kubernetes namespaces and service accounts for this cluster."),
-    platform_kubernetes_attributes_authorization_type: Literal["unknown_authorization", "rbac", "abac"] | None = Field(None, description="The authorization mechanism used by the Kubernetes cluster for access control.")
+    platform_kubernetes_attributes_authorization_type: Literal["unknown_authorization", "rbac", "abac"] | None = Field(None, description="The authorization mechanism used by the Kubernetes cluster for access control."),
 ) -> dict[str, Any]:
     """Register an existing Kubernetes cluster as an instance cluster in GitLab. This allows GitLab to deploy applications and manage resources on the cluster."""
+
+    _management_project_id = _parse_int(management_project_id)
 
     # Construct request model with validation
     try:
         _request = _models.PostApiV4AdminClustersAddRequest(
-            body=_models.PostApiV4AdminClustersAddRequestBody(name=name, enabled=enabled, environment_scope=environment_scope, namespace_per_environment=namespace_per_environment, domain=domain, management_project_id=management_project_id, managed=managed, platform_kubernetes_attributes_api_url=platform_kubernetes_attributes_api_url, platform_kubernetes_attributes_token=platform_kubernetes_attributes_token, platform_kubernetes_attributes_authorization_type=platform_kubernetes_attributes_authorization_type)
+            body=_models.PostApiV4AdminClustersAddRequestBody(name=name, enabled=enabled, environment_scope=environment_scope, namespace_per_environment=namespace_per_environment, domain=domain, management_project_id=_management_project_id, managed=managed, platform_kubernetes_attributes_api_url=platform_kubernetes_attributes_api_url, platform_kubernetes_attributes_token=platform_kubernetes_attributes_token, platform_kubernetes_attributes_authorization_type=platform_kubernetes_attributes_authorization_type)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for add_kubernetes_cluster: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("add_kubernetes_cluster", "POST", "/admin/clusters/add", _request_id)
 
     # Extract parameters for API call
     _http_path = "/admin/clusters/add"
@@ -3061,6 +2706,9 @@ async def add_kubernetes_cluster(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_kubernetes_cluster")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_kubernetes_cluster", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3079,12 +2727,6 @@ async def add_kubernetes_cluster(
 async def list_clusters() -> dict[str, Any]:
     """Retrieve a list of all instance clusters configured in GitLab. This operation provides an overview of cluster infrastructure available at the instance level."""
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_clusters", "GET", "/admin/clusters", _request_id)
-
     # Extract parameters for API call
     _http_path = "/admin/clusters"
     _http_headers = {}
@@ -3092,6 +2734,9 @@ async def list_clusters() -> dict[str, Any]:
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_clusters")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_clusters", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3104,70 +2749,21 @@ async def list_clusters() -> dict[str, Any]:
 
     return _response_data
 
-# Tags: migrations
-@mcp.tool()
-async def mark_migration_executed(
-    timestamp: int = Field(..., description="The version timestamp of the migration to mark as executed.", json_schema_extra={'format': 'int32'}),
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The target database where the migration was executed. Defaults to the main database if not specified.")
-) -> dict[str, Any]:
-    """Mark a database migration as successfully executed. This records that the migration with the specified timestamp has been completed and applied to the target database."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostApiV4AdminMigrationsTimestampMarkRequest(
-            path=_models.PostApiV4AdminMigrationsTimestampMarkRequestPath(timestamp=timestamp),
-            body=_models.PostApiV4AdminMigrationsTimestampMarkRequestBody(database=database)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for mark_migration_executed: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("mark_migration_executed", "POST", "/admin/migrations/{timestamp}/mark", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/admin/migrations/{timestamp}/mark", _request.path.model_dump(by_alias=True)) if _request.path else "/admin/migrations/{timestamp}/mark"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("mark_migration_executed")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="mark_migration_executed",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: applications
 @mcp.tool()
-async def delete_application(id_: int = Field(..., alias="id", description="The unique identifier of the application to delete.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def delete_application(id_: str = Field(..., alias="id", description="The unique identifier of the application to delete.")) -> dict[str, Any]:
     """Permanently delete a specific application by its ID. This action cannot be undone."""
+
+    _id_ = _parse_int(id_)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4ApplicationsIdRequest(
-            path=_models.DeleteApiV4ApplicationsIdRequestPath(id_=id_)
+            path=_models.DeleteApiV4ApplicationsIdRequestPath(id_=_id_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for delete_application: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_application", "DELETE", "/applications/{id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/applications/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/applications/{id}"
@@ -3176,6 +2772,9 @@ async def delete_application(id_: int = Field(..., alias="id", description="The 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_application")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_application", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3188,104 +2787,24 @@ async def delete_application(id_: int = Field(..., alias="id", description="The 
 
     return _response_data
 
-# Tags: applications
-@mcp.tool()
-async def list_applications() -> dict[str, Any]:
-    """Retrieve a list of all registered applications. Use this operation to discover available applications in the system."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_applications", "GET", "/applications", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/applications"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_applications")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_applications",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: applications
-@mcp.tool()
-async def create_application(
-    name: str = Field(..., description="The display name for the application."),
-    redirect_uri: str = Field(..., description="The URI where the authorization server will redirect users after authentication. Must be a valid absolute URI."),
-    scopes: str = Field(..., description="Space-separated list of permission scopes the application requests. Each scope grants specific access permissions to the application."),
-    confidential: bool | None = Field(True, description="Whether the application can securely store the client secret. Set to true for server-side applications, false for native mobile apps and single-page applications.")
-) -> dict[str, Any]:
-    """Create a new OAuth 2.0 application for API access and user authentication. This operation registers an application with specified permissions and redirect configuration."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostApiV4ApplicationsRequest(
-            body=_models.PostApiV4ApplicationsRequestBody(name=name, redirect_uri=redirect_uri, scopes=scopes, confidential=confidential)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_application: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_application", "POST", "/applications", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/applications"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_application")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_application",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: avatar
 @mcp.tool()
 async def get_user_avatar(
     email: str = Field(..., description="The public email address of the user whose avatar should be retrieved."),
-    size: int | None = Field(None, description="The width and height in pixels for the returned avatar image. Larger sizes provide higher resolution avatars.", json_schema_extra={'format': 'int32'})
+    size: str | None = Field(None, description="The width and height in pixels for the returned avatar image. Larger sizes provide higher resolution avatars."),
 ) -> dict[str, Any]:
     """Retrieve the avatar URL for a user based on their email address. Optionally specify a custom image size for the avatar."""
+
+    _size = _parse_int(size)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4AvatarRequest(
-            query=_models.GetApiV4AvatarRequestQuery(email=email, size=size)
+            query=_models.GetApiV4AvatarRequestQuery(email=email, size=_size)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_user_avatar: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_user_avatar", "GET", "/avatar", _request_id)
 
     # Extract parameters for API call
     _http_path = "/avatar"
@@ -3295,6 +2814,9 @@ async def get_user_avatar(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_user_avatar")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_avatar", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3310,23 +2832,19 @@ async def get_user_avatar(
 
 # Tags: broadcast_messages
 @mcp.tool()
-async def get_broadcast_message(id_: int = Field(..., alias="id", description="The unique identifier of the broadcast message to retrieve.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def get_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to retrieve.")) -> dict[str, Any]:
     """Retrieve a specific broadcast message by its ID. Broadcast messages are system-wide announcements visible to all users."""
+
+    _id_ = _parse_int(id_)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BroadcastMessagesIdRequest(
-            path=_models.GetApiV4BroadcastMessagesIdRequestPath(id_=id_)
+            path=_models.GetApiV4BroadcastMessagesIdRequestPath(id_=_id_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_broadcast_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_broadcast_message", "GET", "/broadcast_messages/{id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/broadcast_messages/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/broadcast_messages/{id}"
@@ -3335,6 +2853,9 @@ async def get_broadcast_message(id_: int = Field(..., alias="id", description="T
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_broadcast_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_broadcast_message", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3349,76 +2870,19 @@ async def get_broadcast_message(id_: int = Field(..., alias="id", description="T
 
 # Tags: broadcast_messages
 @mcp.tool()
-async def update_broadcast_message(
-    id_: int = Field(..., alias="id", description="The unique identifier of the broadcast message to update."),
-    message: str | None = Field(None, description="The text content of the broadcast message displayed to users."),
-    starts_at: str | None = Field(None, description="The date and time when the broadcast message becomes visible to users."),
-    ends_at: str | None = Field(None, description="The date and time when the broadcast message stops being displayed to users."),
-    color: str | None = Field(None, description="The background color of the broadcast message banner or notification."),
-    font: str | None = Field(None, description="The foreground text color of the broadcast message."),
-    target_access_levels: list[Literal[10, 20, 30, 40, 50]] | None = Field(None, description="An array of user access levels that should see this broadcast message. Specify which user roles are targeted by this message."),
-    target_path: str | None = Field(None, description="A path pattern to limit where the broadcast message is displayed. The message will only appear on pages matching this path."),
-    broadcast_type: Literal["banner", "notification"] | None = Field(None, description="The type of broadcast message to display."),
-    dismissable: bool | None = Field(None, description="Whether users can dismiss or close the broadcast message.")
-) -> dict[str, Any]:
-    """Update an existing broadcast message displayed to GitLab users. Modify message content, display timing, styling, target audience, and dismissability settings."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutApiV4BroadcastMessagesIdRequest(
-            path=_models.PutApiV4BroadcastMessagesIdRequestPath(id_=id_),
-            body=_models.PutApiV4BroadcastMessagesIdRequestBody(message=message, starts_at=starts_at, ends_at=ends_at, color=color, font=font, target_access_levels=target_access_levels, target_path=target_path, broadcast_type=broadcast_type, dismissable=dismissable)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_broadcast_message: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_broadcast_message", "PUT", "/broadcast_messages/{id}", _request_id)
-
-    # Extract parameters for API call
-    _http_path = _build_path("/broadcast_messages/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/broadcast_messages/{id}"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_broadcast_message")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_broadcast_message",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: broadcast_messages
-@mcp.tool()
-async def delete_broadcast_message(id_: int = Field(..., alias="id", description="The unique identifier of the broadcast message to delete.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def delete_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to delete.")) -> dict[str, Any]:
     """Delete a broadcast message by its ID. This operation permanently removes the specified broadcast message from the system."""
+
+    _id_ = _parse_int(id_)
 
     # Construct request model with validation
     try:
         _request = _models.DeleteApiV4BroadcastMessagesIdRequest(
-            path=_models.DeleteApiV4BroadcastMessagesIdRequestPath(id_=id_)
+            path=_models.DeleteApiV4BroadcastMessagesIdRequestPath(id_=_id_)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for delete_broadcast_message: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("delete_broadcast_message", "DELETE", "/broadcast_messages/{id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/broadcast_messages/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/broadcast_messages/{id}"
@@ -3427,6 +2891,9 @@ async def delete_broadcast_message(id_: int = Field(..., alias="id", description
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_broadcast_message")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_broadcast_message", "DELETE", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3439,120 +2906,25 @@ async def delete_broadcast_message(id_: int = Field(..., alias="id", description
 
     return _response_data
 
-# Tags: broadcast_messages
-@mcp.tool()
-async def list_broadcast_messages(per_page: int | None = Field(20, description="Number of broadcast messages to return per page for pagination.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
-    """Retrieve all broadcast messages from the GitLab instance. Supports pagination to control the number of results returned per page."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4BroadcastMessagesRequest(
-            query=_models.GetApiV4BroadcastMessagesRequestQuery(per_page=per_page)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_broadcast_messages: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_broadcast_messages", "GET", "/broadcast_messages", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/broadcast_messages"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_broadcast_messages")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_broadcast_messages",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: broadcast_messages
-@mcp.tool()
-async def create_broadcast_message(
-    message: str = Field(..., description="The message content to display to users."),
-    starts_at: str | None = Field(None, description="When the broadcast message should start being displayed. Uses ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'}),
-    ends_at: str | None = Field(None, description="When the broadcast message should stop being displayed. Uses ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'}),
-    color: str | None = Field(None, description="Background color for the broadcast message. Specify as a hex color code or CSS color name."),
-    font: str | None = Field(None, description="Foreground text color for the broadcast message. Specify as a hex color code or CSS color name."),
-    target_access_levels: list[Literal[10, 20, 30, 40, 50]] | None = Field(None, description="Array of user access levels that should see this broadcast message. Filters visibility by user role."),
-    target_path: str | None = Field(None, description="URL path pattern to target where the broadcast message should appear. Limits display to specific pages or sections."),
-    broadcast_type: Literal["banner", "notification"] | None = Field(None, description="Type of broadcast message to display. Defaults to banner if not specified."),
-    dismissable: bool | None = Field(None, description="Whether users can dismiss and hide the broadcast message.")
-) -> dict[str, Any]:
-    """Create a broadcast message to display to GitLab users. Broadcast messages can be configured with specific timing, styling, target audiences, and dismissal options."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PostApiV4BroadcastMessagesRequest(
-            body=_models.PostApiV4BroadcastMessagesRequestBody(message=message, starts_at=starts_at, ends_at=ends_at, color=color, font=font, target_access_levels=target_access_levels, target_path=target_path, broadcast_type=broadcast_type, dismissable=dismissable)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for create_broadcast_message: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("create_broadcast_message", "POST", "/broadcast_messages", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/broadcast_messages"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("create_broadcast_message")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="create_broadcast_message",
-        method="POST",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: bulk_imports
 @mcp.tool()
 async def get_migration_entity(
-    import_id: int = Field(..., description="The unique identifier of the GitLab Migration batch containing the entity you want to retrieve.", json_schema_extra={'format': 'int32'}),
-    entity_id: int = Field(..., description="The unique identifier of the specific entity within the migration whose details you want to retrieve.", json_schema_extra={'format': 'int32'})
+    import_id: str = Field(..., description="The unique identifier of the GitLab Migration batch containing the entity you want to retrieve."),
+    entity_id: str = Field(..., description="The unique identifier of the specific entity within the migration whose details you want to retrieve."),
 ) -> dict[str, Any]:
     """Retrieve detailed information about a specific entity within a GitLab Migration. This allows you to inspect the status and properties of individual migrated items."""
+
+    _import_id = _parse_int(import_id)
+    _entity_id = _parse_int(entity_id)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BulkImportsImportIdEntitiesEntityIdRequest(
-            path=_models.GetApiV4BulkImportsImportIdEntitiesEntityIdRequestPath(import_id=import_id, entity_id=entity_id)
+            path=_models.GetApiV4BulkImportsImportIdEntitiesEntityIdRequestPath(import_id=_import_id, entity_id=_entity_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_migration_entity: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_migration_entity", "GET", "/bulk_imports/{import_id}/entities/{entity_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/bulk_imports/{import_id}/entities/{entity_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/bulk_imports/{import_id}/entities/{entity_id}"
@@ -3561,6 +2933,9 @@ async def get_migration_entity(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_migration_entity")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_migration_entity", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3576,27 +2951,24 @@ async def get_migration_entity(
 # Tags: bulk_imports
 @mcp.tool()
 async def list_migration_entities(
-    import_id: int = Field(..., description="The unique identifier of the GitLab Migration import job to retrieve entities from."),
+    import_id: str = Field(..., description="The unique identifier of the GitLab Migration import job to retrieve entities from."),
     status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current processing status in the migration workflow."),
-    per_page: int | None = Field(None, description="Number of entities to return per page for pagination. Defaults to 20 items per page.")
+    per_page: str | None = Field(None, description="Number of entities to return per page for pagination. Defaults to 20 items per page."),
 ) -> dict[str, Any]:
     """Retrieve a list of entities from a GitLab Migration import job. Filter by status and paginate through results to monitor migration progress."""
+
+    _import_id = _parse_int(import_id)
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BulkImportsImportIdEntitiesRequest(
-            path=_models.GetApiV4BulkImportsImportIdEntitiesRequestPath(import_id=import_id),
-            query=_models.GetApiV4BulkImportsImportIdEntitiesRequestQuery(status=status, per_page=per_page)
+            path=_models.GetApiV4BulkImportsImportIdEntitiesRequestPath(import_id=_import_id),
+            query=_models.GetApiV4BulkImportsImportIdEntitiesRequestQuery(status=status, per_page=_per_page)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_migration_entities: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_migration_entities", "GET", "/bulk_imports/{import_id}/entities", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/bulk_imports/{import_id}/entities", _request.path.model_dump(by_alias=True)) if _request.path else "/bulk_imports/{import_id}/entities"
@@ -3606,6 +2978,9 @@ async def list_migration_entities(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_migration_entities")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_migration_entities", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3621,23 +2996,19 @@ async def list_migration_entities(
 
 # Tags: bulk_imports
 @mcp.tool()
-async def get_bulk_import(import_id: int = Field(..., description="The unique identifier of the bulk import migration to retrieve.", json_schema_extra={'format': 'int32'})) -> dict[str, Any]:
+async def get_bulk_import(import_id: str = Field(..., description="The unique identifier of the bulk import migration to retrieve.")) -> dict[str, Any]:
     """Retrieve details about a GitLab Migration bulk import job, including its status and progress information."""
+
+    _import_id = _parse_int(import_id)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BulkImportsImportIdRequest(
-            path=_models.GetApiV4BulkImportsImportIdRequestPath(import_id=import_id)
+            path=_models.GetApiV4BulkImportsImportIdRequestPath(import_id=_import_id)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for get_bulk_import: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_bulk_import", "GET", "/bulk_imports/{import_id}", _request_id)
 
     # Extract parameters for API call
     _http_path = _build_path("/bulk_imports/{import_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/bulk_imports/{import_id}"
@@ -3646,6 +3017,9 @@ async def get_bulk_import(import_id: int = Field(..., description="The unique id
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_bulk_import")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_bulk_import", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3661,26 +3035,22 @@ async def get_bulk_import(import_id: int = Field(..., description="The unique id
 # Tags: bulk_imports
 @mcp.tool()
 async def list_migration_entities_all(
-    per_page: int | None = Field(20, description="Maximum number of entities to return per page for pagination purposes.", json_schema_extra={'format': 'int32'}),
-    sort: Literal["asc", "desc"] | None = Field('desc', description="Order in which to sort the returned entities by creation date."),
-    status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current migration status to view only those in a specific state.")
+    per_page: str | None = Field(None, description="Maximum number of entities to return per page for pagination purposes."),
+    sort: Literal["asc", "desc"] | None = Field(None, description="Order in which to sort the returned entities by creation date."),
+    status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current migration status to view only those in a specific state."),
 ) -> dict[str, Any]:
     """Retrieve a list of all entities from GitLab Migrations. This operation supports pagination, sorting, and filtering by migration status to help track the progress of bulk import operations."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BulkImportsEntitiesRequest(
-            query=_models.GetApiV4BulkImportsEntitiesRequestQuery(per_page=per_page, sort=sort, status=status)
+            query=_models.GetApiV4BulkImportsEntitiesRequestQuery(per_page=_per_page, sort=sort, status=status)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_migration_entities_all: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_migration_entities_all", "GET", "/bulk_imports/entities", _request_id)
 
     # Extract parameters for API call
     _http_path = "/bulk_imports/entities"
@@ -3690,6 +3060,9 @@ async def list_migration_entities_all(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_migration_entities_all")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_migration_entities_all", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3706,26 +3079,22 @@ async def list_migration_entities_all(
 # Tags: bulk_imports
 @mcp.tool()
 async def list_migrations(
-    per_page: int | None = Field(20, description="Number of migration records to return per page for pagination.", json_schema_extra={'format': 'int32'}),
-    sort: Literal["asc", "desc"] | None = Field('desc', description="Sort migrations by creation date in ascending or descending order."),
-    status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter migrations by their current status in the migration lifecycle.")
+    per_page: str | None = Field(None, description="Number of migration records to return per page for pagination."),
+    sort: Literal["asc", "desc"] | None = Field(None, description="Sort migrations by creation date in ascending or descending order."),
+    status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter migrations by their current status in the migration lifecycle."),
 ) -> dict[str, Any]:
     """Retrieve a list of all GitLab Migrations with optional filtering and sorting. This feature was introduced in GitLab 14.1."""
+
+    _per_page = _parse_int(per_page)
 
     # Construct request model with validation
     try:
         _request = _models.GetApiV4BulkImportsRequest(
-            query=_models.GetApiV4BulkImportsRequestQuery(per_page=per_page, sort=sort, status=status)
+            query=_models.GetApiV4BulkImportsRequestQuery(per_page=_per_page, sort=sort, status=status)
         )
     except pydantic.ValidationError as _validation_err:
         logging.error(f"Parameter validation failed for list_migrations: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_migrations", "GET", "/bulk_imports", _request_id)
 
     # Extract parameters for API call
     _http_path = "/bulk_imports"
@@ -3735,6 +3104,9 @@ async def list_migrations(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_migrations")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_migrations", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3757,7 +3129,7 @@ async def start_bulk_migration(
     entities_source_full_path: list[str] = Field(..., description="Array of relative paths for source entities to import. Each path corresponds to the entity at the same index in entities_source_type. Paths should be in the format of full project or group paths on the source instance"),
     entities_destination_namespace: list[str] = Field(..., description="Array of destination namespaces where entities will be imported. Each namespace corresponds to the entity at the same index. Specify the target group or namespace path on the destination instance"),
     entities_destination_slug: list[str] | None = Field(None, description="Array of optional destination slugs for imported entities. When provided, overrides the default slug derived from the source entity name. Each slug corresponds to the entity at the same index"),
-    entities_migrate_projects: list[bool] | None = Field(None, description="Array of boolean flags indicating whether to include nested projects during group migration. Each flag corresponds to the group at the same index in entities_source_type")
+    entities_migrate_projects: list[bool] | None = Field(None, description="Array of boolean flags indicating whether to include nested projects during group migration. Each flag corresponds to the group at the same index in entities_source_type"),
 ) -> dict[str, Any]:
     """Initiate a bulk migration of GitLab entities from a source instance to the destination. This operation supports migrating groups and projects with their nested resources between GitLab instances."""
 
@@ -3770,12 +3142,6 @@ async def start_bulk_migration(
         logging.error(f"Parameter validation failed for start_bulk_migration: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("start_bulk_migration", "POST", "/bulk_imports", _request_id)
-
     # Extract parameters for API call
     _http_path = "/bulk_imports"
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
@@ -3784,6 +3150,9 @@ async def start_bulk_migration(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("start_bulk_migration")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("start_bulk_migration", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -3798,263 +3167,11 @@ async def start_bulk_migration(
 
     return _response_data
 
-# Tags: application
-@mcp.tool()
-async def get_appearance() -> dict[str, Any]:
-    """Retrieve the current appearance settings for the application, including branding and visual customization options."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_appearance", "GET", "/application/appearance", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/application/appearance"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_appearance")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_appearance",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: application
-@mcp.tool()
-async def update_application_appearance(
-    title: str | None = Field(None, description="Main title displayed on the sign-in and sign-up pages."),
-    description: str | None = Field(None, description="Markdown-formatted text displayed on the sign-in and sign-up pages for additional context or instructions."),
-    pwa_name: str | None = Field(None, description="Full name of the Progressive Web App displayed to users."),
-    pwa_short_name: str | None = Field(None, description="Abbreviated name for the Progressive Web App, used in space-constrained contexts."),
-    pwa_description: str | None = Field(None, description="Markdown-formatted description explaining the purpose and functionality of the Progressive Web App."),
-    logo: str | None = Field(None, description="Image file used as the instance logo on the sign-in and sign-up pages.", json_schema_extra={'format': 'binary'}),
-    pwa_icon: str | None = Field(None, description="Image file used as the icon for the Progressive Web App across devices and platforms.", json_schema_extra={'format': 'binary'}),
-    header_logo: str | None = Field(None, description="Image file used as the logo in the main navigation bar header.", json_schema_extra={'format': 'binary'}),
-    favicon: str | None = Field(None, description="Favicon file in .ico or .png format displayed in browser tabs and bookmarks.", json_schema_extra={'format': 'binary'}),
-    new_project_guidelines: str | None = Field(None, description="Markdown-formatted guidelines displayed on the new project creation page to guide users."),
-    profile_image_guidelines: str | None = Field(None, description="Markdown-formatted guidelines displayed on user profile pages below the public avatar section."),
-    header_message: str | None = Field(None, description="Message text displayed in the system header bar visible across all pages."),
-    footer_message: str | None = Field(None, description="Message text displayed in the system footer bar visible across all pages."),
-    message_background_color: str | None = Field(None, description="Background color for the system header and footer bar. Specify as a hex color code or standard color name."),
-    message_font_color: str | None = Field(None, description="Font color for text in the system header and footer bar. Specify as a hex color code or standard color name."),
-    email_header_and_footer_enabled: bool | None = Field(None, description="Enable or disable the automatic addition of header and footer content to all outgoing email messages.")
-) -> dict[str, Any]:
-    """Customize the visual appearance and branding of the application instance, including sign-in page styling, Progressive Web App configuration, system messages, and email footer settings."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutApiV4ApplicationAppearanceRequest(
-            body=_models.PutApiV4ApplicationAppearanceRequestBody(title=title, description=description, pwa_name=pwa_name, pwa_short_name=pwa_short_name, pwa_description=pwa_description, logo=logo, pwa_icon=pwa_icon, header_logo=header_logo, favicon=favicon, new_project_guidelines=new_project_guidelines, profile_image_guidelines=profile_image_guidelines, header_message=header_message, footer_message=footer_message, message_background_color=message_background_color, message_font_color=message_font_color, email_header_and_footer_enabled=email_header_and_footer_enabled)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_application_appearance: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_application_appearance", "PUT", "/application/appearance", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/application/appearance"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_application_appearance")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_application_appearance",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        body_content_type="multipart/form-data",
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: plan_limits
-@mcp.tool()
-async def list_plan_limits(plan_name: Literal["default", "free", "bronze", "silver", "premium", "gold", "ultimate", "ultimate_trial", "premium_trial", "opensource"] | None = Field('default', description="The GitLab plan to retrieve limits for. Defaults to the standard plan if not specified.")) -> dict[str, Any]:
-    """Retrieve the current resource limits for a GitLab plan. Returns limit information for the specified plan on the GitLab instance."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.GetApiV4ApplicationPlanLimitsRequest(
-            query=_models.GetApiV4ApplicationPlanLimitsRequestQuery(plan_name=plan_name)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for list_plan_limits: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_plan_limits", "GET", "/application/plan_limits", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/application/plan_limits"
-    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("list_plan_limits")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="list_plan_limits",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        params=_http_query,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: plan_limits
-@mcp.tool()
-async def update_plan_limits(
-    plan_name: Literal["default", "free", "bronze", "silver", "premium", "gold", "ultimate", "ultimate_trial", "premium_trial", "opensource"] = Field(..., description="The subscription plan to update limits for."),
-    ci_pipeline_size: int | None = Field(None, description="Maximum number of jobs allowed in a single CI/CD pipeline.", json_schema_extra={'format': 'int32'}),
-    ci_active_jobs: int | None = Field(None, description="Total number of jobs permitted across all currently active pipelines.", json_schema_extra={'format': 'int32'}),
-    ci_project_subscriptions: int | None = Field(None, description="Maximum number of pipeline subscriptions a project can have to and from other projects.", json_schema_extra={'format': 'int32'}),
-    ci_pipeline_schedules: int | None = Field(None, description="Maximum number of scheduled pipelines allowed per plan.", json_schema_extra={'format': 'int32'}),
-    ci_needs_size_limit: int | None = Field(None, description="Maximum number of job dependencies a single job can declare using the needs keyword.", json_schema_extra={'format': 'int32'}),
-    ci_registered_group_runners: int | None = Field(None, description="Maximum number of CI/CD runners that can be registered at the group level.", json_schema_extra={'format': 'int32'}),
-    ci_registered_project_runners: int | None = Field(None, description="Maximum number of CI/CD runners that can be registered at the project level.", json_schema_extra={'format': 'int32'}),
-    conan_max_file_size: int | None = Field(None, description="Maximum file size for Conan package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    enforcement_limit: int | None = Field(None, description="Maximum storage quota for root namespace enforcement in MiB.", json_schema_extra={'format': 'int32'}),
-    generic_packages_max_file_size: int | None = Field(None, description="Maximum file size for generic package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    helm_max_file_size: int | None = Field(None, description="Maximum file size for Helm chart uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    maven_max_file_size: int | None = Field(None, description="Maximum file size for Maven package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    notification_limit: int | None = Field(None, description="Maximum storage quota for root namespace notifications in MiB.", json_schema_extra={'format': 'int32'}),
-    npm_max_file_size: int | None = Field(None, description="Maximum file size for NPM package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    nuget_max_file_size: int | None = Field(None, description="Maximum file size for NuGet package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    pypi_max_file_size: int | None = Field(None, description="Maximum file size for PyPI package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    terraform_module_max_file_size: int | None = Field(None, description="Maximum file size for Terraform Module package uploads in bytes.", json_schema_extra={'format': 'int32'}),
-    storage_size_limit: int | None = Field(None, description="Maximum storage quota for the root namespace in MiB.", json_schema_extra={'format': 'int32'}),
-    pipeline_hierarchy_size: int | None = Field(None, description="Maximum number of downstream pipelines allowed in a pipeline's hierarchy tree.", json_schema_extra={'format': 'int32'})
-) -> dict[str, Any]:
-    """Update resource and storage limits for a GitLab subscription plan. Modify CI/CD pipeline constraints, package file size limits, and namespace storage quotas for the specified plan."""
-
-    # Construct request model with validation
-    try:
-        _request = _models.PutApiV4ApplicationPlanLimitsRequest(
-            body=_models.PutApiV4ApplicationPlanLimitsRequestBody(plan_name=plan_name, ci_pipeline_size=ci_pipeline_size, ci_active_jobs=ci_active_jobs, ci_project_subscriptions=ci_project_subscriptions, ci_pipeline_schedules=ci_pipeline_schedules, ci_needs_size_limit=ci_needs_size_limit, ci_registered_group_runners=ci_registered_group_runners, ci_registered_project_runners=ci_registered_project_runners, conan_max_file_size=conan_max_file_size, enforcement_limit=enforcement_limit, generic_packages_max_file_size=generic_packages_max_file_size, helm_max_file_size=helm_max_file_size, maven_max_file_size=maven_max_file_size, notification_limit=notification_limit, npm_max_file_size=npm_max_file_size, nuget_max_file_size=nuget_max_file_size, pypi_max_file_size=pypi_max_file_size, terraform_module_max_file_size=terraform_module_max_file_size, storage_size_limit=storage_size_limit, pipeline_hierarchy_size=pipeline_hierarchy_size)
-        )
-    except pydantic.ValidationError as _validation_err:
-        logging.error(f"Parameter validation failed for update_plan_limits: {_validation_err}")
-        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("update_plan_limits", "PUT", "/application/plan_limits", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/application/plan_limits"
-    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("update_plan_limits")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="update_plan_limits",
-        method="PUT",
-        path=_http_path,
-        request_id=_request_id,
-        body=_http_body,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: metadata
-@mcp.tool()
-async def get_instance_metadata() -> dict[str, Any]:
-    """Retrieve metadata information about the GitLab instance, including version and feature availability. This operation provides system-level information useful for understanding instance capabilities."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_instance_metadata", "GET", "/metadata", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/metadata"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_instance_metadata")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_instance_metadata",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
-# Tags: metadata
-@mcp.tool()
-async def get_instance_version() -> dict[str, Any]:
-    """Retrieves version information for the GitLab instance. Note: This endpoint was deprecated in GitLab 15.5; use the Metadata API instead."""
-
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_instance_version", "GET", "/version", _request_id)
-
-    # Extract parameters for API call
-    _http_path = "/version"
-    _http_headers = {}
-
-    # Inject per-operation authentication
-    _auth = await _get_auth_for_operation("get_instance_version")
-    _http_headers.update(_auth.get("headers", {}))
-
-    # Execute request (returns normalized dict and status code)
-    _response_data, _ = await _execute_tool_request(
-        tool_name="get_instance_version",
-        method="GET",
-        path=_http_path,
-        request_id=_request_id,
-        headers=_http_headers,
-    )
-
-    return _response_data
-
 # Tags: jobs
 @mcp.tool()
 async def list_jobs(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
-    scope: list[str] | None = Field(None, description="Filter results to include only jobs with the specified statuses. Provide as an array of status values; order is not significant.")
+    scope: list[str] | None = Field(None, description="Filter results to include only jobs with the specified statuses. Provide as an array of status values; order is not significant."),
 ) -> dict[str, Any]:
     """Retrieve all jobs for a specified project, with optional filtering by job status. Use this to monitor job execution, track pipeline progress, or retrieve job details."""
 
@@ -4068,12 +3185,6 @@ async def list_jobs(
         logging.error(f"Parameter validation failed for list_jobs: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("list_jobs", "GET", "/projects/{id}/jobs", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/jobs", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/jobs"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -4082,6 +3193,9 @@ async def list_jobs(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_jobs")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_jobs", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4099,7 +3213,7 @@ async def list_jobs(
 @mcp.tool()
 async def get_job(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
-    job_id: int = Field(..., description="The numeric identifier of the job to retrieve.")
+    job_id: int = Field(..., description="The numeric identifier of the job to retrieve."),
 ) -> dict[str, Any]:
     """Retrieve details for a specific job within a project. Returns comprehensive job information including status, logs, and execution details."""
 
@@ -4112,12 +3226,6 @@ async def get_job(
         logging.error(f"Parameter validation failed for get_job: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("get_job", "GET", "/projects/{id}/jobs/{job_id}", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/jobs/{job_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/jobs/{job_id}"
     _http_headers = {}
@@ -4125,6 +3233,9 @@ async def get_job(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_job")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_job", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4142,7 +3253,7 @@ async def get_job(
 async def execute_manual_job(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     job_id: int = Field(..., description="The numeric ID of the manual job to execute."),
-    job_variables_attributes: list[str] | None = Field(None, description="Optional array of custom variables to make available to the job during execution. Variables are applied in the order provided.")
+    job_variables_attributes: list[str] | None = Field(None, description="Optional array of custom variables to make available to the job during execution. Variables are applied in the order provided."),
 ) -> dict[str, Any]:
     """Execute a manual job for a project. Optionally provide custom variables to override job defaults during execution."""
 
@@ -4156,12 +3267,6 @@ async def execute_manual_job(
         logging.error(f"Parameter validation failed for execute_manual_job: {_validation_err}")
         raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
 
-    # Generate request ID
-    _request_id = str(uuid.uuid4())
-
-    # Log invocation
-    _log_tool_invocation("execute_manual_job", "POST", "/projects/{id}/jobs/{job_id}/play", _request_id)
-
     # Extract parameters for API call
     _http_path = _build_path("/projects/{id}/jobs/{job_id}/play", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{id}/jobs/{job_id}/play"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
@@ -4170,6 +3275,9 @@ async def execute_manual_job(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("execute_manual_job")
     _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("execute_manual_job", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -4267,7 +3375,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python git_lab_api_server.py", file=sys.stderr)
+        print("  python git_lab_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

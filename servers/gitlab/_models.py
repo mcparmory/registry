@@ -1,8 +1,8 @@
 """
-Gitlab Api MCP Server - Pydantic Models
+Gitlab MCP Server - Pydantic Models
 
-Generated: 2026-03-31 18:45:04 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:51 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
 from __future__ import annotations
@@ -24,16 +24,11 @@ __all__ = [
     "DeleteApiV4ProjectsIdBadgesBadgeIdRequest",
     "DeleteApiV4ProjectsIdRepositoryBranchesBranchRequest",
     "DeleteApiV4ProjectsIdRepositoryMergedBranchesRequest",
-    "GetApiV4AdminBatchedBackgroundMigrationsIdRequest",
-    "GetApiV4AdminBatchedBackgroundMigrationsRequest",
     "GetApiV4AdminCiVariablesKeyRequest",
     "GetApiV4AdminCiVariablesRequest",
     "GetApiV4AdminClustersClusterIdRequest",
-    "GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequest",
-    "GetApiV4ApplicationPlanLimitsRequest",
     "GetApiV4AvatarRequest",
     "GetApiV4BroadcastMessagesIdRequest",
-    "GetApiV4BroadcastMessagesRequest",
     "GetApiV4BulkImportsEntitiesRequest",
     "GetApiV4BulkImportsImportIdEntitiesEntityIdRequest",
     "GetApiV4BulkImportsImportIdEntitiesRequest",
@@ -41,12 +36,10 @@ __all__ = [
     "GetApiV4BulkImportsRequest",
     "GetApiV4GroupsIdAccessRequestsRequest",
     "GetApiV4GroupsIdBadgesBadgeIdRequest",
-    "GetApiV4GroupsIdBadgesRenderRequest",
     "GetApiV4GroupsIdBadgesRequest",
     "GetApiV4ProjectsIdAccessRequestsRequest",
     "GetApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest",
     "GetApiV4ProjectsIdBadgesBadgeIdRequest",
-    "GetApiV4ProjectsIdBadgesRenderRequest",
     "GetApiV4ProjectsIdBadgesRequest",
     "GetApiV4ProjectsIdRepositoryBranchesBranchRequest",
     "GetApiV4ProjectsIdRepositoryBranchesRequest",
@@ -55,24 +48,15 @@ __all__ = [
     "ListProjectJobsRequest",
     "PostApiV4AdminCiVariablesRequest",
     "PostApiV4AdminClustersAddRequest",
-    "PostApiV4AdminMigrationsTimestampMarkRequest",
-    "PostApiV4ApplicationsRequest",
-    "PostApiV4BroadcastMessagesRequest",
     "PostApiV4BulkImportsRequest",
     "PostApiV4GroupsIdAccessRequestsRequest",
     "PostApiV4GroupsIdBadgesRequest",
     "PostApiV4ProjectsIdAccessRequestsRequest",
-    "PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequest",
     "PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest",
     "PostApiV4ProjectsIdBadgesRequest",
     "PostApiV4ProjectsIdRepositoryBranchesRequest",
     "PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequest",
-    "PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequest",
-    "PutApiV4AdminCiVariablesKeyRequest",
     "PutApiV4AdminClustersClusterIdRequest",
-    "PutApiV4ApplicationAppearanceRequest",
-    "PutApiV4ApplicationPlanLimitsRequest",
-    "PutApiV4BroadcastMessagesIdRequest",
     "PutApiV4GroupsIdAccessRequestsUserIdApproveRequest",
     "PutApiV4GroupsIdBadgesBadgeIdRequest",
     "PutApiV4ProjectsIdAccessRequestsUserIdApproveRequest",
@@ -138,17 +122,6 @@ class PostApiV4GroupsIdBadgesRequest(StrictModel):
     """Adds a badge to a group to display custom branding or status indicators. The badge will be visible on the group's profile page."""
     path: PostApiV4GroupsIdBadgesRequestPath
     body: PostApiV4GroupsIdBadgesRequestBody
-
-# Operation: preview_group_badge
-class GetApiV4GroupsIdBadgesRenderRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The ID or URL-encoded path of the group. This identifies which group the badge preview is for.")
-class GetApiV4GroupsIdBadgesRenderRequestQuery(StrictModel):
-    link_url: str = Field(default=..., description="The URL where the badge link should direct users when clicked.")
-    image_url: str = Field(default=..., description="The URL of the badge image to be displayed.")
-class GetApiV4GroupsIdBadgesRenderRequest(StrictModel):
-    """Generate a preview of a badge for a group using the provided link and image URLs. This allows you to see how the badge will render before applying it to the group."""
-    path: GetApiV4GroupsIdBadgesRenderRequestPath
-    query: GetApiV4GroupsIdBadgesRenderRequestQuery
 
 # Operation: deny_group_access_request
 class DeleteApiV4GroupsIdAccessRequestsUserIdRequestPath(StrictModel):
@@ -311,17 +284,6 @@ class PostApiV4ProjectsIdBadgesRequest(StrictModel):
     path: PostApiV4ProjectsIdBadgesRequestPath
     body: PostApiV4ProjectsIdBadgesRequestBody
 
-# Operation: preview_badge
-class GetApiV4ProjectsIdBadgesRenderRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project).")
-class GetApiV4ProjectsIdBadgesRenderRequestQuery(StrictModel):
-    link_url: str = Field(default=..., description="The destination URL that the badge will link to when clicked.")
-    image_url: str = Field(default=..., description="The URL of the badge image to be rendered.")
-class GetApiV4ProjectsIdBadgesRenderRequest(StrictModel):
-    """Generate a preview of a badge for a project by rendering it with the specified image and link URLs. Useful for validating badge configuration before deployment."""
-    path: GetApiV4ProjectsIdBadgesRenderRequestPath
-    query: GetApiV4ProjectsIdBadgesRenderRequestQuery
-
 # Operation: deny_access_request
 class DeleteApiV4ProjectsIdAccessRequestsUserIdRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The project identifier, either as a numeric ID or URL-encoded path.")
@@ -401,41 +363,6 @@ class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequest(Strict
     path: PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestPath
     body: PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesRequestBody
 
-# Operation: authorize_alert_metric_image
-class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The project identifier, either as a numeric ID or URL-encoded path.")
-    alert_iid: int = Field(default=..., description="The internal ID of the alert to which the metric image will be attached.", json_schema_extra={'format': 'int32'})
-class PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequest(StrictModel):
-    """Authorize and prepare a metric image file for upload to an alert. This initiates the upload process for attaching metric images to alert management alerts."""
-    path: PostApiV4ProjectsIdAlertManagementAlertsAlertIidMetricImagesAuthorizeRequestPath
-
-# Operation: get_batched_background_migration
-class GetApiV4AdminBatchedBackgroundMigrationsIdRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the batched background migration to retrieve.", json_schema_extra={'format': 'int32'})
-class GetApiV4AdminBatchedBackgroundMigrationsIdRequestQuery(StrictModel):
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(default=None, description="The database instance to query. Defaults to the main database if not specified.")
-class GetApiV4AdminBatchedBackgroundMigrationsIdRequest(StrictModel):
-    """Retrieve details of a specific batched background migration by its ID. Use this to monitor the status and progress of database migrations running in the background."""
-    path: GetApiV4AdminBatchedBackgroundMigrationsIdRequestPath
-    query: GetApiV4AdminBatchedBackgroundMigrationsIdRequestQuery | None = None
-
-# Operation: list_batched_background_migrations
-class GetApiV4AdminBatchedBackgroundMigrationsRequestQuery(StrictModel):
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(default=None, description="The database to query for background migrations. Defaults to the main database if not specified.")
-class GetApiV4AdminBatchedBackgroundMigrationsRequest(StrictModel):
-    """Retrieve the list of batched background migrations for a specified database. Batched background migrations are long-running data migrations that are executed in batches to minimize performance impact."""
-    query: GetApiV4AdminBatchedBackgroundMigrationsRequestQuery | None = None
-
-# Operation: resume_batched_background_migration
-class PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the batched background migration to resume.", json_schema_extra={'format': 'int32'})
-class PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestBody(StrictModel):
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(default=None, description="The database where the batched background migration is running. Defaults to 'main' if not specified.")
-class PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequest(StrictModel):
-    """Resume a paused batched background migration by its ID. Specify the database if the migration is not on the default 'main' database."""
-    path: PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestPath
-    body: PutApiV4AdminBatchedBackgroundMigrationsIdResumeRequestBody | None = None
-
 # Operation: pause_batched_background_migration
 class PutApiV4AdminBatchedBackgroundMigrationsIdPauseRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the batched background migration to pause.", json_schema_extra={'format': 'int32'})
@@ -452,20 +379,6 @@ class GetApiV4AdminCiVariablesKeyRequestPath(StrictModel):
 class GetApiV4AdminCiVariablesKeyRequest(StrictModel):
     """Retrieve the details of a specific instance-level CI/CD variable by its key. This operation returns the variable's configuration and metadata."""
     path: GetApiV4AdminCiVariablesKeyRequestPath
-
-# Operation: update_admin_ci_variable
-class PutApiV4AdminCiVariablesKeyRequestPath(StrictModel):
-    key: str = Field(default=..., description="The unique identifier key of the CI/CD variable to update.")
-class PutApiV4AdminCiVariablesKeyRequestBody(StrictModel):
-    value: str | None = Field(default=None, description="The new value to assign to the variable.")
-    protected: bool | None = Field(default=None, description="Whether the variable should be protected, restricting its use to protected branches and tags only.")
-    masked: bool | None = Field(default=None, description="Whether the variable value should be masked in job logs to prevent accidental exposure of sensitive data.")
-    raw: bool | None = Field(default=None, description="Whether the variable will be expanded during job execution. When false, the variable is treated as a literal string.")
-    variable_type: Literal["env_var", "file"] | None = Field(default=None, description="The type of variable, determining how it is handled during job execution.")
-class PutApiV4AdminCiVariablesKeyRequest(StrictModel):
-    """Update an instance-level CI/CD variable. Modify the value, protection status, masking behavior, expansion mode, or type of an existing admin-level variable."""
-    path: PutApiV4AdminCiVariablesKeyRequestPath
-    body: PutApiV4AdminCiVariablesKeyRequestBody | None = None
 
 # Operation: delete_instance_variable
 class DeleteApiV4AdminCiVariablesKeyRequestPath(StrictModel):
@@ -492,14 +405,6 @@ class PostApiV4AdminCiVariablesRequestBody(StrictModel):
 class PostApiV4AdminCiVariablesRequest(StrictModel):
     """Create a new instance-level CI/CD variable that is available to all projects. Instance variables are useful for storing secrets and configuration values needed across your entire GitLab instance."""
     body: PostApiV4AdminCiVariablesRequestBody
-
-# Operation: get_table_dictionary
-class GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequestPath(StrictModel):
-    database_name: Literal["main", "ci"] = Field(default=..., description="The database to query. Must be either the main production database or the CI testing database.")
-    table_name: str = Field(default=..., description="The name of the table whose dictionary details should be retrieved.")
-class GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequest(StrictModel):
-    """Retrieve detailed dictionary metadata for a specific table, including its schema and structure information from the specified database."""
-    path: GetApiV4AdminDatabasesDatabaseNameDictionaryTablesTableNameRequestPath
 
 # Operation: get_cluster
 class GetApiV4AdminClustersClusterIdRequestPath(StrictModel):
@@ -547,32 +452,12 @@ class PostApiV4AdminClustersAddRequest(StrictModel):
     """Register an existing Kubernetes cluster as an instance cluster in GitLab. This allows GitLab to deploy applications and manage resources on the cluster."""
     body: PostApiV4AdminClustersAddRequestBody
 
-# Operation: mark_migration_executed
-class PostApiV4AdminMigrationsTimestampMarkRequestPath(StrictModel):
-    timestamp: int = Field(default=..., description="The version timestamp of the migration to mark as executed.", json_schema_extra={'format': 'int32'})
-class PostApiV4AdminMigrationsTimestampMarkRequestBody(StrictModel):
-    database: Literal["main", "ci", "embedding", "geo"] | None = Field(default=None, description="The target database where the migration was executed. Defaults to the main database if not specified.")
-class PostApiV4AdminMigrationsTimestampMarkRequest(StrictModel):
-    """Mark a database migration as successfully executed. This records that the migration with the specified timestamp has been completed and applied to the target database."""
-    path: PostApiV4AdminMigrationsTimestampMarkRequestPath
-    body: PostApiV4AdminMigrationsTimestampMarkRequestBody | None = None
-
 # Operation: delete_application
 class DeleteApiV4ApplicationsIdRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the application to delete.", json_schema_extra={'format': 'int32'})
 class DeleteApiV4ApplicationsIdRequest(StrictModel):
     """Permanently delete a specific application by its ID. This action cannot be undone."""
     path: DeleteApiV4ApplicationsIdRequestPath
-
-# Operation: create_application
-class PostApiV4ApplicationsRequestBody(StrictModel):
-    name: str = Field(default=..., description="The display name for the application.")
-    redirect_uri: str = Field(default=..., description="The URI where the authorization server will redirect users after authentication. Must be a valid absolute URI.")
-    scopes: str = Field(default=..., description="Space-separated list of permission scopes the application requests. Each scope grants specific access permissions to the application.")
-    confidential: bool | None = Field(default=None, description="Whether the application can securely store the client secret. Set to true for server-side applications, false for native mobile apps and single-page applications.")
-class PostApiV4ApplicationsRequest(StrictModel):
-    """Create a new OAuth 2.0 application for API access and user authentication. This operation registers an application with specified permissions and redirect configuration."""
-    body: PostApiV4ApplicationsRequestBody
 
 # Operation: get_user_avatar
 class GetApiV4AvatarRequestQuery(StrictModel):
@@ -589,52 +474,12 @@ class GetApiV4BroadcastMessagesIdRequest(StrictModel):
     """Retrieve a specific broadcast message by its ID. Broadcast messages are system-wide announcements visible to all users."""
     path: GetApiV4BroadcastMessagesIdRequestPath
 
-# Operation: update_broadcast_message
-class PutApiV4BroadcastMessagesIdRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the broadcast message to update.", json_schema_extra={'format': 'int32'})
-class PutApiV4BroadcastMessagesIdRequestBody(StrictModel):
-    message: str | None = Field(default=None, description="The text content of the broadcast message displayed to users.")
-    starts_at: str | None = Field(default=None, description="The date and time when the broadcast message becomes visible to users.", json_schema_extra={'format': 'date-time'})
-    ends_at: str | None = Field(default=None, description="The date and time when the broadcast message stops being displayed to users.", json_schema_extra={'format': 'date-time'})
-    color: str | None = Field(default=None, description="The background color of the broadcast message banner or notification.")
-    font: str | None = Field(default=None, description="The foreground text color of the broadcast message.")
-    target_access_levels: list[Literal[10, 20, 30, 40, 50]] | None = Field(default=None, description="An array of user access levels that should see this broadcast message. Specify which user roles are targeted by this message.")
-    target_path: str | None = Field(default=None, description="A path pattern to limit where the broadcast message is displayed. The message will only appear on pages matching this path.")
-    broadcast_type: Literal["banner", "notification"] | None = Field(default=None, description="The type of broadcast message to display.")
-    dismissable: bool | None = Field(default=None, description="Whether users can dismiss or close the broadcast message.")
-class PutApiV4BroadcastMessagesIdRequest(StrictModel):
-    """Update an existing broadcast message displayed to GitLab users. Modify message content, display timing, styling, target audience, and dismissability settings."""
-    path: PutApiV4BroadcastMessagesIdRequestPath
-    body: PutApiV4BroadcastMessagesIdRequestBody | None = None
-
 # Operation: delete_broadcast_message
 class DeleteApiV4BroadcastMessagesIdRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the broadcast message to delete.", json_schema_extra={'format': 'int32'})
 class DeleteApiV4BroadcastMessagesIdRequest(StrictModel):
     """Delete a broadcast message by its ID. This operation permanently removes the specified broadcast message from the system."""
     path: DeleteApiV4BroadcastMessagesIdRequestPath
-
-# Operation: list_broadcast_messages
-class GetApiV4BroadcastMessagesRequestQuery(StrictModel):
-    per_page: int | None = Field(default=None, description="Number of broadcast messages to return per page for pagination.", json_schema_extra={'format': 'int32'})
-class GetApiV4BroadcastMessagesRequest(StrictModel):
-    """Retrieve all broadcast messages from the GitLab instance. Supports pagination to control the number of results returned per page."""
-    query: GetApiV4BroadcastMessagesRequestQuery | None = None
-
-# Operation: create_broadcast_message
-class PostApiV4BroadcastMessagesRequestBody(StrictModel):
-    message: str = Field(default=..., description="The message content to display to users.")
-    starts_at: str | None = Field(default=None, description="When the broadcast message should start being displayed. Uses ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'})
-    ends_at: str | None = Field(default=None, description="When the broadcast message should stop being displayed. Uses ISO 8601 date-time format.", json_schema_extra={'format': 'date-time'})
-    color: str | None = Field(default=None, description="Background color for the broadcast message. Specify as a hex color code or CSS color name.")
-    font: str | None = Field(default=None, description="Foreground text color for the broadcast message. Specify as a hex color code or CSS color name.")
-    target_access_levels: list[Literal[10, 20, 30, 40, 50]] | None = Field(default=None, description="Array of user access levels that should see this broadcast message. Filters visibility by user role.")
-    target_path: str | None = Field(default=None, description="URL path pattern to target where the broadcast message should appear. Limits display to specific pages or sections.")
-    broadcast_type: Literal["banner", "notification"] | None = Field(default=None, description="Type of broadcast message to display. Defaults to banner if not specified.")
-    dismissable: bool | None = Field(default=None, description="Whether users can dismiss and hide the broadcast message.")
-class PostApiV4BroadcastMessagesRequest(StrictModel):
-    """Create a broadcast message to display to GitLab users. Broadcast messages can be configured with specific timing, styling, target audiences, and dismissal options."""
-    body: PostApiV4BroadcastMessagesRequestBody
 
 # Operation: get_migration_entity
 class GetApiV4BulkImportsImportIdEntitiesEntityIdRequestPath(StrictModel):
@@ -692,61 +537,6 @@ class PostApiV4BulkImportsRequestBody(StrictModel):
 class PostApiV4BulkImportsRequest(StrictModel):
     """Initiate a bulk migration of GitLab entities from a source instance to the destination. This operation supports migrating groups and projects with their nested resources between GitLab instances."""
     body: PostApiV4BulkImportsRequestBody
-
-# Operation: update_application_appearance
-class PutApiV4ApplicationAppearanceRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Main title displayed on the sign-in and sign-up pages.")
-    description: str | None = Field(default=None, description="Markdown-formatted text displayed on the sign-in and sign-up pages for additional context or instructions.")
-    pwa_name: str | None = Field(default=None, description="Full name of the Progressive Web App displayed to users.")
-    pwa_short_name: str | None = Field(default=None, description="Abbreviated name for the Progressive Web App, used in space-constrained contexts.")
-    pwa_description: str | None = Field(default=None, description="Markdown-formatted description explaining the purpose and functionality of the Progressive Web App.")
-    logo: str | None = Field(default=None, description="Image file used as the instance logo on the sign-in and sign-up pages.", json_schema_extra={'format': 'binary'})
-    pwa_icon: str | None = Field(default=None, description="Image file used as the icon for the Progressive Web App across devices and platforms.", json_schema_extra={'format': 'binary'})
-    header_logo: str | None = Field(default=None, description="Image file used as the logo in the main navigation bar header.", json_schema_extra={'format': 'binary'})
-    favicon: str | None = Field(default=None, description="Favicon file in .ico or .png format displayed in browser tabs and bookmarks.", json_schema_extra={'format': 'binary'})
-    new_project_guidelines: str | None = Field(default=None, description="Markdown-formatted guidelines displayed on the new project creation page to guide users.")
-    profile_image_guidelines: str | None = Field(default=None, description="Markdown-formatted guidelines displayed on user profile pages below the public avatar section.")
-    header_message: str | None = Field(default=None, description="Message text displayed in the system header bar visible across all pages.")
-    footer_message: str | None = Field(default=None, description="Message text displayed in the system footer bar visible across all pages.")
-    message_background_color: str | None = Field(default=None, description="Background color for the system header and footer bar. Specify as a hex color code or standard color name.")
-    message_font_color: str | None = Field(default=None, description="Font color for text in the system header and footer bar. Specify as a hex color code or standard color name.")
-    email_header_and_footer_enabled: bool | None = Field(default=None, description="Enable or disable the automatic addition of header and footer content to all outgoing email messages.")
-class PutApiV4ApplicationAppearanceRequest(StrictModel):
-    """Customize the visual appearance and branding of the application instance, including sign-in page styling, Progressive Web App configuration, system messages, and email footer settings."""
-    body: PutApiV4ApplicationAppearanceRequestBody | None = None
-
-# Operation: list_plan_limits
-class GetApiV4ApplicationPlanLimitsRequestQuery(StrictModel):
-    plan_name: Literal["default", "free", "bronze", "silver", "premium", "gold", "ultimate", "ultimate_trial", "premium_trial", "opensource"] | None = Field(default=None, description="The GitLab plan to retrieve limits for. Defaults to the standard plan if not specified.")
-class GetApiV4ApplicationPlanLimitsRequest(StrictModel):
-    """Retrieve the current resource limits for a GitLab plan. Returns limit information for the specified plan on the GitLab instance."""
-    query: GetApiV4ApplicationPlanLimitsRequestQuery | None = None
-
-# Operation: update_plan_limits
-class PutApiV4ApplicationPlanLimitsRequestBody(StrictModel):
-    plan_name: Literal["default", "free", "bronze", "silver", "premium", "gold", "ultimate", "ultimate_trial", "premium_trial", "opensource"] = Field(default=..., description="The subscription plan to update limits for.")
-    ci_pipeline_size: int | None = Field(default=None, description="Maximum number of jobs allowed in a single CI/CD pipeline.", json_schema_extra={'format': 'int32'})
-    ci_active_jobs: int | None = Field(default=None, description="Total number of jobs permitted across all currently active pipelines.", json_schema_extra={'format': 'int32'})
-    ci_project_subscriptions: int | None = Field(default=None, description="Maximum number of pipeline subscriptions a project can have to and from other projects.", json_schema_extra={'format': 'int32'})
-    ci_pipeline_schedules: int | None = Field(default=None, description="Maximum number of scheduled pipelines allowed per plan.", json_schema_extra={'format': 'int32'})
-    ci_needs_size_limit: int | None = Field(default=None, description="Maximum number of job dependencies a single job can declare using the needs keyword.", json_schema_extra={'format': 'int32'})
-    ci_registered_group_runners: int | None = Field(default=None, description="Maximum number of CI/CD runners that can be registered at the group level.", json_schema_extra={'format': 'int32'})
-    ci_registered_project_runners: int | None = Field(default=None, description="Maximum number of CI/CD runners that can be registered at the project level.", json_schema_extra={'format': 'int32'})
-    conan_max_file_size: int | None = Field(default=None, description="Maximum file size for Conan package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    enforcement_limit: int | None = Field(default=None, description="Maximum storage quota for root namespace enforcement in MiB.", json_schema_extra={'format': 'int32'})
-    generic_packages_max_file_size: int | None = Field(default=None, description="Maximum file size for generic package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    helm_max_file_size: int | None = Field(default=None, description="Maximum file size for Helm chart uploads in bytes.", json_schema_extra={'format': 'int32'})
-    maven_max_file_size: int | None = Field(default=None, description="Maximum file size for Maven package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    notification_limit: int | None = Field(default=None, description="Maximum storage quota for root namespace notifications in MiB.", json_schema_extra={'format': 'int32'})
-    npm_max_file_size: int | None = Field(default=None, description="Maximum file size for NPM package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    nuget_max_file_size: int | None = Field(default=None, description="Maximum file size for NuGet package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    pypi_max_file_size: int | None = Field(default=None, description="Maximum file size for PyPI package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    terraform_module_max_file_size: int | None = Field(default=None, description="Maximum file size for Terraform Module package uploads in bytes.", json_schema_extra={'format': 'int32'})
-    storage_size_limit: int | None = Field(default=None, description="Maximum storage quota for the root namespace in MiB.", json_schema_extra={'format': 'int32'})
-    pipeline_hierarchy_size: int | None = Field(default=None, description="Maximum number of downstream pipelines allowed in a pipeline's hierarchy tree.", json_schema_extra={'format': 'int32'})
-class PutApiV4ApplicationPlanLimitsRequest(StrictModel):
-    """Update resource and storage limits for a GitLab subscription plan. Modify CI/CD pipeline constraints, package file size limits, and namespace storage quotas for the specified plan."""
-    body: PutApiV4ApplicationPlanLimitsRequestBody
 
 # Operation: list_jobs
 class ListProjectJobsRequestPath(StrictModel):

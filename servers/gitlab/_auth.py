@@ -1,8 +1,8 @@
 """
-Authentication module for GitLab API MCP server.
+Authentication module for GitLab MCP server.
 
-Generated: 2026-03-31 18:45:04 UTC
-Generator: MCP Blacksmith v1.0.0 (https://mcpblacksmith.com)
+Generated: 2026-04-09 17:21:51 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
 1. Authentication class implementations (OAuth2)
@@ -29,7 +29,7 @@ class APIKeyAuth:
     """
     API Key authentication for GitLab API.
 
-    Supports header, query parameter, and cookie-based API key injection.
+    Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
     """
 
@@ -39,8 +39,8 @@ class APIKeyAuth:
 
         Args:
             env_var: Environment variable name containing the API key.
-            location: Where to inject the key - 'header', 'query', or 'cookie'.
-            param_name: Name of the header, query parameter, or cookie.
+            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
+            param_name: Name of the header, query parameter, cookie, or path placeholder.
             prefix: Optional prefix before the key value (e.g., 'Bearer').
         """
         self.location = location
@@ -89,6 +89,12 @@ class APIKeyAuth:
             return {}
         return {self.param_name: self.api_key}
 
+    def get_auth_path_params(self) -> dict[str, str]:
+        """Get authentication path parameters for URL template substitution."""
+        if self.location != "path":
+            return {}
+        return {self.param_name: self.api_key}
+
 
 # ============================================================================
 # Operation Auth Requirements Map
@@ -106,7 +112,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "remove_group_badge": [["ApiKeyAuth"]],
     "list_group_badges": [["ApiKeyAuth"]],
     "add_group_badge": [["ApiKeyAuth"]],
-    "preview_group_badge": [["ApiKeyAuth"]],
     "deny_group_access_request": [["ApiKeyAuth"]],
     "approve_group_access_request": [["ApiKeyAuth"]],
     "list_group_access_requests": [["ApiKeyAuth"]],
@@ -124,7 +129,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_badge": [["ApiKeyAuth"]],
     "list_project_badges": [["ApiKeyAuth"]],
     "create_project_badge": [["ApiKeyAuth"]],
-    "preview_badge": [["ApiKeyAuth"]],
     "deny_access_request": [["ApiKeyAuth"]],
     "approve_access_request": [["ApiKeyAuth"]],
     "list_access_requests": [["ApiKeyAuth"]],
@@ -133,44 +137,26 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_alert_metric_image": [["ApiKeyAuth"]],
     "list_alert_metric_images": [["ApiKeyAuth"]],
     "upload_alert_metric_image": [["ApiKeyAuth"]],
-    "authorize_alert_metric_image": [["ApiKeyAuth"]],
-    "get_batched_background_migration": [["ApiKeyAuth"]],
-    "list_batched_background_migrations": [["ApiKeyAuth"]],
-    "resume_batched_background_migration": [["ApiKeyAuth"]],
     "pause_batched_background_migration": [["ApiKeyAuth"]],
     "get_admin_ci_variable": [["ApiKeyAuth"]],
-    "update_admin_ci_variable": [["ApiKeyAuth"]],
     "delete_instance_variable": [["ApiKeyAuth"]],
     "list_instance_variables": [["ApiKeyAuth"]],
     "create_instance_variable": [["ApiKeyAuth"]],
-    "get_table_dictionary": [["ApiKeyAuth"]],
     "get_cluster": [["ApiKeyAuth"]],
     "update_cluster": [["ApiKeyAuth"]],
     "delete_cluster": [["ApiKeyAuth"]],
     "add_kubernetes_cluster": [["ApiKeyAuth"]],
     "list_clusters": [["ApiKeyAuth"]],
-    "mark_migration_executed": [["ApiKeyAuth"]],
     "delete_application": [["ApiKeyAuth"]],
-    "list_applications": [["ApiKeyAuth"]],
-    "create_application": [["ApiKeyAuth"]],
     "get_user_avatar": [["ApiKeyAuth"]],
     "get_broadcast_message": [["ApiKeyAuth"]],
-    "update_broadcast_message": [["ApiKeyAuth"]],
     "delete_broadcast_message": [["ApiKeyAuth"]],
-    "list_broadcast_messages": [["ApiKeyAuth"]],
-    "create_broadcast_message": [["ApiKeyAuth"]],
     "get_migration_entity": [["ApiKeyAuth"]],
     "list_migration_entities": [["ApiKeyAuth"]],
     "get_bulk_import": [["ApiKeyAuth"]],
     "list_migration_entities_all": [["ApiKeyAuth"]],
     "list_migrations": [["ApiKeyAuth"]],
     "start_bulk_migration": [["ApiKeyAuth"]],
-    "get_appearance": [["ApiKeyAuth"]],
-    "update_application_appearance": [["ApiKeyAuth"]],
-    "list_plan_limits": [["ApiKeyAuth"]],
-    "update_plan_limits": [["ApiKeyAuth"]],
-    "get_instance_metadata": [["ApiKeyAuth"]],
-    "get_instance_version": [["ApiKeyAuth"]],
     "list_jobs": [["ApiKeyAuth"]],
     "get_job": [["ApiKeyAuth"]],
     "execute_manual_job": [["ApiKeyAuth"]]

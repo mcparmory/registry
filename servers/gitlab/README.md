@@ -1,4 +1,4 @@
-# GitLab API MCP Server
+# GitLab MCP Server
 
 Base URL: https://www.gitlab.com/api/v4
 ## API Info
