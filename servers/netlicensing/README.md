@@ -1,4 +1,4 @@
-# Labs64 NetLicensing RESTful API Test Center MCP Server
+# NetLicensing MCP Server
 
 Base URL: https://go.netlicensing.io/core/v2/rest
 ## API Info

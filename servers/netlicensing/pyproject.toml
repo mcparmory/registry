@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcparmory-netlicensing"
 version = "1.0.0"
-description = "MCP server for Labs64 NetLicensing RESTful API Test Center"
+description = "MCP server for NetLicensing"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

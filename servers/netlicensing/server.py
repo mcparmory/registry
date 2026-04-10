@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Labs64 NetLicensing RESTful API Test Center MCP Server
+NetLicensing MCP Server
 
 API Info:
 - Terms of Service: https://www.labs64.com/legal/terms-of-service/netlicensing
@@ -42,7 +42,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://go.netlicensing.io/core/v2/rest")
-SERVER_NAME = "Labs64 NetLicensing RESTful API Test Center"
+SERVER_NAME = "NetLicensing"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1063,7 +1063,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Labs64 NetLicensing RESTful API Test Center", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("NetLicensing", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Product
 @mcp.tool()
@@ -2815,7 +2815,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Labs64 NetLicensing RESTful API Test Center MCP Server")
+    parser = argparse.ArgumentParser(description="NetLicensing MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2916,7 +2916,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Labs64 NetLicensing RESTful API Test Center MCP Server")
+    logger.info("Starting NetLicensing MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

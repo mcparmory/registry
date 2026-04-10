@@ -1,4 +1,4 @@
-# Labs64 NetLicensing RESTful API Test Center MCP Server
+# NetLicensing MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-netlicensing .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Labs64 NetLicensing RESTful API Test Center MCP Server" \
+LABEL org.opencontainers.image.title="NetLicensing MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

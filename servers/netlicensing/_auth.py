@@ -1,5 +1,5 @@
 """
-Authentication module for Labs64 NetLicensing RESTful API Test Center MCP server.
+Authentication module for NetLicensing MCP server.
 
 Generated: 2026-04-09 17:28:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -28,7 +28,7 @@ __all__ = [
 
 class BasicAuth:
     """
-    HTTP Basic Authentication for Labs64 NetLicensing RESTful API Test Center.
+    HTTP Basic Authentication for NetLicensing.
 
     Configuration:
         Credentials are automatically Base64-encoded.
