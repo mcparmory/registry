@@ -1,4 +1,4 @@
-# OpenCage Geocoding API MCP Server
+# OpenCage Geocoding MCP Server
 
 Base URL: https://api.opencagedata.com/geocode/v1
 ## API Info

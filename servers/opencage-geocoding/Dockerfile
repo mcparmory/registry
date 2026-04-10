@@ -1,4 +1,4 @@
-# OpenCage Geocoding API MCP Server
+# OpenCage Geocoding MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-opencage-geocoding .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="OpenCage Geocoding API MCP Server" \
+LABEL org.opencontainers.image.title="OpenCage Geocoding MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

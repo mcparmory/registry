@@ -1,5 +1,5 @@
 """
-Authentication module for OpenCage Geocoding API MCP server.
+Authentication module for OpenCage Geocoding MCP server.
 
 Generated: 2026-04-10 07:11:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for OpenCage Geocoding API.
+    API Key authentication for OpenCage Geocoding.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.

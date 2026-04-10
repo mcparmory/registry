@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenCage Geocoding API MCP Server
+OpenCage Geocoding MCP Server
 
 API Info:
 - Contact: OpenCage GmbH <support@opencagedata.com> (https://opencagedata.com/contact)
@@ -44,7 +44,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.opencagedata.com/geocode/v1")
-SERVER_NAME = "OpenCage Geocoding API"
+SERVER_NAME = "OpenCage Geocoding"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1041,7 +1041,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("OpenCage Geocoding API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("OpenCage Geocoding", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Geocoding, Reverse Geocoding
 @mcp.tool()
@@ -1366,7 +1366,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="OpenCage Geocoding API MCP Server")
+    parser = argparse.ArgumentParser(description="OpenCage Geocoding MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -1467,7 +1467,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting OpenCage Geocoding API MCP Server")
+    logger.info("Starting OpenCage Geocoding MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
