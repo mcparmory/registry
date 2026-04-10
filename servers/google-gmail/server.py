@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gmail API MCP Server
+Google Gmail MCP Server
 
 API Info:
 - API License: Creative Commons Attribution 3.0 (http://creativecommons.org/licenses/by/3.0/)
@@ -47,7 +47,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://gmail.googleapis.com")
-SERVER_NAME = "Gmail API"
+SERVER_NAME = "Google Gmail"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1130,7 +1130,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Gmail API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Google Gmail", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: users
 @mcp.tool()
@@ -4028,7 +4028,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Gmail API MCP Server")
+    parser = argparse.ArgumentParser(description="Google Gmail MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -4129,7 +4129,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Gmail API MCP Server")
+    logger.info("Starting Google Gmail MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

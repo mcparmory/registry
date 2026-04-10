@@ -1,4 +1,4 @@
-# Gmail API - Dependencies
+# Google Gmail - Dependencies
 # Generated: 2026-04-09 17:23:45 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.1.0
