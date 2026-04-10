@@ -1,4 +1,4 @@
-# CMA - Contentful Management API MCP Server
+# Contentful Management MCP Server
 
 Base URL: https://api.contentful.com
 ---

@@ -1,5 +1,5 @@
 """
-Authentication module for CMA - Contentful Management API MCP server.
+Authentication module for Contentful Management MCP server.
 
 Generated: 2026-04-09 17:18:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -27,7 +27,7 @@ __all__ = [
 
 class BearerTokenAuth:
     """
-    Bearer token authentication for CMA - Contentful Management API.
+    Bearer token authentication for Contentful Management.
 
     Configuration:
         Provide the raw token in the environment variable.

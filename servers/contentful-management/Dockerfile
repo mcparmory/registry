@@ -1,4 +1,4 @@
-# CMA - Contentful Management API MCP Server
+# Contentful Management MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-contentful-management .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="CMA - Contentful Management API MCP Server" \
+LABEL org.opencontainers.image.title="Contentful Management MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
