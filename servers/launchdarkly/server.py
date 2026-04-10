@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LaunchDarkly REST API MCP Server
+LaunchDarkly MCP Server
 
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
@@ -43,7 +43,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.launchdarkly.com")
-SERVER_NAME = "LaunchDarkly REST API"
+SERVER_NAME = "LaunchDarkly"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1064,7 +1064,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("LaunchDarkly REST API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("LaunchDarkly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Relay Proxy configurations
 @mcp.tool()
@@ -12623,7 +12623,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="LaunchDarkly REST API MCP Server")
+    parser = argparse.ArgumentParser(description="LaunchDarkly MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -12724,7 +12724,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting LaunchDarkly REST API MCP Server")
+    logger.info("Starting LaunchDarkly MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

@@ -1,4 +1,4 @@
-# LaunchDarkly REST API MCP Server
+# LaunchDarkly MCP Server
 
 Base URL: https://app.launchdarkly.com
 ## API Info

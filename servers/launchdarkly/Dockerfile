@@ -1,4 +1,4 @@
-# LaunchDarkly REST API MCP Server
+# LaunchDarkly MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-launchdarkly .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="LaunchDarkly REST API MCP Server" \
+LABEL org.opencontainers.image.title="LaunchDarkly MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

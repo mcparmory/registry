@@ -1,4 +1,4 @@
-# LaunchDarkly REST API - Dependencies
+# LaunchDarkly - Dependencies
 # Generated: 2026-04-09 17:25:42 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
