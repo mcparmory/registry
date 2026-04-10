@@ -1,4 +1,4 @@
-# Apollo REST API MCP Server
+# Apollo MCP Server
 
 Base URL: https://api.apollo.io
 ---

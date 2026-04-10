@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-apollo"
-version = "1.0.2"
-description = "MCP server for Apollo REST API"
+version = "1.0.0"
+description = "MCP server for Apollo"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

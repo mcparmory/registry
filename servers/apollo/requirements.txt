@@ -1,4 +1,4 @@
-# Apollo REST API - Dependencies
+# Apollo - Dependencies
 # Generated: 2026-04-09 17:13:58 UTC
 authlib>=1.6.0,<2.0.0
 fastmcp>=3.1.0

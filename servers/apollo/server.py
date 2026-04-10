@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Apollo REST API MCP Server
+Apollo MCP Server
 Generated: 2026-04-09 17:13:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
@@ -38,7 +38,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.apollo.io")
-SERVER_NAME = "Apollo REST API"
+SERVER_NAME = "Apollo"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1059,7 +1059,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Apollo REST API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Apollo", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Enrichment
 @mcp.tool()
@@ -3383,7 +3383,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Apollo REST API MCP Server")
+    parser = argparse.ArgumentParser(description="Apollo MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -3484,7 +3484,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Apollo REST API MCP Server")
+    logger.info("Starting Apollo MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
