@@ -1,4 +1,4 @@
-# Google Search Console API MCP Server
+# Google Search Console MCP Server
 
 Base URL: https://searchconsole.googleapis.com
 ## API Info

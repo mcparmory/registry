@@ -1,4 +1,4 @@
-# Google Search Console API MCP Server
+# Google Search Console MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-google-search-console .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Google Search Console API MCP Server" \
+LABEL org.opencontainers.image.title="Google Search Console MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
