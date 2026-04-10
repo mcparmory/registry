@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Klaviyo API MCP Server
+Klaviyo MCP Server
 
 API Info:
 - API License: License (https://www.klaviyo.com/legal)
@@ -44,7 +44,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://a.klaviyo.com")
-SERVER_NAME = "Klaviyo API"
+SERVER_NAME = "Klaviyo"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1070,7 +1070,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Klaviyo API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Klaviyo", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Accounts
 @mcp.tool()
@@ -14730,7 +14730,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Klaviyo API MCP Server")
+    parser = argparse.ArgumentParser(description="Klaviyo MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -14831,7 +14831,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Klaviyo API MCP Server")
+    logger.info("Starting Klaviyo MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

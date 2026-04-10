@@ -1,4 +1,4 @@
-# Klaviyo API - Dependencies
+# Klaviyo - Dependencies
 # Generated: 2026-04-09 17:25:38 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0

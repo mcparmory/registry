@@ -1,4 +1,4 @@
-# Klaviyo API MCP Server
+# Klaviyo MCP Server
 
 Base URL: https://a.klaviyo.com
 ## API Info
