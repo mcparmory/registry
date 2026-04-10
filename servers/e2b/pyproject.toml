@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-e2b"
-version = "1.0.3"
+version = "1.0.0"
 description = "MCP server for E2B"
 readme = "README.md"
 license = "MIT"
