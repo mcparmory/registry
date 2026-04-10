@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Alpha Vantage API MCP Server
+Alpha Vantage MCP Server
 
 API Info:
 - Contact: Alpha Vantage Support <support@alphavantage.co> (https://www.alphavantage.co/support/)
@@ -43,7 +43,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.alphavantage.co")
-SERVER_NAME = "Alpha Vantage API"
+SERVER_NAME = "Alpha Vantage"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1040,7 +1040,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Alpha Vantage API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Alpha Vantage", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Core Stock APIs
 @mcp.tool()
@@ -6152,7 +6152,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Alpha Vantage API MCP Server")
+    parser = argparse.ArgumentParser(description="Alpha Vantage MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -6253,7 +6253,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Alpha Vantage API MCP Server")
+    logger.info("Starting Alpha Vantage MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

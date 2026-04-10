@@ -1,4 +1,4 @@
-# Alpha Vantage API MCP Server
+# Alpha Vantage MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-alpha-vantage .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Alpha Vantage API MCP Server" \
+LABEL org.opencontainers.image.title="Alpha Vantage MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

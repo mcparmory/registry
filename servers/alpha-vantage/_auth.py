@@ -1,5 +1,5 @@
 """
-Authentication module for Alpha Vantage API MCP server.
+Authentication module for Alpha Vantage MCP server.
 
 Generated: 2026-04-09 17:13:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for Alpha Vantage API.
+    API Key authentication for Alpha Vantage.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.

@@ -1,4 +1,4 @@
-# Alpha Vantage API MCP Server
+# Alpha Vantage MCP Server
 
 Base URL: https://www.alphavantage.co
 ## API Info

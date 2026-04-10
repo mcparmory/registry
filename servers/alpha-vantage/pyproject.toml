@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-alpha-vantage"
-version = "1.0.1"
-description = "MCP server for Alpha Vantage API"
+version = "1.0.0"
+description = "MCP server for Alpha Vantage"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
