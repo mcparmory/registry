@@ -1,4 +1,4 @@
-# Google Sheets API MCP Server
+# Google Sheets MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-google-sheets .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Google Sheets API MCP Server" \
+LABEL org.opencontainers.image.title="Google Sheets MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

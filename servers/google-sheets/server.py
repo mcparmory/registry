@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Google Sheets API MCP Server
+Google Sheets MCP Server
 
 API Info:
 - API License: Creative Commons Attribution 3.0 (http://creativecommons.org/licenses/by/3.0/)
@@ -44,7 +44,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://sheets.googleapis.com")
-SERVER_NAME = "Google Sheets API"
+SERVER_NAME = "Google Sheets"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1065,7 +1065,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Google Sheets API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Google Sheets", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: spreadsheets
 @mcp.tool()
@@ -2047,7 +2047,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Google Sheets API MCP Server")
+    parser = argparse.ArgumentParser(description="Google Sheets MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2148,7 +2148,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Google Sheets API MCP Server")
+    logger.info("Starting Google Sheets MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

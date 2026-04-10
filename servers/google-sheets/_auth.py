@@ -1,5 +1,5 @@
 """
-Authentication module for Google Sheets API MCP server.
+Authentication module for Google Sheets MCP server.
 
 Generated: 2026-04-09 17:24:32 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -46,7 +46,7 @@ OAUTH2_CALLBACK_PORT = int(os.environ.get("OAUTH2_CALLBACK_PORT", 9400))
 
 class OAuth2Auth:
     """
-    OAuth 2.0 authentication for Google Sheets API.
+    OAuth 2.0 authentication for Google Sheets.
 
     Flow: authorizationCode
     Uses: authlib for OAuth2 protocol handling

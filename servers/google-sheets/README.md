@@ -1,4 +1,4 @@
-# Google Sheets API MCP Server
+# Google Sheets MCP Server
 
 Base URL: https://sheets.googleapis.com
 ## API Info
