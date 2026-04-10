@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Query API MCP Server
+Mixpanel MCP Server
 
 API Info:
 - API License: MIT (https://opensource.org/licenses/MIT)
@@ -47,7 +47,7 @@ _SERVER_VARS = {
     "regionAndDomain": os.getenv("SERVER_REGIONANDDOMAIN", "mixpanel"),
 }
 BASE_URL = os.getenv("BASE_URL", "https://{regionAndDomain}.com/api/query".format_map(collections.defaultdict(str, _SERVER_VARS)))
-SERVER_NAME = "Query API"
+SERVER_NAME = "Mixpanel"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1044,7 +1044,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Query API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Mixpanel", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Insights
 @mcp.tool()
@@ -2080,7 +2080,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Query API MCP Server")
+    parser = argparse.ArgumentParser(description="Mixpanel MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2181,7 +2181,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Query API MCP Server")
+    logger.info("Starting Mixpanel MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

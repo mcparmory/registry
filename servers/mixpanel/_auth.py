@@ -1,5 +1,5 @@
 """
-Authentication module for Query API MCP server.
+Authentication module for Mixpanel MCP server.
 
 Generated: 2026-04-09 20:17:21 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -28,7 +28,7 @@ __all__ = [
 
 class BasicAuth:
     """
-    HTTP Basic Authentication for Query API.
+    HTTP Basic Authentication for Mixpanel.
 
     Configuration:
         Credentials are automatically Base64-encoded.

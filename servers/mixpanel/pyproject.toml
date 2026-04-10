@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcparmory-query"
 version = "1.0.0"
-description = "MCP server for Query API"
+description = "MCP server for Mixpanel"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

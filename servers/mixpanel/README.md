@@ -1,4 +1,4 @@
-# Query API MCP Server
+# Mixpanel MCP Server
 
 Base URL: https://mixpanel.com/api/query
 ## API Info
