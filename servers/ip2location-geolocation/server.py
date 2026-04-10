@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IP2Location.io IP Geolocation API MCP Server
+IP2Location.io IP Geolocation MCP Server
 
 API Info:
 - Contact: IP2Location.io (https://github.com/ip2location/ip2location-io-openapi)
@@ -42,7 +42,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.ip2location.io")
-SERVER_NAME = "IP2Location.io IP Geolocation API"
+SERVER_NAME = "IP2Location.io IP Geolocation"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1039,7 +1039,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("IP2Location.io IP Geolocation API", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("IP2Location.io IP Geolocation", middleware=[_JsonCoercionMiddleware()])
 
 
 @mcp.tool()
@@ -1268,7 +1268,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="IP2Location.io IP Geolocation API MCP Server")
+    parser = argparse.ArgumentParser(description="IP2Location.io IP Geolocation MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -1369,7 +1369,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting IP2Location.io IP Geolocation API MCP Server")
+    logger.info("Starting IP2Location.io IP Geolocation MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

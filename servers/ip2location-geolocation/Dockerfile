@@ -1,4 +1,4 @@
-# IP2Location.io IP Geolocation API MCP Server
+# IP2Location.io IP Geolocation MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-ip2location-geolocation .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="IP2Location.io IP Geolocation API MCP Server" \
+LABEL org.opencontainers.image.title="IP2Location.io IP Geolocation MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

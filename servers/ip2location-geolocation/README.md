@@ -1,4 +1,4 @@
-# IP2Location.io IP Geolocation API MCP Server
+# IP2Location.io IP Geolocation MCP Server
 
 Base URL: https://api.ip2location.io
 ## API Info
