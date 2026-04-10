@@ -1,4 +1,4 @@
-# Linkly API Specification MCP Server
+# Linkly MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-linkly .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Linkly API Specification MCP Server" \
+LABEL org.opencontainers.image.title="Linkly MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

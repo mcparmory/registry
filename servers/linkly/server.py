@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Linkly API Specification MCP Server
+Linkly MCP Server
 Generated: 2026-04-09 19:17:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
@@ -38,7 +38,7 @@ from fastmcp.server.middleware import Middleware
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.linklyhq.com")
-SERVER_NAME = "Linkly API Specification"
+SERVER_NAME = "Linkly"
 SERVER_VERSION = "1.0.0"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
@@ -1035,7 +1035,7 @@ async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]
 # FastMCP Server Initialization
 # ============================================================================
 
-mcp = FastMCP("Linkly API Specification", middleware=[_JsonCoercionMiddleware()])
+mcp = FastMCP("Linkly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Domains
 @mcp.tool()
@@ -1997,7 +1997,7 @@ def main():
 
     validate_environment()
 
-    parser = argparse.ArgumentParser(description="Linkly API Specification MCP Server")
+    parser = argparse.ArgumentParser(description="Linkly MCP Server")
 
     parser.add_argument(
         '--transport',
@@ -2098,7 +2098,7 @@ def main():
     )
 
     logger = logging.getLogger(__name__)
-    logger.info("Starting Linkly API Specification MCP Server")
+    logger.info("Starting Linkly MCP Server")
     logger.info(f"Transport: {args.transport}")
 
     global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT

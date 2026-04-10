@@ -1,4 +1,4 @@
-# Linkly API Specification MCP Server
+# Linkly MCP Server
 
 Base URL: https://app.linklyhq.com
 ---

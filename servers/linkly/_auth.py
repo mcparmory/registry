@@ -1,5 +1,5 @@
 """
-Authentication module for Linkly API Specification MCP server.
+Authentication module for Linkly MCP server.
 
 Generated: 2026-04-09 19:17:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for Linkly API Specification.
+    API Key authentication for Linkly.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.

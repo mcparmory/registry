@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-linkly"
-version = "1.0.1"
-description = "MCP server for Linkly API Specification"
+version = "1.0.0"
+description = "MCP server for Linkly"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

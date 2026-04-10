@@ -1,4 +1,4 @@
-# Linkly API Specification - Dependencies
+# Linkly - Dependencies
 # Generated: 2026-04-09 19:17:56 UTC
 fastmcp>=3.1.0
 httpx>=0.27.0,<1.0.0
