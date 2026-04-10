@@ -1,0 +1,2196 @@
+#!/usr/bin/env python3
+"""
+Pinecone Control Plane API MCP Server
+
+API Info:
+- API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+- Contact: Pinecone Support <support@pinecone.io> (https://support.pinecone.io)
+
+Generated: 2026-04-10 13:58:24 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import random
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, overload
+
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / '.env'
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
+
+import _auth
+import _models
+import httpx
+import pydantic
+from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
+from pydantic import Field
+
+BASE_URL = os.getenv("BASE_URL", "https://api.pinecone.io")
+SERVER_NAME = "Pinecone Control Plane API"
+SERVER_VERSION = "1.0.0"
+
+CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
+MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+    LOG_LEVEL = "INFO"
+
+HTTPX_TIMEOUT = httpx.Timeout(
+    connect=float(os.getenv("HTTPX_CONNECT_TIMEOUT", "10.0")),
+    read=float(os.getenv("HTTPX_READ_TIMEOUT", "60.0")),
+    write=float(os.getenv("HTTPX_WRITE_TIMEOUT", "30.0")),
+    pool=float(os.getenv("HTTPX_POOL_TIMEOUT", "5.0"))
+)
+
+DEFAULT_TIMEOUT = float(os.getenv("TOOL_EXECUTION_TIMEOUT", "90.0"))
+
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "2.0"))
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+CIRCUIT_BREAKER_TIMEOUT_SECONDS = float(os.getenv("CIRCUIT_BREAKER_TIMEOUT_SECONDS", "60.0"))
+RATE_LIMIT_REQUESTS_PER_SECOND = int(os.getenv("RATE_LIMIT_REQUESTS_PER_SECOND", "10"))
+client: httpx.AsyncClient | None = None
+
+@dataclass
+class RetryConfig:
+    """Retry with exponential backoff configuration."""
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    retry_on_status_codes: list[int] | None = None
+
+    def __post_init__(self):
+        if self.retry_on_status_codes is None:
+            self.retry_on_status_codes = [429, 500, 502, 503, 504]
+
+class TokenBucket:
+    """Token bucket rate limiter."""
+
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = float(capacity)
+        self.last_update = time.monotonic()
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + (elapsed * self.rate))
+        self.last_update = now
+
+    def consume(self, tokens: int = 1) -> tuple[bool, float | None]:
+        self._refill()
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True, None
+        tokens_needed = tokens - self.tokens
+        return False, tokens_needed / self.rate
+
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Blocking requests
+    HALF_OPEN = "half_open"  # Testing recovery
+
+@dataclass
+class CircuitBreakerConfig:
+    """Circuit breaker configuration."""
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    timeout: float = 60.0
+
+class CircuitBreakerError(Exception):
+    """Circuit breaker is open, request blocked."""
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+class CircuitBreaker:
+    """Circuit breaker to prevent cascading failures."""
+
+    def __init__(self, config: CircuitBreakerConfig):
+        self.config = config
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: float | None = None
+
+    def before_call(self):
+        """Check if circuit allows request."""
+        if self.state == CircuitState.OPEN:
+            if self._should_attempt_reset():
+                self._transition_to_half_open()
+            else:
+                retry_after = self._time_until_recovery()
+                raise CircuitBreakerError(
+                    "Circuit breaker OPEN due to repeated failures",
+                    retry_after=retry_after
+                )
+
+    def on_success(self):
+        """Handle successful request."""
+        if self.state == CircuitState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.config.success_threshold:
+                self._transition_to_closed()
+        elif self.state == CircuitState.CLOSED:
+            if self.failure_count > 0:
+                self.failure_count = 0
+
+    def on_failure(self, error: Exception):
+        """Handle failed request."""
+        logging.debug(f"Circuit breaker recorded failure: {error}")
+        if self.state == CircuitState.HALF_OPEN:
+            self._transition_to_open()
+        elif self.state == CircuitState.CLOSED:
+            self.failure_count += 1
+            if self.failure_count >= self.config.failure_threshold:
+                self._transition_to_open()
+
+    def _should_attempt_reset(self) -> bool:
+        """Check if timeout elapsed for recovery."""
+        if self.last_failure_time is None:
+            return True
+        return (time.monotonic() - self.last_failure_time) >= self.config.timeout
+
+    def _time_until_recovery(self) -> float:
+        """Time remaining until recovery attempt."""
+        if self.last_failure_time is None:
+            return 0.0
+        elapsed = time.monotonic() - self.last_failure_time
+        return max(0.0, self.config.timeout - elapsed)
+
+    def _transition_to_open(self):
+        """Transition to OPEN state."""
+        self.state = CircuitState.OPEN
+        self.last_failure_time = time.monotonic()
+        self.success_count = 0
+        logging.error(f"Circuit breaker OPEN after {self.failure_count} failures")
+
+    def _transition_to_half_open(self):
+        """Transition to HALF_OPEN state."""
+        self.state = CircuitState.HALF_OPEN
+        self.failure_count = 0
+        self.success_count = 0
+        logging.info("Circuit breaker HALF_OPEN - testing recovery")
+
+    def _transition_to_closed(self):
+        """Transition to CLOSED state."""
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        logging.info("Circuit breaker CLOSED - recovered")
+
+# Global resilience configuration
+retry_config: RetryConfig | None = None
+rate_limiter = None  # Initialized based on mode in main()
+circuit_breaker: CircuitBreaker | None = None
+
+# ============================================================================
+# Error Formatting
+# ============================================================================
+
+def _format_api_error_message(
+    tool_name: str | None,
+    method: str,
+    path: str,
+    status_code: int,
+    request_id: str | None,
+    error_data: dict
+) -> str:
+    """
+    Format API error for LLM consumption with structured, parseable details.
+
+    Args:
+        tool_name: MCP tool function name
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path
+        status_code: HTTP status code
+        request_id: Request UUID
+        error_data: Sanitized error response from API
+
+    Returns:
+        Structured error message for LLM with available details
+    """
+    parts = []
+
+    # Add tool name if available
+    if tool_name:
+        parts.append(f"Tool: {tool_name}")
+
+    parts.append(f"Status: {status_code}")
+
+    # Extract error message from various API response formats
+    error_message = None
+    if isinstance(error_data, dict):
+        # Format 1: {"message": "..."}
+        if 'message' in error_data:
+            error_message = error_data['message']
+        # Format 2: {"error": {"message": "...", "code": ..., "errors": [...]}}  (Google APIs)
+        elif 'error' in error_data:
+            err = error_data['error']
+            if isinstance(err, dict):
+                if 'message' in err:
+                    error_message = err['message']
+                # Also include error code if available
+                if 'code' in err and error_message:
+                    error_message = f"[{err['code']}] {error_message}"
+            elif isinstance(err, str):
+                error_message = err
+        # Format 3: {"detail": "..."} (FastAPI/OpenAPI)
+        elif 'detail' in error_data:
+            detail = error_data['detail']
+            if isinstance(detail, str):
+                error_message = detail
+            elif isinstance(detail, list) and detail:
+                # Validation errors: [{"loc": [...], "msg": "...", "type": "..."}]
+                msgs = [d.get('msg', str(d)) if isinstance(d, dict) else str(d) for d in detail[:3]]
+                error_message = "; ".join(msgs)
+                if len(detail) > 3:
+                    error_message += f" (+{len(detail) - 3} more)"
+        # Format 4: {"errors": [...]} (GraphQL-style)
+        elif 'errors' in error_data and isinstance(error_data['errors'], list):
+            errors = error_data['errors']
+            if errors:
+                msgs = [e.get('message', str(e)) if isinstance(e, dict) else str(e) for e in errors[:3]]
+                error_message = "; ".join(msgs)
+                if len(errors) > 3:
+                    error_message += f" (+{len(errors) - 3} more)"
+
+    if error_message:
+        parts.append(f"Error: {error_message}")
+
+    parts.append(f"Request: {method} {path}")
+
+    # Add request ID if available
+    if request_id:
+        parts.append(f"ID: {request_id}")
+
+    return "\n".join(parts)
+
+# ============================================================================
+# Response Sanitization
+# ============================================================================
+
+# Sanitization level configuration
+SANITIZATION_LEVEL = os.getenv("SANITIZATION_LEVEL", "DISABLED").upper()
+if SANITIZATION_LEVEL not in ("DISABLED", "LOW", "MEDIUM", "HIGH"):
+    SANITIZATION_LEVEL = "DISABLED"
+
+# Pattern sets by level
+_PATTERNS_LOW = [
+    'password', 'passwd', 'pwd',
+    'token', 'secret', 'private_key', 'priv_key',
+]
+_PATTERNS_MEDIUM = _PATTERNS_LOW + [
+    'auth_token', 'access_token', 'refresh_token', 'bearer',
+    'credentials', 'authorization',
+]
+_PATTERNS_HIGH = _PATTERNS_MEDIUM + [
+    'session_id', 'sessionid', 'cookie',
+    'api_key', 'apikey', 'api-key',
+    'user_id', 'userid', 'account_id', 'accountid', 'internal_id',
+    'ip_address', 'ipaddress', 'ip_addr',
+    'hostname', 'host_name', 'server_name', 'servername',
+    'internal_ip', 'private_ip',
+]
+
+def _get_sensitive_patterns() -> list:
+    """Get patterns based on current sanitization level."""
+    if SANITIZATION_LEVEL == "DISABLED":
+        return []
+    if SANITIZATION_LEVEL == "LOW":
+        return _PATTERNS_LOW
+    if SANITIZATION_LEVEL == "MEDIUM":
+        return _PATTERNS_MEDIUM
+    return _PATTERNS_HIGH
+
+def sanitize_response(response_data: Any) -> Any:
+    """Remove sensitive fields from API responses before returning to LLM.
+
+    Controlled by SANITIZATION_LEVEL env var:
+    - DISABLED: No filtering (fastest)
+    - LOW: Basic secrets (password, token, secret, private_key)
+    - MEDIUM: LOW + Auth fields
+    - HIGH: MEDIUM + Session/IDs
+
+    Args:
+        response_data: API response (dict, list, or primitive)
+
+    Returns:
+        Sanitized response with sensitive fields removed (based on level)
+    """
+    sensitive_patterns = _get_sensitive_patterns()
+
+    # Skip sanitization if disabled
+    if not sensitive_patterns:
+        return response_data
+
+    def should_filter(key: str) -> bool:
+        """Check if field name matches sensitive patterns."""
+        key_lower = key.lower()
+        return any(pattern in key_lower for pattern in sensitive_patterns)
+
+    def sanitize_dict(data: dict) -> dict:
+        """Recursively sanitize dictionary."""
+        sanitized: dict[str, Any] = {}
+        for key, value in data.items():
+            if should_filter(key):
+                # Skip sensitive fields
+                logging.debug(f"Filtered sensitive field: {key}")
+                continue
+
+            # Recursively sanitize nested structures
+            if isinstance(value, dict):
+                sanitized[key] = sanitize_dict(value)
+            elif isinstance(value, list):
+                sanitized[key] = sanitize_list(value)
+            else:
+                sanitized[key] = value
+
+        return sanitized
+
+    def sanitize_list(data: list[Any]) -> list[Any]:
+        """Recursively sanitize list."""
+        sanitized: list[Any] = []
+        for item in data:
+            if isinstance(item, dict):
+                sanitized.append(sanitize_dict(item))
+            elif isinstance(item, list):
+                sanitized.append(sanitize_list(item))
+            else:
+                sanitized.append(item)
+        return sanitized
+
+    # Handle different response types
+    if isinstance(response_data, dict):
+        return sanitize_dict(response_data)
+    if isinstance(response_data, list):
+        return sanitize_list(response_data)
+    # Primitive types (str, int, bool, None) pass through
+    return response_data
+
+def get_safe_error_response(
+    error_type: str,
+    status_code: int | None = None,
+    retry_after: int | None = None,
+    request_id: str | None = None
+) -> dict:
+    """Generate safe error response for client (LLM).
+
+    Returns generic, actionable error messages without leaking:
+    - API keys, tokens, credentials
+    - Internal server details, IP addresses, hostnames
+    - Stack traces, exception messages
+    - User data from other users
+
+    Args:
+        error_type: Type of error (auth, rate_limit, timeout, etc.)
+        status_code: HTTP status code
+        retry_after: Retry-After header value (seconds)
+        request_id: Request correlation ID for debugging
+
+    Returns:
+        Safe error response dictionary
+    """
+    error_messages = {
+        'AUTHENTICATION_ERROR': {
+            'error': 'AUTHENTICATION_ERROR',
+            'message': 'Authentication failed. Please check your credentials.',
+            'retry': False
+        },
+        'RATE_LIMIT_ERROR': {
+            'error': 'RATE_LIMIT_ERROR',
+            'message': 'Rate limit exceeded. Please retry after the specified delay.',
+            'retry': True
+        },
+        'TIMEOUT_ERROR': {
+            'error': 'TIMEOUT_ERROR',
+            'message': 'Request timed out. The API did not respond in time.',
+            'retry': True
+        },
+        'VALIDATION_ERROR': {
+            'error': 'VALIDATION_ERROR',
+            'message': 'Invalid request parameters. Please check your input.',
+            'retry': False
+        },
+        'NOT_FOUND': {
+            'error': 'NOT_FOUND',
+            'message': 'The requested resource was not found.',
+            'retry': False
+        },
+        'PERMISSION_DENIED': {
+            'error': 'PERMISSION_DENIED',
+            'message': 'You do not have permission to access this resource.',
+            'retry': False
+        },
+        'API_ERROR': {
+            'error': 'API_ERROR',
+            'message': 'An error occurred while calling the external API.',
+            'retry': True
+        },
+        'INTERNAL_ERROR': {
+            'error': 'INTERNAL_ERROR',
+            'message': 'An internal error occurred. Please try again later.',
+            'retry': False
+        }
+    }
+
+    # Get base error response
+    response = error_messages.get(error_type, error_messages['INTERNAL_ERROR']).copy()
+
+    # Add optional fields
+    if status_code:
+        response['status_code'] = status_code
+
+    if retry_after:
+        response['retry_after_seconds'] = retry_after
+
+    if request_id:
+        response['request_id'] = request_id
+
+    return response
+
+async def _make_request(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    body_content_type: str | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    tool_name: str | None = None,
+    request_id: str | None = None,
+    raw_querystring: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Make HTTP request with retry, rate limiting, and circuit breaker."""
+    global client, retry_config, rate_limiter, circuit_breaker
+
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=BASE_URL,
+            timeout=HTTPX_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
+            cookies=None,
+            follow_redirects=True,
+        )
+
+    if headers is None:
+        headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
+
+
+    if rate_limiter is not None:
+        allowed, wait_time = rate_limiter.consume()
+        if not allowed:
+            return {
+                "error": "Rate limit exceeded",
+                "retry_after": wait_time,
+                "message": f"Rate limit exceeded. Wait {wait_time:.1f}s"
+            }, 429
+
+    if circuit_breaker is not None:
+        try:
+            circuit_breaker.before_call()
+        except CircuitBreakerError as e:
+            return {
+                "error": "Circuit breaker open",
+                "retry_after": e.retry_after,
+                "message": str(e)
+            }, 503
+
+    if retry_config is not None:
+        max_attempts = retry_config.max_attempts
+        retry_status_codes = retry_config.retry_on_status_codes or []
+    else:
+        max_attempts = 1
+        retry_status_codes = []
+
+    # Append raw querystring before retry loop to avoid repeated appending
+    # (OAS 3.2 in: querystring — already serialized per media type)
+    if raw_querystring:
+        _qs_sep = "&" if "?" in path else "?"
+        path = f"{path}{_qs_sep}{raw_querystring}"
+
+    last_error: httpx.HTTPStatusError | Exception | None = None
+    _auth_retried = False  # Guard: only attempt one auth refresh per request
+    for attempt in range(max_attempts):
+        try:
+            # Dispatch body to correct httpx kwarg based on content type
+            _json = body if body_content_type is None or body_content_type == "application/json" else None
+            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+            response = await client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=_json,
+                data=_data,
+                content=_content,
+                headers=headers,
+                cookies=cookies
+            )
+
+            # Get status code and data before raise_for_status
+            status_code = response.status_code
+
+            # Handle empty response body (204 No Content, 205 Reset Content, or empty body)
+            if status_code in (204, 205) or not response.content:
+                response_data = {"status": status_code, "message": "Success"}
+            else:
+                # Parse response JSON (graceful fallback to text)
+                try:
+                    response_data = response.json()
+                except Exception:
+                    response_data = {"text": response.text}
+
+            # Check for HTTP errors
+            if status_code >= 400:
+                last_error = httpx.HTTPStatusError(
+                    message=f"HTTP {status_code}",
+                    request=response.request,
+                    response=response
+                )
+
+                # On 401: clear stale tokens and retry once with fresh auth
+                if status_code == 401 and not _auth_retried and tool_name:
+                    _auth_retried = True
+                    logging.warning(f"401 Unauthorized for {tool_name} - clearing token and re-authorizing")
+                    _on_auth_failure()
+                    _fresh_auth = await _get_auth_for_operation(tool_name)
+                    if _fresh_auth.get("headers"):
+                        headers = {**headers, **_fresh_auth["headers"]}
+                    if _fresh_auth.get("params") and params is not None:
+                        params = {**params, **_fresh_auth["params"]}
+                    continue  # Retry immediately with fresh auth (no backoff)
+
+                # Check if should retry
+                if status_code not in retry_status_codes or attempt == max_attempts - 1:
+                    # Don't retry or last attempt - notify circuit breaker of failure
+                    if circuit_breaker is not None and status_code in [500, 502, 503, 504]:
+                        circuit_breaker.on_failure(last_error)
+
+                    # Log error information - WARNING for client errors (4xx), ERROR for server errors (5xx)
+                    log_level = logging.WARNING if 400 <= status_code < 500 else logging.ERROR
+                    logging.log(
+                        log_level,
+                        f"API request failed: {method} {path} (status: {status_code})",
+                        extra={
+                            "status_code": status_code,
+                            "endpoint": path,
+                            "method": method,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "error_detail": str(response_data)[:500]
+                        },
+                        exc_info=False
+                    )
+
+                    # Sanitize response before returning/raising
+                    sanitized_data = sanitize_response(response_data)
+
+                    # Raise exception with structured error message for LLM
+                    error_message = _format_api_error_message(
+                        tool_name=tool_name,
+                        method=method,
+                        path=path,
+                        status_code=status_code,
+                        request_id=request_id,
+                        error_data=sanitized_data
+                    )
+                    raise ValueError(error_message)
+
+                # Will retry - continue to backoff logic below
+
+            else:
+                # Success - notify circuit breaker
+                if circuit_breaker is not None:
+                    circuit_breaker.on_success()
+
+                # Sanitize response before returning to client
+                sanitized_data = sanitize_response(response_data)
+                return sanitized_data, status_code
+
+            # Exponential backoff with jitter (for retry)
+            # retry_config is guaranteed non-None here since max_attempts > 1
+            assert retry_config is not None
+            base_delay = retry_config.base_delay
+            max_delay = retry_config.max_delay
+            exponential_base = retry_config.exponential_base
+            use_jitter = retry_config.jitter
+
+            # Honor Retry-After header for 429 responses
+            delay: float
+            if status_code == 429:
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        delay = min(base_delay * (exponential_base ** attempt), max_delay)
+                else:
+                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
+            else:
+                delay = min(base_delay * (exponential_base ** attempt), max_delay)
+
+            # Add jitter
+            if use_jitter:
+                delay = delay * (0.5 + random.random() * 0.5)  # noqa: S311
+
+            logging.warning(
+                f"Request failed with {status_code} (attempt {attempt + 1}/{max_attempts}). "
+                f"Retrying in {delay:.2f}s"
+            )
+            await asyncio.sleep(delay)
+
+        except httpx.HTTPStatusError:
+            # Already handled above - shouldn't reach here
+            continue
+
+        except Exception as e:
+            last_error = e
+
+            # Network/connection errors - notify circuit breaker
+            if circuit_breaker is not None:
+                circuit_breaker.on_failure(e)
+
+            # Log detailed error information for debugging (internal only)
+            logging.error(
+                f"Request failed with exception: {method} {path}",
+                extra={
+                    "endpoint": path,
+                    "method": method,
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "error_type": e.__class__.__name__,
+                    "error_detail": str(e)
+                },
+                exc_info=True
+            )
+
+            # Don't retry on non-HTTP errors - raise immediately with details
+            # This ensures the LLM sees the actual error message
+            error_message = (
+                f"Tool: {tool_name}\n"
+                f"Error: {e.__class__.__name__}\n"
+                f"Request: {method} {path}\n"
+                f"ID: {request_id}\n"
+                f"Details: {str(e)}"
+            )
+            raise ConnectionError(error_message) from e
+
+    # Log retry exhaustion with full context (internal only)
+    logging.error(
+        f"All retry attempts exhausted: {method} {path}",
+        extra={
+            "endpoint": path,
+            "method": method,
+            "total_attempts": max_attempts,
+            "last_error_type": last_error.__class__.__name__ if last_error else "Unknown",
+            "last_error_detail": str(last_error) if last_error else "Unknown"
+        },
+        exc_info=True
+    )
+
+    # Raise exception with error details
+    if isinstance(last_error, httpx.HTTPStatusError):
+        try:
+            error_data = last_error.response.json()
+        except Exception:
+            error_data = {"error": last_error.response.text[:1000]}
+
+        sanitized_error = sanitize_response(error_data)
+        error_message = _format_api_error_message(
+            tool_name=tool_name,
+            method=method,
+            path=path,
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            error_data=sanitized_error
+        )
+        raise ValueError(error_message)
+
+    # Network/connection error - structured format for consistency
+    error_message = (
+        f"Tool: {tool_name}\n"
+        f"Error: Network error after {max_attempts} attempts\n"
+        f"Request: {method} {path}\n"
+        f"ID: {request_id}\n"
+        f"Details: {str(last_error)}"
+    )
+    raise ConnectionError(error_message)
+
+# ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+@overload
+def _parse_int(v: str | int) -> int: ...
+@overload
+def _parse_int(v: None) -> None: ...
+def _parse_int(v: str | int | None) -> int | None:
+    """Convert a string representation of an integer to a Python int.
+
+    Formatted integer parameters (int32, int64, uint64, etc.) are exposed as str
+    in the tool signature to prevent JS float64 precision loss for large IDs.
+    This helper converts them back to int before Pydantic model construction.
+    None passes through for optional parameters.
+    Raises ValueError for non-integer strings or unexpected types (e.g. bool).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError(f"Expected an integer value, got {v!r}")
+    if isinstance(v, int):
+        return v
+    try:
+        return int(v)
+    except (ValueError, TypeError) as _e:
+        raise ValueError(f"Expected an integer value, got {v!r}") from _e
+
+
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
+    logging.info(
+        f"Tool invoked: {tool_name}",
+        extra={
+            "request_id": request_id,
+            "tool": tool_name,
+            "method": method,
+            "path": log_path,
+            "timeout": DEFAULT_TIMEOUT
+        }
+    )
+
+def _build_path(
+    template: str,
+    path_params: dict[str, Any],
+) -> str:
+    """Build path from template and parameters.
+
+    Args:
+        template: Path template with {param} placeholders
+        path_params: Dictionary of parameter names to values
+
+    Returns:
+        Path with all  placeholders replaced
+
+    Example:
+        _build_path("/files/{fileId}/copy", {"fileId": "abc123"})
+        Returns: "/files/abc123/copy"
+    """
+    result = template
+    for key, value in path_params.items():
+        result = result.replace("{" + key + "}", str(value))
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
+    while "//" in result:
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
+    return result
+
+async def _execute_tool_request(
+    tool_name: str,
+    method: str,
+    path: str,
+    request_id: str,
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    body_content_type: str | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    raw_querystring: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """
+    Execute tool request with timeout handling and metrics recording.
+
+    Returns:
+        Tuple of (normalized_response_data, status_code).
+        Response data is normalized to dict format for Pydantic validation.
+        Status code: HTTP status code from the API response.
+    """
+    start_time = time.time()
+    try:
+        # Wrap API call with timeout to prevent hanging
+        async with asyncio.timeout(DEFAULT_TIMEOUT):
+            # Call unified _make_request() which handles all resilience + security features
+            result, status_code = await _make_request(
+                method=method,
+                path=path,
+                params=params,
+                body=body,
+                body_content_type=body_content_type,
+                headers=headers,
+                cookies=cookies,
+                tool_name=tool_name,
+                request_id=request_id,
+                raw_querystring=raw_querystring,
+            )
+
+        latency_ms = (time.time() - start_time) * 1000.0
+
+        logging.info(f"Tool completed: {tool_name}", extra={"request_id": request_id, "latency_ms": f"{latency_ms:.2f}"})
+
+        # Normalize response to dict and return with status code
+        # Use "value" key for consistency with generated response models
+        if isinstance(result, dict):
+            return result, status_code
+        return {"value": result}, status_code
+
+    except asyncio.TimeoutError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+
+        # Request timed out
+        logging.error(
+            f"Tool timeout: {tool_name}",
+            extra={
+                "request_id": request_id,
+                "tool": tool_name,
+                "method": method,
+                "path": path,
+                "timeout": DEFAULT_TIMEOUT,
+                "latency_ms": f"{latency_ms:.2f}"
+            }
+        )
+
+        # Raise exception with structured error message for consistency
+        # FastMCP will catch this and set isError: true in MCP response
+        timeout_message = (
+            f"Tool: {tool_name}\n"
+            f"Error: Request timed out after {DEFAULT_TIMEOUT} seconds\n"
+            f"ID: {request_id}"
+        )
+        raise asyncio.TimeoutError(timeout_message) from e
+
+    except ValueError:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+    except ConnectionError:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+    except Exception:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
+# Authentication scheme priority (most secure first)
+AUTH_SCHEME_PRIORITY = [
+    'ApiKeyAuth',
+]
+
+# Initialize authentication handlers at server startup
+_auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Api-Key")
+    logging.info("Authentication configured: ApiKeyAuth")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
+    _auth_handlers["ApiKeyAuth"] = None
+
+# Warn only if NO auth handlers were successfully configured
+if all(handler is None for handler in _auth_handlers.values()):
+    logging.warning("Server will attempt unauthenticated requests (may fail if API requires auth)")
+
+def _on_auth_failure() -> None:
+    """Clear tokens on all auth handlers that support it (called on 401 response)."""
+    for scheme_name, handler in _auth_handlers.items():
+        if handler is not None and hasattr(handler, 'clear_token'):
+            handler.clear_token()
+            logging.info(f"Cleared token for auth scheme '{scheme_name}' after 401")
+
+async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
+    """Get authentication for specific operation (handles multi-auth with OR/AND logic).
+
+    Args:
+        operation_id: The operation ID (tool name) to get auth for
+
+    Returns:
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
+    """
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
+
+    # Get auth requirements for this operation from auth module
+    # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
+    required_schemes = _auth.OPERATION_AUTH_MAP.get(operation_id)
+
+    if required_schemes is None:
+        # CRITICAL: Operation missing from OPERATION_AUTH_MAP
+        # This indicates a bug in auth config generation - operation should be in map
+        # Do NOT fall back to global security - this masks bugs and creates security gaps
+        logging.error(
+            f"SECURITY ERROR: Operation '{operation_id}' not found in OPERATION_AUTH_MAP. "
+            f"This indicates a bug in auth config generation. "
+            f"All operations should be explicitly mapped. "
+            f"Proceeding with no authentication - REQUEST WILL LIKELY FAIL."
+        )
+        # Return empty auth (will likely fail at API, but surfaces the bug)
+        return result
+
+    # Sort OR groups by security priority (most secure first)
+    # Each OR group is sorted internally by scheme priority
+    def get_scheme_priority(scheme_name: str) -> int:
+        """Get priority index for scheme (lower = higher priority)."""
+        try:
+            return AUTH_SCHEME_PRIORITY.index(scheme_name)
+        except ValueError:
+            # Unknown scheme - put at end
+            return len(AUTH_SCHEME_PRIORITY)
+
+    # Sort each OR group by priority, then sort OR groups by their best (lowest) priority
+    sorted_schemes = []
+    for scheme_list in required_schemes:
+        # Sort schemes within AND group by priority (most secure first)
+        sorted_group = sorted(scheme_list, key=get_scheme_priority)
+        sorted_schemes.append(sorted_group)
+
+    # Sort OR groups by the priority of their first (most secure) scheme
+    sorted_schemes.sort(key=lambda group: get_scheme_priority(group[0]) if group else float('inf'))
+
+    # Try each OR group in priority order (most secure first)
+    for scheme_list in sorted_schemes:
+        headers = {}
+        params = {}
+        cookies = {}
+        path_params = {}
+        all_succeeded = True
+
+        # Handle AND group (multiple schemes in same list - all must succeed)
+        for scheme_name in scheme_list:
+            handler = _auth_handlers.get(scheme_name)
+            if not handler:
+                # Handler not configured (env vars missing)
+                all_succeeded = False
+                logging.debug(f"Auth scheme '{scheme_name}' not configured for {operation_id}")
+                break
+
+            try:
+                # Try all injection methods (headers, params, cookies, path_params)
+                # OAuth2 methods are async (token refresh/authorize); others are sync.
+                import inspect as _inspect
+                if hasattr(handler, 'get_auth_headers'):
+                    _h = handler.get_auth_headers()
+                    headers.update(await _h if _inspect.isawaitable(_h) else _h)
+                if hasattr(handler, 'get_auth_params'):
+                    _p = handler.get_auth_params()
+                    params.update(await _p if _inspect.isawaitable(_p) else _p)
+                if hasattr(handler, 'get_auth_cookies'):
+                    _c = handler.get_auth_cookies()
+                    cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
+            except Exception as e:
+                logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
+                all_succeeded = False
+                break
+
+        # If all schemes in AND group succeeded, use this auth
+        if all_succeeded and (headers or params or cookies or path_params):
+            result["headers"] = headers
+            result["params"] = params
+            result["cookies"] = cookies
+            result["path_params"] = path_params
+            logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
+            return result
+
+    # No auth configured or all OR groups failed
+    if required_schemes and required_schemes != [[]]:
+        logging.warning(f"No configured auth handler found for {operation_id} (requires: {required_schemes})")
+
+    return result
+
+# ============================================================================
+# FastMCP Server Initialization
+# ============================================================================
+
+mcp = FastMCP("Pinecone Control Plane API", middleware=[_JsonCoercionMiddleware()])
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def list_indexes(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for request routing and response formatting. Defaults to 2026-04 if not provided.")) -> dict[str, Any]:
+    """Retrieve all indexes in the current project. Returns a list of index configurations and metadata."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIndexesRequest(
+            header=_models.ListIndexesRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_indexes: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/indexes"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_indexes")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_indexes", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_indexes",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def create_index(
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version identifier in date format (e.g., 2026-04). Required for all requests to ensure compatibility."),
+    name: str = Field(..., description="Unique name for the index (1-45 characters). Must start and end with an alphanumeric character and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
+    spec: _models.CreateIndexBodySpecV0 | _models.CreateIndexBodySpecV1 | _models.CreateIndexBodySpecV2 = Field(..., description="Deployment configuration specifying where and how the index runs. For serverless indexes, provide cloud provider and region. For pod-based indexes, specify environment, pod type, and pod size."),
+    dimension: str | None = Field(None, description="Number of dimensions for vectors stored in this index (1-20,000). Required for dense vector types. Omit for sparse vectors."),
+    metric: str | None = Field(None, description="Distance metric for similarity calculations: 'cosine' (default for dense vectors), 'euclidean', or 'dotproduct' (required for sparse vectors)."),
+    deletion_protection: str | None = Field(None, description="Enable or disable deletion protection for the index. When enabled, prevents accidental index removal. Defaults to disabled."),
+    tags: dict[str, str] | None = Field(None, description="Optional custom metadata tags for organizing and identifying the index. Keys up to 80 characters (alphanumeric, underscore, hyphen); values up to 120 characters (alphanumeric, semicolon, at-sign, underscore, hyphen, period, plus, space). Set value to empty string to remove a tag."),
+    vector_type: str | None = Field(None, description="Vector type for the index: 'dense' (default, requires dimension specification) or 'sparse' (omit dimension specification)."),
+) -> dict[str, Any]:
+    """Create a new Pinecone index by specifying vector dimensions, similarity metric, deployment configuration, and optional metadata. This establishes the foundation for storing and searching vectors."""
+
+    _dimension = _parse_int(dimension)
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIndexRequest(
+            header=_models.CreateIndexRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.CreateIndexRequestBody(name=name, dimension=_dimension, metric=metric, deletion_protection=deletion_protection, tags=tags, spec=spec, vector_type=vector_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_index: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/indexes"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_index")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_index", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_index",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def get_index(
+    index_name: str = Field(..., description="The name of the index to retrieve. Use the exact index name as it appears in your Pinecone project (e.g., 'test-index')."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date in YYYY-MM format. Defaults to 2026-04 if not provided; include this header to ensure compatibility with a specific API version."),
+) -> dict[str, Any]:
+    """Retrieve detailed metadata and configuration information about a specific index, including its dimensions, metric type, and current status."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DescribeIndexRequest(
+            path=_models.DescribeIndexRequestPath(index_name=index_name),
+            header=_models.DescribeIndexRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_index: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/indexes/{index_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/indexes/{index_name}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_index")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_index", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_index",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def update_index(
+    index_name: str = Field(..., description="The name of the index to configure (e.g., 'test-index')."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="Required API version header in date-based format (defaults to 2026-04)."),
+    spec: _models.ConfigureIndexBodySpecV0 | _models.ConfigureIndexBodySpecV1 | _models.ConfigureIndexBodySpecV2 | None = Field(None, description="The deployment specification for the index. Defines how the index is scaled and configured. Only modifiable attributes related to scaling and configuration are supported; cloud provider and region are immutable."),
+    deletion_protection: str | None = Field(None, description="Enable or disable deletion protection for the index to prevent accidental removal. Defaults to disabled."),
+    tags: dict[str, str] | None = Field(None, description="Custom key-value tags for organizing and labeling the index. Keys must be 80 characters or fewer and contain only alphanumeric characters, underscores, or hyphens. Values must be 120 characters or fewer and contain only alphanumeric characters, semicolons, at signs, underscores, hyphens, periods, plus signs, or spaces. Set a value to an empty string to remove a tag."),
+) -> dict[str, Any]:
+    """Update configuration settings for an existing index, including scaling parameters, deletion protection, and custom tags. Only scaling and configuration attributes can be modified; the index's cloud provider and region cannot be changed."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ConfigureIndexRequest(
+            path=_models.ConfigureIndexRequestPath(index_name=index_name),
+            header=_models.ConfigureIndexRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.ConfigureIndexRequestBody(spec=spec, deletion_protection=deletion_protection, tags=tags)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_index: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/indexes/{index_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/indexes/{index_name}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_index")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_index", "PATCH", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_index",
+        method="PATCH",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def delete_index(
+    index_name: str = Field(..., description="The name of the index to delete (e.g., 'test-index'). Must match an existing index exactly."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required header for request routing."),
+) -> dict[str, Any]:
+    """Permanently delete an existing index and all its data. This operation cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIndexRequest(
+            path=_models.DeleteIndexRequestPath(index_name=index_name),
+            header=_models.DeleteIndexRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_index: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/indexes/{index_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/indexes/{index_name}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_index")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_index", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_index",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def list_index_backups(
+    index_name: str = Field(..., description="The name of the index for which to list backups."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required for request routing."),
+    limit: int | None = Field(None, description="Maximum number of backup results to return per page. Must be between 1 and 100 (defaults to 10).", ge=1, le=100),
+    pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of results."),
+) -> dict[str, Any]:
+    """Retrieve all backups for a specified index with pagination support. Use pagination tokens to navigate through large result sets."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIndexBackupsRequest(
+            path=_models.ListIndexBackupsRequestPath(index_name=index_name),
+            query=_models.ListIndexBackupsRequestQuery(limit=limit, pagination_token=pagination_token),
+            header=_models.ListIndexBackupsRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_index_backups: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/indexes/{index_name}/backups", _request.path.model_dump(by_alias=True)) if _request.path else "/indexes/{index_name}/backups"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_index_backups")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_index_backups", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_index_backups",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def create_backup(
+    index_name: str = Field(..., description="The name of the index to back up. This identifies which index will be backed up."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="The API version specified as a date-based header (required for all requests). Use the default version 2026-04 unless you need a specific earlier version."),
+    name: str | None = Field(None, description="An optional name for the backup. If provided, this will be used to identify the backup in your backup list."),
+    description: str | None = Field(None, description="An optional description of the backup. Use this to document the purpose or context of the backup for future reference."),
+) -> dict[str, Any]:
+    """Create a backup of a Pinecone index to preserve its current state. Backups can be named and described for easy identification and management."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateBackupRequest(
+            path=_models.CreateBackupRequestPath(index_name=index_name),
+            header=_models.CreateBackupRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.CreateBackupRequestBody(name=name, description=description)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_backup: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/indexes/{index_name}/backups", _request.path.model_dump(by_alias=True)) if _request.path else "/indexes/{index_name}/backups"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_backup")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_backup", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_backup",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def list_collections(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests to ensure compatibility with the API specification.")) -> dict[str, Any]:
+    """Retrieve all collections in a project. Note that serverless indexes do not support collections."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListCollectionsRequest(
+            header=_models.ListCollectionsRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_collections: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/collections"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_collections")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_collections", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_collections",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def create_collection(
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format. Defaults to 2026-04 if not provided."),
+    name: str = Field(..., description="The name for the new collection. Must be 1-45 characters long, start and end with an alphanumeric character, and contain only lowercase alphanumeric characters or hyphens.", min_length=1, max_length=45),
+    source: str = Field(..., description="The name of an existing index to use as the source for this collection. The source index will provide the data and configuration for the collection."),
+) -> dict[str, Any]:
+    """Create a new collection in Pinecone by specifying a name and source index. Collections allow you to organize and manage data within an index (note: serverless indexes do not support collections)."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateCollectionRequest(
+            header=_models.CreateCollectionRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.CreateCollectionRequestBody(name=name, source=source)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_collection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/collections"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_collection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_collection", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_collection",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def create_index_for_model(
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version identifier in date format (required header for all requests)."),
+    name: str = Field(..., description="Unique name for the index. Must be 1-45 characters, start and end with alphanumeric characters, and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
+    cloud: str = Field(..., description="Cloud provider where the index will be hosted: AWS, Google Cloud, or Azure."),
+    region: str = Field(..., description="Geographic region for index deployment (e.g., us-east-1, europe-west1). Must be a valid region for your chosen cloud provider."),
+    fields: dict[str, _models.CreateIndexForModelBodySchemaFieldsValue] = Field(..., description="Configuration map defining metadata field names and their types. Each field name must be unique and follow valid metadata field naming conventions."),
+    model: str = Field(..., description="Name of the hosted embedding model to use for automatic text vectorization (e.g., multilingual-e5-large). The model determines default vector dimensions and distance metrics."),
+    field_map: dict[str, Any] = Field(..., description="Mapping that identifies which text field from your documents will be embedded. Specify the source field name that contains the text to vectorize."),
+    deletion_protection: str | None = Field(None, description="Enable or disable deletion protection to prevent accidental index removal. Defaults to disabled if not specified."),
+    tags: dict[str, str] | None = Field(None, description="Optional custom key-value tags for organizing and identifying the index. Keys up to 80 characters, values up to 120 characters. Keys must be alphanumeric with underscores or hyphens; values support alphanumeric characters plus ';@_-.+' and spaces."),
+    read_capacity: _models.ReadCapacityOnDemandSpec | _models.ReadCapacityDedicatedSpec | None = Field(None, description="Optional capacity configuration for read operations. Defaults to OnDemand mode; specify Dedicated mode with node_type and scaling parameters for predictable, reserved throughput."),
+    metric: str | None = Field(None, description="Distance metric for similarity search operations: cosine, euclidean, or dotproduct. If omitted, defaults based on the selected embedding model. Cannot be changed after index creation."),
+    dimension: int | None = Field(None, description="Optional vector dimension size for embeddings. If not specified, the dimension is automatically determined by the selected embedding model."),
+) -> dict[str, Any]:
+    """Create a vector search index with integrated embedding capabilities. Pinecone automatically converts your source text using the specified hosted embedding model during data operations, eliminating the need for separate embedding infrastructure."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIndexForModelRequest(
+            header=_models.CreateIndexForModelRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.CreateIndexForModelRequestBody(name=name, cloud=cloud, region=region, deletion_protection=deletion_protection, tags=tags, read_capacity=read_capacity,
+                schema_=_models.CreateIndexForModelRequestBodySchema(fields=fields),
+                embed=_models.CreateIndexForModelRequestBodyEmbed(model=model, metric=metric, field_map=field_map, dimension=dimension))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_index_for_model: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/indexes/create-for-model"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_index_for_model")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_index_for_model", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_index_for_model",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def list_project_backups(
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based string (defaults to 2026-04). Required header for API compatibility."),
+    limit: int | None = Field(None, description="Maximum number of backups to return per page, between 1 and 100. Defaults to 10 results per page.", ge=1, le=100),
+    pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of results."),
+) -> dict[str, Any]:
+    """Retrieve all backups for indexes in a project with optional pagination. Use pagination tokens to navigate through large result sets."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListProjectBackupsRequest(
+            query=_models.ListProjectBackupsRequestQuery(limit=limit, pagination_token=pagination_token),
+            header=_models.ListProjectBackupsRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_project_backups: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/backups"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_project_backups")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_project_backups", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_project_backups",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def get_backup(
+    backup_id: str = Field(..., description="The unique identifier of the backup to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific backup by its ID. Returns the backup's metadata and configuration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DescribeBackupRequest(
+            path=_models.DescribeBackupRequestPath(backup_id=backup_id),
+            header=_models.DescribeBackupRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_backup: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/backups/{backup_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/backups/{backup_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_backup")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_backup", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_backup",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def delete_backup(
+    backup_id: str = Field(..., description="The unique identifier of the backup to delete, formatted as a UUID."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04 if not provided)."),
+) -> dict[str, Any]:
+    """Permanently delete a backup by its ID. This operation removes the backup and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteBackupRequest(
+            path=_models.DeleteBackupRequestPath(backup_id=backup_id),
+            header=_models.DeleteBackupRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_backup: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/backups/{backup_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/backups/{backup_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_backup")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_backup", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_backup",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def create_index_from_backup(
+    backup_id: str = Field(..., description="The unique identifier of the backup to restore from, formatted as a UUID."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (e.g., 2026-04). This header is required to ensure compatibility with the API version."),
+    name: str = Field(..., description="The name for the new index. Must be 1-45 characters long, start and end with an alphanumeric character, and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
+    tags: dict[str, str] | None = Field(None, description="Optional custom metadata tags for organizing and identifying the index. Tag keys can be up to 80 characters and must contain only alphanumeric characters, underscores, or hyphens. Tag values can be up to 120 characters and may include alphanumeric characters, semicolons, at signs, underscores, hyphens, periods, plus signs, or spaces. Set a value to an empty string to remove a tag."),
+    deletion_protection: str | None = Field(None, description="Optional setting to prevent accidental deletion of the index. Set to 'enabled' to protect the index or 'disabled' (default) to allow deletion."),
+) -> dict[str, Any]:
+    """Create a new index by restoring data from an existing backup. The new index will be initialized with the backup's configuration and data."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIndexFromBackupOperationRequest(
+            path=_models.CreateIndexFromBackupOperationRequestPath(backup_id=backup_id),
+            header=_models.CreateIndexFromBackupOperationRequestHeader(x_pinecone_api_version=x_pinecone_api_version),
+            body=_models.CreateIndexFromBackupOperationRequestBody(name=name, tags=tags, deletion_protection=deletion_protection)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_index_from_backup: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/backups/{backup_id}/create-index", _request.path.model_dump(by_alias=True)) if _request.path else "/backups/{backup_id}/create-index"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_index_from_backup")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_index_from_backup", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_index_from_backup",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def list_restore_jobs(
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests. Defaults to 2026-04."),
+    limit: int | None = Field(None, description="Maximum number of restore jobs to return per page, between 1 and 100 results. Defaults to 10 if not specified.", ge=1, le=100),
+    pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of restore jobs. Omit for the first page."),
+) -> dict[str, Any]:
+    """Retrieve a paginated list of all restore jobs for the project. Use pagination tokens to navigate through results."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListRestoreJobsRequest(
+            query=_models.ListRestoreJobsRequestQuery(limit=limit, pagination_token=pagination_token),
+            header=_models.ListRestoreJobsRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_restore_jobs: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/restore-jobs"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_restore_jobs")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_restore_jobs", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_restore_jobs",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def get_restore_job(
+    job_id: str = Field(..., description="The unique identifier of the restore job to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific restore job, including its status, progress, and configuration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DescribeRestoreJobRequest(
+            path=_models.DescribeRestoreJobRequestPath(job_id=job_id),
+            header=_models.DescribeRestoreJobRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_restore_job: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/restore-jobs/{job_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/restore-jobs/{job_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_restore_job")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_restore_job", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_restore_job",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def get_collection(
+    collection_name: str = Field(..., description="The name of the collection to retrieve information about (e.g., 'tiny-collection')."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format (defaults to 2026-04 if not provided)."),
+) -> dict[str, Any]:
+    """Retrieve detailed metadata and configuration information about a specific collection. Note that serverless indexes do not support collections."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DescribeCollectionRequest(
+            path=_models.DescribeCollectionRequestPath(collection_name=collection_name),
+            header=_models.DescribeCollectionRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_collection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/collections/{collection_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/collections/{collection_name}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_collection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_collection", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_collection",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Manage Indexes
+@mcp.tool()
+async def delete_collection(
+    collection_name: str = Field(..., description="The name of the collection to delete (e.g., 'test-collection'). This is a required identifier that specifies which collection will be removed."),
+    x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="Required API version header in date-based format (defaults to 2026-04). This ensures the request is processed with the correct API specification."),
+) -> dict[str, Any]:
+    """Permanently delete an existing collection and all its data. Note that serverless indexes do not support collections."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteCollectionRequest(
+            path=_models.DeleteCollectionRequestPath(collection_name=collection_name),
+            header=_models.DeleteCollectionRequestHeader(x_pinecone_api_version=x_pinecone_api_version)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_collection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/collections/{collection_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/collections/{collection_name}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_collection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_collection", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_collection",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# ============================================================================
+# Schema Optimization
+# ============================================================================
+
+def _optimize_tool_schemas() -> None:
+    """Simplify anyOf nullable wrappers in tool schemas for LLM token efficiency.
+
+    Pydantic generates {"anyOf": [{"type": "T"}, {"type": "null"}], "default": null}
+    for `T | None = None` params. Both Anthropic and OpenAI recommend the simpler
+    {"type": "T"} with the param outside `required` for optimal tool-calling accuracy
+    and minimal token overhead. Runtime validation is unaffected — Python signatures
+    retain the `T | None` annotation.
+    """
+    from fastmcp.tools import Tool as _ToolCls
+    # v3: _local_provider._components, v2: _tool_manager._tools
+    _src = getattr(mcp, "_local_provider", None)
+    if _src is not None:
+        _tools = [v for v in _src._components.values() if isinstance(v, _ToolCls)]
+    else:
+        _tools = list(mcp._tool_manager._tools.values())  # type: ignore[attr-defined]
+    for _tool in _tools:
+        _simplify_schema(_tool.parameters)
+
+def _simplify_schema(schema: dict) -> None:
+    """Walk a JSON Schema dict and collapse anyOf-nullable patterns in place.
+
+    Also removes discriminator objects anywhere in the tree: after FastMCP's
+    DereferenceRefsMiddleware inlines $ref entries, discriminator.mapping values
+    point to $defs that no longer exist. The discriminator is redundant — each
+    variant already identifies itself via Literal constants on the discriminant
+    field, so MCP clients and LLMs don't need the mapping.
+    """
+    schema.pop("discriminator", None)
+    for _def_schema in schema.get("$defs", {}).values():
+        _simplify_schema(_def_schema)
+    _props = schema.get("properties", {})
+    _required = set(schema.get("required", []))
+    for _name, _prop in _props.items():
+        if "anyOf" in _prop:
+            _non_null = [b for b in _prop["anyOf"] if b.get("type") != "null"]
+            if len(_non_null) == 1:
+                _desc = _prop.get("description")
+                _prop.clear()
+                _prop.update(_non_null[0])
+                if _desc:
+                    _prop["description"] = _desc
+                _required.discard(_name)
+        _simplify_schema(_prop)
+    if _required:
+        schema["required"] = sorted(_required)
+    elif "required" in schema:
+        del schema["required"]
+    for _key in ("anyOf", "oneOf"):
+        for _branch in schema.get(_key, []):
+            if isinstance(_branch, dict):
+                _simplify_schema(_branch)
+
+_optimize_tool_schemas()
+
+# ============================================================================
+# Environment Validation
+# ============================================================================
+
+def validate_environment() -> None:
+    """Validate required environment variables at startup."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    required_vars: list[tuple[str, str, str | None]] = [
+    ]
+
+    for var_name, description, default in required_vars:
+        value = os.getenv(var_name, default)
+        if not value:
+            errors.append(f"  - {var_name}: {description}")
+
+    if errors:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Missing required environment variables", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        for error in errors:
+            print(error, file=sys.stderr)
+        print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
+        print("\nExample:", file=sys.stderr)
+        print("  python pinecone_control_plane_api_server.py", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    _validate_port()
+    _validate_timeout()
+    _validate_rate_limit()
+
+    logger = logging.getLogger(__name__)
+    logger.info("Environment validation passed")
+    for warning in warnings:
+        logger.warning(warning)
+
+def _validate_port() -> None:
+    port_str = os.getenv('PORT')
+    if not port_str:
+        return  # Optional, has CLI default
+
+    port: int
+    try:
+        port = int(port_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid PORT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {port_str}", file=sys.stderr)
+        print("\nPORT must be an integer between 1 and 65535", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if port < 1 or port > 65535:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: PORT out of valid range", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {port}", file=sys.stderr)
+        print("\nPORT must be between 1 and 65535", file=sys.stderr)
+        print("  Common ports: 8000, 8080, 3000", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+def _validate_timeout() -> None:
+    timeout_str = os.getenv('API_TIMEOUT')
+    if not timeout_str:
+        return  # Optional, has default
+
+    timeout: int
+    try:
+        timeout = int(timeout_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid API_TIMEOUT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {timeout_str}", file=sys.stderr)
+        print("\nAPI_TIMEOUT must be a positive integer (seconds)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if timeout < 1 or timeout > 3600:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: API_TIMEOUT out of reasonable range", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {timeout} seconds", file=sys.stderr)
+        print("\nAPI_TIMEOUT must be between 1 and 3600 seconds (1 hour max)", file=sys.stderr)
+        print("  Recommended: 30 (most APIs), 60 (slower APIs), 300 (long operations)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+def _validate_rate_limit() -> None:
+    rate_str = os.getenv('RATE_LIMIT')
+    if not rate_str:
+        return  # Optional, has default
+
+    try:
+        rate = float(rate_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid RATE_LIMIT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {rate_str}", file=sys.stderr)
+        print("\nRATE_LIMIT must be a positive number (requests per second)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if rate <= 0:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: RATE_LIMIT must be positive", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {rate}", file=sys.stderr)
+        print("\nRATE_LIMIT must be greater than 0", file=sys.stderr)
+        print("  Recommended: 1-100 requests/second depending on API limits", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+def main():
+    """CLI entry point with runtime transport selection."""
+
+    validate_environment()
+
+    parser = argparse.ArgumentParser(description="Pinecone Control Plane API MCP Server")
+
+    parser.add_argument(
+        '--transport',
+        choices=['stdio', 'sse', 'streamable-http'],
+        default='stdio',
+        help='Transport protocol: stdio (default, for Claude Code), sse (remote capable), streamable-http (production)'
+    )
+    parser.add_argument(
+        '--host',
+        default='0.0.0.0',  # noqa: S104
+        help='Host address for HTTP transports (default: 0.0.0.0)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8000,
+        help='Port for HTTP transports (default: 8000)'
+    )
+    parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default=LOG_LEVEL,
+        help='Logging level (default: from LOG_LEVEL env var, or INFO)'
+    )
+    parser.add_argument(
+        '--retry',
+        action='store_true',
+        help='Enable automatic retry with exponential backoff (default: enabled)'
+    )
+    parser.add_argument(
+        '--no-retry',
+        action='store_true',
+        help='Disable automatic retry'
+    )
+    parser.add_argument(
+        '--max-retries',
+        type=int,
+        default=MAX_RETRIES,
+        help='Maximum retry attempts (default: from MAX_RETRIES env var, or 3)'
+    )
+    parser.add_argument(
+        '--retry-base-delay',
+        type=int,
+        default=RETRY_BACKOFF_FACTOR,
+        help='Base delay for exponential backoff in seconds (default: from RETRY_BACKOFF_FACTOR env var, or 2)'
+    )
+    parser.add_argument(
+        '--retry-max-delay',
+        type=int,
+        default=60,
+        help='Maximum retry delay in seconds (default: 60)'
+    )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=None,
+        help='API request timeout in seconds (default: 30, or API_TIMEOUT env var)'
+    )
+    parser.add_argument(
+        '--rate-limiting',
+        choices=['disabled', 'local'],
+        default='local',
+        help='Rate limiting mode: disabled (default) or local (in-memory token bucket)'
+    )
+    parser.add_argument(
+        '--rate-limit',
+        type=int,
+        default=RATE_LIMIT_REQUESTS_PER_SECOND,
+        help='Rate limit in requests per second (default: from RATE_LIMIT_REQUESTS_PER_SECOND env var, or 10)'
+    )
+    parser.add_argument(
+        '--burst',
+        type=int,
+        help='Burst capacity for rate limiter (default: 2x rate-limit)'
+    )
+    parser.add_argument(
+        '--circuit-breaker',
+        action='store_true',
+        help='Enable circuit breaker to prevent cascading failures'
+    )
+    parser.add_argument(
+        '--circuit-breaker-failure-threshold',
+        type=int,
+        default=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        help='Failures before opening circuit (default: from CIRCUIT_BREAKER_FAILURE_THRESHOLD env var, or 5)'
+    )
+    parser.add_argument(
+        '--circuit-breaker-timeout',
+        type=float,
+        default=CIRCUIT_BREAKER_TIMEOUT_SECONDS,
+        help='Seconds before recovery attempt (default: from CIRCUIT_BREAKER_TIMEOUT_SECONDS env var, or 60.0)'
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting Pinecone Control Plane API MCP Server")
+    logger.info(f"Transport: {args.transport}")
+
+    global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
+
+    if args.timeout is not None:
+        DEFAULT_TIMEOUT = args.timeout
+    else:
+        timeout_env = os.getenv('API_TIMEOUT')
+        if timeout_env:
+            try:
+                DEFAULT_TIMEOUT = int(timeout_env)
+            except ValueError:
+                logger.warning(f"Invalid API_TIMEOUT '{timeout_env}', using default {DEFAULT_TIMEOUT}s")
+    logger.info(f"Timeout: {DEFAULT_TIMEOUT}s")
+
+    if not args.no_retry:
+        retry_config = RetryConfig(
+            max_attempts=args.max_retries,
+            base_delay=args.retry_base_delay,
+            max_delay=args.retry_max_delay
+        )
+        logger.info(
+            f"Retry: Enabled (max attempts: {retry_config.max_attempts}, "
+            f"base delay: {retry_config.base_delay}s, max delay: {retry_config.max_delay}s)"
+        )
+    else:
+        logger.info("Retry: Disabled")
+
+    rate_limiting_mode = args.rate_limiting
+
+    if rate_limiting_mode == 'disabled':
+        rate_limiter = None
+        logger.info("Rate limiting: Disabled")
+    elif rate_limiting_mode == 'local':
+        rate_limit = args.rate_limit if args.rate_limit else 10.0
+        burst = args.burst if args.burst else int(rate_limit * 2)
+        rate_limiter = TokenBucket(rate=rate_limit, capacity=burst)
+        logger.info(f"Rate limiting: Local (rate: {rate_limit} req/sec, burst: {burst})")
+    else:
+        logger.warning(f"Unknown rate limiting mode: {rate_limiting_mode}, disabling")
+        rate_limiter = None
+
+    if args.circuit_breaker:
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=args.circuit_breaker_failure_threshold,
+            timeout=args.circuit_breaker_timeout
+        )
+        circuit_breaker = CircuitBreaker(cb_config)
+        logger.info(
+            f"Circuit breaker: Enabled (failure threshold: {cb_config.failure_threshold}, "
+            f"timeout: {cb_config.timeout}s)"
+        )
+    else:
+        logger.info("Circuit breaker: Disabled")
+    try:
+        if args.transport == 'stdio':
+            logger.info("Using stdio transport")
+            mcp.run()
+        elif args.transport == 'sse':
+            logger.info(f"Using SSE transport on http://{args.host}:{args.port}")
+            mcp.run(transport='sse', host=args.host, port=args.port)
+        elif args.transport == 'streamable-http':
+            logger.info(f"Using Streamable HTTP transport on http://{args.host}:{args.port}")
+            mcp.run(transport='streamable-http', host=args.host, port=args.port)
+
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+        raise
+
+if __name__ == "__main__":
+    main()
