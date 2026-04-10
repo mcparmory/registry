@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-builtwith"
-version = "1.0.1"
-description = "MCP server for BuiltWith API"
+version = "1.0.0"
+description = "MCP server for BuiltWith"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

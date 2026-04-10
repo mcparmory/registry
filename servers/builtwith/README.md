@@ -1,4 +1,4 @@
-# BuiltWith API MCP Server
+# BuiltWith MCP Server
 
 Base URL: https://api.builtwith.com
 ## API Info

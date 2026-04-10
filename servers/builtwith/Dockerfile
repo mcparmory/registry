@@ -1,4 +1,4 @@
-# BuiltWith API MCP Server
+# BuiltWith MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-builtwith .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="BuiltWith API MCP Server" \
+LABEL org.opencontainers.image.title="BuiltWith MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 
