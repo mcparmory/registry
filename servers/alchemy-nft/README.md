@@ -1,4 +1,4 @@
-# 🎨 NFT API MCP Server
+# Alchemy NFT MCP Server
 
 Base URL: https://eth-mainnet.g.alchemy.com/nft
 ---

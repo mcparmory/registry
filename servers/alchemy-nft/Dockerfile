@@ -1,4 +1,4 @@
-# 🎨 NFT API MCP Server
+# Alchemy NFT MCP Server
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-alchemy-nft .
@@ -41,7 +41,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="🎨 NFT API MCP Server" \
+LABEL org.opencontainers.image.title="Alchemy NFT MCP Server" \
       org.opencontainers.image.vendor="MCP Blacksmith" \
       org.opencontainers.image.source="https://mcpblacksmith.com"
 

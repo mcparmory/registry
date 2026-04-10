@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-alchemy-nft"
-version = "1.0.1"
-description = "MCP server for 🎨 NFT API"
+version = "1.0.0"
+description = "MCP server for Alchemy NFT"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

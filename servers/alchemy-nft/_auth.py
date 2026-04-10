@@ -1,5 +1,5 @@
 """
-Authentication module for 🎨 NFT API MCP server.
+Authentication module for Alchemy NFT MCP server.
 
 Generated: 2026-04-09 17:13:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for 🎨 NFT API.
+    API Key authentication for Alchemy NFT.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
