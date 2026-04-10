@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-algolia-search"
-version = "1.0.2"
+version = "1.0.0"
 description = "MCP server for Algolia Search"
 readme = "README.md"
 license = "MIT"
