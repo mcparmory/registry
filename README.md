@@ -132,7 +132,7 @@ Servers are auto-generated — don't edit server code directly. If you find an i
 - Authentication problems
 - Incorrect request/response models
 
-We'll re-generate the affected server with the fix. To request a new server, open an issue with a link to the API's OpenAPI spec.
+We'll re-generate the affected server with the fix. To request a new server, open an issue with a link to the API's OpenAPI spec or documentation.
 
 ## License
 
