@@ -1,0 +1,34 @@
+name: New Server Request
+description: Request an MCP server for a new API
+labels: ["new server"]
+body:
+  - type: input
+    id: api_name
+    attributes:
+      label: API name
+      placeholder: e.g. Stripe, Twilio, Shopify
+    validations:
+      required: true
+  - type: input
+    id: openapi_spec
+    attributes:
+      label: OpenAPI spec URL
+      description: Link to the API's OpenAPI/Swagger specification (if available).
+      placeholder: https://api.example.com/openapi.json
+    validations:
+      required: false
+  - type: input
+    id: api_docs
+    attributes:
+      label: API documentation URL
+      description: Link to the API's documentation.
+      placeholder: https://docs.example.com
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Why is this API useful? Any specific endpoints you need?
+    validations:
+      required: false
