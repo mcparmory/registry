@@ -1,7 +1,7 @@
 """
 Authentication module for Mixpanel MCP server.
 
-Generated: 2026-04-09 20:17:21 UTC
+Generated: 2026-04-14 18:26:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -28,7 +28,7 @@ __all__ = [
 
 class BasicAuth:
     """
-    HTTP Basic Authentication for Mixpanel.
+    HTTP Basic Authentication for Query API.
 
     Configuration:
         Credentials are automatically Base64-encoded.

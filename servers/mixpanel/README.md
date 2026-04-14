@@ -1,6 +1,12 @@
 # Mixpanel MCP Server
 
 Base URL: https://mixpanel.com/api/query
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 19 |
+| **Auth** | HTTP Basic |
+
 ## API Info
 - **API License:** MIT — [https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT)
 
@@ -13,16 +19,16 @@ Base URL: https://mixpanel.com/api/query
 ```bash
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-uvx mcparmory-query
+uvx mcparmory-mixpanel
 ```
 
 ### With pip
 
 ```bash
-pip install mcparmory-query
+pip install mcparmory-mixpanel
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-mcparmory-query
+mcparmory-mixpanel
 ```
 
 ### MCP Client Configuration
@@ -32,9 +38,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 ```json
 {
   "mcpServers": {
-    "query": {
+    "mixpanel": {
       "command": "uvx",
-      "args": ["mcparmory-query"],
+      "args": ["mcparmory-mixpanel"],
       "env": {
         "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
         "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
@@ -69,13 +75,13 @@ python server.py
 
 Edit `.mcp.json` and replace `<SERVER_DIR>` with the absolute path to this directory, then add to your MCP client configuration.
 
-Example (if server is at `/home/user/mcp-servers/query`):
+Example (if server is at `/home/user/mcp-servers/mixpanel`):
 ```json
 {
   "mcpServers": {
-    "query": {
+    "mixpanel": {
       "command": "python",
-      "args": ["/home/user/mcp-servers/query/server.py"]
+      "args": ["/home/user/mcp-servers/mixpanel/server.py"]
     }
   }
 }
@@ -88,15 +94,15 @@ Example (if server is at `/home/user/mcp-servers/query`):
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
-docker build -t query .
-docker run -p 8000:8000 --env-file .env query
+docker build -t mixpanel .
+docker run -p 8000:8000 --env-file .env mixpanel
 ```
 
 **Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
-    "query": {
+    "mixpanel": {
       "type": "sse",
       "url": "http://localhost:8000/sse"
     }

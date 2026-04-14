@@ -5,7 +5,7 @@ Mixpanel MCP Server
 API Info:
 - API License: MIT (https://opensource.org/licenses/MIT)
 
-Generated: 2026-04-09 20:17:21 UTC
+Generated: 2026-04-14 18:26:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1978,7 +1978,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python query_api_server.py", file=sys.stderr)
+        print("  python mixpanel_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

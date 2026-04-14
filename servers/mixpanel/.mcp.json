@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "query": {
+    "mixpanel": {
       "command": "python",
       "args": ["<SERVER_DIR>/server.py"]
     }

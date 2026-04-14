@@ -1,8 +1,8 @@
 # Mixpanel MCP Server
 #
 # Usage:
-#   1. Build: docker build -t mcparmory-query .
-#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-query
+#   1. Build: docker build -t mcparmory-mixpanel .
+#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-mixpanel
 #
 # The .env file should contain your API credentials.
 # See the generated .env file for required variables.

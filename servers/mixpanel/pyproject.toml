@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcparmory-query"
+name = "mcparmory-mixpanel"
 version = "1.0.0"
 description = "MCP server for Mixpanel"
 readme = "README.md"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
-mcparmory-query = "server:main"
+mcparmory-mixpanel = "server:main"
 
 [project.urls]
 Homepage = "https://mcparmory.com"

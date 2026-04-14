@@ -1,7 +1,7 @@
 """
-Query Api MCP Server - Validators
+Mixpanel MCP Server - Validators
 
-Generated: 2026-04-09 20:17:21 UTC
+Generated: 2026-04-14 18:26:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
