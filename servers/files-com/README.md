@@ -1,6 +1,12 @@
 # Files.com MCP Server
 
 Base URL: http://app.files.com/api/rest/v1
+| | |
+|---|---|
+| **Category** | Storage |
+| **Tools** | 197 |
+| **Auth** | API Key |
+
 ## API Info
 - **Contact:** Files.com Customer Success Team (support@files.com)
 
