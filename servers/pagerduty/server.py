@@ -1,0 +1,16600 @@
+#!/usr/bin/env python3
+"""
+PagerDuty MCP Server
+
+API Info:
+- Contact: PagerDuty Support <support@pagerduty.com> (http://www.pagerduty.com/support)
+
+Generated: 2026-04-14 18:28:21 UTC
+Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import random
+import sys
+import time
+import uuid
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / '.env'
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    pass
+
+import _auth
+import _models
+import httpx
+import pydantic
+from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
+from pydantic import AfterValidator, Field
+
+BASE_URL = os.getenv("BASE_URL", "https://api.pagerduty.com")
+SERVER_NAME = "PagerDuty"
+SERVER_VERSION = "1.0.0"
+
+CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
+MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+    LOG_LEVEL = "INFO"
+
+HTTPX_TIMEOUT = httpx.Timeout(
+    connect=float(os.getenv("HTTPX_CONNECT_TIMEOUT", "10.0")),
+    read=float(os.getenv("HTTPX_READ_TIMEOUT", "60.0")),
+    write=float(os.getenv("HTTPX_WRITE_TIMEOUT", "30.0")),
+    pool=float(os.getenv("HTTPX_POOL_TIMEOUT", "5.0"))
+)
+
+DEFAULT_TIMEOUT = float(os.getenv("TOOL_EXECUTION_TIMEOUT", "90.0"))
+
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_BACKOFF_FACTOR = float(os.getenv("RETRY_BACKOFF_FACTOR", "2.0"))
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+CIRCUIT_BREAKER_TIMEOUT_SECONDS = float(os.getenv("CIRCUIT_BREAKER_TIMEOUT_SECONDS", "60.0"))
+RATE_LIMIT_REQUESTS_PER_SECOND = int(os.getenv("RATE_LIMIT_REQUESTS_PER_SECOND", "10"))
+client: httpx.AsyncClient | None = None
+
+@dataclass
+class RetryConfig:
+    """Retry with exponential backoff configuration."""
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    retry_on_status_codes: list[int] | None = None
+
+    def __post_init__(self):
+        if self.retry_on_status_codes is None:
+            self.retry_on_status_codes = [429, 500, 502, 503, 504]
+
+class TokenBucket:
+    """Token bucket rate limiter."""
+
+    def __init__(self, rate: float, capacity: int):
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = float(capacity)
+        self.last_update = time.monotonic()
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + (elapsed * self.rate))
+        self.last_update = now
+
+    def consume(self, tokens: int = 1) -> tuple[bool, float | None]:
+        self._refill()
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True, None
+        tokens_needed = tokens - self.tokens
+        return False, tokens_needed / self.rate
+
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Blocking requests
+    HALF_OPEN = "half_open"  # Testing recovery
+
+@dataclass
+class CircuitBreakerConfig:
+    """Circuit breaker configuration."""
+    failure_threshold: int = 5
+    success_threshold: int = 2
+    timeout: float = 60.0
+
+class CircuitBreakerError(Exception):
+    """Circuit breaker is open, request blocked."""
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+class CircuitBreaker:
+    """Circuit breaker to prevent cascading failures."""
+
+    def __init__(self, config: CircuitBreakerConfig):
+        self.config = config
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: float | None = None
+
+    def before_call(self):
+        """Check if circuit allows request."""
+        if self.state == CircuitState.OPEN:
+            if self._should_attempt_reset():
+                self._transition_to_half_open()
+            else:
+                retry_after = self._time_until_recovery()
+                raise CircuitBreakerError(
+                    "Circuit breaker OPEN due to repeated failures",
+                    retry_after=retry_after
+                )
+
+    def on_success(self):
+        """Handle successful request."""
+        if self.state == CircuitState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.config.success_threshold:
+                self._transition_to_closed()
+        elif self.state == CircuitState.CLOSED:
+            if self.failure_count > 0:
+                self.failure_count = 0
+
+    def on_failure(self, error: Exception):
+        """Handle failed request."""
+        logging.debug(f"Circuit breaker recorded failure: {error}")
+        if self.state == CircuitState.HALF_OPEN:
+            self._transition_to_open()
+        elif self.state == CircuitState.CLOSED:
+            self.failure_count += 1
+            if self.failure_count >= self.config.failure_threshold:
+                self._transition_to_open()
+
+    def _should_attempt_reset(self) -> bool:
+        """Check if timeout elapsed for recovery."""
+        if self.last_failure_time is None:
+            return True
+        return (time.monotonic() - self.last_failure_time) >= self.config.timeout
+
+    def _time_until_recovery(self) -> float:
+        """Time remaining until recovery attempt."""
+        if self.last_failure_time is None:
+            return 0.0
+        elapsed = time.monotonic() - self.last_failure_time
+        return max(0.0, self.config.timeout - elapsed)
+
+    def _transition_to_open(self):
+        """Transition to OPEN state."""
+        self.state = CircuitState.OPEN
+        self.last_failure_time = time.monotonic()
+        self.success_count = 0
+        logging.error(f"Circuit breaker OPEN after {self.failure_count} failures")
+
+    def _transition_to_half_open(self):
+        """Transition to HALF_OPEN state."""
+        self.state = CircuitState.HALF_OPEN
+        self.failure_count = 0
+        self.success_count = 0
+        logging.info("Circuit breaker HALF_OPEN - testing recovery")
+
+    def _transition_to_closed(self):
+        """Transition to CLOSED state."""
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        logging.info("Circuit breaker CLOSED - recovered")
+
+# Global resilience configuration
+retry_config: RetryConfig | None = None
+rate_limiter = None  # Initialized based on mode in main()
+circuit_breaker: CircuitBreaker | None = None
+
+# ============================================================================
+# Error Formatting
+# ============================================================================
+
+def _format_api_error_message(
+    tool_name: str | None,
+    method: str,
+    path: str,
+    status_code: int,
+    request_id: str | None,
+    error_data: dict
+) -> str:
+    """
+    Format API error for LLM consumption with structured, parseable details.
+
+    Args:
+        tool_name: MCP tool function name
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path
+        status_code: HTTP status code
+        request_id: Request UUID
+        error_data: Sanitized error response from API
+
+    Returns:
+        Structured error message for LLM with available details
+    """
+    parts = []
+
+    # Add tool name if available
+    if tool_name:
+        parts.append(f"Tool: {tool_name}")
+
+    parts.append(f"Status: {status_code}")
+
+    # Extract error message from various API response formats
+    error_message = None
+    if isinstance(error_data, dict):
+        # Format 1: {"message": "..."}
+        if 'message' in error_data:
+            error_message = error_data['message']
+        # Format 2: {"error": {"message": "...", "code": ..., "errors": [...]}}  (Google APIs)
+        elif 'error' in error_data:
+            err = error_data['error']
+            if isinstance(err, dict):
+                if 'message' in err:
+                    error_message = err['message']
+                # Also include error code if available
+                if 'code' in err and error_message:
+                    error_message = f"[{err['code']}] {error_message}"
+            elif isinstance(err, str):
+                error_message = err
+        # Format 3: {"detail": "..."} (FastAPI/OpenAPI)
+        elif 'detail' in error_data:
+            detail = error_data['detail']
+            if isinstance(detail, str):
+                error_message = detail
+            elif isinstance(detail, list) and detail:
+                # Validation errors: [{"loc": [...], "msg": "...", "type": "..."}]
+                msgs = [d.get('msg', str(d)) if isinstance(d, dict) else str(d) for d in detail[:3]]
+                error_message = "; ".join(msgs)
+                if len(detail) > 3:
+                    error_message += f" (+{len(detail) - 3} more)"
+        # Format 4: {"errors": [...]} (GraphQL-style)
+        elif 'errors' in error_data and isinstance(error_data['errors'], list):
+            errors = error_data['errors']
+            if errors:
+                msgs = [e.get('message', str(e)) if isinstance(e, dict) else str(e) for e in errors[:3]]
+                error_message = "; ".join(msgs)
+                if len(errors) > 3:
+                    error_message += f" (+{len(errors) - 3} more)"
+
+    if error_message:
+        parts.append(f"Error: {error_message}")
+
+    parts.append(f"Request: {method} {path}")
+
+    # Add request ID if available
+    if request_id:
+        parts.append(f"ID: {request_id}")
+
+    return "\n".join(parts)
+
+# ============================================================================
+# Response Sanitization
+# ============================================================================
+
+# Sanitization level configuration
+SANITIZATION_LEVEL = os.getenv("SANITIZATION_LEVEL", "DISABLED").upper()
+if SANITIZATION_LEVEL not in ("DISABLED", "LOW", "MEDIUM", "HIGH"):
+    SANITIZATION_LEVEL = "DISABLED"
+
+# Pattern sets by level
+_PATTERNS_LOW = [
+    'password', 'passwd', 'pwd',
+    'token', 'secret', 'private_key', 'priv_key',
+]
+_PATTERNS_MEDIUM = _PATTERNS_LOW + [
+    'auth_token', 'access_token', 'refresh_token', 'bearer',
+    'credentials', 'authorization',
+]
+_PATTERNS_HIGH = _PATTERNS_MEDIUM + [
+    'session_id', 'sessionid', 'cookie',
+    'api_key', 'apikey', 'api-key',
+    'user_id', 'userid', 'account_id', 'accountid', 'internal_id',
+    'ip_address', 'ipaddress', 'ip_addr',
+    'hostname', 'host_name', 'server_name', 'servername',
+    'internal_ip', 'private_ip',
+]
+
+def _get_sensitive_patterns() -> list:
+    """Get patterns based on current sanitization level."""
+    if SANITIZATION_LEVEL == "DISABLED":
+        return []
+    if SANITIZATION_LEVEL == "LOW":
+        return _PATTERNS_LOW
+    if SANITIZATION_LEVEL == "MEDIUM":
+        return _PATTERNS_MEDIUM
+    return _PATTERNS_HIGH
+
+def sanitize_response(response_data: Any) -> Any:
+    """Remove sensitive fields from API responses before returning to LLM.
+
+    Controlled by SANITIZATION_LEVEL env var:
+    - DISABLED: No filtering (fastest)
+    - LOW: Basic secrets (password, token, secret, private_key)
+    - MEDIUM: LOW + Auth fields
+    - HIGH: MEDIUM + Session/IDs
+
+    Args:
+        response_data: API response (dict, list, or primitive)
+
+    Returns:
+        Sanitized response with sensitive fields removed (based on level)
+    """
+    sensitive_patterns = _get_sensitive_patterns()
+
+    # Skip sanitization if disabled
+    if not sensitive_patterns:
+        return response_data
+
+    def should_filter(key: str) -> bool:
+        """Check if field name matches sensitive patterns."""
+        key_lower = key.lower()
+        return any(pattern in key_lower for pattern in sensitive_patterns)
+
+    def sanitize_dict(data: dict) -> dict:
+        """Recursively sanitize dictionary."""
+        sanitized: dict[str, Any] = {}
+        for key, value in data.items():
+            if should_filter(key):
+                # Skip sensitive fields
+                logging.debug(f"Filtered sensitive field: {key}")
+                continue
+
+            # Recursively sanitize nested structures
+            if isinstance(value, dict):
+                sanitized[key] = sanitize_dict(value)
+            elif isinstance(value, list):
+                sanitized[key] = sanitize_list(value)
+            else:
+                sanitized[key] = value
+
+        return sanitized
+
+    def sanitize_list(data: list[Any]) -> list[Any]:
+        """Recursively sanitize list."""
+        sanitized: list[Any] = []
+        for item in data:
+            if isinstance(item, dict):
+                sanitized.append(sanitize_dict(item))
+            elif isinstance(item, list):
+                sanitized.append(sanitize_list(item))
+            else:
+                sanitized.append(item)
+        return sanitized
+
+    # Handle different response types
+    if isinstance(response_data, dict):
+        return sanitize_dict(response_data)
+    if isinstance(response_data, list):
+        return sanitize_list(response_data)
+    # Primitive types (str, int, bool, None) pass through
+    return response_data
+
+def get_safe_error_response(
+    error_type: str,
+    status_code: int | None = None,
+    retry_after: int | None = None,
+    request_id: str | None = None
+) -> dict:
+    """Generate safe error response for client (LLM).
+
+    Returns generic, actionable error messages without leaking:
+    - API keys, tokens, credentials
+    - Internal server details, IP addresses, hostnames
+    - Stack traces, exception messages
+    - User data from other users
+
+    Args:
+        error_type: Type of error (auth, rate_limit, timeout, etc.)
+        status_code: HTTP status code
+        retry_after: Retry-After header value (seconds)
+        request_id: Request correlation ID for debugging
+
+    Returns:
+        Safe error response dictionary
+    """
+    error_messages = {
+        'AUTHENTICATION_ERROR': {
+            'error': 'AUTHENTICATION_ERROR',
+            'message': 'Authentication failed. Please check your credentials.',
+            'retry': False
+        },
+        'RATE_LIMIT_ERROR': {
+            'error': 'RATE_LIMIT_ERROR',
+            'message': 'Rate limit exceeded. Please retry after the specified delay.',
+            'retry': True
+        },
+        'TIMEOUT_ERROR': {
+            'error': 'TIMEOUT_ERROR',
+            'message': 'Request timed out. The API did not respond in time.',
+            'retry': True
+        },
+        'VALIDATION_ERROR': {
+            'error': 'VALIDATION_ERROR',
+            'message': 'Invalid request parameters. Please check your input.',
+            'retry': False
+        },
+        'NOT_FOUND': {
+            'error': 'NOT_FOUND',
+            'message': 'The requested resource was not found.',
+            'retry': False
+        },
+        'PERMISSION_DENIED': {
+            'error': 'PERMISSION_DENIED',
+            'message': 'You do not have permission to access this resource.',
+            'retry': False
+        },
+        'API_ERROR': {
+            'error': 'API_ERROR',
+            'message': 'An error occurred while calling the external API.',
+            'retry': True
+        },
+        'INTERNAL_ERROR': {
+            'error': 'INTERNAL_ERROR',
+            'message': 'An internal error occurred. Please try again later.',
+            'retry': False
+        }
+    }
+
+    # Get base error response
+    response = error_messages.get(error_type, error_messages['INTERNAL_ERROR']).copy()
+
+    # Add optional fields
+    if status_code:
+        response['status_code'] = status_code
+
+    if retry_after:
+        response['retry_after_seconds'] = retry_after
+
+    if request_id:
+        response['request_id'] = request_id
+
+    return response
+
+async def _make_request(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    body_content_type: str | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    tool_name: str | None = None,
+    request_id: str | None = None,
+    raw_querystring: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Make HTTP request with retry, rate limiting, and circuit breaker."""
+    global client, retry_config, rate_limiter, circuit_breaker
+
+    if client is None:
+        client = httpx.AsyncClient(
+            base_url=BASE_URL,
+            timeout=HTTPX_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS, max_connections=CONNECTION_POOL_SIZE),
+            cookies=None,
+            follow_redirects=True,
+        )
+
+    if headers is None:
+        headers = {}
+    headers.setdefault("Accept", "application/json")
+    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+        headers.setdefault("Content-Type", "application/json")
+
+
+    if rate_limiter is not None:
+        allowed, wait_time = rate_limiter.consume()
+        if not allowed:
+            return {
+                "error": "Rate limit exceeded",
+                "retry_after": wait_time,
+                "message": f"Rate limit exceeded. Wait {wait_time:.1f}s"
+            }, 429
+
+    if circuit_breaker is not None:
+        try:
+            circuit_breaker.before_call()
+        except CircuitBreakerError as e:
+            return {
+                "error": "Circuit breaker open",
+                "retry_after": e.retry_after,
+                "message": str(e)
+            }, 503
+
+    if retry_config is not None:
+        max_attempts = retry_config.max_attempts
+        retry_status_codes = retry_config.retry_on_status_codes or []
+    else:
+        max_attempts = 1
+        retry_status_codes = []
+
+    # Append raw querystring before retry loop to avoid repeated appending
+    # (OAS 3.2 in: querystring — already serialized per media type)
+    if raw_querystring:
+        _qs_sep = "&" if "?" in path else "?"
+        path = f"{path}{_qs_sep}{raw_querystring}"
+
+    last_error: httpx.HTTPStatusError | Exception | None = None
+    _auth_retried = False  # Guard: only attempt one auth refresh per request
+    for attempt in range(max_attempts):
+        try:
+            # Dispatch body to correct httpx kwarg based on content type
+            _json = body if body_content_type is None or body_content_type == "application/json" else None
+            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _content = None
+            if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
+                _raw = body
+                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+            response = await client.request(
+                method=method,
+                url=path,
+                params=params,
+                json=_json,
+                data=_data,
+                content=_content,
+                headers=headers,
+                cookies=cookies
+            )
+
+            # Get status code and data before raise_for_status
+            status_code = response.status_code
+
+            # Handle empty response body (204 No Content, 205 Reset Content, or empty body)
+            if status_code in (204, 205) or not response.content:
+                response_data = {"status": status_code, "message": "Success"}
+            else:
+                # Parse response JSON (graceful fallback to text)
+                try:
+                    response_data = response.json()
+                except Exception:
+                    response_data = {"text": response.text}
+
+            # Check for HTTP errors
+            if status_code >= 400:
+                last_error = httpx.HTTPStatusError(
+                    message=f"HTTP {status_code}",
+                    request=response.request,
+                    response=response
+                )
+
+                # On 401: clear stale tokens and retry once with fresh auth
+                if status_code == 401 and not _auth_retried and tool_name:
+                    _auth_retried = True
+                    logging.warning(f"401 Unauthorized for {tool_name} - clearing token and re-authorizing")
+                    _on_auth_failure()
+                    _fresh_auth = await _get_auth_for_operation(tool_name)
+                    if _fresh_auth.get("headers"):
+                        headers = {**headers, **_fresh_auth["headers"]}
+                    if _fresh_auth.get("params") and params is not None:
+                        params = {**params, **_fresh_auth["params"]}
+                    continue  # Retry immediately with fresh auth (no backoff)
+
+                # Check if should retry
+                if status_code not in retry_status_codes or attempt == max_attempts - 1:
+                    # Don't retry or last attempt - notify circuit breaker of failure
+                    if circuit_breaker is not None and status_code in [500, 502, 503, 504]:
+                        circuit_breaker.on_failure(last_error)
+
+                    # Log error information - WARNING for client errors (4xx), ERROR for server errors (5xx)
+                    log_level = logging.WARNING if 400 <= status_code < 500 else logging.ERROR
+                    logging.log(
+                        log_level,
+                        f"API request failed: {method} {path} (status: {status_code})",
+                        extra={
+                            "status_code": status_code,
+                            "endpoint": path,
+                            "method": method,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "error_detail": str(response_data)[:500]
+                        },
+                        exc_info=False
+                    )
+
+                    # Sanitize response before returning/raising
+                    sanitized_data = sanitize_response(response_data)
+
+                    # Raise exception with structured error message for LLM
+                    error_message = _format_api_error_message(
+                        tool_name=tool_name,
+                        method=method,
+                        path=path,
+                        status_code=status_code,
+                        request_id=request_id,
+                        error_data=sanitized_data
+                    )
+                    raise ValueError(error_message)
+
+                # Will retry - continue to backoff logic below
+
+            else:
+                # Success - notify circuit breaker
+                if circuit_breaker is not None:
+                    circuit_breaker.on_success()
+
+                # Sanitize response before returning to client
+                sanitized_data = sanitize_response(response_data)
+                return sanitized_data, status_code
+
+            # Exponential backoff with jitter (for retry)
+            # retry_config is guaranteed non-None here since max_attempts > 1
+            assert retry_config is not None
+            base_delay = retry_config.base_delay
+            max_delay = retry_config.max_delay
+            exponential_base = retry_config.exponential_base
+            use_jitter = retry_config.jitter
+
+            # Honor Retry-After header for 429 responses
+            delay: float
+            if status_code == 429:
+                retry_after = response.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        delay = min(base_delay * (exponential_base ** attempt), max_delay)
+                else:
+                    delay = min(base_delay * (exponential_base ** attempt), max_delay)
+            else:
+                delay = min(base_delay * (exponential_base ** attempt), max_delay)
+
+            # Add jitter
+            if use_jitter:
+                delay = delay * (0.5 + random.random() * 0.5)  # noqa: S311
+
+            logging.warning(
+                f"Request failed with {status_code} (attempt {attempt + 1}/{max_attempts}). "
+                f"Retrying in {delay:.2f}s"
+            )
+            await asyncio.sleep(delay)
+
+        except httpx.HTTPStatusError:
+            # Already handled above - shouldn't reach here
+            continue
+
+        except Exception as e:
+            last_error = e
+
+            # Network/connection errors - notify circuit breaker
+            if circuit_breaker is not None:
+                circuit_breaker.on_failure(e)
+
+            # Log detailed error information for debugging (internal only)
+            logging.error(
+                f"Request failed with exception: {method} {path}",
+                extra={
+                    "endpoint": path,
+                    "method": method,
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "error_type": e.__class__.__name__,
+                    "error_detail": str(e)
+                },
+                exc_info=True
+            )
+
+            # Don't retry on non-HTTP errors - raise immediately with details
+            # This ensures the LLM sees the actual error message
+            error_message = (
+                f"Tool: {tool_name}\n"
+                f"Error: {e.__class__.__name__}\n"
+                f"Request: {method} {path}\n"
+                f"ID: {request_id}\n"
+                f"Details: {str(e)}"
+            )
+            raise ConnectionError(error_message) from e
+
+    # Log retry exhaustion with full context (internal only)
+    logging.error(
+        f"All retry attempts exhausted: {method} {path}",
+        extra={
+            "endpoint": path,
+            "method": method,
+            "total_attempts": max_attempts,
+            "last_error_type": last_error.__class__.__name__ if last_error else "Unknown",
+            "last_error_detail": str(last_error) if last_error else "Unknown"
+        },
+        exc_info=True
+    )
+
+    # Raise exception with error details
+    if isinstance(last_error, httpx.HTTPStatusError):
+        try:
+            error_data = last_error.response.json()
+        except Exception:
+            error_data = {"error": last_error.response.text[:1000]}
+
+        sanitized_error = sanitize_response(error_data)
+        error_message = _format_api_error_message(
+            tool_name=tool_name,
+            method=method,
+            path=path,
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            error_data=sanitized_error
+        )
+        raise ValueError(error_message)
+
+    # Network/connection error - structured format for consistency
+    error_message = (
+        f"Tool: {tool_name}\n"
+        f"Error: Network error after {max_attempts} attempts\n"
+        f"Request: {method} {path}\n"
+        f"ID: {request_id}\n"
+        f"Details: {str(last_error)}"
+    )
+    raise ConnectionError(error_message)
+
+# ============================================================================
+# MCP Input Coercion Middleware
+# ============================================================================
+# Defensive middleware: some MCP clients (including Claude) may send dict/list
+# arguments as JSON strings instead of native objects. This violates the MCP spec
+# but is a known, widespread client-side issue. This middleware transparently
+# parses stringified JSON before Pydantic validation, preventing tool call failures.
+# See: https://github.com/PrefectHQ/fastmcp/issues/932
+
+class _JsonCoercionMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if context.message.arguments:
+            for key, value in context.message.arguments.items():
+                if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
+                    try:
+                        context.message.arguments[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        return await call_next(context)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _check_unique_items(v: list) -> list:
+    """Validate that array items are unique (OAS uniqueItems: true)."""
+    seen = []
+    for item in v:
+        if item in seen:
+            raise ValueError("array items must be unique")
+        seen.append(item)
+    return v
+
+def _serialize_query(params: dict[str, Any], styles: dict[str, tuple[str, bool]]) -> dict[str, Any]:
+    """Serialize query params per OAS style/explode rules."""
+    result: dict[str, Any] = {}
+    for key, value in params.items():
+        if key not in styles:
+            result[key] = value
+            continue
+        style, explode = styles[key]
+        if isinstance(value, list):
+            if style == "pipeDelimited":
+                result[key] = "|".join(str(v) for v in value)
+            elif style == "spaceDelimited":
+                result[key] = " ".join(str(v) for v in value)
+            elif not explode:
+                result[key] = ",".join(str(v) for v in value)
+            else:
+                result[key] = value
+        elif isinstance(value, dict):
+            if style == "deepObject":
+                for k, v in value.items():
+                    result[f"{key}[{k}]"] = v
+            elif not explode:
+                result[key] = ",".join(f"{k},{v}" for k, v in value.items())
+            else:
+                result.update(value)
+        else:
+            result[key] = value
+    return result
+
+def _log_tool_invocation(tool_name: str, method: str, path: str, request_id: str, _redact: str = "") -> None:
+    """Log tool invocation. If _redact is set, that value is partially masked in the logged path."""
+    log_path = path
+    if _redact:
+        log_path = log_path.replace(_redact, _redact[:4] + "***" if len(_redact) > 4 else "***")
+
+    logging.info(
+        f"Tool invoked: {tool_name}",
+        extra={
+            "request_id": request_id,
+            "tool": tool_name,
+            "method": method,
+            "path": log_path,
+            "timeout": DEFAULT_TIMEOUT
+        }
+    )
+
+def _build_path(
+    template: str,
+    path_params: dict[str, Any],
+) -> str:
+    """Build path from template and parameters.
+
+    Args:
+        template: Path template with {param} placeholders
+        path_params: Dictionary of parameter names to values
+
+    Returns:
+        Path with all  placeholders replaced
+
+    Example:
+        _build_path("/files/{fileId}/copy", {"fileId": "abc123"})
+        Returns: "/files/abc123/copy"
+    """
+    result = template
+    for key, value in path_params.items():
+        result = result.replace("{" + key + "}", str(value))
+    # Normalize double slashes from path param substitution (e.g. "/{path}" + "/foo")
+    # but preserve "://" in URL-valued params (e.g. siteUrl="https://example.com")
+    while "//" in result:
+        cleaned = result.replace("://", ":%SCHEME%")
+        cleaned = cleaned.replace("//", "/")
+        cleaned = cleaned.replace(":%SCHEME%", "://")
+        if cleaned == result:
+            break
+        result = cleaned
+    return result
+
+async def _execute_tool_request(
+    tool_name: str,
+    method: str,
+    path: str,
+    request_id: str,
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    body_content_type: str | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    raw_querystring: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """
+    Execute tool request with timeout handling and metrics recording.
+
+    Returns:
+        Tuple of (normalized_response_data, status_code).
+        Response data is normalized to dict format for Pydantic validation.
+        Status code: HTTP status code from the API response.
+    """
+    start_time = time.time()
+    try:
+        # Wrap API call with timeout to prevent hanging
+        async with asyncio.timeout(DEFAULT_TIMEOUT):
+            # Call unified _make_request() which handles all resilience + security features
+            result, status_code = await _make_request(
+                method=method,
+                path=path,
+                params=params,
+                body=body,
+                body_content_type=body_content_type,
+                headers=headers,
+                cookies=cookies,
+                tool_name=tool_name,
+                request_id=request_id,
+                raw_querystring=raw_querystring,
+            )
+
+        latency_ms = (time.time() - start_time) * 1000.0
+
+        logging.info(f"Tool completed: {tool_name}", extra={"request_id": request_id, "latency_ms": f"{latency_ms:.2f}"})
+
+        # Normalize response to dict and return with status code
+        # Use "value" key for consistency with generated response models
+        if isinstance(result, dict):
+            return result, status_code
+        return {"value": result}, status_code
+
+    except asyncio.TimeoutError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+
+        # Request timed out
+        logging.error(
+            f"Tool timeout: {tool_name}",
+            extra={
+                "request_id": request_id,
+                "tool": tool_name,
+                "method": method,
+                "path": path,
+                "timeout": DEFAULT_TIMEOUT,
+                "latency_ms": f"{latency_ms:.2f}"
+            }
+        )
+
+        # Raise exception with structured error message for consistency
+        # FastMCP will catch this and set isError: true in MCP response
+        timeout_message = (
+            f"Tool: {tool_name}\n"
+            f"Error: Request timed out after {DEFAULT_TIMEOUT} seconds\n"
+            f"ID: {request_id}"
+        )
+        raise asyncio.TimeoutError(timeout_message) from e
+
+    except ValueError:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+    except ConnectionError:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+    except Exception:
+        latency_ms = (time.time() - start_time) * 1000.0
+        raise
+
+# ============================================================================
+# Authentication
+# ============================================================================
+
+# Authentication scheme priority (most secure first)
+AUTH_SCHEME_PRIORITY = [
+    'api_key',
+]
+
+# Initialize authentication handlers at server startup
+_auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["api_key"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Authorization")
+    logging.info("Authentication configured: api_key")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for api_key not configured: {error_msg}")
+    _auth_handlers["api_key"] = None
+
+# Warn only if NO auth handlers were successfully configured
+if all(handler is None for handler in _auth_handlers.values()):
+    logging.warning("Server will attempt unauthenticated requests (may fail if API requires auth)")
+
+def _on_auth_failure() -> None:
+    """Clear tokens on all auth handlers that support it (called on 401 response)."""
+    for scheme_name, handler in _auth_handlers.items():
+        if handler is not None and hasattr(handler, 'clear_token'):
+            handler.clear_token()
+            logging.info(f"Cleared token for auth scheme '{scheme_name}' after 401")
+
+async def _get_auth_for_operation(operation_id: str) -> dict[str, dict[str, str]]:
+    """Get authentication for specific operation (handles multi-auth with OR/AND logic).
+
+    Args:
+        operation_id: The operation ID (tool name) to get auth for
+
+    Returns:
+        Dictionary with 'headers', 'params', 'cookies', 'path_params' keys containing auth data
+    """
+    result: dict[str, dict[str, str]] = {"headers": {}, "params": {}, "cookies": {}, "path_params": {}}
+
+    # Get auth requirements for this operation from auth module
+    # Map structure: operation_id -> [[scheme1], [scheme2, scheme3]] (OR of AND groups)
+    required_schemes = _auth.OPERATION_AUTH_MAP.get(operation_id)
+
+    if required_schemes is None:
+        # CRITICAL: Operation missing from OPERATION_AUTH_MAP
+        # This indicates a bug in auth config generation - operation should be in map
+        # Do NOT fall back to global security - this masks bugs and creates security gaps
+        logging.error(
+            f"SECURITY ERROR: Operation '{operation_id}' not found in OPERATION_AUTH_MAP. "
+            f"This indicates a bug in auth config generation. "
+            f"All operations should be explicitly mapped. "
+            f"Proceeding with no authentication - REQUEST WILL LIKELY FAIL."
+        )
+        # Return empty auth (will likely fail at API, but surfaces the bug)
+        return result
+
+    # Sort OR groups by security priority (most secure first)
+    # Each OR group is sorted internally by scheme priority
+    def get_scheme_priority(scheme_name: str) -> int:
+        """Get priority index for scheme (lower = higher priority)."""
+        try:
+            return AUTH_SCHEME_PRIORITY.index(scheme_name)
+        except ValueError:
+            # Unknown scheme - put at end
+            return len(AUTH_SCHEME_PRIORITY)
+
+    # Sort each OR group by priority, then sort OR groups by their best (lowest) priority
+    sorted_schemes = []
+    for scheme_list in required_schemes:
+        # Sort schemes within AND group by priority (most secure first)
+        sorted_group = sorted(scheme_list, key=get_scheme_priority)
+        sorted_schemes.append(sorted_group)
+
+    # Sort OR groups by the priority of their first (most secure) scheme
+    sorted_schemes.sort(key=lambda group: get_scheme_priority(group[0]) if group else float('inf'))
+
+    # Try each OR group in priority order (most secure first)
+    for scheme_list in sorted_schemes:
+        headers = {}
+        params = {}
+        cookies = {}
+        path_params = {}
+        all_succeeded = True
+
+        # Handle AND group (multiple schemes in same list - all must succeed)
+        for scheme_name in scheme_list:
+            handler = _auth_handlers.get(scheme_name)
+            if not handler:
+                # Handler not configured (env vars missing)
+                all_succeeded = False
+                logging.debug(f"Auth scheme '{scheme_name}' not configured for {operation_id}")
+                break
+
+            try:
+                # Try all injection methods (headers, params, cookies, path_params)
+                # OAuth2 methods are async (token refresh/authorize); others are sync.
+                import inspect as _inspect
+                if hasattr(handler, 'get_auth_headers'):
+                    _h = handler.get_auth_headers()
+                    headers.update(await _h if _inspect.isawaitable(_h) else _h)
+                if hasattr(handler, 'get_auth_params'):
+                    _p = handler.get_auth_params()
+                    params.update(await _p if _inspect.isawaitable(_p) else _p)
+                if hasattr(handler, 'get_auth_cookies'):
+                    _c = handler.get_auth_cookies()
+                    cookies.update(await _c if _inspect.isawaitable(_c) else _c)
+                if hasattr(handler, 'get_auth_path_params'):
+                    _pp = handler.get_auth_path_params()
+                    path_params.update(await _pp if _inspect.isawaitable(_pp) else _pp)
+            except Exception as e:
+                logging.debug(f"Auth scheme '{scheme_name}' failed for {operation_id}: {e}")
+                all_succeeded = False
+                break
+
+        # If all schemes in AND group succeeded, use this auth
+        if all_succeeded and (headers or params or cookies or path_params):
+            result["headers"] = headers
+            result["params"] = params
+            result["cookies"] = cookies
+            result["path_params"] = path_params
+            logging.debug(f"Using auth for {operation_id}: schemes={scheme_list}")
+            return result
+
+    # No auth configured or all OR groups failed
+    if required_schemes and required_schemes != [[]]:
+        logging.warning(f"No configured auth handler found for {operation_id} (requires: {required_schemes})")
+
+    return result
+
+# ============================================================================
+# FastMCP Server Initialization
+# ============================================================================
+
+mcp = FastMCP("PagerDuty", middleware=[_JsonCoercionMiddleware()])
+
+# Tags: Tags
+@mcp.tool()
+async def add_and_remove_tags_for_entity(
+    entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to tag: users, teams, or escalation policies."),
+    id_: str = Field(..., alias="id", description="The unique identifier of the entity to modify tags for."),
+    accept: str = Field(..., alias="Accept", description="API version header. Use the default value for PagerDuty API v2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    add: list[_models.CreateEntityTypeByIdChangeTagsBodyAddItem] | None = Field(None, description="Array of tags to add to the entity. Each item can be a tag reference (using an existing tag's ID) or a new tag definition (by label). If a label matches an existing tag, that tag is added; otherwise, a new tag is created if you have permission."),
+    remove: list[_models.CreateEntityTypeByIdChangeTagsBodyRemoveItem] | None = Field(None, description="Array of tag references (by ID) to remove from the entity."),
+) -> dict[str, Any]:
+    """Add or remove tags from a user, team, or escalation policy. Tags can be existing tags or newly created ones, and are used to organize and filter entities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateEntityTypeByIdChangeTagsRequest(
+            path=_models.CreateEntityTypeByIdChangeTagsRequestPath(entity_type=entity_type, id_=id_),
+            header=_models.CreateEntityTypeByIdChangeTagsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateEntityTypeByIdChangeTagsRequestBody(add=add, remove=remove)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_and_remove_tags_for_entity: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/{entity_type}/{id}/change_tags", _request.path.model_dump(by_alias=True)) if _request.path else "/{entity_type}/{id}/change_tags"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_and_remove_tags_for_entity")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_and_remove_tags_for_entity", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_and_remove_tags_for_entity",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def list_tags_for_entity(
+    entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to retrieve tags for. Must be one of: users, teams, or escalation_policies."),
+    id_: str = Field(..., alias="id", description="The unique identifier of the entity (user, team, or escalation policy) to retrieve tags for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all tags associated with a specific user, team, or escalation policy. Tags are used to organize and filter these entities within PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetEntityTypeByIdTagsRequest(
+            path=_models.GetEntityTypeByIdTagsRequestPath(entity_type=entity_type, id_=id_),
+            header=_models.GetEntityTypeByIdTagsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_tags_for_entity: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/{entity_type}/{id}/tags", _request.path.model_dump(by_alias=True)) if _request.path else "/{entity_type}/{id}/tags"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_tags_for_entity")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_tags_for_entity", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_tags_for_entity",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Abilities
+@mcp.tool()
+async def list_abilities(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all capabilities available to your account based on your pricing plan and account state. Abilities are feature names (e.g., 'teams') that indicate what functionality your account can access."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListAbilitiesRequest(
+            header=_models.ListAbilitiesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_abilities: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/abilities"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_abilities")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_abilities", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_abilities",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Abilities
+@mcp.tool()
+async def check_account_ability(
+    id_: str = Field(..., alias="id", description="The unique identifier of the ability to check (e.g., 'teams'). This determines which account capability is being tested."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version (version 2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Check whether your account has a specific capability or feature enabled. Abilities represent account features (such as 'teams') that may be available based on your pricing plan or account state."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAbilityRequest(
+            path=_models.GetAbilityRequestPath(id_=id_),
+            header=_models.GetAbilityRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for check_account_ability: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/abilities/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/abilities/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("check_account_ability")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("check_account_ability", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="check_account_ability",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Add-ons
+@mcp.tool()
+async def get_addon(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Add-on to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type as JSON."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific Add-on, which is a piece of functionality that extends PagerDuty's UI with custom features."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAddonRequest(
+            path=_models.GetAddonRequestPath(id_=id_),
+            header=_models.GetAddonRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_addon: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/addons/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/addons/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_addon")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_addon", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_addon",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Alert Grouping Settings
+@mcp.tool()
+async def get_alert_grouping_setting(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Alert Grouping Setting to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific Alert Grouping Setting by ID. Alert Grouping Settings define the configurations used by the Alert Grouper service to organize and group alerts."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAlertGroupingSettingRequest(
+            path=_models.GetAlertGroupingSettingRequestPath(id_=id_),
+            header=_models.GetAlertGroupingSettingRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_alert_grouping_setting: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/alert_grouping_settings/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/alert_grouping_settings/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_alert_grouping_setting")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_alert_grouping_setting", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_alert_grouping_setting",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_incident_analytics_aggregated(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="ISO 8601 datetime string marking the start of the query window (inclusive). Incidents created before this time are excluded. Maximum supported time range is one year when used with created_at_end."),
+    created_at_end: str | None = Field(None, description="ISO 8601 datetime string marking the end of the query window (exclusive). Incidents created at or after this time are excluded. Maximum supported time range is one year when used with created_at_start."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results to incidents matching a specific urgency level: high or low. Omit to include all urgency levels."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true), exclude major incidents (false), or include all incidents (omit parameter). Major incidents are those flagged in operational reviews."),
+    min_ackowledgements: int | None = Field(None, description="Minimum number of acknowledgements required. Only incidents with at least this many acknowledgements are included. Omit to include all incidents regardless of acknowledgement count."),
+    min_timeout_escalations: int | None = Field(None, description="Minimum number of timeout escalations required. Only incidents with at least this many timeout escalations are included. Omit to include all incidents regardless of timeout escalation count."),
+    min_manual_escalations: int | None = Field(None, description="Minimum number of manual escalations required. Only incidents with at least this many manual escalations are included. Omit to include all incidents regardless of manual escalation count."),
+    team_ids: list[str] | None = Field(None, description="Array of team IDs to filter results. Only incidents associated with these teams are included. Required for user-level API keys or OAuth-generated keys; optional for account-level keys. Omit to include all accessible teams."),
+    service_ids: list[str] | None = Field(None, description="Array of service IDs to filter results. Only incidents associated with these services are included. Required for user-level API keys or OAuth-generated keys; optional for account-level keys. Omit to include all accessible services."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Array of escalation policy IDs to filter results. Only incidents associated with these escalation policies are included. Omit to include all accessible escalation policies."),
+    time_zone: str | None = Field(None, description="Time zone for result grouping and display, specified in tzdata format (e.g., America/New_York, Europe/London, Etc/UTC). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: asc for ascending or desc for descending. Used in conjunction with order_by parameter."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., created_at). Used in conjunction with order parameter."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics: day, week, or month. Omit to aggregate metrics across the entire queried period without time-based grouping."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics with optional time-based grouping (daily, weekly, monthly). Metrics are enriched and can be filtered by date range, urgency, team, service, and escalation characteristics. Note: Analytics data updates periodically with up to 24-hour latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsAllRequest(
+            header=_models.GetAnalyticsMetricsIncidentsAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsAllRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsAllRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_analytics_aggregated: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_analytics_aggregated")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_analytics_aggregated", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_analytics_aggregated",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_escalation_policy_incident_metrics(
+    accept: str = Field(..., alias="Accept", description="API versioning header specifying the response format and version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be JSON."),
+    created_at_start: str | None = Field(None, description="Filter incidents by creation date (inclusive start). Accepts ISO 8601 datetime format. Combined with created_at_end, the maximum supported range is one year."),
+    created_at_end: str | None = Field(None, description="Filter incidents by creation date (exclusive end). Accepts ISO 8601 datetime format. Combined with created_at_start, the maximum supported range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter incidents by urgency level. Specify 'high' or 'low' to include only incidents matching that urgency."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true), exclude major incidents (false), or include all incidents (omit parameter)."),
+    min_ackowledgements: int | None = Field(None, description="Filter to include only incidents with at least the specified number of acknowledgements. Omit to include all incidents regardless of acknowledgement count."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to include only incidents with at least the specified number of timeout-triggered escalations. Omit to include all incidents regardless of timeout escalation count."),
+    min_manual_escalations: int | None = Field(None, description="Filter to include only incidents with at least the specified number of manually-triggered escalations. Omit to include all incidents regardless of manual escalation count."),
+    team_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with specific teams. Provide an array of team IDs. Omit to include all teams accessible to the requestor."),
+    service_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with specific services. Provide an array of service IDs. Omit to include all services accessible to the requestor."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Restrict results to specific escalation policies. Provide an array of escalation policy IDs. Omit to include all escalation policies accessible to the requestor."),
+    time_zone: str | None = Field(None, description="Time zone for result grouping and display. Must be in tzdata format (e.g., 'America/New_York', 'Etc/UTC'). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: 'asc' for ascending or 'desc' for descending. Use with order_by to specify the sort column."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'created_at'). Use with order to specify ascending or descending direction."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics: 'day', 'week', or 'month'. Omit to aggregate metrics across the entire specified period without time-based grouping."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics grouped by escalation policy over a specified time period. Returns metrics such as resolution time, engagement time, and sleep interruptions to analyze escalation policy performance."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsEscalationPolicyRequest(
+            header=_models.GetAnalyticsMetricsIncidentsEscalationPolicyRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsEscalationPolicyRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsEscalationPolicyRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_escalation_policy_incident_metrics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/escalation_policies"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_escalation_policy_incident_metrics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_escalation_policy_incident_metrics", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_escalation_policy_incident_metrics",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_escalation_policy_incident_metrics_aggregated(
+    accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this ISO 8601 datetime. When combined with created_at_end, the maximum supported time range is one year."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this ISO 8601 datetime. When combined with created_at_start, the maximum supported time range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency; use 'high' for high-urgency incidents or 'low' for low-urgency incidents. Omit to include all urgency levels."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true), exclude major incidents (false), or include all incidents (omit parameter)."),
+    min_ackowledgements: int | None = Field(None, description="Filter to incidents with at least this many acknowledgements. For example, set to 1 to return only acknowledged incidents. Omit to include all incidents regardless of acknowledgement count."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to incidents with at least this many timeout-triggered escalations. For example, set to 1 to return only incidents that escalated due to timeout. Omit to include all incidents regardless of timeout escalation count."),
+    min_manual_escalations: int | None = Field(None, description="Filter to incidents with at least this many manual escalations. For example, set to 1 to return only manually escalated incidents. Omit to include all incidents regardless of manual escalation count."),
+    team_ids: list[str] | None = Field(None, description="Comma-separated list of team IDs to include in results. Only incidents assigned to these teams will be returned. Omit to include all teams the requestor has access to."),
+    service_ids: list[str] | None = Field(None, description="Comma-separated list of service IDs to include in results. Only incidents related to these services will be returned. Omit to include all services the requestor has access to."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Comma-separated list of escalation policy IDs to include in results. Only incidents using these escalation policies will be returned. Omit to include all escalation policies the requestor has access to."),
+    time_zone: str | None = Field(None, description="Time zone for result timestamps and metric aggregation grouping; must be in IANA tzdata format (e.g., 'America/New_York', 'Etc/UTC'). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: 'asc' for ascending or 'desc' for descending. Use with order_by to specify the sort column."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'created_at'). Use with order to specify ascending or descending direction."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for metric aggregation: 'day', 'week', or 'month'. Omit to aggregate metrics across the entire requested period without time-based grouping."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics across all escalation policies, including resolution time, engagement time, and sleep interruptions. Supports filtering by date range, urgency, teams, services, and escalation policies, with optional time-based aggregation."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsEscalationPolicyAllRequest(
+            header=_models.GetAnalyticsMetricsIncidentsEscalationPolicyAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsEscalationPolicyAllRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsEscalationPolicyAllRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_escalation_policy_incident_metrics_aggregated: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/escalation_policies/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_escalation_policy_incident_metrics_aggregated")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_escalation_policy_incident_metrics_aggregated", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_escalation_policy_incident_metrics_aggregated",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_service_incident_analytics(
+    accept: str = Field(..., alias="Accept", description="API versioning header; use application/vnd.pagerduty+json;version=2 for this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this ISO 8601 datetime. Combined with created_at_end, the maximum supported time range is one year."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this ISO 8601 datetime. Combined with created_at_start, the maximum supported time range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency level: either 'high' or 'low'. Omit to include all urgency levels."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true), exclude major incidents (false), or include all incidents (omit parameter)."),
+    min_ackowledgements: int | None = Field(None, description="Filter to incidents with at least this many acknowledgements. Omit to include incidents regardless of acknowledgement count."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to incidents with at least this many timeout escalations. Omit to include incidents regardless of timeout escalation count."),
+    min_manual_escalations: int | None = Field(None, description="Filter to incidents with at least this many manual escalations. Omit to include incidents regardless of manual escalation count."),
+    team_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these team IDs. Provide as an array of team identifiers. Omit to include all teams you have access to."),
+    service_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these service IDs. Provide as an array of service identifiers. Omit to include all services you have access to."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these escalation policy IDs. Provide as an array of escalation policy identifiers. Omit to include all escalation policies you have access to."),
+    time_zone: str | None = Field(None, description="Time zone for aggregating and displaying results; must be in tzdata format (e.g., 'America/New_York', 'Etc/UTC'). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: 'asc' for ascending or 'desc' for descending. Use with order_by to specify the sort column."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'created_at'). Use with order to specify ascending or descending direction."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics: 'day', 'week', or 'month'. Omit to aggregate metrics across the entire specified period without time-based grouping."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics by service over a specified time period. Metrics include resolution time, engagement time, and sleep interruptions, with optional grouping by day, week, or month."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsServiceRequest(
+            header=_models.GetAnalyticsMetricsIncidentsServiceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsServiceRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsServiceRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_incident_analytics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/services"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_incident_analytics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_incident_analytics", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_incident_analytics",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_aggregated_incident_metrics_across_services(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to ensure compatibility with this endpoint."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this date and time. Accepts ISO 8601 format. Maximum supported time range is one year when used with created_at_end."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this date and time. Accepts ISO 8601 format. Maximum supported time range is one year when used with created_at_start."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency level. Use 'high' for high-urgency incidents or 'low' for low-urgency incidents. Omit to include all urgency levels."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true) or exclude major incidents (false). Omit to include all incidents regardless of major status."),
+    min_ackowledgements: int | None = Field(None, description="Filter to incidents with at least this many acknowledgements. For example, set to 1 to return only incidents that were acknowledged. Omit to include all incidents."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to incidents with at least this many timeout-based escalations. For example, set to 1 to return only incidents that escalated due to timeout. Omit to include all incidents."),
+    min_manual_escalations: int | None = Field(None, description="Filter to incidents with at least this many manual escalations. For example, set to 1 to return only incidents that were manually escalated. Omit to include all incidents."),
+    team_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with specific teams. Provide as an array of team IDs. Required for user-level API keys; optional for account-level keys. Omit to include all accessible teams."),
+    service_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with specific services. Provide as an array of service IDs. Required for user-level API keys; optional for account-level keys. Omit to include all accessible services."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Restrict results to incidents routed through specific escalation policies. Provide as an array of escalation policy IDs. Omit to include all accessible escalation policies."),
+    time_zone: str | None = Field(None, description="Time zone for interpreting date ranges and grouping results. Use tzdata format (e.g., 'America/New_York', 'Etc/UTC'). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results. Use 'asc' for ascending or 'desc' for descending order. Only applies when order_by is specified."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'created_at'). Pair with order parameter to control sort direction."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics. Use 'day', 'week', or 'month' to group metrics by that period. Omit to aggregate metrics across the entire time range."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics across all services, including resolution time, engagement time, and sleep interruptions. Supports filtering by time range, urgency, escalation activity, and organizational units (teams, services, escalation policies)."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsServiceAllRequest(
+            header=_models.GetAnalyticsMetricsIncidentsServiceAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsServiceAllRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsServiceAllRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_aggregated_incident_metrics_across_services: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/services/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_aggregated_incident_metrics_across_services")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_aggregated_incident_metrics_across_services", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_aggregated_incident_metrics_across_services",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_team_incident_analytics(
+    accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this ISO 8601 datetime. When combined with created_at_end, the maximum supported time range is one year."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this ISO 8601 datetime. When combined with created_at_start, the maximum supported time range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency; include only high or low urgency incidents. If omitted, all urgency levels are included."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true), exclude major incidents (false), or include all incidents (omitted)."),
+    min_ackowledgements: int | None = Field(None, description="Filter to include only incidents with at least this many acknowledgements. If omitted, all incidents are included regardless of acknowledgement count."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to include only incidents with at least this many timeout escalations. If omitted, all incidents are included regardless of timeout escalation count."),
+    min_manual_escalations: int | None = Field(None, description="Filter to include only incidents with at least this many manual escalations. If omitted, all incidents are included regardless of manual escalation count."),
+    team_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these team IDs. Required for user-level and OAuth API keys; optional for account-level keys. Provide as an array of team ID strings."),
+    service_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these service IDs. Optional for all key types. Provide as an array of service ID strings."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these escalation policy IDs. Optional for all key types. Provide as an array of escalation policy ID strings."),
+    time_zone: str | None = Field(None, description="Time zone for aggregation and result timestamps; must be in tzdata format (e.g., America/New_York, Etc/UTC). Defaults to UTC if omitted."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending (asc) or descending (desc). Used in conjunction with order_by."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., created_at). Used in conjunction with order."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for metric aggregation: day, week, or month. If omitted, metrics are aggregated across the entire period without time-based grouping."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics for teams, including resolution time, engagement time, and sleep interruptions. Metrics can be grouped by day, week, or month, or aggregated across the entire period."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsTeamRequest(
+            header=_models.GetAnalyticsMetricsIncidentsTeamRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsTeamRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsTeamRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_team_incident_analytics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/teams"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_team_incident_analytics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_team_incident_analytics", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_team_incident_analytics",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_analytics_metrics_incidents_for_all_teams(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this ISO 8601 datetime. When combined with created_at_end, the maximum supported time range is one year."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this ISO 8601 datetime. When combined with created_at_start, the maximum supported time range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency. Specify 'high' or 'low' to include only incidents matching that urgency level."),
+    major: bool | None = Field(None, description="Filter to include only major incidents (true) or exclude them (false). If not specified, all incidents are included regardless of major incident status."),
+    min_ackowledgements: int | None = Field(None, description="Filter to include only incidents with at least this many acknowledgements. For example, set to 1 to return only acknowledged incidents."),
+    min_timeout_escalations: int | None = Field(None, description="Filter to include only incidents with at least this many timeout escalations."),
+    min_manual_escalations: int | None = Field(None, description="Filter to include only incidents with at least this many manual escalations."),
+    team_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these team IDs. Required for user-level API keys or OAuth-generated keys. Omit to include all teams the requestor has access to."),
+    service_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these service IDs. Required for user-level API keys or OAuth-generated keys. Omit to include all services the requestor has access to."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Restrict results to incidents associated with these escalation policy IDs. Omit to include all escalation policies the requestor has access to."),
+    time_zone: str | None = Field(None, description="Time zone for results and grouping, specified in tzdata format (e.g., America/New_York, Etc/UTC). Defaults to UTC if not provided."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: 'asc' for ascending or 'desc' for descending. Use with order_by to specify the sort column."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'created_at'). Use with order to specify ascending or descending."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics: 'day', 'week', or 'month'. If not specified, metrics are aggregated across the entire requested period."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics across all teams, including resolution time, engagement time, and sleep interruptions. Supports filtering by date range, urgency, escalations, and other incident characteristics."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsIncidentsTeamAllRequest(
+            header=_models.GetAnalyticsMetricsIncidentsTeamAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsIncidentsTeamAllRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsIncidentsTeamAllRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_analytics_metrics_incidents_for_all_teams: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/incidents/teams/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_analytics_metrics_incidents_for_all_teams")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_analytics_metrics_incidents_for_all_teams", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_analytics_metrics_incidents_for_all_teams",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_pd_advance_usage_metrics(
+    accept: str = Field(..., alias="Accept", description="API versioning header specifying the response format and schema version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type; must be JSON."),
+    created_at_start: str | None = Field(None, description="ISO 8601 datetime marking the start of the PD Advance usage creation window (inclusive). Combined with created_at_end, the time range cannot exceed one year."),
+    created_at_end: str | None = Field(None, description="ISO 8601 datetime marking the end of the PD Advance usage creation window (exclusive). Combined with created_at_start, the time range cannot exceed one year."),
+    incident_created_at_start: str | None = Field(None, description="ISO 8601 datetime marking the start of the incident creation window (inclusive). Combined with incident_created_at_end, the time range cannot exceed one year."),
+    incident_created_at_end: str | None = Field(None, description="ISO 8601 datetime marking the end of the incident creation window (exclusive). Combined with incident_created_at_start, the time range cannot exceed one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results to incidents with a specific urgency level: high or low."),
+    major: bool | None = Field(None, description="When true, include only major incidents; when false, exclude major incidents. Omit to include all incidents regardless of major status."),
+    min_ackowledgements: int | None = Field(None, description="Minimum number of acknowledgements required on an incident for inclusion in results. Omit to include all incidents."),
+    min_timeout_escalations: int | None = Field(None, description="Minimum number of timeout escalations required on an incident for inclusion in results. Omit to include all incidents."),
+    min_manual_escalations: int | None = Field(None, description="Minimum number of manual escalations required on an incident for inclusion in results. Omit to include all incidents."),
+    team_ids: list[str] | None = Field(None, description="Array of team IDs to filter incidents by team membership. Omit to include incidents from all teams accessible to the requestor."),
+    service_ids: list[str] | None = Field(None, description="Array of service IDs to filter incidents by service association. Omit to include incidents from all services accessible to the requestor."),
+    escalation_policy_ids: list[str] | None = Field(None, description="Array of escalation policy IDs to filter incidents by escalation policy. Omit to include incidents from all escalation policies accessible to the requestor."),
+    time_zone: str | None = Field(None, description="Time zone for result grouping and display, specified in tzdata format (e.g., America/New_York, Europe/London). Defaults to UTC if omitted."),
+) -> dict[str, Any]:
+    """Retrieve aggregated PD Advance usage metrics filtered by time range, incident properties, and organizational resources. Analytics data updates periodically with up to 24-hour latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsPdAdvanceUsageFeaturesRequest(
+            header=_models.GetAnalyticsMetricsPdAdvanceUsageFeaturesRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsPdAdvanceUsageFeaturesRequestBody(time_zone=time_zone,
+                filters=_models.GetAnalyticsMetricsPdAdvanceUsageFeaturesRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, incident_created_at_start=incident_created_at_start, incident_created_at_end=incident_created_at_end, urgency=urgency, major=major, min_ackowledgements=min_ackowledgements, min_timeout_escalations=min_timeout_escalations, min_manual_escalations=min_manual_escalations, team_ids=team_ids, service_ids=service_ids, escalation_policy_ids=escalation_policy_ids) if any(v is not None for v in [created_at_start, created_at_end, incident_created_at_start, incident_created_at_end, urgency, major, min_ackowledgements, min_timeout_escalations, min_manual_escalations, team_ids, service_ids, escalation_policy_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_pd_advance_usage_metrics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/pd_advance_usage/features"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_pd_advance_usage_metrics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_pd_advance_usage_metrics", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_pd_advance_usage_metrics",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_analytics_metrics_for_all_responders(
+    accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json."),
+    date_range_start: str | None = Field(None, description="Start of the date range as an ISO 8601 datetime string (inclusive). Incidents created before this time are excluded. Maximum supported range is one year when used with date_range_end."),
+    date_range_end: str | None = Field(None, description="End of the date range as an ISO 8601 datetime string (exclusive). Incidents created at or after this time are excluded. Maximum supported range is one year when used with date_range_start."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency: either 'high' or 'low'. Incidents not matching the specified urgency are excluded."),
+    team_ids: list[str] | None = Field(None, description="Array of team IDs to include in results. Only incidents associated with these teams are returned. If omitted, all teams accessible to the requestor are included."),
+    responder_ids: list[str] | None = Field(None, description="Array of responder IDs to include in results. Only incidents involving these responders are returned. If omitted, all responders accessible to the requestor are included."),
+    time_zone: str | None = Field(None, description="Time zone for interpreting date ranges and grouping results (e.g., 'Etc/UTC'). Affects how dates are processed and displayed."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: 'asc' for ascending or 'desc' for descending order."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., 'user_id'). Used in conjunction with the order parameter."),
+) -> dict[str, Any]:
+    """Retrieve aggregated incident metrics across all responders, including resolution time, engagement time, and sleep interruptions. Results can be filtered by date range, urgency, teams, and responders, with data updated periodically (up to 24 hours for new incidents)."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsRespondersAllRequest(
+            header=_models.GetAnalyticsMetricsRespondersAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsRespondersAllRequestBody(time_zone=time_zone, order=order, order_by=order_by,
+                filters=_models.GetAnalyticsMetricsRespondersAllRequestBodyFilters(date_range_start=date_range_start, date_range_end=date_range_end, urgency=urgency, team_ids=team_ids, responder_ids=responder_ids) if any(v is not None for v in [date_range_start, date_range_end, urgency, team_ids, responder_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_analytics_metrics_for_all_responders: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/responders/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_analytics_metrics_for_all_responders")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_analytics_metrics_for_all_responders", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_analytics_metrics_for_all_responders",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_analytics_metrics_responders_by_team(
+    accept: str = Field(..., alias="Accept", description="API versioning header; must be set to application/vnd.pagerduty+json;version=2"),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type; must be application/json"),
+    date_range_start: str | None = Field(None, description="Filter results to incidents created on or after this ISO 8601 datetime. Combined with date_range_end, the maximum supported time range is one year."),
+    date_range_end: str | None = Field(None, description="Filter results to incidents created before this ISO 8601 datetime. Combined with date_range_start, the maximum supported time range is one year."),
+    urgency: Literal["high", "low"] | None = Field(None, description="Filter results by incident urgency; use 'high' for high-urgency incidents or 'low' for low-urgency incidents. Omit to include all urgency levels."),
+    team_ids: list[str] | None = Field(None, description="Array of team IDs to include in results. If omitted, all teams accessible to the requestor are included. Order does not affect results."),
+    responder_ids: list[str] | None = Field(None, description="Array of responder IDs to include in results. If omitted, all responders accessible to the requestor are included. Order does not affect results."),
+    time_zone: str | None = Field(None, description="IANA timezone identifier (e.g., Etc/UTC, America/New_York) used for interpreting date ranges and grouping results."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results; use 'asc' for ascending or 'desc' for descending order."),
+    order_by: str | None = Field(None, description="Column name to sort results by (e.g., user_id, seconds_to_resolve). Must be used with the order parameter."),
+) -> dict[str, Any]:
+    """Retrieve incident response metrics aggregated by team, including resolution time, engagement time, and sleep interruptions. Analytics data updates periodically with up to 24-hour latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsRespondersTeamRequest(
+            header=_models.GetAnalyticsMetricsRespondersTeamRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsRespondersTeamRequestBody(time_zone=time_zone, order=order, order_by=order_by,
+                filters=_models.GetAnalyticsMetricsRespondersTeamRequestBodyFilters(date_range_start=date_range_start, date_range_end=date_range_end, urgency=urgency, team_ids=team_ids, responder_ids=responder_ids) if any(v is not None for v in [date_range_start, date_range_end, urgency, team_ids, responder_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_analytics_metrics_responders_by_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/responders/teams"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_analytics_metrics_responders_by_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_analytics_metrics_responders_by_team", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_analytics_metrics_responders_by_team",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_analytics_metrics_for_all_users(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Start of the date range for metrics (ISO 8601 format). If omitted, metrics begin from the earliest available data."),
+    created_at_end: str | None = Field(None, description="End of the date range for metrics (ISO 8601 format). If omitted, metrics extend to the most recent available data."),
+    team_ids: list[str] | None = Field(None, description="Filter results to include only users belonging to specified teams. Provide as an array of team IDs."),
+    user_ids: list[str] | None = Field(None, description="Filter results to include only specified users. Provide as an array of user IDs."),
+    role_ids: list[str] | None = Field(None, description="Filter results to include only users with specified roles. Provide as an array of role IDs."),
+    time_zone: str | None = Field(None, description="Time zone for result timestamps and time-based grouping. Must be in tzdata format (e.g., Etc/UTC, America/New_York). Defaults to Etc/UTC if not specified."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending (asc) or descending (desc). Defaults to descending."),
+    order_by: str | None = Field(None, description="Column to sort results by. Defaults to user_id. Common values include user_id and other metric fields."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics: day, week, or month. If omitted, metrics are aggregated across the entire specified period."),
+) -> dict[str, Any]:
+    """Retrieve aggregated analytics metrics across all users in your account, including activity and performance statistics. Note: Analytics data updates periodically with up to 24 hours latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsMetricsUsersAllRequest(
+            header=_models.GetAnalyticsMetricsUsersAllRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsMetricsUsersAllRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsMetricsUsersAllRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, team_ids=team_ids, user_ids=user_ids, role_ids=role_ids) if any(v is not None for v in [created_at_start, created_at_end, team_ids, user_ids, role_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_analytics_metrics_for_all_users: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/metrics/users/all"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_analytics_metrics_for_all_users")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_analytics_metrics_for_all_users", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_analytics_metrics_for_all_users",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def list_analytics_incidents(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter incidents by creation timestamp (inclusive). Use ISO 8601 format. Only incidents created on or after this time are returned."),
+    created_at_end: str | None = Field(None, description="Filter incidents by creation timestamp (exclusive). Use ISO 8601 format. Only incidents created before this time are returned."),
+    updated_after: str | None = Field(None, description="Filter incidents by last update time. Use ISO 8601 format. Only incidents updated after this timestamp are returned."),
+    urgency: str | None = Field(None, description="Filter incidents by urgency level. Valid values are 'high' and 'low'."),
+    major: bool | None = Field(None, description="Filter to show only major incidents. Major incidents have one of the two highest priorities or multiple acknowledged responders."),
+    team_ids: list[str] | None = Field(None, description="Filter by team IDs. Provide an array of team IDs to return only incidents assigned to members of those teams. Required for user-level API keys or OAuth-generated keys."),
+    service_ids: list[str] | None = Field(None, description="Filter by service IDs. Provide an array of service IDs to return only incidents related to those services."),
+    incident_type_ids: list[str] | None = Field(None, description="Filter by incident type IDs. Provide an array of incident type IDs to return only incidents matching those types."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results. Use 'asc' for ascending or 'desc' for descending. Defaults to 'desc'."),
+    order_by: Literal["created_at", "seconds_to_resolve"] | None = Field(None, description="Column to sort by. Options are 'created_at' (default) or 'seconds_to_resolve'."),
+    time_zone: str | None = Field(None, description="Time zone for result timestamps. Use IANA time zone format (e.g., 'Etc/UTC', 'America/New_York'). Defaults to account time zone."),
+) -> dict[str, Any]:
+    """Retrieve enriched incident data and metrics for multiple incidents, including resolution time, engagement time, and sleep interruptions. Analytics data updates periodically with up to 24-hour latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsIncidentsRequest(
+            header=_models.GetAnalyticsIncidentsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsIncidentsRequestBody(order=order, order_by=order_by, time_zone=time_zone,
+                filters=_models.GetAnalyticsIncidentsRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, updated_after=updated_after, urgency=urgency, major=major, team_ids=team_ids, service_ids=service_ids, incident_type_ids=incident_type_ids) if any(v is not None for v in [created_at_start, created_at_end, updated_after, urgency, major, team_ids, service_ids, incident_type_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_analytics_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/raw/incidents"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_analytics_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_analytics_incidents", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_analytics_incidents",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_incident_analytics(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to retrieve analytics for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve enriched analytics data and metrics for a single incident, including resolution time, engagement time, and sleep interruption metrics. Note: Analytics data updates periodically with up to 24 hours latency for new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsIncidentsByIdRequest(
+            path=_models.GetAnalyticsIncidentsByIdRequestPath(id_=id_),
+            header=_models.GetAnalyticsIncidentsByIdRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_analytics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/analytics/raw/incidents/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/analytics/raw/incidents/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_analytics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_analytics", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_analytics",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def get_incident_response_analytics(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve response analytics."),
+    accept: str = Field(..., alias="Accept", description="API versioning header; use application/vnd.pagerduty+json;version=2 for current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request; must be application/json."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending (asc) or descending (desc). Defaults to descending."),
+    order_by: Literal["requested_at"] | None = Field(None, description="Field to sort by; currently supports requested_at (the timestamp when the response was requested)."),
+    time_zone: str | None = Field(None, description="Time zone for interpreting and displaying timestamps in results (e.g., Etc/UTC). Defaults to UTC if not specified."),
+) -> dict[str, Any]:
+    """Retrieve enriched responder analytics for a specific incident, including metrics like time to respond, responder type, and response status. Note: Analytics data updates daily with up to 24-hour latency for new incident responses."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsIncidentResponsesByIdRequest(
+            path=_models.GetAnalyticsIncidentResponsesByIdRequestPath(id_=id_),
+            header=_models.GetAnalyticsIncidentResponsesByIdRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsIncidentResponsesByIdRequestBody(order=order, order_by=order_by, time_zone=time_zone)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_response_analytics: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/analytics/raw/incidents/{id}/responses", _request.path.model_dump(by_alias=True)) if _request.path else "/analytics/raw/incidents/{id}/responses"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_response_analytics")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_response_analytics", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_response_analytics",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def list_responder_incidents(
+    responder_id: str = Field(..., description="The unique identifier of the responder whose incidents you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to incidents created on or after this timestamp (ISO 8601 format, e.g., 2023-05-01T00:00:00-04:00)."),
+    created_at_end: str | None = Field(None, description="Filter results to incidents created before this timestamp (ISO 8601 format, e.g., 2023-06-01T00:00:00-04:00)."),
+    urgency: str | None = Field(None, description="Filter results by incident urgency level (e.g., 'high' or 'low')."),
+    major: bool | None = Field(None, description="Filter to only major incidents, which are classified as such when they have one of the two highest priorities or involve multiple acknowledged responders."),
+    team_ids: list[str] | None = Field(None, description="Filter results to incidents assigned to members of specific teams. Provide an array of team IDs. Requires teams ability on your account."),
+    service_ids: list[str] | None = Field(None, description="Filter results to incidents related to specific services. Provide an array of service IDs."),
+    incident_type_ids: list[str] | None = Field(None, description="Filter results to incidents matching specific incident type IDs. Provide an array of incident type IDs."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: 'asc' for ascending or 'desc' for descending. Defaults to descending."),
+    order_by: Literal["incident_created_at"] | None = Field(None, description="Column to sort by. Currently supports 'incident_created_at' (default)."),
+    time_zone: str | None = Field(None, description="Time zone for interpreting timestamps in results (e.g., 'Etc/UTC'). Use IANA time zone identifiers."),
+) -> dict[str, Any]:
+    """Retrieve enriched incident data and performance metrics for a specific responder, including resolution times, engagement times, and sleep interruptions. Note: Analytics data updates periodically and may take up to 24 hours to reflect new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsResponderIncidentsRequest(
+            path=_models.GetAnalyticsResponderIncidentsRequestPath(responder_id=responder_id),
+            header=_models.GetAnalyticsResponderIncidentsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsResponderIncidentsRequestBody(order=order, order_by=order_by, time_zone=time_zone,
+                filters=_models.GetAnalyticsResponderIncidentsRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, urgency=urgency, major=major, team_ids=team_ids, service_ids=service_ids, incident_type_ids=incident_type_ids) if any(v is not None for v in [created_at_start, created_at_end, urgency, major, team_ids, service_ids, incident_type_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_responder_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/analytics/raw/responders/{responder_id}/incidents", _request.path.model_dump(by_alias=True)) if _request.path else "/analytics/raw/responders/{responder_id}/incidents"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_responder_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_responder_incidents", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_responder_incidents",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Analytics
+@mcp.tool()
+async def list_analytics_users(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    created_at_start: str | None = Field(None, description="Filter results to users created on or after this date. Specify as an ISO 8601 datetime string."),
+    created_at_end: str | None = Field(None, description="Filter results to users created on or before this date. Specify as an ISO 8601 datetime string."),
+    team_ids: list[str] | None = Field(None, description="Filter results to include only users belonging to the specified teams. Provide as an array of team IDs."),
+    user_ids: list[str] | None = Field(None, description="Filter results to include only the specified users. Provide as an array of user IDs."),
+    role_ids: list[str] | None = Field(None, description="Filter results to include only users with the specified roles. Provide as an array of role IDs."),
+    time_zone: str | None = Field(None, description="Time zone for result timestamps and time-based grouping. Must be a valid tzdata format (e.g., Etc/UTC, America/New_York)."),
+    order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending (asc) or descending (desc). Defaults to descending."),
+    order_by: str | None = Field(None, description="Column to sort results by. Defaults to user_id. Common values include user_id and creation date fields."),
+    aggregate_unit: Literal["day", "week", "month"] | None = Field(None, description="Time unit for aggregating metrics. Choose day, week, or month for time-bucketed results. If omitted, metrics are aggregated across the entire period."),
+) -> dict[str, Any]:
+    """Retrieve raw user analytics data for your account, including detailed user activity and configuration metrics. Note that analytics data updates periodically with up to 24 hours latency for new user data."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAnalyticsUsersRequest(
+            header=_models.GetAnalyticsUsersRequestHeader(accept=accept, content_type=content_type),
+            body=_models.GetAnalyticsUsersRequestBody(time_zone=time_zone, order=order, order_by=order_by, aggregate_unit=aggregate_unit,
+                filters=_models.GetAnalyticsUsersRequestBodyFilters(created_at_start=created_at_start, created_at_end=created_at_end, team_ids=team_ids, user_ids=user_ids, role_ids=role_ids) if any(v is not None for v in [created_at_start, created_at_end, team_ids, user_ids, role_ids]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_analytics_users: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/analytics/raw/users"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_analytics_users")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_analytics_users", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_analytics_users",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Audit
+@mcp.tool()
+async def list_audit_records(
+    accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to the PagerDuty v2 JSON media type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying the request body format as JSON."),
+    since: str | None = Field(None, description="Start of the date range to search (ISO 8601 format). Defaults to 24 hours ago if not specified."),
+    until: str | None = Field(None, description="End of the date range to search (ISO 8601 format). Defaults to now if not specified. Cannot be more than 31 days after the `since` parameter."),
+    root_resource_types: Literal["users", "teams", "schedules", "escalation_policies", "services"] | None = Field(None, description="Filter records by the type of resource affected. Accepts one or more values: users, teams, schedules, escalation_policies, or services."),
+    actor_type: Literal["user_reference", "api_key_reference", "app_reference"] | None = Field(None, description="Filter records by who performed the action: a user, API key, or application."),
+    actor_id: str | None = Field(None, description="Filter records by a specific actor's ID. Requires `actor_type` to be specified."),
+    method_type: Literal["browser", "oauth", "api_token", "identity_provider", "other"] | None = Field(None, description="Filter records by the method used to perform the action: browser session, OAuth, API token, identity provider, or other."),
+    method_truncated_token: str | None = Field(None, description="Filter records by a truncated authentication token. Requires `method_type` to be specified."),
+    actions: Literal["create", "update", "delete"] | None = Field(None, description="Filter records by the type of action performed: create, update, or delete. Accepts one or more values."),
+) -> dict[str, Any]:
+    """Retrieve audit trail records for your PagerDuty account, filtered by date range and optional criteria like resource type, actor, or action. Results are sorted by execution time from newest to oldest and support cursor-based pagination."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListAuditRecordsRequest(
+            query=_models.ListAuditRecordsRequestQuery(since=since, until=until, root_resource_types=root_resource_types, actor_type=actor_type, actor_id=actor_id, method_type=method_type, method_truncated_token=method_truncated_token, actions=actions),
+            header=_models.ListAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_automation_actions(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to request the correct API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be `application/json`."),
+    runner_id: str | None = Field(None, description="Filter results to automation actions linked to a specific runner by ID. Use the special value `any` to include only actions linked to runners, excluding unlinked actions."),
+    classification: Literal["diagnostic", "remediation"] | None = Field(None, description="Filter results by action classification: either `diagnostic` for diagnostic actions or `remediation` for remediation actions."),
+    team_id: str | None = Field(None, description="Filter results to include only automation actions associated with the specified team ID."),
+    service_id: str | None = Field(None, description="Filter results to include only automation actions associated with the specified service ID."),
+    action_type: Literal["script", "process_automation"] | None = Field(None, description="Filter results by action type: either `script` for script-based actions or `process_automation` for process automation actions."),
+) -> dict[str, Any]:
+    """Retrieves a list of automation actions filtered by optional criteria such as runner, classification, team, service, or action type. Results are sorted alphabetically by action name and support cursor-based pagination."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAllAutomationActionsRequest(
+            query=_models.GetAllAutomationActionsRequestQuery(runner_id=runner_id, classification=classification, team_id=team_id, service_id=service_id, action_type=action_type),
+            header=_models.GetAllAutomationActionsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_automation_actions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/automation_actions/actions"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_automation_actions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_automation_actions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_automation_actions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def create_automation_action(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json for this operation."),
+    action: _models.AutomationActionsScriptActionPostBody | _models.AutomationActionsProcessAutomationJobActionPostBody = Field(..., description="The automation action configuration object defining the action type (Script, Process Automation, or Runbook Automation) and its properties."),
+) -> dict[str, Any]:
+    """Create a new automation action (Script, Process Automation, or Runbook Automation) to define automated workflows and tasks within PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionRequest(
+            header=_models.CreateAutomationActionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionRequestBody(action=action)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_automation_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/automation_actions/actions"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_automation_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_automation_action", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_automation_action",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_automation_action(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation action to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific automation action by its ID. Returns the full details of the automation action resource."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionRequest(
+            path=_models.GetAutomationActionRequestPath(id_=id_),
+            header=_models.GetAutomationActionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_automation_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_automation_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_automation_action", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_automation_action",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def update_automation_action(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    action: _models.AutomationActionsScriptActionPutBody | _models.AutomationActionsProcessAutomationJobActionPutBody = Field(..., description="The Automation Action object containing the updated configuration details."),
+) -> dict[str, Any]:
+    """Updates an existing Automation Action with new configuration. Specify the action ID and provide the updated action details in the request body."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateAutomationActionRequest(
+            path=_models.UpdateAutomationActionRequestPath(id_=id_),
+            header=_models.UpdateAutomationActionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateAutomationActionRequestBody(action=action)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_automation_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_automation_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_automation_action", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_automation_action",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def delete_automation_action(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete an Automation Action by its ID. This operation removes the automation action and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteAutomationActionRequest(
+            path=_models.DeleteAutomationActionRequestPath(id_=id_),
+            header=_models.DeleteAutomationActionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_automation_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_automation_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_automation_action", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_automation_action",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def invoke_automation_action(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation action to invoke."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    incident_id: str = Field(..., description="The unique identifier of the incident associated with this invocation. Required to scope the action execution to a specific incident."),
+    alert_id: str | None = Field(None, description="The unique identifier of the alert associated with this invocation. Optional; use to further scope the action to a specific alert within an incident."),
+) -> dict[str, Any]:
+    """Triggers an invocation of an automation action, optionally scoped to a specific incident or alert. This executes the action's defined workflow or automation logic."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionInvocationRequest(
+            path=_models.CreateAutomationActionInvocationRequestPath(id_=id_),
+            header=_models.CreateAutomationActionInvocationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionInvocationRequestBody(invocation=_models.CreateAutomationActionInvocationRequestBodyInvocation(
+                    metadata=_models.CreateAutomationActionInvocationRequestBodyInvocationMetadata(incident_id=incident_id, alert_id=alert_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for invoke_automation_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/invocations", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/invocations"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("invoke_automation_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("invoke_automation_action", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="invoke_automation_action",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_automation_action_service_associations(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource whose service associations you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API version 2 with JSON content type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all service references associated with a specific Automation Action. This returns the complete list of services linked to the automation action for management and visibility purposes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsActionServiceAssociationsRequest(
+            path=_models.GetAutomationActionsActionServiceAssociationsRequestPath(id_=id_),
+            header=_models.GetAutomationActionsActionServiceAssociationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_automation_action_service_associations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/services", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/services"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_automation_action_service_associations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_automation_action_service_associations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_automation_action_service_associations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def associate_automation_action_with_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource to associate with a service."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    service: _models.ServiceReference = Field(..., description="The service object to associate with the Automation Action. This should contain the service identifier and any required service details."),
+) -> dict[str, Any]:
+    """Associate an Automation Action with a service to enable the action to be triggered by or applied to that service. This establishes the relationship between an automation action and a specific service in your PagerDuty account."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionServiceAssocationRequest(
+            path=_models.CreateAutomationActionServiceAssocationRequestPath(id_=id_),
+            header=_models.CreateAutomationActionServiceAssocationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionServiceAssocationRequestBody(service=service)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for associate_automation_action_with_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/services", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/services"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("associate_automation_action_with_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("associate_automation_action_with_service", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="associate_automation_action_with_service",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_automation_action_service_association(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
+    service_id: str = Field(..., description="The unique identifier of the service associated with the Automation Action."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve the details of the relationship between a specific Automation Action and a service. This shows how an automation action is associated with and configured for a particular service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsActionServiceAssociationRequest(
+            path=_models.GetAutomationActionsActionServiceAssociationRequestPath(id_=id_, service_id=service_id),
+            header=_models.GetAutomationActionsActionServiceAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_automation_action_service_association: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/services/{service_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/services/{service_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_automation_action_service_association")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_automation_action_service_association", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_automation_action_service_association",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def remove_automation_action_service_association(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to disassociate."),
+    service_id: str = Field(..., description="The unique identifier of the service from which the Automation Action should be removed."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Remove the association between an Automation Action and a service, effectively disabling that action for the specified service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteAutomationActionServiceAssociationRequest(
+            path=_models.DeleteAutomationActionServiceAssociationRequestPath(id_=id_, service_id=service_id),
+            header=_models.DeleteAutomationActionServiceAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_automation_action_service_association: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/services/{service_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/services/{service_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_automation_action_service_association")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_automation_action_service_association", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_automation_action_service_association",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_automation_action_team_associations(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve all teams associated with a specific Automation Action. Use this to view which teams are linked to an automation action for access control and assignment purposes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsActionTeamAssociationsRequest(
+            path=_models.GetAutomationActionsActionTeamAssociationsRequestPath(id_=id_),
+            header=_models.GetAutomationActionsActionTeamAssociationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_automation_action_team_associations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/teams", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/teams"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_automation_action_team_associations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_automation_action_team_associations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_automation_action_team_associations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def add_automation_action_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action to associate with a team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    team: _models.TeamReference = Field(..., description="The team object containing the team identifier and details to associate with this Automation Action."),
+) -> dict[str, Any]:
+    """Associate an Automation Action with a team, enabling the team to access and manage the automation action."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionTeamAssociationRequest(
+            path=_models.CreateAutomationActionTeamAssociationRequestPath(id_=id_),
+            header=_models.CreateAutomationActionTeamAssociationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionTeamAssociationRequestBody(team=team)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_automation_action_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/teams", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/teams"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_automation_action_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_automation_action_team", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_automation_action_team",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_automation_action_team_association(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource."),
+    team_id: str = Field(..., description="The unique identifier of the team associated with the Automation Action."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve the association details between a specific Automation Action and a team, including their relationship configuration and metadata."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsActionTeamAssociationRequest(
+            path=_models.GetAutomationActionsActionTeamAssociationRequestPath(id_=id_, team_id=team_id),
+            header=_models.GetAutomationActionsActionTeamAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_automation_action_team_association: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/teams/{team_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/teams/{team_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_automation_action_team_association")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_automation_action_team_association", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_automation_action_team_association",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def remove_automation_action_team_association(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action resource to disassociate."),
+    team_id: str = Field(..., description="The unique identifier of the team to disassociate from the Automation Action."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version (defaults to PagerDuty JSON API v2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body, must be JSON format."),
+) -> dict[str, Any]:
+    """Remove the association between an Automation Action and a specific team, effectively disassociating them from each other."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteAutomationActionTeamAssociationRequest(
+            path=_models.DeleteAutomationActionTeamAssociationRequestPath(id_=id_, team_id=team_id),
+            header=_models.DeleteAutomationActionTeamAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_automation_action_team_association: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/actions/{id}/teams/{team_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/actions/{id}/teams/{team_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_automation_action_team_association")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_automation_action_team_association", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_automation_action_team_association",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_automation_action_invocations(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default value for standard JSON responses."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body content type as JSON."),
+    invocation_state: Literal["prepared", "created", "sent", "queued", "running", "aborted", "completed", "error", "unknown"] | None = Field(None, description="Filter invocations by their current state in the execution lifecycle, such as prepared, running, completed, or error."),
+    incident_id: str | None = Field(None, description="Filter invocations to those associated with a specific incident by its ID."),
+    action_id: str | None = Field(None, description="Filter invocations to those triggered by a specific automation action by its ID."),
+) -> dict[str, Any]:
+    """Retrieve a list of automation action invocations, optionally filtered by invocation state, incident, or action. Use this to track the execution history and status of automated actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListAutomationActionInvocationsRequest(
+            query=_models.ListAutomationActionInvocationsRequestQuery(invocation_state=invocation_state, incident_id=incident_id, action_id=action_id),
+            header=_models.ListAutomationActionInvocationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_automation_action_invocations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/automation_actions/invocations"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_automation_action_invocations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_automation_action_invocations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_automation_action_invocations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_automation_action_invocation(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action Invocation to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific Automation Action Invocation by its ID. This returns the current state and metadata of an invocation execution."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsInvocationRequest(
+            path=_models.GetAutomationActionsInvocationRequestPath(id_=id_),
+            header=_models.GetAutomationActionsInvocationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_automation_action_invocation: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/invocations/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/invocations/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_automation_action_invocation")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_automation_action_invocation", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_automation_action_invocation",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_automation_action_runners(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to JSON format."),
+    include: Annotated[list[Literal["associated_actions"]], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of additional data elements to include in the response payload, expanding the default response structure."),
+) -> dict[str, Any]:
+    """Retrieve a list of Automation Action runners filtered by query parameters. Results are sorted alphabetically by runner name and support cursor-based pagination."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsRunnersRequest(
+            query=_models.GetAutomationActionsRunnersRequestQuery(include=include),
+            header=_models.GetAutomationActionsRunnersRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_automation_action_runners: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/automation_actions/runners"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_automation_action_runners")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_automation_action_runners", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_automation_action_runners",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def create_automation_runner(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    runner: _models.AutomationActionsRunnerSidecarPostBody | _models.AutomationActionsRunnerRunbookPostBody = Field(..., description="The automation runner configuration object containing the runner type (Process Automation or Runbook Automation) and associated settings."),
+) -> dict[str, Any]:
+    """Create a new automation runner for Process Automation or Runbook Automation workflows. The runner executes automation actions within your PagerDuty environment."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionsRunnerRequest(
+            header=_models.CreateAutomationActionsRunnerRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionsRunnerRequestBody(runner=runner)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_automation_runner: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/automation_actions/runners"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_automation_runner")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_automation_runner", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_automation_runner",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_automation_actions_runner(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Retrieve a specific Automation Action runner by its ID. Use this to fetch details about a configured runner instance."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsRunnerRequest(
+            path=_models.GetAutomationActionsRunnerRequestPath(id_=id_),
+            header=_models.GetAutomationActionsRunnerRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_automation_actions_runner: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_automation_actions_runner")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_automation_actions_runner", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_automation_actions_runner",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def update_automation_actions_runner(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to update."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    runner: _models.AutomationActionsRunnerSidecarBody | _models.AutomationActionsRunnerRunbookBody = Field(..., description="The runner configuration object containing the properties to update. Refer to the API documentation for the complete schema of updatable runner fields."),
+) -> dict[str, Any]:
+    """Update the configuration and settings of an existing Automation Action runner. This operation allows you to modify runner properties such as name, status, or other operational parameters."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateAutomationActionsRunnerRequest(
+            path=_models.UpdateAutomationActionsRunnerRequestPath(id_=id_),
+            header=_models.UpdateAutomationActionsRunnerRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateAutomationActionsRunnerRequestBody(runner=runner)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_automation_actions_runner: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_automation_actions_runner")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_automation_actions_runner", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_automation_actions_runner",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def delete_automation_actions_runner(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Automation Action runner to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete an Automation Action runner by its ID. This operation removes the runner and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteAutomationActionsRunnerRequest(
+            path=_models.DeleteAutomationActionsRunnerRequestPath(id_=id_),
+            header=_models.DeleteAutomationActionsRunnerRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_automation_actions_runner: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_automation_actions_runner")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_automation_actions_runner", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_automation_actions_runner",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def list_runner_team_associations(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve all teams associated with an automation action runner. Use this to view which teams have access to or are linked with a specific runner."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsRunnerTeamAssociationsRequest(
+            path=_models.GetAutomationActionsRunnerTeamAssociationsRequestPath(id_=id_),
+            header=_models.GetAutomationActionsRunnerTeamAssociationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_runner_team_associations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}/teams", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}/teams"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_runner_team_associations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_runner_team_associations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_runner_team_associations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def associate_runner_with_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation actions runner to associate with a team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    team: _models.TeamReference = Field(..., description="The team object containing the team details to associate with the runner. Typically includes the team's unique identifier."),
+) -> dict[str, Any]:
+    """Associate an automation actions runner with a team to enable the team to use that runner for executing automations."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateAutomationActionsRunnerTeamAssociationRequest(
+            path=_models.CreateAutomationActionsRunnerTeamAssociationRequestPath(id_=id_),
+            header=_models.CreateAutomationActionsRunnerTeamAssociationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateAutomationActionsRunnerTeamAssociationRequestBody(team=team)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for associate_runner_with_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}/teams", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}/teams"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("associate_runner_with_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("associate_runner_with_team", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="associate_runner_with_team",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def get_runner_team_association(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner resource."),
+    team_id: str = Field(..., description="The unique identifier of the team associated with the runner."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve the association details between a specific automation action runner and a team, including their relationship configuration and status."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetAutomationActionsRunnerTeamAssociationRequest(
+            path=_models.GetAutomationActionsRunnerTeamAssociationRequestPath(id_=id_, team_id=team_id),
+            header=_models.GetAutomationActionsRunnerTeamAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_runner_team_association: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}/teams/{team_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}/teams/{team_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_runner_team_association")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_runner_team_association", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_runner_team_association",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Automation Actions
+@mcp.tool()
+async def remove_runner_from_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the automation action runner to disassociate."),
+    team_id: str = Field(..., description="The unique identifier of the team to disassociate from the runner."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version (defaults to PagerDuty JSON v2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body (must be application/json)."),
+) -> dict[str, Any]:
+    """Removes the association between an automation action runner and a team, preventing the runner from executing actions for that team."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteAutomationActionsRunnerTeamAssociationRequest(
+            path=_models.DeleteAutomationActionsRunnerTeamAssociationRequestPath(id_=id_, team_id=team_id),
+            header=_models.DeleteAutomationActionsRunnerTeamAssociationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_runner_from_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/automation_actions/runners/{id}/teams/{team_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/automation_actions/runners/{id}/teams/{team_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_runner_from_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_runner_from_team", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_runner_from_team",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def list_business_services(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. This is the only supported content type for this operation."),
+) -> dict[str, Any]:
+    """Retrieve a list of existing business services that span multiple technical services and may be owned by different teams. Use this to discover available business services in your PagerDuty instance."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListBusinessServicesRequest(
+            header=_models.ListBusinessServicesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_business_services: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/business_services"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_business_services")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_business_services", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_business_services",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def create_business_service(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
+    description: str | None = Field(None, description="A human-readable description of the Business Service's purpose and scope."),
+    point_of_contact: str | None = Field(None, description="The identifier or reference of the team or person responsible for owning and managing this Business Service."),
+    id_: str | None = Field(None, alias="id", description="The Team ID that will own this Business Service."),
+) -> dict[str, Any]:
+    """Create a new Business Service that models capabilities spanning multiple technical services and owned by different teams. Each account is limited to 5,000 business services."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateBusinessServiceRequest(
+            header=_models.CreateBusinessServiceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateBusinessServiceRequestBody(business_service=_models.CreateBusinessServiceRequestBodyBusinessService(description=description, point_of_contact=point_of_contact,
+                    team=_models.CreateBusinessServiceRequestBodyBusinessServiceTeam(id_=id_) if any(v is not None for v in [id_]) else None) if any(v is not None for v in [description, point_of_contact, id_]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/business_services"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_business_service", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_business_service",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def get_business_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific Business Service, which represents a capability spanning multiple technical services and potentially owned by several teams."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceRequest(
+            path=_models.GetBusinessServiceRequestPath(id_=id_),
+            header=_models.GetBusinessServiceRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_business_service", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_business_service",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def update_business_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    team_id: str | None = Field(None, alias="teamId", description="The ID of the team that owns or is associated with this Business Service."),
+    description: str | None = Field(None, description="A text description of the Business Service's purpose, scope, or other relevant details."),
+    point_of_contact: str | None = Field(None, description="The name or identifier of the person or team responsible for owning and managing this Business Service."),
+) -> dict[str, Any]:
+    """Update an existing Business Service that spans multiple technical services and may be owned by several teams. Supports both PUT and PATCH HTTP methods."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateBusinessServiceRequest(
+            path=_models.UpdateBusinessServiceRequestPath(id_=id_),
+            header=_models.UpdateBusinessServiceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateBusinessServiceRequestBody(business_service=_models.UpdateBusinessServiceRequestBodyBusinessService(description=description, point_of_contact=point_of_contact,
+                    team=_models.UpdateBusinessServiceRequestBodyBusinessServiceTeam(id_=team_id) if any(v is not None for v in [team_id]) else None) if any(v is not None for v in [team_id, description, point_of_contact]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_business_service", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_business_service",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def delete_business_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the business service to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Permanently delete a business service by its ID. Once deleted, the service will no longer be accessible in the web UI and cannot be associated with new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteBusinessServiceRequest(
+            path=_models.DeleteBusinessServiceRequestPath(id_=id_),
+            header=_models.DeleteBusinessServiceRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_business_service", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_business_service",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def subscribe_account_to_business_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to subscribe to."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Subscribe your account to a Business Service, enabling access to its features and capabilities. Requires the `subscribers.write` OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateBusinessServiceAccountSubscriptionRequest(
+            path=_models.CreateBusinessServiceAccountSubscriptionRequestPath(id_=id_),
+            header=_models.CreateBusinessServiceAccountSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for subscribe_account_to_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/account_subscription", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/account_subscription"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("subscribe_account_to_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("subscribe_account_to_business_service", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="subscribe_account_to_business_service",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def remove_business_service_account_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service from which to remove the account subscription."),
+    accept: str = Field(..., alias="Accept", description="The API version to use for this request, specified via the Accept header. Defaults to PagerDuty API version 2 if not provided."),
+) -> dict[str, Any]:
+    """Unsubscribe your account from a Business Service. This operation removes the subscription relationship between your account and the specified Business Service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.RemoveBusinessServiceAccountSubscriptionRequest(
+            path=_models.RemoveBusinessServiceAccountSubscriptionRequestPath(id_=id_),
+            header=_models.RemoveBusinessServiceAccountSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_business_service_account_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/account_subscription", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/account_subscription"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_business_service_account_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_business_service_account_subscription", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_business_service_account_subscription",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def list_business_service_subscribers(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service for which to retrieve subscribers."),
+    accept: str = Field(..., alias="Accept", description="The API version to use for this request, specified as a media type. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all notification subscribers configured for a specific Business Service. Only subscribers that have been explicitly added through the subscriber creation endpoint will be returned."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceSubscribersRequest(
+            path=_models.GetBusinessServiceSubscribersRequestPath(id_=id_),
+            header=_models.GetBusinessServiceSubscribersRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_business_service_subscribers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/subscribers", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/subscribers"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_business_service_subscribers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_business_service_subscribers", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_business_service_subscribers",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def add_subscribers_to_business_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service to which subscribers will be added."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+    subscribers: Annotated[list[_models.NotificationSubscriber], AfterValidator(_check_unique_items)] = Field(..., description="Array of subscriber objects to add to the Business Service. Must contain at least one subscriber. Each subscriber should specify the entity type and ID.", min_length=1),
+) -> dict[str, Any]:
+    """Subscribe one or more entities (users, teams, or schedules) to a Business Service to receive notifications related to that service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateBusinessServiceNotificationSubscribersRequest(
+            path=_models.CreateBusinessServiceNotificationSubscribersRequestPath(id_=id_),
+            header=_models.CreateBusinessServiceNotificationSubscribersRequestHeader(accept=accept),
+            body=_models.CreateBusinessServiceNotificationSubscribersRequestBody(subscribers=subscribers)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_subscribers_to_business_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/subscribers", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/subscribers"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_subscribers_to_business_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_subscribers_to_business_service", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_subscribers_to_business_service",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def list_supporting_service_impacts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service for which to retrieve supporting service impacts."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value `application/vnd.pagerduty+json;version=2` unless a different API version is required."),
+    additional_fields: Literal["services.highest_impacting_priority", "total_impacted_count"] | None = Field(None, description="Optional fields to include in the response. Choose from: `services.highest_impacting_priority` to get the highest priority per business service, or `total_impacted_count` to get the total impacted count."),
+    ids: str | None = Field(None, description="Filter results to only include supporting services with the specified IDs. Provide as a list of resource identifiers."),
+) -> dict[str, Any]:
+    """Retrieve the supporting Business Services for a given Business Service, sorted by impact level and recency. Returns up to 200 most impacted supporting services with their impact status."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceSupportingServiceImpactsRequest(
+            path=_models.GetBusinessServiceSupportingServiceImpactsRequestPath(id_=id_),
+            query=_models.GetBusinessServiceSupportingServiceImpactsRequestQuery(additional_fields=additional_fields, ids=ids),
+            header=_models.GetBusinessServiceSupportingServiceImpactsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_supporting_service_impacts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/supporting_services/impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/supporting_services/impacts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_supporting_service_impacts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_supporting_service_impacts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_supporting_service_impacts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def remove_business_service_notification_subscribers(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service from which subscribers will be unsubscribed."),
+    accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
+    subscribers: Annotated[list[_models.NotificationSubscriber], AfterValidator(_check_unique_items)] = Field(..., description="An array of subscriber identifiers to unsubscribe from the Business Service. Must contain at least one subscriber ID.", min_length=1),
+) -> dict[str, Any]:
+    """Unsubscribe one or more subscribers from receiving notifications for a specific Business Service. This operation removes the notification subscriptions for the provided subscriber IDs."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.RemoveBusinessServiceNotificationSubscriberRequest(
+            path=_models.RemoveBusinessServiceNotificationSubscriberRequestPath(id_=id_),
+            header=_models.RemoveBusinessServiceNotificationSubscriberRequestHeader(accept=accept),
+            body=_models.RemoveBusinessServiceNotificationSubscriberRequestBody(subscribers=subscribers)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_business_service_notification_subscribers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/business_services/{id}/unsubscribe", _request.path.model_dump(by_alias=True)) if _request.path else "/business_services/{id}/unsubscribe"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_business_service_notification_subscribers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_business_service_notification_subscribers", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_business_service_notification_subscribers",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def list_business_service_impactors(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default value unless you require a different API version."),
+    ids: str | None = Field(None, description="Filter results to specific Business Services by their IDs. Provide one or more IDs to retrieve Impactors for only those services; omit to retrieve Impactors for all top-level Business Services."),
+) -> dict[str, Any]:
+    """Retrieve the highest-priority Impactors (currently limited to Incidents) affecting top-level Business Services on your account, sorted by priority and creation date. Returns up to 200 results; use the ids[] parameter to filter for specific Business Services."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceTopLevelImpactorsRequest(
+            query=_models.GetBusinessServiceTopLevelImpactorsRequestQuery(ids=ids),
+            header=_models.GetBusinessServiceTopLevelImpactorsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_business_service_impactors: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/business_services/impactors"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_business_service_impactors")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_business_service_impactors", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_business_service_impactors",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def list_business_services_by_impact(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value 'application/vnd.pagerduty+json;version=2' to request the current API version."),
+    additional_fields: Literal["services.highest_impacting_priority", "total_impacted_count"] | None = Field(None, description="Optional additional fields to include in the response: use 'services.highest_impacting_priority' to get the highest priority incident per service, or 'total_impacted_count' to get the total count of impacted resources per service."),
+    ids: str | None = Field(None, description="Optional list of specific Business Service IDs to retrieve impact information for. When provided, returns impact data for only these services regardless of impact level."),
+) -> dict[str, Any]:
+    """Retrieve the most impacted Business Services sorted by impact level, recency, and name. Without filtering by IDs, returns up to 200 of the highest-impact services; use the `ids[]` parameter to get impact data for a specific set of Business Services."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceImpactsRequest(
+            query=_models.GetBusinessServiceImpactsRequestQuery(additional_fields=additional_fields, ids=ids),
+            header=_models.GetBusinessServiceImpactsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_business_services_by_impact: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/business_services/impacts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_business_services_by_impact")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_business_services_by_impact", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_business_services_by_impact",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Business Services
+@mcp.tool()
+async def get_business_service_priority_thresholds(accept: str = Field(..., alias="Accept", description="Content type and API version specification. Use the PagerDuty JSON media type with version 2 to ensure compatibility with the current API specification.")) -> dict[str, Any]:
+    """Retrieve the global priority threshold that determines when an Incident is considered to impact a Business Service. This threshold applies account-wide, affecting any Business Service that depends on the Service to which an Incident belongs."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServicePriorityThresholdsRequest(
+            header=_models.GetBusinessServicePriorityThresholdsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_business_service_priority_thresholds: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/business_services/priority_thresholds"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_business_service_priority_thresholds")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_business_service_priority_thresholds", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_business_service_priority_thresholds",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def list_change_events(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to `application/vnd.pagerduty+json;version=2`."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be `application/json`."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only include change events from specific teams. Provide an array of team IDs. Requires the `teams` ability on your account."),
+    integration_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only include change events from specific integrations. Provide an array of integration IDs."),
+    since: str | None = Field(None, description="Start of the date range to search, specified as a UTC ISO 8601 datetime string (format: YYYY-MM-DDThh:mm:ssZ). Non-UTC datetimes will return an HTTP 400 error.", pattern="YYYY-MM-DDThh:mm:ssZ"),
+    until: str | None = Field(None, description="End of the date range to search, specified as a UTC ISO 8601 datetime string (format: YYYY-MM-DDThh:mm:ssZ). Non-UTC datetimes will return an HTTP 400 error.", pattern="YYYY-MM-DDThh:mm:ssZ"),
+) -> dict[str, Any]:
+    """Retrieve all change events, optionally filtered by teams, integrations, or date range. Change events track modifications across your PagerDuty account."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListChangeEventsRequest(
+            query=_models.ListChangeEventsRequestQuery(team_ids=team_ids, integration_ids=integration_ids, since=since, until=until),
+            header=_models.ListChangeEventsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_change_events: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/change_events"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_change_events")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_change_events", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_change_events",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def send_change_event(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to the PagerDuty V2 JSON media type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
+) -> dict[str, Any]:
+    """Send a change event to PagerDuty to notify about infrastructure or application changes. This operation integrates with the V2 Events API for change event tracking."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateChangeEventRequest(
+            header=_models.CreateChangeEventRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for send_change_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/change_events"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("send_change_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_change_event", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="send_change_event",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def get_change_event(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Change Event to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific Change Event by its ID. Returns the full Change Event resource with all associated metadata."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetChangeEventRequest(
+            path=_models.GetChangeEventRequestPath(id_=id_),
+            header=_models.GetChangeEventRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_change_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/change_events/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/change_events/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_change_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_change_event", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_change_event",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def update_change_event(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Change Event to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request PagerDuty API v2 response format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    change_event: _models.ChangeEvent = Field(..., description="The Change Event object containing the fields to update. Provide the properties you want to modify for the Change Event."),
+) -> dict[str, Any]:
+    """Update an existing Change Event in PagerDuty. Modify the properties of a specific Change Event using its ID."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateChangeEventRequest(
+            path=_models.UpdateChangeEventRequestPath(id_=id_),
+            header=_models.UpdateChangeEventRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateChangeEventRequestBody(change_event=change_event)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_change_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/change_events/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/change_events/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_change_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_change_event", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_change_event",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def list_escalation_policies(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be application/json."),
+    user_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to show only escalation policies where any of the specified users are targets. Provide as an array of user IDs."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only escalation policies related to the specified teams. Requires the account to have the teams ability. Provide as an array of team IDs."),
+    include: Annotated[Literal["services", "teams", "targets"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related data in the response. Choose from services (related services), teams (team details), or targets (escalation targets)."),
+    sort_by: Literal["name", "name:asc", "name:desc"] | None = Field(None, description="Sort results by the specified field. Options are name (default, ascending), name:asc (ascending), or name:desc (descending)."),
+) -> dict[str, Any]:
+    """Retrieve all escalation policies that define which users should be alerted and when. Optionally filter by users, teams, or include related service and target details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListEscalationPoliciesRequest(
+            query=_models.ListEscalationPoliciesRequestQuery(user_ids=user_ids, team_ids=team_ids, include=include, sort_by=sort_by),
+            header=_models.ListEscalationPoliciesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_escalation_policies: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/escalation_policies"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_escalation_policies")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_escalation_policies", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_escalation_policies",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def create_escalation_policy(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
+    escalation_policy: _models.EscalationPolicy = Field(..., description="The escalation policy configuration object. Must include at least one escalation rule that specifies which users to alert and at what intervals."),
+    from_: str | None = Field(None, alias="From", description="Email address of the user making the request. Optional and used only for change tracking purposes. Must be a valid email address associated with your account."),
+) -> dict[str, Any]:
+    """Creates a new escalation policy that defines which users should be alerted and when. At least one escalation rule must be provided in the request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateEscalationPolicyRequest(
+            header=_models.CreateEscalationPolicyRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateEscalationPolicyRequestBody(escalation_policy=escalation_policy)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_escalation_policy: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/escalation_policies"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_escalation_policy")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_escalation_policy", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_escalation_policy",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def get_escalation_policy(
+    id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    include: Annotated[Literal["services", "teams", "targets"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Valid options are services, teams, or targets. Specify multiple values to include multiple resource types."),
+) -> dict[str, Any]:
+    """Retrieve details about an escalation policy, including its rules that define which users should be alerted and when. Optionally include related services, teams, or escalation targets in the response."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetEscalationPolicyRequest(
+            path=_models.GetEscalationPolicyRequestPath(id_=id_),
+            query=_models.GetEscalationPolicyRequestQuery(include=include),
+            header=_models.GetEscalationPolicyRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_escalation_policy: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/escalation_policies/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/escalation_policies/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_escalation_policy")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_escalation_policy", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_escalation_policy",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def update_escalation_policy(
+    id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+    escalation_policy: _models.EscalationPolicy = Field(..., description="The escalation policy object containing the updated configuration, including escalation rules and notification settings."),
+) -> dict[str, Any]:
+    """Update an existing escalation policy to modify alert routing rules and user notification timing. Escalation policies define the sequence and timing of which users should be alerted during an incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateEscalationPolicyRequest(
+            path=_models.UpdateEscalationPolicyRequestPath(id_=id_),
+            header=_models.UpdateEscalationPolicyRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateEscalationPolicyRequestBody(escalation_policy=escalation_policy)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_escalation_policy: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/escalation_policies/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/escalation_policies/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_escalation_policy")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_escalation_policy", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_escalation_policy",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def delete_escalation_policy(
+    id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete an escalation policy and its associated rules. The escalation policy must not be actively used by any services before deletion."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteEscalationPolicyRequest(
+            path=_models.DeleteEscalationPolicyRequestPath(id_=id_),
+            header=_models.DeleteEscalationPolicyRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_escalation_policy: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/escalation_policies/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/escalation_policies/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_escalation_policy")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_escalation_policy", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_escalation_policy",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Escalation Policies
+@mcp.tool()
+async def list_escalation_policy_audit_records(
+    id_: str = Field(..., alias="id", description="The unique identifier of the escalation policy to retrieve audit records for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be `application/json`."),
+    since: str | None = Field(None, description="The start of the date range for the audit search in ISO 8601 format. Defaults to 24 hours before the current time if not specified."),
+    until: str | None = Field(None, description="The end of the date range for the audit search in ISO 8601 format. Defaults to the current time if not specified. Cannot be more than 31 days after the `since` parameter."),
+) -> dict[str, Any]:
+    """Retrieve audit records for a specific escalation policy, sorted by execution time from newest to oldest. Use cursor-based pagination to navigate through results."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListEscalationPolicyAuditRecordsRequest(
+            path=_models.ListEscalationPolicyAuditRecordsRequestPath(id_=id_),
+            query=_models.ListEscalationPolicyAuditRecordsRequestQuery(since=since, until=until),
+            header=_models.ListEscalationPolicyAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_escalation_policy_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/escalation_policies/{id}/audit/records", _request.path.model_dump(by_alias=True)) if _request.path else "/escalation_policies/{id}/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_escalation_policy_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_escalation_policy_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_escalation_policy_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def list_event_orchestrations(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    sort_by: Literal["name:asc", "name:desc", "routes:asc", "routes:desc", "created_at:asc", "created_at:desc"] | None = Field(None, description="Sort results by a specific field in ascending or descending order. Options include orchestration name, number of routes, or creation timestamp. Defaults to sorting by name in ascending order."),
+) -> dict[str, Any]:
+    """Retrieve all Global Event Orchestrations configured on your account. Global Event Orchestrations enable you to define rules that automatically process and route incoming events to the appropriate services based on event content."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListEventOrchestrationsRequest(
+            query=_models.ListEventOrchestrationsRequestQuery(sort_by=sort_by),
+            header=_models.ListEventOrchestrationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_event_orchestrations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/event_orchestrations"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_event_orchestrations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_event_orchestrations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_event_orchestrations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def create_event_orchestration(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
+    id_: str | None = Field(None, alias="id", description="The unique identifier of the team that owns this orchestration. Optional; if not specified, the orchestration will not be assigned to a team."),
+    description: str | None = Field(None, description="A human-readable description explaining the purpose and function of this orchestration. Optional; helps document the orchestration's role in your event processing workflow."),
+) -> dict[str, Any]:
+    """Create a Global Event Orchestration to define rules and routing logic for incoming events. Events ingested using the orchestration's routing key will be processed through Global Rules and then routed to the appropriate Service based on Router Rules."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.PostOrchestrationRequest(
+            header=_models.PostOrchestrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.PostOrchestrationRequestBody(orchestration=_models.PostOrchestrationRequestBodyOrchestration(description=description,
+                    team=_models.PostOrchestrationRequestBodyOrchestrationTeam(id_=id_) if any(v is not None for v in [id_]) else None) if any(v is not None for v in [id_, description]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_event_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/event_orchestrations"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_event_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_event_orchestration", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_event_orchestration",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve a Global Event Orchestration by ID. Global Event Orchestrations define Global Rules and Router Rules that process and route incoming events to the appropriate Service based on event content."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchestrationRequest(
+            path=_models.GetOrchestrationRequestPath(id_=id_),
+            header=_models.GetOrchestrationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type as JSON."),
+) -> dict[str, Any]:
+    """Delete a Global Event Orchestration. Once deleted, the orchestration's Routing Key can no longer be used to ingest events into PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteOrchestrationRequest(
+            path=_models.DeleteOrchestrationRequestPath(id_=id_),
+            header=_models.DeleteOrchestrationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_orchestration", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_orchestration",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def list_integrations_for_event_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration whose integrations you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all integrations associated with a specific Event Orchestration. Use the routing keys from these integrations to send events to PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListOrchestrationIntegrationsRequest(
+            path=_models.ListOrchestrationIntegrationsRequestPath(id_=id_),
+            header=_models.ListOrchestrationIntegrationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_integrations_for_event_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_integrations_for_event_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_integrations_for_event_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_integrations_for_event_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def create_integration_for_event_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to associate this integration with."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    label: str = Field(..., description="A human-readable name for this integration. This label helps identify the integration's purpose within the Event Orchestration."),
+) -> dict[str, Any]:
+    """Create a new integration for an Event Orchestration to generate a routing key for sending events to PagerDuty. Each integration provides a unique routing key that can be used to route events through the orchestration's rules."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.PostOrchestrationIntegrationRequest(
+            path=_models.PostOrchestrationIntegrationRequestPath(id_=id_),
+            header=_models.PostOrchestrationIntegrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.PostOrchestrationIntegrationRequestBody(integration=_models.PostOrchestrationIntegrationRequestBodyIntegration(label=label))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_integration_for_event_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_integration_for_event_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_integration_for_event_orchestration", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_integration_for_event_orchestration",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_integration_for_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration."),
+    integration_id: str = Field(..., description="The unique identifier of the integration to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific integration associated with an event orchestration. Use the routing key from the returned integration to send events to PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchestrationIntegrationRequest(
+            path=_models.GetOrchestrationIntegrationRequestPath(id_=id_, integration_id=integration_id),
+            header=_models.GetOrchestrationIntegrationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_integration_for_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations/{integration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations/{integration_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_integration_for_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_integration_for_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_integration_for_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_event_orchestration_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to update."),
+    integration_id: str = Field(..., description="The unique identifier of the Integration within the Event Orchestration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    label: str = Field(..., description="A human-readable name for the Integration."),
+) -> dict[str, Any]:
+    """Update an integration associated with an Event Orchestration. The integration's routing key can be used to send events to PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateOrchestrationIntegrationRequest(
+            path=_models.UpdateOrchestrationIntegrationRequestPath(id_=id_, integration_id=integration_id),
+            header=_models.UpdateOrchestrationIntegrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateOrchestrationIntegrationRequestBody(integration=_models.UpdateOrchestrationIntegrationRequestBodyIntegration(label=label))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_event_orchestration_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations/{integration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations/{integration_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_event_orchestration_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_event_orchestration_integration", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_event_orchestration_integration",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_orchestration_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the integration to delete."),
+    integration_id: str = Field(..., description="The unique identifier of the Integration to delete from the Event Orchestration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Delete an integration from an Event Orchestration, which stops PagerDuty from accepting events sent to the associated Routing Key. Once deleted, all future events using that Routing Key will be dropped."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteOrchestrationIntegrationRequest(
+            path=_models.DeleteOrchestrationIntegrationRequestPath(id_=id_, integration_id=integration_id),
+            header=_models.DeleteOrchestrationIntegrationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_orchestration_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations/{integration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations/{integration_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_orchestration_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_orchestration_integration", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_orchestration_integration",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def move_integration_between_orchestrations(
+    id_: str = Field(..., alias="id", description="The ID of the target Event Orchestration that will receive and process the Integration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    source_id: str = Field(..., description="The ID of the source Event Orchestration from which the Integration will be moved."),
+    source_type: Literal["orchestration"] = Field(..., description="The type of the source object. Must be 'orchestration'."),
+    integration_id: str = Field(..., description="The ID of the Integration to be moved to the target Event Orchestration."),
+) -> dict[str, Any]:
+    """Relocate an Integration and its Routing Key from a source Event Orchestration to a target Event Orchestration. Future events sent to the Integration's Routing Key will be processed by the target orchestration's rules."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.MigrateOrchestrationIntegrationRequest(
+            path=_models.MigrateOrchestrationIntegrationRequestPath(id_=id_),
+            header=_models.MigrateOrchestrationIntegrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.MigrateOrchestrationIntegrationRequestBody(source_id=source_id, source_type=source_type, integration_id=integration_id)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for move_integration_between_orchestrations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/integrations/migration", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/integrations/migration"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("move_integration_between_orchestrations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("move_integration_between_orchestrations", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="move_integration_between_orchestrations",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_event_orchestration_global(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve global rules for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve the Global Orchestration rules for an Event Orchestration. Global rules evaluate all incoming events and can modify, enhance, and route events for further processing within the orchestration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchPathGlobalRequest(
+            path=_models.GetOrchPathGlobalRequestPath(id_=id_),
+            header=_models.GetOrchPathGlobalRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_event_orchestration_global: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/global", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/global"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_event_orchestration_global")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_event_orchestration_global", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_event_orchestration_global",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_event_orchestration_router(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration whose router configuration you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve the routing rules for an Event Orchestration. The router evaluates incoming events against a set of rules and directs them to the appropriate Service based on the first matching rule, or to a catch-all service if no rules match."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchPathRouterRequest(
+            path=_models.GetOrchPathRouterRequestPath(id_=id_),
+            header=_models.GetOrchPathRouterRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_event_orchestration_router: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/router", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/router"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_event_orchestration_router")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_event_orchestration_router", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_event_orchestration_router",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_unrouted_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to retrieve unrouted rules for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve the Unrouted Orchestration rules for an Event Orchestration, which processes events that don't match any rules in the Global Orchestration's Router. The Unrouted Orchestration evaluates these events against its rule sets and can modify, enhance, or route them for further processing."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchPathUnroutedRequest(
+            path=_models.GetOrchPathUnroutedRequestPath(id_=id_),
+            header=_models.GetOrchPathUnroutedRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_unrouted_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/unrouted", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/unrouted"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_unrouted_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_unrouted_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_unrouted_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service whose orchestration configuration should be retrieved."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+    include: Annotated[Literal["migrated_metadata"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of additional data models to include in the response. Specify 'migrated_metadata' to include migration-related metadata in the response."),
+) -> dict[str, Any]:
+    """Retrieve the Event Orchestration configuration for a specific service. The orchestration defines a set of event rules that process and route incoming events through multiple rule sets for enhancement and conditional handling."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchPathServiceRequest(
+            path=_models.GetOrchPathServiceRequestPath(service_id=service_id),
+            query=_models.GetOrchPathServiceRequestQuery(include=include),
+            header=_models.GetOrchPathServiceRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_service_orchestration_active_status(
+    service_id: str = Field(..., description="The unique identifier of the service for which to retrieve the orchestration active status."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve whether a Service Orchestration is active for a given service. When active (true), events are evaluated against the service orchestration path; when inactive (false), events are evaluated against the service ruleset instead."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOrchActiveStatusRequest(
+            path=_models.GetOrchActiveStatusRequestPath(service_id=service_id),
+            header=_models.GetOrchActiveStatusRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_orchestration_active_status: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/active", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/active"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_orchestration_active_status")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_orchestration_active_status", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_orchestration_active_status",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_service_orchestration_active_status(
+    service_id: str = Field(..., description="The unique identifier of the service whose orchestration active status should be updated."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    active: bool | None = Field(None, description="Boolean flag indicating whether the service orchestration should be active (true) or inactive (false). When true, events are evaluated against the orchestration path; when false, they use the service ruleset instead."),
+) -> dict[str, Any]:
+    """Enable or disable event evaluation against a service orchestration path for a specific service. When active, events are evaluated using the orchestration path; when inactive, they fall back to the service ruleset."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateOrchActiveStatusRequest(
+            path=_models.UpdateOrchActiveStatusRequestPath(service_id=service_id),
+            header=_models.UpdateOrchActiveStatusRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateOrchActiveStatusRequestBody(active=active)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service_orchestration_active_status: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/active", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/active"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service_orchestration_active_status")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service_orchestration_active_status", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service_orchestration_active_status",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def list_cache_variables_for_global_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all cache variables stored on a global event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListCacheVarOnGlobalOrchRequest(
+            path=_models.ListCacheVarOnGlobalOrchRequestPath(id_=id_),
+            header=_models.ListCacheVarOnGlobalOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_cache_variables_for_global_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_cache_variables_for_global_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_cache_variables_for_global_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_cache_variables_for_global_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def create_cache_variable_for_global_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration where the cache variable will be created."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    cache_variable: _models.OrchestrationCacheVariableRecentValue | _models.OrchestrationCacheVariableTriggerEventCount | _models.OrchestrationCacheVariableExternalData = Field(..., description="The cache variable object containing the variable name, initial value, and other configuration properties."),
+) -> dict[str, Any]:
+    """Create a cache variable on a global event orchestration to store event data for use in orchestration rules, conditions, and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateCacheVarOnGlobalOrchRequest(
+            path=_models.CreateCacheVarOnGlobalOrchRequestPath(id_=id_),
+            header=_models.CreateCacheVarOnGlobalOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateCacheVarOnGlobalOrchRequestBody(cache_variable=cache_variable)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_cache_variable_for_global_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_cache_variable_for_global_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_cache_variable_for_global_orchestration", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_cache_variable_for_global_orchestration",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_cache_variable_for_global_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve a specific cache variable from a global event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetCacheVarOnGlobalOrchRequest(
+            path=_models.GetCacheVarOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.GetCacheVarOnGlobalOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_cache_variable_for_global_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_cache_variable_for_global_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cache_variable_for_global_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_cache_variable_for_global_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_cache_variable_for_global_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
+    accept: str = Field(..., alias="Accept", description="API version header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    cache_variable: _models.OrchestrationCacheVariableRecentValue | _models.OrchestrationCacheVariableTriggerEventCount | _models.OrchestrationCacheVariableExternalData = Field(..., description="The cache variable object containing the updated configuration and values."),
+) -> dict[str, Any]:
+    """Update a cache variable on a global event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateCacheVarOnGlobalOrchRequest(
+            path=_models.UpdateCacheVarOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.UpdateCacheVarOnGlobalOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateCacheVarOnGlobalOrchRequestBody(cache_variable=cache_variable)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_cache_variable_for_global_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_cache_variable_for_global_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cache_variable_for_global_orchestration", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_cache_variable_for_global_orchestration",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_cache_variable_from_global_orchestration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable to delete."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to remove from the orchestration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Remove a cache variable from a global event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteCacheVarOnGlobalOrchRequest(
+            path=_models.DeleteCacheVarOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.DeleteCacheVarOnGlobalOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_cache_variable_from_global_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_cache_variable_from_global_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cache_variable_from_global_orchestration", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_cache_variable_from_global_orchestration",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_external_data_cache_variable_data(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the Cache Variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the Cache Variable to retrieve data from."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve the stored data for an external data type Cache Variable on a Global Event Orchestration. External data Cache Variables store string, number, or boolean values that can be referenced in Event Orchestration rules and conditions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetExternalDataCacheVarDataOnGlobalOrchRequest(
+            path=_models.GetExternalDataCacheVarDataOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.GetExternalDataCacheVarDataOnGlobalOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_external_data_cache_variable_data: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_external_data_cache_variable_data")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_external_data_cache_variable_data", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_external_data_cache_variable_data",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_cache_variable_external_data(
+    id_: str = Field(..., alias="id", description="The unique identifier of the event orchestration containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value of application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    cache_variable_data: str = Field(..., description="The string value to store in the cache variable. Use this parameter when the cache variable is configured with data_type of string."),
+) -> dict[str, Any]:
+    """Update the data value stored in an external data type cache variable on a global event orchestration. The updated value can then be referenced in event orchestration rules and conditions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateExternalDataCacheVarDataOnGlobalOrchRequest(
+            path=_models.UpdateExternalDataCacheVarDataOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.UpdateExternalDataCacheVarDataOnGlobalOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateExternalDataCacheVarDataOnGlobalOrchRequestBody(cache_variable_data=cache_variable_data)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_cache_variable_external_data: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_cache_variable_external_data")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cache_variable_external_data", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_cache_variable_external_data",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_external_data_cache_variable_data(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration containing the Cache Variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the Cache Variable whose data should be deleted."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Delete stored data for an external data type Cache Variable on a Global Event Orchestration. This removes the cached values that were previously set via the dedicated API endpoint."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteExternalDataCacheVarDataOnGlobalOrchRequest(
+            path=_models.DeleteExternalDataCacheVarDataOnGlobalOrchRequestPath(id_=id_, cache_variable_id=cache_variable_id),
+            header=_models.DeleteExternalDataCacheVarDataOnGlobalOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_external_data_cache_variable_data: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/cache_variables/{cache_variable_id}/data"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_external_data_cache_variable_data")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_external_data_cache_variable_data", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_external_data_cache_variable_data",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def list_cache_variables_for_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service whose cache variables you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all cache variables configured for a service's event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListCacheVarOnServiceOrchRequest(
+            path=_models.ListCacheVarOnServiceOrchRequestPath(service_id=service_id),
+            header=_models.ListCacheVarOnServiceOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_cache_variables_for_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_cache_variables_for_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_cache_variables_for_service_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_cache_variables_for_service_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def create_cache_variable_for_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service for which to create the cache variable."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    cache_variable: _models.OrchestrationCacheVariableRecentValue | _models.OrchestrationCacheVariableTriggerEventCount | _models.OrchestrationCacheVariableExternalData = Field(..., description="The cache variable configuration object containing the variable definition and settings."),
+) -> dict[str, Any]:
+    """Create a cache variable for a service event orchestration to store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateCacheVarOnServiceOrchRequest(
+            path=_models.CreateCacheVarOnServiceOrchRequestPath(service_id=service_id),
+            header=_models.CreateCacheVarOnServiceOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateCacheVarOnServiceOrchRequestBody(cache_variable=cache_variable)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_cache_variable_for_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_cache_variable_for_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_cache_variable_for_service_orchestration", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_cache_variable_for_service_orchestration",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_cache_variable_for_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service containing the event orchestration."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 for the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific cache variable from a service's event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetCacheVarOnServiceOrchRequest(
+            path=_models.GetCacheVarOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.GetCacheVarOnServiceOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_cache_variable_for_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_cache_variable_for_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cache_variable_for_service_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_cache_variable_for_service_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_cache_variable_for_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service containing the event orchestration."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    cache_variable: _models.OrchestrationCacheVariableRecentValue | _models.OrchestrationCacheVariableTriggerEventCount | _models.OrchestrationCacheVariableExternalData = Field(..., description="The cache variable object containing the updated configuration and values."),
+) -> dict[str, Any]:
+    """Update a cache variable on a service event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateCacheVarOnServiceOrchRequest(
+            path=_models.UpdateCacheVarOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.UpdateCacheVarOnServiceOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateCacheVarOnServiceOrchRequestBody(cache_variable=cache_variable)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_cache_variable_for_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_cache_variable_for_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cache_variable_for_service_orchestration", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_cache_variable_for_service_orchestration",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_cache_variable_for_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service whose event orchestration contains the cache variable to delete."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to delete from the service's event orchestration."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Remove a cache variable from a service's event orchestration. Cache variables store event data that can be referenced in orchestration rules for conditions and actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteCacheVarOnServiceOrchRequest(
+            path=_models.DeleteCacheVarOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.DeleteCacheVarOnServiceOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_cache_variable_for_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_cache_variable_for_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cache_variable_for_service_orchestration", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_cache_variable_for_service_orchestration",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def get_cache_variable_data_on_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to retrieve data for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve the stored data for an external data type cache variable on a service event orchestration. External data cache variables store string, number, or boolean values that can be referenced in event orchestration rules and conditions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetExternalDataCacheVarDataOnServiceOrchRequest(
+            path=_models.GetExternalDataCacheVarDataOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.GetExternalDataCacheVarDataOnServiceOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_cache_variable_data_on_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_cache_variable_data_on_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_cache_variable_data_on_service_orchestration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_cache_variable_data_on_service_orchestration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_cache_variable_data(
+    service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    cache_variable_data: str = Field(..., description="The string value to store in the external data cache variable. Can be any string value used by Event Orchestration rules."),
+) -> dict[str, Any]:
+    """Update the data value for an external data type cache variable on a service event orchestration. The stored value can be used in conditions and actions within Event Orchestration rules."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateExternalDataCacheVarDataOnServiceOrchRequest(
+            path=_models.UpdateExternalDataCacheVarDataOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.UpdateExternalDataCacheVarDataOnServiceOrchRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateExternalDataCacheVarDataOnServiceOrchRequestBody(cache_variable_data=cache_variable_data)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_cache_variable_data: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_cache_variable_data")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_cache_variable_data", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_cache_variable_data",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def delete_cache_variable_data_on_service_orchestration(
+    service_id: str = Field(..., description="The unique identifier of the service containing the cache variable."),
+    cache_variable_id: str = Field(..., description="The unique identifier of the cache variable whose data should be deleted."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Delete stored data for an external data type cache variable on a service event orchestration. This removes the cached string, number, or boolean value that was previously stored via the cache variable API."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteExternalDataCacheVarDataOnServiceOrchRequest(
+            path=_models.DeleteExternalDataCacheVarDataOnServiceOrchRequestPath(service_id=service_id, cache_variable_id=cache_variable_id),
+            header=_models.DeleteExternalDataCacheVarDataOnServiceOrchRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_cache_variable_data_on_service_orchestration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/services/{service_id}/cache_variables/{cache_variable_id}/data"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_cache_variable_data_on_service_orchestration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_cache_variable_data_on_service_orchestration", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_cache_variable_data_on_service_orchestration",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def list_event_orchestration_enablements(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration for which to list feature enablements."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and structure. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all feature enablement settings for a specific Event Orchestration. Currently supports the `aiops` enablement, which is enabled by default for accounts with the AIOps product addon. A warning will be returned if the account lacks AIOps entitlement."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListEventOrchestrationFeatureEnablementsRequest(
+            path=_models.ListEventOrchestrationFeatureEnablementsRequestPath(id_=id_),
+            header=_models.ListEventOrchestrationFeatureEnablementsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_event_orchestration_enablements: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/enablements", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/enablements"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_event_orchestration_enablements")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_event_orchestration_enablements", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_event_orchestration_enablements",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Event Orchestrations
+@mcp.tool()
+async def update_event_orchestration_feature_enablement(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Event Orchestration to update."),
+    feature_name: Literal["aiops"] = Field(..., description="The feature addon to enable or disable. Currently only 'aiops' is supported."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value for standard PagerDuty API v2 responses."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON."),
+    enabled: bool = Field(..., description="Set to true to enable the feature addon, or false to disable it."),
+) -> dict[str, Any]:
+    """Enable or disable a feature addon for an Event Orchestration. Currently supports the AIOps addon. Note: if your account lacks AIOps entitlement, the setting will update but return a warning."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateEventOrchestrationFeatureEnablementsRequest(
+            path=_models.UpdateEventOrchestrationFeatureEnablementsRequestPath(id_=id_, feature_name=feature_name),
+            header=_models.UpdateEventOrchestrationFeatureEnablementsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateEventOrchestrationFeatureEnablementsRequestBody(enablement=_models.UpdateEventOrchestrationFeatureEnablementsRequestBodyEnablement(enabled=enabled))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_event_orchestration_feature_enablement: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/event_orchestrations/{id}/enablements/{feature_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/event_orchestrations/{id}/enablements/{feature_name}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_event_orchestration_feature_enablement")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_event_orchestration_feature_enablement", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_event_orchestration_feature_enablement",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extension Schemas
+@mcp.tool()
+async def list_extension_schemas(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all available extension schemas that define outbound extension types (such as Generic Webhook, Slack, ServiceNow) supported by PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListExtensionSchemasRequest(
+            header=_models.ListExtensionSchemasRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_extension_schemas: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/extension_schemas"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_extension_schemas")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_extension_schemas", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_extension_schemas",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extension Schemas
+@mcp.tool()
+async def get_extension_schema(
+    id_: str = Field(..., alias="id", description="The unique identifier of the extension schema to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific PagerDuty extension vendor (such as Generic Webhook, Slack, or ServiceNow). Extension schemas define the structure and capabilities of outbound extensions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetExtensionSchemaRequest(
+            path=_models.GetExtensionSchemaRequestPath(id_=id_),
+            header=_models.GetExtensionSchemaRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_extension_schema: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/extension_schemas/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/extension_schemas/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_extension_schema")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_extension_schema", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_extension_schema",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def list_extensions(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to version 2 of the PagerDuty JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    extension_object_id: str | None = Field(None, description="Filter results to extensions associated with a specific extension object by its ID."),
+    extension_schema_id: str | None = Field(None, description="Filter results to extensions using a specific extension schema (vendor) by its ID."),
+    include: Annotated[Literal["extension_objects", "extension_schemas"], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of related resources to include in the response. Specify 'extension_objects' to include extension object details or 'extension_schemas' to include schema definitions."),
+) -> dict[str, Any]:
+    """Retrieve a list of extensions attached to services. Extensions are representations of Extension Schema objects that extend service functionality. Use optional filters to narrow results by extension object or schema, and include related details as needed."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListExtensionsRequest(
+            query=_models.ListExtensionsRequestQuery(extension_object_id=extension_object_id, extension_schema_id=extension_schema_id, include=include),
+            header=_models.ListExtensionsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_extensions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/extensions"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_extensions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_extensions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_extensions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def create_extension(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    extension: _models.Extension = Field(..., description="The Extension object to create, containing the configuration and schema details for the new extension."),
+) -> dict[str, Any]:
+    """Create a new Extension that can be attached to a Service. Extensions are representations of Extension Schema objects used to extend Service functionality."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateExtensionRequest(
+            header=_models.CreateExtensionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateExtensionRequestBody(extension=extension)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_extension: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/extensions"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_extension")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_extension", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_extension",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def get_extension(
+    id_: str = Field(..., alias="id", description="The unique identifier of the extension to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["extension_schemas", "extension_objects", "temporarily_disabled"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Choose from: extension_schemas (the schema definition), extension_objects (associated objects), or temporarily_disabled (disabled status information)."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific extension attached to a service. Extensions are representations of Extension Schema objects that define how services integrate with external systems."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetExtensionRequest(
+            path=_models.GetExtensionRequestPath(id_=id_),
+            query=_models.GetExtensionRequestQuery(include=include),
+            header=_models.GetExtensionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_extension: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/extensions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/extensions/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_extension")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_extension", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_extension",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def update_extension(
+    id_: str = Field(..., alias="id", description="The unique identifier of the extension to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    extension: _models.Extension = Field(..., description="The extension object containing the fields to update."),
+) -> dict[str, Any]:
+    """Update an existing extension attached to a service. Extensions are representations of Extension Schema objects that customize service behavior."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateExtensionRequest(
+            path=_models.UpdateExtensionRequestPath(id_=id_),
+            header=_models.UpdateExtensionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateExtensionRequestBody(extension=extension)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_extension: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/extensions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/extensions/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_extension")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_extension", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_extension",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def delete_extension(
+    id_: str = Field(..., alias="id", description="The unique identifier of the extension to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version (version 2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Permanently delete an extension by ID. Once deleted, the extension will no longer be accessible in the web UI and cannot be used for creating new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteExtensionRequest(
+            path=_models.DeleteExtensionRequestPath(id_=id_),
+            header=_models.DeleteExtensionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_extension: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/extensions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/extensions/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_extension")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_extension", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_extension",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Extensions
+@mcp.tool()
+async def enable_extension(
+    id_: str = Field(..., alias="id", description="The unique identifier of the extension to enable."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Enable a temporarily disabled extension attached to a service. The extension will become active and functional again."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.EnableExtensionRequest(
+            path=_models.EnableExtensionRequestPath(id_=id_),
+            header=_models.EnableExtensionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for enable_extension: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/extensions/{id}/enable", _request.path.model_dump(by_alias=True)) if _request.path else "/extensions/{id}/enable"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("enable_extension")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("enable_extension", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="enable_extension",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def delete_incident_workflow(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete an Incident Workflow by its ID. This removes the workflow and all its associated Steps, Triggers, and automated Actions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIncidentWorkflowRequest(
+            path=_models.DeleteIncidentWorkflowRequestPath(id_=id_),
+            header=_models.DeleteIncidentWorkflowRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_incident_workflow: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_incident_workflow")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_incident_workflow", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_incident_workflow",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def create_incident_workflow_instance(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident workflow to execute."),
+    accept: str = Field(..., alias="Accept", description="The API version header for response formatting. Defaults to version 2 of the PagerDuty JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The request body content type. Must be JSON format."),
+    incident_id: str = Field(..., alias="incidentId", description="The unique identifier of the incident on which to execute the workflow."),
+    incident_workflow_instance_id: str | None = Field(None, alias="incident_workflow_instanceId", description="An optional identifier to distinguish between multiple executions of the same workflow, useful for tracking and auditing purposes."),
+) -> dict[str, Any]:
+    """Trigger an instance of an incident workflow to execute its configured steps and automated actions on a specific incident. This starts a new workflow execution sequence for the given incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentWorkflowInstanceRequest(
+            path=_models.CreateIncidentWorkflowInstanceRequestPath(id_=id_),
+            header=_models.CreateIncidentWorkflowInstanceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateIncidentWorkflowInstanceRequestBody(incident_workflow_instance=_models.CreateIncidentWorkflowInstanceRequestBodyIncidentWorkflowInstance(
+                    id_=incident_workflow_instance_id,
+                    incident=_models.CreateIncidentWorkflowInstanceRequestBodyIncidentWorkflowInstanceIncident(id_=incident_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident_workflow_instance: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/{id}/instances", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/{id}/instances"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident_workflow_instance")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident_workflow_instance", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident_workflow_instance",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def list_incident_workflow_actions(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Must be set to the PagerDuty API v2 content type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. Required for API compatibility."),
+    keyword: str | None = Field(None, description="Filter actions by a specific keyword tag (e.g., 'slack'). When provided, only actions tagged with this keyword are returned."),
+) -> dict[str, Any]:
+    """Retrieve a list of available incident workflow actions. Optionally filter actions by keyword tag to find specific action types."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentWorkflowActionsRequest(
+            query=_models.ListIncidentWorkflowActionsRequestQuery(keyword=keyword),
+            header=_models.ListIncidentWorkflowActionsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_workflow_actions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incident_workflows/actions"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_workflow_actions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_workflow_actions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_workflow_actions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def get_incident_workflow_action(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Action to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific Incident Workflow Action by its ID. Returns the action details including its configuration and properties within an incident workflow."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentWorkflowActionRequest(
+            path=_models.GetIncidentWorkflowActionRequestPath(id_=id_),
+            header=_models.GetIncidentWorkflowActionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_workflow_action: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/actions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/actions/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_workflow_action")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_workflow_action", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_workflow_action",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def list_incident_workflow_triggers(
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to 'application/vnd.pagerduty+json;version=2' for this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be 'application/json'."),
+    workflow_id: str | None = Field(None, description="Filter to show only triggers configured to start a specific workflow. Useful for discovering all services and incidents associated with a given workflow."),
+    incident_id: str | None = Field(None, description="Filter to show only triggers configured on the service of a specific incident. Useful for finding manual triggers available for that incident. Cannot be used together with `service_id`."),
+    service_id: str | None = Field(None, description="Filter to show only triggers configured for a specific service. Useful for discovering all workflows that can be triggered for incidents in that service. Cannot be used together with `incident_id`."),
+    trigger_type: Literal["manual", "conditional", "incident_type"] | None = Field(None, description="Filter to show only triggers of a specific type: 'manual' for user-initiated triggers, 'conditional' for automatically triggered workflows, or 'incident_type' for type-based triggers."),
+    workflow_name_contains: str | None = Field(None, description="Filter to show only triggers configured to start workflows whose names contain the provided text. Matching is case-sensitive substring search."),
+    sort_by: Literal["workflow_id", "workflow_id asc", "workflow_id desc", "workflow_name", "workflow_name asc", "workflow_name desc"] | None = Field(None, description="Sort results by workflow ID or workflow name in ascending or descending order. If not specified, results are returned in default order."),
+) -> dict[str, Any]:
+    """Retrieve a list of incident workflow triggers, optionally filtered by workflow, service, incident, trigger type, or workflow name. Use this to discover which workflows are configured to start automatically or manually for specific services or incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentWorkflowTriggersRequest(
+            query=_models.ListIncidentWorkflowTriggersRequestQuery(workflow_id=workflow_id, incident_id=incident_id, service_id=service_id, trigger_type=trigger_type, workflow_name_contains=workflow_name_contains, sort_by=sort_by),
+            header=_models.ListIncidentWorkflowTriggersRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_workflow_triggers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incident_workflows/triggers"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_workflow_triggers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_workflow_triggers", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_workflow_triggers",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def delete_incident_workflow_trigger(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Trigger to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Permanently delete an existing Incident Workflow Trigger by its ID. This action cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIncidentWorkflowTriggerRequest(
+            path=_models.DeleteIncidentWorkflowTriggerRequestPath(id_=id_),
+            header=_models.DeleteIncidentWorkflowTriggerRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_incident_workflow_trigger: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/triggers/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/triggers/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_incident_workflow_trigger")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_incident_workflow_trigger", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_incident_workflow_trigger",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def add_service_to_incident_workflow_trigger(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Incident Workflow Trigger to associate the service with."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
+    service_id: str | None = Field(None, alias="serviceId", description="The unique identifier of the Service to associate with the trigger."),
+) -> dict[str, Any]:
+    """Associate a Service with an existing Incident Workflow Trigger to enable the trigger to act on incidents for that service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.AssociateServiceToIncidentWorkflowTriggerRequest(
+            path=_models.AssociateServiceToIncidentWorkflowTriggerRequestPath(id_=id_),
+            header=_models.AssociateServiceToIncidentWorkflowTriggerRequestHeader(accept=accept, content_type=content_type),
+            body=_models.AssociateServiceToIncidentWorkflowTriggerRequestBody(service=_models.AssociateServiceToIncidentWorkflowTriggerRequestBodyService(id_=service_id) if any(v is not None for v in [service_id]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_service_to_incident_workflow_trigger: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/triggers/{id}/services", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/triggers/{id}/services"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_service_to_incident_workflow_trigger")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_service_to_incident_workflow_trigger", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_service_to_incident_workflow_trigger",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Workflows
+@mcp.tool()
+async def remove_service_from_incident_workflow_trigger(
+    trigger_id: str = Field(..., description="The unique identifier of the incident workflow trigger from which the service will be removed."),
+    service_id: str = Field(..., description="The unique identifier of the service to be dissociated from the trigger."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Remove a service from an incident workflow trigger, effectively dissociating them. This operation requires write access to incident workflows."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceFromIncidentWorkflowTriggerRequest(
+            path=_models.DeleteServiceFromIncidentWorkflowTriggerRequestPath(trigger_id=trigger_id, service_id=service_id),
+            header=_models.DeleteServiceFromIncidentWorkflowTriggerRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_service_from_incident_workflow_trigger: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incident_workflows/triggers/{trigger_id}/services/{service_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incident_workflows/triggers/{trigger_id}/services/{service_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_service_from_incident_workflow_trigger")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_service_from_incident_workflow_trigger", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_service_from_incident_workflow_trigger",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_incidents(
+    accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to 'application/vnd.pagerduty+json;version=2'."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying request body format. Must be 'application/json'."),
+    date_range: Literal["all"] | None = Field(None, description="When set to 'all', ignores the since and until date range parameters and their defaults to retrieve all incidents without time constraints."),
+    incident_key: str | None = Field(None, description="Filter by incident de-duplication key. For incidents with child alerts, this matches against the alert_key of associated alerts rather than a direct incident key."),
+    service_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to incidents associated with one or more specific services. Accepts an array of service IDs."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to incidents related to one or more teams. Requires the account to have the teams ability. Accepts an array of team IDs."),
+    user_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter to incidents currently assigned to one or more users. Accepts an array of user IDs. Note: Only returns incidents with triggered or acknowledged status, as resolved incidents are not assigned to users."),
+    urgencies: Annotated[Literal["high", "low"], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter by incident urgency level. Valid values are 'high' or 'low'. Defaults to all urgencies. Requires the account to have the urgencies ability."),
+    time_zone: str | None = Field(None, description="Specify the time zone for rendering date/time results in responses. Defaults to the account's configured time zone. Use IANA time zone format (tzinfo)."),
+    statuses: Annotated[Literal["triggered", "acknowledged", "resolved"], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter by incident status. Valid values are 'triggered', 'acknowledged', or 'resolved'. Pass multiple times to filter by multiple statuses."),
+    sort_by: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Sort results by one or two fields with direction. Format each field as 'field:direction' (e.g., 'incident_number:asc'). Valid fields are incident_number, created_at, resolved_at, or urgency. Separate multiple sorts with commas. Defaults to ascending order. Sorting by urgency requires the urgencies ability.", max_length=2),
+    include: Annotated[Literal["acknowledgers", "agents", "assignees", "conference_bridge", "escalation_policies", "first_trigger_log_entries", "priorities", "services", "teams", "users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related data in the response. Valid options include acknowledgers, agents, assignees, conference_bridge, escalation_policies, first_trigger_log_entries, priorities, services, teams, and users."),
+    since: str | None = Field(None, description="Start of the date range for searching incidents. Maximum searchable range is 6 months; defaults to 1 month if not specified. Use ISO 8601 format."),
+    until: str | None = Field(None, description="End of the date range for searching incidents. Maximum searchable range is 6 months; defaults to 1 month if not specified. Use ISO 8601 format."),
+) -> dict[str, Any]:
+    """Retrieve a list of incidents with optional filtering by service, team, user assignment, status, and urgency. Incidents represent problems or issues requiring resolution and can be filtered across various dimensions and sorted by multiple fields."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentsRequest(
+            query=_models.ListIncidentsRequestQuery(date_range=date_range, incident_key=incident_key, service_ids=service_ids, team_ids=team_ids, user_ids=user_ids, urgencies=urgencies, time_zone=time_zone, statuses=statuses, sort_by=sort_by, include=include, since=since, until=until),
+            header=_models.ListIncidentsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incidents"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_query = _serialize_query(_http_query, {
+        "sort_by": ("form", False),
+    })
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incidents", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incidents",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def create_incident(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be application/json."),
+    from_: str = Field(..., alias="From", description="Email address of a valid user associated with the account making the request. Used to identify the incident creator."),
+    type_: Literal["incident"] = Field(..., alias="type", description="The resource type identifier. Must be set to 'incident'."),
+    title: str = Field(..., description="A concise description of the incident's nature, symptoms, cause, or effect. This is the primary human-readable summary of the problem."),
+    service: _models.ServiceReference = Field(..., description="The service associated with this incident. This determines which service the incident belongs to and affects escalation routing."),
+    priority: _models.PriorityReference | None = Field(None, description="The priority level of the incident. Helps determine urgency and response requirements."),
+    urgency: Literal["high", "low"] | None = Field(None, description="The urgency level of the incident. Must be either 'high' or 'low', affecting notification and escalation behavior."),
+    details: dict[str, Any] | None = Field(None, description="Additional structured data providing context or metadata about the incident. Useful for storing custom fields or supplementary information."),
+    incident_key: str | None = Field(None, description="A unique identifier for the incident within its service. Subsequent requests with the same service and incident_key will be rejected if an open incident already exists with that key, preventing duplicate incidents."),
+    assignments: list[_models.CreateIncidentBodyIncidentAssignmentsItem] | None = Field(None, description="List of users to assign the incident to. Cannot be used together with an escalation policy. Assignments determine who is initially responsible for the incident."),
+    escalation_policy: _models.EscalationPolicyReference | None = Field(None, description="The escalation policy to apply to the incident. Determines the chain of escalation if the incident is not acknowledged. Cannot be specified if assignments are provided."),
+    conference_number: str | None = Field(None, description="The phone number for the conference bridge, formatted with commas representing one-second waits and pound sign (#) completing access code input (e.g., +1 415-555-1212,,,,1234#)."),
+    conference_url: str | None = Field(None, description="A URL for the conference bridge, such as a web conference link or Slack channel. Must be a valid URL format."),
+) -> dict[str, Any]:
+    """Create an incident synchronously to represent a problem or issue that needs to be addressed, without requiring a corresponding event from a monitoring service. Requires a valid user email and service association."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentRequest(
+            header=_models.CreateIncidentRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateIncidentRequestBody(incident=_models.CreateIncidentRequestBodyIncident(
+                    type_=type_, title=title, service=service, priority=priority, urgency=urgency, incident_key=incident_key, assignments=assignments, escalation_policy=escalation_policy,
+                    body=_models.CreateIncidentRequestBodyIncidentBody(details=details) if any(v is not None for v in [details]) else None,
+                    conference_bridge=_models.CreateIncidentRequestBodyIncidentConferenceBridge(conference_number=conference_number, conference_url=conference_url) if any(v is not None for v in [conference_number, conference_url]) else None
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incidents"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incidents(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    from_: str = Field(..., alias="From", description="Email address of a valid user associated with the account making the request. This identifies who is performing the incident updates."),
+    incidents: list[_models.UpdateIncidentsBodyIncidentsItem] = Field(..., description="Array of incident objects to update, each containing the incident ID and the parameters to modify (status, assignee, escalation policy, etc.). Maximum of 250 incidents per request; exceeding this limit will return a 413 error."),
+) -> dict[str, Any]:
+    """Update the status of one or more incidents by acknowledging, resolving, escalating, or reassigning them. Supports batch operations on up to 250 incidents per request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentsRequest(
+            header=_models.UpdateIncidentsRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateIncidentsRequestBody(incidents=incidents)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incidents"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incidents", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incidents",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def get_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 (application/vnd.pagerduty+json;version=2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["acknowledgers", "agents", "assignees", "conference_bridge", "custom_fields", "escalation_policies", "first_trigger_log_entries", "priorities", "services", "teams", "users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Choose from: acknowledgers, agents, assignees, conference_bridge, custom_fields, escalation_policies, first_trigger_log_entries, priorities, services, teams, or users."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific incident by its ID or incident number. An incident represents a problem or issue that requires resolution."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentRequest(
+            path=_models.GetIncidentRequestPath(id_=id_),
+            query=_models.GetIncidentRequestQuery(include=include),
+            header=_models.GetIncidentRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
+    accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    from_: str = Field(..., alias="From", description="Email address of the authenticated user making this request. Must be a valid user associated with your account."),
+    service_id: str = Field(..., alias="serviceId", description="The ID of the service associated with this incident."),
+    incident_type: Literal["incident", "incident_reference"] = Field(..., alias="incidentType", description="The incident type. Use 'incident' for standard incidents or 'incident_reference' for references."),
+    service_type: Literal["service_reference"] = Field(..., alias="serviceType", description="The type of service reference. Must be 'service_reference'."),
+    status: Literal["resolved", "acknowledged", "triggered"] | None = Field(None, description="The new incident status. Use 'resolved' to close the incident, 'acknowledged' to mark as in-progress, or 'triggered' to reopen. Reopening to 'triggered' reassigns based on escalation policy; reopening to 'acknowledged' assigns to the current user."),
+    priority: _models.UpdateIncidentBodyIncidentPriority | None = Field(None, description="The priority level for the incident. Can be provided as an object or scalar value."),
+    resolution: str | None = Field(None, description="Resolution reason or notes. Only used when setting status to 'resolved'. Appears in the incident's resolution log entry."),
+    title: str | None = Field(None, description="A new title for the incident."),
+    escalation_level: int | None = Field(None, description="Escalate the incident to a specific level in the escalation policy. Must be a positive integer representing the escalation level."),
+    assignments: list[_models.UpdateIncidentBodyIncidentAssignmentsItem] | None = Field(None, description="Array of users or schedules to assign this incident to. Order may affect assignment priority."),
+    escalation_policy: _models.EscalationPolicyReference | None = Field(None, description="The escalation policy to apply to this incident."),
+    urgency: Literal["high", "low"] | None = Field(None, description="The urgency level of the incident. Use 'high' for critical issues or 'low' for non-critical ones."),
+    conference_number: str | None = Field(None, description="Phone number for the incident's conference bridge. Format as +1 415-555-1212,,,,1234# where commas represent one-second waits and # completes access code entry."),
+    conference_url: str | None = Field(None, description="URL for the incident's conference bridge, such as a web conference link or Slack channel. Must be a valid URL."),
+) -> dict[str, Any]:
+    """Update an incident's status, priority, assignments, or other details. Use this to acknowledge, resolve, escalate, or reassign incidents, and optionally add resolution notes or conference details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentRequest(
+            path=_models.UpdateIncidentRequestPath(id_=id_),
+            header=_models.UpdateIncidentRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateIncidentRequestBody(incident=_models.UpdateIncidentRequestBodyIncident(
+                    type_=incident_type, status=status, priority=priority, resolution=resolution, title=title, escalation_level=escalation_level, assignments=assignments, escalation_policy=escalation_policy, urgency=urgency,
+                    service=_models.UpdateIncidentRequestBodyIncidentService(id_=service_id, type_=service_type),
+                    conference_bridge=_models.UpdateIncidentRequestBodyIncidentConferenceBridge(conference_number=conference_number, conference_url=conference_url) if any(v is not None for v in [conference_number, conference_url]) else None
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_incident_alerts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve alerts."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    alert_key: str | None = Field(None, description="Filter alerts by their de-duplication key to find specific alert instances."),
+    statuses: Annotated[Literal["triggered", "resolved"], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only include alerts with specific statuses: triggered (active/unresolved) or resolved (closed). Multiple statuses can be specified."),
+    sort_by: Annotated[Literal["created_at", "resolved_at", "created_at:asc", "created_at:desc", "resolved_at:asc", "resolved_at:desc"], AfterValidator(_check_unique_items)] | None = Field(None, description="Sort results by creation time or resolution time in ascending or descending order. Specify as field:direction (e.g., created_at:desc). Up to two sort fields can be combined with commas; direction defaults to ascending if omitted.", max_length=2),
+    include: Annotated[Literal["services", "first_trigger_log_entries", "incidents"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related data in the response: services (associated service details), first_trigger_log_entries (initial trigger event logs), or incidents (parent incident information). Multiple inclusions can be specified."),
+) -> dict[str, Any]:
+    """Retrieve all alerts associated with a specific incident. Alerts can be filtered by status, deduplicated by key, sorted by creation or resolution time, and enriched with related service, log entry, or incident details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentAlertsRequest(
+            path=_models.ListIncidentAlertsRequestPath(id_=id_),
+            query=_models.ListIncidentAlertsRequestQuery(alert_key=alert_key, statuses=statuses, sort_by=sort_by, include=include),
+            header=_models.ListIncidentAlertsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_alerts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/alerts", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/alerts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_query = _serialize_query(_http_query, {
+        "sort_by": ("form", False),
+    })
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_alerts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_alerts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_alerts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident_alerts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to update alerts for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of the authenticated user making the request. Must be a valid user associated with the PagerDuty account."),
+    alerts: list[_models.AlertUpdate] = Field(..., description="Array of alert objects to update, each containing the alert ID and parameters to modify (such as status or target incident). Maximum 250 alerts per request; exceeding this limit will return a 413 error."),
+) -> dict[str, Any]:
+    """Update the status of multiple alerts or reassign them to different incidents. Supports resolving alerts or moving them between incidents, with a maximum of 250 alerts per request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentAlertsRequest(
+            path=_models.UpdateIncidentAlertsRequestPath(id_=id_),
+            header=_models.UpdateIncidentAlertsRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateIncidentAlertsRequestBody(alerts=alerts)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_alerts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/alerts", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/alerts"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_alerts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_alerts", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_alerts",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def get_incident_alert(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the alert."),
+    alert_id: str = Field(..., description="The unique identifier of the alert to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific alert within an incident. Alerts are triggered when a service sends an event to PagerDuty and represent the individual notifications associated with an incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentAlertRequest(
+            path=_models.GetIncidentAlertRequestPath(id_=id_, alert_id=alert_id),
+            header=_models.GetIncidentAlertRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_alert: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/alerts/{alert_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/alerts/{alert_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_alert")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_alert", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_alert",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident_alert(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the alert to update."),
+    alert_id: str = Field(..., description="The unique identifier of the alert to update."),
+    accept: str = Field(..., alias="Accept", description="API version header. Must be set to 'application/vnd.pagerduty+json;version=2' to specify the PagerDuty API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be 'application/json'."),
+    from_: str = Field(..., alias="From", description="The email address of a valid user associated with your PagerDuty account. This identifies who is making the request."),
+    incident_id: str = Field(..., alias="incidentId", description="The unique identifier of the parent incident to associate this alert with. Use this to reassign the alert to a different incident."),
+    status: Literal["resolved", "triggered"] | None = Field(None, description="The new status for the alert. Set to 'resolved' to close the alert or 'triggered' to reopen it."),
+) -> dict[str, Any]:
+    """Update an alert by resolving it or reassigning it to a different parent incident. This operation allows you to change an alert's status or move it between incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentAlertRequest(
+            path=_models.UpdateIncidentAlertRequestPath(id_=id_, alert_id=alert_id),
+            header=_models.UpdateIncidentAlertRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateIncidentAlertRequestBody(alert=_models.UpdateIncidentAlertRequestBodyAlert(
+                    status=status,
+                    incident=_models.UpdateIncidentAlertRequestBodyAlertIncident(id_=incident_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_alert: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/alerts/{alert_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/alerts/{alert_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_alert")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_alert", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_alert",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident_business_service_impact(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to modify."),
+    business_service_id: str = Field(..., description="The unique identifier of the business service whose impact status should be updated."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request PagerDuty API version 2."),
+    relation: Literal["impacted", "not_impacted"] = Field(..., description="The impact relationship status. Set to 'impacted' if the incident affects this business service, or 'not_impacted' if it does not."),
+) -> dict[str, Any]:
+    """Manually update whether an incident impacts a specific business service. Use this to change the impact relationship between an incident and a business service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.PutIncidentManualBusinessServiceAssociationRequest(
+            path=_models.PutIncidentManualBusinessServiceAssociationRequestPath(id_=id_, business_service_id=business_service_id),
+            header=_models.PutIncidentManualBusinessServiceAssociationRequestHeader(accept=accept),
+            body=_models.PutIncidentManualBusinessServiceAssociationRequestBody(relation=relation)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_business_service_impact: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/business_services/{business_service_id}/impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/business_services/{business_service_id}/impacts"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_business_service_impact")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_business_service_impact", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_business_service_impact",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_business_services_impacted_by_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve impacted business services."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
+) -> dict[str, Any]:
+    """Retrieve all Business Services currently being impacted by a specific incident. Use this to understand the scope of service degradation caused by an incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentImpactedBusinessServicesRequest(
+            path=_models.GetIncidentImpactedBusinessServicesRequestPath(id_=id_),
+            header=_models.GetIncidentImpactedBusinessServicesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_business_services_impacted_by_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/business_services/impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/business_services/impacts"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_business_services_impacted_by_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_business_services_impacted_by_incident", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_business_services_impacted_by_incident",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def get_incident_custom_field_values(id_: str = Field(..., alias="id", description="The unique identifier of the incident whose custom field values you want to retrieve.")) -> dict[str, Any]:
+    """Retrieve all custom field values associated with a specific incident. Returns the current values for any custom fields configured for that incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentFieldValuesRequest(
+            path=_models.GetIncidentFieldValuesRequestPath(id_=id_)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_custom_field_values: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/custom_fields/values", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/custom_fields/values"
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_custom_field_values")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_custom_field_values", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_custom_field_values",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident_custom_field_values(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
+    custom_fields: list[_models.CustomFieldsEditableFieldValue] = Field(..., description="An array of custom field assignments to set for the incident. Each item in the array should specify the field and its value."),
+) -> dict[str, Any]:
+    """Update custom field values for a specific incident. Allows setting or modifying one or more custom field values associated with the incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.SetIncidentFieldValuesRequest(
+            path=_models.SetIncidentFieldValuesRequestPath(id_=id_),
+            body=_models.SetIncidentFieldValuesRequestBody(custom_fields=custom_fields)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_custom_field_values: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/custom_fields/values", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/custom_fields/values"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_custom_field_values")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_custom_field_values", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_custom_field_values",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_incident_log_entries(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve log entries."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    time_zone: str | None = Field(None, description="Time zone for rendering timestamps in results. Defaults to your account's configured time zone. Specify as a valid IANA time zone identifier (e.g., America/New_York)."),
+    since: str | None = Field(None, description="Filter log entries to those on or after this date and time. Specify in ISO 8601 format."),
+    until: str | None = Field(None, description="Filter log entries to those on or before this date and time. Specify in ISO 8601 format."),
+    is_overview: bool | None = Field(None, description="When true, returns only the most significant log entries highlighting major incident changes. When false (default), returns all log entries."),
+    include: Annotated[Literal["incidents", "services", "channels", "teams"], AfterValidator(_check_unique_items)] | None = Field(None, description="Comma-separated list of related resources to include in the response. Valid options are incidents, services, channels, and teams. Omit to return only log entry data."),
+) -> dict[str, Any]:
+    """Retrieve a chronological list of log entries documenting all events and changes for a specific incident. Optionally filter by date range and retrieve only critical updates."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentLogEntriesRequest(
+            path=_models.ListIncidentLogEntriesRequestPath(id_=id_),
+            query=_models.ListIncidentLogEntriesRequestQuery(time_zone=time_zone, since=since, until=until, is_overview=is_overview, include=include),
+            header=_models.ListIncidentLogEntriesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_log_entries: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/log_entries", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/log_entries"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_log_entries")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_log_entries", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_log_entries",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def merge_incidents(
+    id_: str = Field(..., alias="id", description="The unique identifier of the target incident that will receive the merged incidents and their alerts."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of the authenticated user making the request. Must be a valid user associated with the account."),
+    source_incidents: list[_models.IncidentReference] = Field(..., description="Array of incident IDs to merge into the target incident. Only incidents with alerts or manually created incidents are eligible. Open incidents cannot be merged into resolved incidents."),
+) -> dict[str, Any]:
+    """Merge multiple source incidents into a target incident, consolidating their alerts and resolving the source incidents. The target incident will inherit all alerts from source incidents, with a maximum combined alert limit of 1000."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.MergeIncidentsRequest(
+            path=_models.MergeIncidentsRequestPath(id_=id_),
+            header=_models.MergeIncidentsRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.MergeIncidentsRequestBody(source_incidents=source_incidents)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for merge_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/merge", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/merge"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("merge_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("merge_incidents", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="merge_incidents",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_incident_notes(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve notes."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all notes associated with a specific incident. Notes provide additional context and updates about the incident's status and resolution efforts."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentNotesRequest(
+            path=_models.ListIncidentNotesRequestPath(id_=id_),
+            header=_models.ListIncidentNotesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_notes: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/notes", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/notes"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_notes")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_notes", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_notes",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def add_note_to_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to which the note will be added."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type, must be JSON."),
+    from_: str = Field(..., alias="From", description="Email address of the user account making this request. Must be a valid, active user associated with your PagerDuty account."),
+    content: str = Field(..., description="The text content of the note. Can be up to 2000 characters to document incident details, actions taken, or resolution information."),
+) -> dict[str, Any]:
+    """Add a new note to an incident to document updates, context, or resolution steps. Each incident supports up to 2000 notes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentNoteRequest(
+            path=_models.CreateIncidentNoteRequestPath(id_=id_),
+            header=_models.CreateIncidentNoteRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateIncidentNoteRequestBody(note=_models.CreateIncidentNoteRequestBodyNote(content=content))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_note_to_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/notes", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/notes"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_note_to_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_note_to_incident", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_note_to_incident",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def update_incident_note(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the note to update."),
+    note_id: str = Field(..., description="The unique identifier of the note to update."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="The email address of a valid user account associated with your PagerDuty instance. This identifies who is making the request."),
+    content: str = Field(..., description="The updated text content for the note."),
+) -> dict[str, Any]:
+    """Update the content of an existing note attached to an incident. This allows you to modify note text after it has been created."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentNoteRequest(
+            path=_models.UpdateIncidentNoteRequestPath(id_=id_, note_id=note_id),
+            header=_models.UpdateIncidentNoteRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateIncidentNoteRequestBody(note=_models.UpdateIncidentNoteRequestBodyNote(content=content))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_note: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/notes/{note_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/notes/{note_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_note")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_note", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_note",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def delete_incident_note(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident containing the note to delete."),
+    note_id: str = Field(..., description="The unique identifier of the note to delete."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Permanently delete a note attached to an incident. This action cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIncidentNoteRequest(
+            path=_models.DeleteIncidentNoteRequestPath(id_=id_, note_id=note_id),
+            header=_models.DeleteIncidentNoteRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_incident_note: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/notes/{note_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/notes/{note_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_incident_note")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_incident_note", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_incident_note",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def get_outlier_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident resource to retrieve outlier information for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    since: str | None = Field(None, description="The start of the date range for analyzing incident patterns. Specify as an ISO 8601 formatted date-time string."),
+    additional_details: Annotated[Literal["incident"], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of additional attributes to include in the response for related incidents. Currently supports 'incident' to include full incident details."),
+) -> dict[str, Any]:
+    """Retrieves outlier incident information for a specific incident on its associated service. Outlier incidents are identified based on statistical deviation from normal incident patterns."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOutlierIncidentRequest(
+            path=_models.GetOutlierIncidentRequestPath(id_=id_),
+            query=_models.GetOutlierIncidentRequestQuery(since=since, additional_details=additional_details),
+            header=_models.GetOutlierIncidentRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_outlier_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/outlier_incident", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/outlier_incident"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_outlier_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_outlier_incident", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_outlier_incident",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_past_incidents(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related past incidents."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve incidents from the past 6 months that share similar metadata and were generated on the same service as a specified incident. Returns up to 5 past incidents by default. This feature requires the Event Intelligence package or Digital Operations plan."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetPastIncidentsRequest(
+            path=_models.GetPastIncidentsRequestPath(id_=id_),
+            header=_models.GetPastIncidentsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_past_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/past_incidents", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/past_incidents"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_past_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_past_incidents", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_past_incidents",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def list_incident_related_change_events(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related change events."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and structure. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve change events correlated with a specific incident, including the correlation reasons (time proximity, related service, or machine learning intelligence). This helps incident responders understand what service changes may have triggered or contributed to the incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentRelatedChangeEventsRequest(
+            path=_models.ListIncidentRelatedChangeEventsRequestPath(id_=id_),
+            header=_models.ListIncidentRelatedChangeEventsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_related_change_events: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/related_change_events", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/related_change_events"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_related_change_events")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_related_change_events", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_related_change_events",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def get_related_incidents(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve related incidents."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+    additional_details: Annotated[Literal["incident"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional details about returned incidents. Currently supports the 'incident' attribute to expand incident information."),
+) -> dict[str, Any]:
+    """Retrieve the 20 most recent incidents that are impacting other responders and services in relation to a specific incident. This feature requires the Event Intelligence package or Digital Operations plan."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetRelatedIncidentsRequest(
+            path=_models.GetRelatedIncidentsRequestPath(id_=id_),
+            query=_models.GetRelatedIncidentsRequestQuery(additional_details=additional_details),
+            header=_models.GetRelatedIncidentsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_related_incidents: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/related_incidents", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/related_incidents"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_related_incidents")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_related_incidents", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_related_incidents",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def send_responder_request_for_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to request responders for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    requester_id: str = Field(..., description="The user ID of the person making the responder request."),
+    message: str = Field(..., description="A message to include with the responder request explaining the need for additional responders."),
+    responder_request_targets: Any = Field(..., description="An array of responder targets (users or escalation policies) to notify. Each target will receive high urgency notifications until they respond to the request."),
+) -> dict[str, Any]:
+    """Request additional responders for an incident by notifying a user or escalation policy. The responder targets will be notified via high urgency notification rules until they accept or decline the request. Requires the account to have the `coordinated_responding` ability."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentResponderRequest(
+            path=_models.CreateIncidentResponderRequestPath(id_=id_),
+            header=_models.CreateIncidentResponderRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateIncidentResponderRequestBody(requester_id=requester_id, message=message, responder_request_targets=responder_request_targets)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for send_responder_request_for_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/responder_requests", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/responder_requests"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("send_responder_request_for_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_responder_request_for_incident", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="send_responder_request_for_incident",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def cancel_incident_responder_requests(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which responder requests should be cancelled."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    requester_id: str = Field(..., description="The user ID of the person making the cancellation request. This user must have permission to modify the incident."),
+    responder_request_targets: list[_models.CancelIncidentResponderRequestBodyResponderRequestTargetsItem] = Field(..., description="Array of responder targets to cancel. Each target can be a user or escalation policy. Only targets in pending state will be cancelled; those already joined or declined are unaffected."),
+) -> dict[str, Any]:
+    """Cancel pending responder requests for an incident. Stops notifications and updates state to cancelled for responders who have not yet joined or declined. Requires the coordinated_responding account ability."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CancelIncidentResponderRequest(
+            path=_models.CancelIncidentResponderRequestPath(id_=id_),
+            header=_models.CancelIncidentResponderRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CancelIncidentResponderRequestBody(requester_id=requester_id, responder_request_targets=responder_request_targets)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for cancel_incident_responder_requests: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/responder_requests/cancel", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/responder_requests/cancel"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("cancel_incident_responder_requests")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("cancel_incident_responder_requests", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="cancel_incident_responder_requests",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def snooze_incident(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to snooze."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of the authenticated user making this request. Must be a valid user associated with your PagerDuty account."),
+    duration: int = Field(..., description="Duration to snooze the incident in seconds. Must be between 1 second and 7 days (604800 seconds).", ge=1, le=604800),
+) -> dict[str, Any]:
+    """Temporarily snooze an incident to suppress notifications and defer its resolution. The incident will automatically return to triggered state after the specified duration expires."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentSnoozeRequest(
+            path=_models.CreateIncidentSnoozeRequestPath(id_=id_),
+            header=_models.CreateIncidentSnoozeRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateIncidentSnoozeRequestBody(duration=duration)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for snooze_incident: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/snooze", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/snooze"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("snooze_incident")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("snooze_incident", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="snooze_incident",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def create_incident_status_update(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to update."),
+    accept: str = Field(..., alias="Accept", description="API version header to specify the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON."),
+    from_: str = Field(..., alias="From", description="The email address of an active user account associated with your organization. This user is credited as the author of the status update."),
+    message: str = Field(..., description="The status update message to post. This text will be visible in the incident timeline."),
+    subject: str | None = Field(None, description="The subject line for the email notification sent to stakeholders. Only used if html_message is also provided for a custom email."),
+    html_message: str | None = Field(None, description="The HTML content for the email notification sent to stakeholders. Only used if subject is also provided for a custom email."),
+) -> dict[str, Any]:
+    """Post a status update to an incident to communicate progress or changes. Optionally customize the email notification sent to stakeholders by providing a custom subject and HTML message."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentStatusUpdateRequest(
+            path=_models.CreateIncidentStatusUpdateRequestPath(id_=id_),
+            header=_models.CreateIncidentStatusUpdateRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateIncidentStatusUpdateRequestBody(message=message, subject=subject, html_message=html_message)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident_status_update: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/status_updates", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/status_updates"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident_status_update")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident_status_update", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident_status_update",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def list_incident_notification_subscribers(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident for which to retrieve notification subscribers."),
+    accept: str = Field(..., alias="Accept", description="The API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Retrieve the list of users subscribed to receive status update notifications for a specific incident. Only users explicitly added via the subscribe endpoint will be returned."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentNotificationSubscribersRequest(
+            path=_models.GetIncidentNotificationSubscribersRequestPath(id_=id_),
+            header=_models.GetIncidentNotificationSubscribersRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_notification_subscribers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/status_updates/subscribers", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/status_updates/subscribers"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_notification_subscribers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_notification_subscribers", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_notification_subscribers",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def add_incident_status_update_subscribers(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident to subscribe entities to for status update notifications."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON v2 format."),
+    subscribers: Annotated[list[_models.NotificationSubscriber], AfterValidator(_check_unique_items)] = Field(..., description="Array of subscriber entities to add to the incident's notification list. Must contain at least one subscriber. Each subscriber should specify the entity type (user, team, or schedule) and its ID.", min_length=1),
+) -> dict[str, Any]:
+    """Subscribe entities (users, teams, or schedules) to receive notifications when an incident's status is updated. This allows stakeholders to stay informed of incident progress."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentNotificationSubscribersRequest(
+            path=_models.CreateIncidentNotificationSubscribersRequestPath(id_=id_),
+            header=_models.CreateIncidentNotificationSubscribersRequestHeader(accept=accept),
+            body=_models.CreateIncidentNotificationSubscribersRequestBody(subscribers=subscribers)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_incident_status_update_subscribers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/status_updates/subscribers", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/status_updates/subscribers"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_incident_status_update_subscribers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_incident_status_update_subscribers", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_incident_status_update_subscribers",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incidents
+@mcp.tool()
+async def remove_incident_notification_subscribers(
+    id_: str = Field(..., alias="id", description="The unique identifier of the incident from which to remove subscribers."),
+    accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
+    subscribers: Annotated[list[_models.NotificationSubscriber], AfterValidator(_check_unique_items)] = Field(..., description="An array of subscriber identifiers to unsubscribe from incident notifications. Must contain at least one subscriber.", min_length=1),
+) -> dict[str, Any]:
+    """Unsubscribes one or more subscribers from receiving status update notifications for a specific incident."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.RemoveIncidentNotificationSubscribersRequest(
+            path=_models.RemoveIncidentNotificationSubscribersRequestPath(id_=id_),
+            header=_models.RemoveIncidentNotificationSubscribersRequestHeader(accept=accept),
+            body=_models.RemoveIncidentNotificationSubscribersRequestBody(subscribers=subscribers)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_incident_notification_subscribers: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/{id}/status_updates/unsubscribe", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/{id}/status_updates/unsubscribe"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_incident_notification_subscribers")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_incident_notification_subscribers", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_incident_notification_subscribers",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def list_incident_types(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON media type with version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+    filter_: Literal["enabled", "disabled", "all"] | None = Field(None, alias="filter", description="Filter results by the enabled state of incident types. Use 'enabled' to show only active types, 'disabled' to show only inactive types, or 'all' to show both. Defaults to 'enabled'."),
+) -> dict[str, Any]:
+    """Retrieve the list of available incident types that can be used to categorize incidents (such as security, major, or fraud incidents). Results can be filtered by enabled or disabled status."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentTypesRequest(
+            query=_models.ListIncidentTypesRequestQuery(filter_=filter_),
+            header=_models.ListIncidentTypesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_types: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incidents/types"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_types")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_types", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_types",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def create_incident_type(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON."),
+    name: str = Field(..., description="The incident type identifier (up to 50 characters). Cannot be changed after creation and cannot end with `_default`.", max_length=50),
+    display_name: str = Field(..., description="The human-readable display name (up to 50 characters). Cannot start with `PD`, `PagerDuty`, or `Default`.", max_length=50),
+    parent_type: str = Field(..., description="The parent incident type that this type inherits from. Specify either the parent type's name or ID."),
+    enabled: bool | None = Field(None, description="Whether this incident type is active and available for use. Defaults to true if not specified."),
+    description: str | None = Field(None, description="Optional description of the incident type's purpose and usage (up to 1000 characters).", max_length=1000),
+) -> dict[str, Any]:
+    """Create a new incident type to categorize incidents (e.g., security, major, fraud). Incident types help organize and manage different incident categories within your organization."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentTypeRequest(
+            header=_models.CreateIncidentTypeRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateIncidentTypeRequestBody(incident_type=_models.CreateIncidentTypeRequestBodyIncidentType(name=name, display_name=display_name, parent_type=parent_type, enabled=enabled, description=description))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident_type: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/incidents/types"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident_type")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident_type", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident_type",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def get_incident_type(
+    type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a single incident type by its ID or name. Incident types categorize incidents (e.g., security, major, fraud) for organizational purposes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentTypeRequest(
+            path=_models.GetIncidentTypeRequestPath(type_id_or_name=type_id_or_name),
+            header=_models.GetIncidentTypeRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_type: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_type")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_type", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_type",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def update_incident_type(
+    type_id_or_name: str = Field(..., description="The unique identifier or name of the Incident Type to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    display_name: str | None = Field(None, description="The display name for the Incident Type. Maximum 50 characters.", max_length=50),
+    enabled: bool | None = Field(None, description="Whether the Incident Type is active and available for use. Defaults to true if not specified."),
+    description: str | None = Field(None, description="A detailed description of the Incident Type's purpose or usage. Maximum 1000 characters.", max_length=1000),
+) -> dict[str, Any]:
+    """Update an existing Incident Type to modify its display name, description, or enabled status. Incident Types allow customers to categorize incidents such as security, major, or fraud incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentTypeRequest(
+            path=_models.UpdateIncidentTypeRequestPath(type_id_or_name=type_id_or_name),
+            header=_models.UpdateIncidentTypeRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateIncidentTypeRequestBody(incident_type=_models.UpdateIncidentTypeRequestBodyIncidentType(display_name=display_name, enabled=enabled, description=description) if any(v is not None for v in [display_name, enabled, description]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_type: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_type")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_type", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_type",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def list_incident_type_custom_fields(
+    type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type whose custom fields you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 (application/vnd.pagerduty+json;version=2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be set to application/json."),
+    include: Annotated[Literal["field_options"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional details about custom fields. Specify 'field_options' to retrieve the available options for fields that support predefined choices."),
+) -> dict[str, Any]:
+    """Retrieve all custom fields configured for a specific incident type. Custom fields extend incidents with additional context and enable customized filtering, search, and analytics capabilities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentTypeCustomFieldsRequest(
+            path=_models.ListIncidentTypeCustomFieldsRequestPath(type_id_or_name=type_id_or_name),
+            query=_models.ListIncidentTypeCustomFieldsRequestQuery(include=include),
+            header=_models.ListIncidentTypeCustomFieldsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_type_custom_fields: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_type_custom_fields")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_type_custom_fields", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_type_custom_fields",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def create_incident_type_custom_field(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field will be added."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    name: str = Field(..., description="The internal name of the custom field. Limited to 50 characters.", max_length=50),
+    display_name: str = Field(..., description="The user-facing display name for the custom field. Limited to 50 characters.", max_length=50),
+    data_type: str = Field(..., description="The data type that the custom field will store (e.g., string, integer, boolean)."),
+    field_type: Literal["single_value", "single_value_fixed", "multi_value", "multi_value_fixed"] = Field(..., description="The field interaction type. Use 'single_value' or 'multi_value' for open-ended fields, or 'single_value_fixed' or 'multi_value_fixed' for predefined options."),
+    description: str | None = Field(None, description="Optional description of the custom field's purpose and usage. Limited to 1000 characters.", max_length=1000),
+    enabled: bool | None = Field(None, description="Whether the custom field is active and available for use on incidents."),
+    default_value: str | None = Field(None, description="The initial value assigned to this custom field when creating new incidents."),
+    field_options: list[_models.CustomFieldsFieldOption] | None = Field(None, description="Predefined options for fixed-value fields. Required when field_type is 'single_value_fixed' or 'multi_value_fixed'. Must include at least one option."),
+) -> dict[str, Any]:
+    """Create a custom field for a specific incident type to extend incidents with additional context. Custom fields support customized filtering, search, and analytics across incident data."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentTypeCustomFieldRequest(
+            path=_models.CreateIncidentTypeCustomFieldRequestPath(type_id_or_name=type_id_or_name),
+            header=_models.CreateIncidentTypeCustomFieldRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateIncidentTypeCustomFieldRequestBody(field=_models.CreateIncidentTypeCustomFieldRequestBodyField(name=name, display_name=display_name, data_type=data_type, field_type=field_type, description=description, enabled=enabled, default_value=default_value, field_options=field_options))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident_type_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident_type_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident_type_custom_field", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident_type_custom_field",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def get_incident_type_custom_field(
+    type_id_or_name: str = Field(..., description="The unique identifier or display name of the incident type to which the custom field belongs."),
+    field_id: str = Field(..., description="The unique identifier of the custom field to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+    include: Annotated[Literal["field_options"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related data to include in the response. Specify 'field_options' to include the available options for this custom field."),
+) -> dict[str, Any]:
+    """Retrieve a specific custom field associated with an incident type. Custom fields extend incidents with additional context and enable customized filtering, search, and analytics capabilities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentTypeCustomFieldRequest(
+            path=_models.GetIncidentTypeCustomFieldRequestPath(type_id_or_name=type_id_or_name, field_id=field_id),
+            query=_models.GetIncidentTypeCustomFieldRequestQuery(include=include),
+            header=_models.GetIncidentTypeCustomFieldRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_type_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_type_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_type_custom_field", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_type_custom_field",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def update_incident_type_custom_field(
+    type_id_or_name: str = Field(..., description="The ID or name of the incident type to which the custom field belongs."),
+    field_id: str = Field(..., description="The ID of the custom field to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    display_name: str | None = Field(None, description="The display name of the custom field, up to 50 characters.", max_length=50),
+    enabled: bool | None = Field(None, description="Whether the custom field is active and available for use on incidents."),
+    default_value: str | None = Field(None, description="The default value assigned to this custom field when creating new incidents."),
+    description: str | None = Field(None, description="A description of the custom field's purpose and usage, up to 1000 characters.", max_length=1000),
+    field_options: list[_models.CustomFieldsFieldOption] | None = Field(None, description="List of field options to add or update. Only applicable to fixed-value fields (single or multi-select). Include an `id` property to update an existing option, or omit it to add a new option. Options not included in this list will be deleted unless they are referenced by the current default value."),
+) -> dict[str, Any]:
+    """Update a custom field definition for an incident type, including its display properties and field options. Custom fields extend incidents with additional context to support filtering, search, and analytics."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentTypeCustomFieldRequest(
+            path=_models.UpdateIncidentTypeCustomFieldRequestPath(type_id_or_name=type_id_or_name, field_id=field_id),
+            header=_models.UpdateIncidentTypeCustomFieldRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateIncidentTypeCustomFieldRequestBody(field=_models.UpdateIncidentTypeCustomFieldRequestBodyField(display_name=display_name, enabled=enabled, default_value=default_value, description=description, field_options=field_options) if any(v is not None for v in [display_name, enabled, default_value, description, field_options]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_type_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_type_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_type_custom_field", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_type_custom_field",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def delete_incident_type_custom_field(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is attached."),
+    field_id: str = Field(..., description="The unique identifier of the custom field to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be JSON format."),
+) -> dict[str, Any]:
+    """Remove a custom field from an incident type. Custom fields extend incidents with additional context and enable customized filtering, search, and analytics capabilities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIncidentTypeCustomFieldRequest(
+            path=_models.DeleteIncidentTypeCustomFieldRequestPath(type_id_or_name=type_id_or_name, field_id=field_id),
+            header=_models.DeleteIncidentTypeCustomFieldRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_incident_type_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_incident_type_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_incident_type_custom_field", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_incident_type_custom_field",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def list_incident_type_custom_field_options(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is attached."),
+    field_id: str = Field(..., description="The unique identifier of the custom field whose options you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all available field options for a custom field attached to a specific incident type. Custom fields extend incidents with additional context and enable customized filtering, search, and analytics capabilities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListIncidentTypeCustomFieldRequest(
+            path=_models.ListIncidentTypeCustomFieldRequestPath(type_id_or_name=type_id_or_name, field_id=field_id),
+            header=_models.ListIncidentTypeCustomFieldRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_type_custom_field_options: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_type_custom_field_options")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_type_custom_field_options", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_type_custom_field_options",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def create_incident_type_custom_field_option(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs."),
+    field_id: str = Field(..., description="The unique identifier of the custom field within the incident type."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 for current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    data_type: str = Field(..., description="The data type classification for this field option (e.g., string, number, boolean)."),
+    value: str = Field(..., description="The actual value of the field option that will be available for selection when creating or updating incidents."),
+) -> dict[str, Any]:
+    """Create a field option for a custom field on a specific incident type. Field options define the available choices for custom fields, enabling structured data collection and filtering across incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateIncidentTypeCustomFieldFieldOptionsRequest(
+            path=_models.CreateIncidentTypeCustomFieldFieldOptionsRequestPath(type_id_or_name=type_id_or_name, field_id=field_id),
+            header=_models.CreateIncidentTypeCustomFieldFieldOptionsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateIncidentTypeCustomFieldFieldOptionsRequestBody(field_option=_models.CreateIncidentTypeCustomFieldFieldOptionsRequestBodyFieldOption(
+                    data=_models.CreateIncidentTypeCustomFieldFieldOptionsRequestBodyFieldOptionData(data_type=data_type, value=value)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_incident_type_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_incident_type_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_incident_type_custom_field_option", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_incident_type_custom_field_option",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def get_incident_type_custom_field_option(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field is applied."),
+    field_option_id: str = Field(..., description="The unique identifier of the field option to retrieve."),
+    field_id: str = Field(..., description="The unique identifier of the custom field containing the field option."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body and response. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve a specific field option from a custom field associated with an incident type. Field options define the available choices for custom fields applied to incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetIncidentTypeCustomFieldFieldOptionsRequest(
+            path=_models.GetIncidentTypeCustomFieldFieldOptionsRequestPath(type_id_or_name=type_id_or_name, field_option_id=field_option_id, field_id=field_id),
+            header=_models.GetIncidentTypeCustomFieldFieldOptionsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_incident_type_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_incident_type_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_incident_type_custom_field_option", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_incident_type_custom_field_option",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def update_incident_type_custom_field_option(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs."),
+    field_option_id: str = Field(..., description="The unique identifier of the field option to update."),
+    field_id: str = Field(..., description="The unique identifier of the custom field containing the field option."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    data_type: str = Field(..., description="The data type classification for this field option (e.g., string, number, boolean)."),
+    value: str = Field(..., description="The display value or label for this field option that users will see when selecting it."),
+) -> dict[str, Any]:
+    """Update a specific field option within a custom field attached to an incident type. Field options define the available choices for custom fields, allowing you to modify their values and data types."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateIncidentTypeCustomFieldFieldOptionRequest(
+            path=_models.UpdateIncidentTypeCustomFieldFieldOptionRequestPath(type_id_or_name=type_id_or_name, field_option_id=field_option_id, field_id=field_id),
+            header=_models.UpdateIncidentTypeCustomFieldFieldOptionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateIncidentTypeCustomFieldFieldOptionRequestBody(field_option=_models.UpdateIncidentTypeCustomFieldFieldOptionRequestBodyFieldOption(
+                    data=_models.UpdateIncidentTypeCustomFieldFieldOptionRequestBodyFieldOptionData(data_type=data_type, value=value)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_incident_type_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_incident_type_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_incident_type_custom_field_option", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_incident_type_custom_field_option",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Incident Types
+@mcp.tool()
+async def delete_incident_type_custom_field_option(
+    type_id_or_name: str = Field(..., description="The incident type identifier or name to which the custom field belongs. Can be either the unique ID or the human-readable name of the incident type."),
+    field_option_id: str = Field(..., description="The unique identifier of the field option to delete. This is the specific choice or value being removed from the custom field."),
+    field_id: str = Field(..., description="The unique identifier of the custom field that contains the field option being deleted."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. Only application/json is supported."),
+) -> dict[str, Any]:
+    """Remove a specific field option from a custom field associated with an incident type. This allows you to delete predefined choices or values that were previously available for selection in that custom field."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteIncidentTypeCustomFieldFieldOptionRequest(
+            path=_models.DeleteIncidentTypeCustomFieldFieldOptionRequestPath(type_id_or_name=type_id_or_name, field_option_id=field_option_id, field_id=field_id),
+            header=_models.DeleteIncidentTypeCustomFieldFieldOptionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_incident_type_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/incidents/types/{type_id_or_name}/custom_fields/{field_id}/field_options/{field_option_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_incident_type_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_incident_type_custom_field_option", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_incident_type_custom_field_option",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Licenses
+@mcp.tool()
+async def list_license_allocations(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON. This is the only supported content type for this operation."),
+) -> dict[str, Any]:
+    """Retrieve all licenses allocated to users within your PagerDuty account. This operation returns a list of license assignments showing which users have been granted specific license types."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListLicenseAllocationsRequest(
+            header=_models.ListLicenseAllocationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_license_allocations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/license_allocations"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_license_allocations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_license_allocations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_license_allocations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Licenses
+@mcp.tool()
+async def list_licenses(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all licenses associated with your PagerDuty account. Returns a collection of license objects with their current status and details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListLicensesRequest(
+            header=_models.ListLicensesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_licenses: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/licenses"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_licenses")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_licenses", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_licenses",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Log Entries
+@mcp.tool()
+async def list_incident_log_entries_account(
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2 for this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be application/json."),
+    time_zone: str | None = Field(None, description="Time zone for rendering timestamps in results. Defaults to your account's configured time zone. Specify as a valid IANA time zone identifier."),
+    since: str | None = Field(None, description="Start of the date range to search, specified in ISO 8601 date-time format. Only log entries on or after this time will be included."),
+    until: str | None = Field(None, description="End of the date range to search, specified in ISO 8601 date-time format. Only log entries on or before this time will be included."),
+    is_overview: bool | None = Field(None, description="When true, returns only the most important log entries that represent significant changes to incidents. Defaults to false, which returns all entries."),
+    include: Annotated[Literal["incidents", "services", "channels", "teams"], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of related resource types to include in the response. Valid options are incidents, services, channels, and teams. Helps provide context for log entries."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of team IDs to filter results. Only log entries related to the specified teams will be returned. Requires your account to have the teams ability enabled."),
+) -> dict[str, Any]:
+    """Retrieve all incident log entries across your account, showing events and changes that occur to incidents. Optionally filter by date range, teams, and incident details to find specific activity."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListLogEntriesRequest(
+            query=_models.ListLogEntriesRequestQuery(time_zone=time_zone, since=since, until=until, is_overview=is_overview, include=include, team_ids=team_ids),
+            header=_models.ListLogEntriesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_incident_log_entries_account: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/log_entries"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_incident_log_entries_account")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_incident_log_entries_account", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_incident_log_entries_account",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Log Entries
+@mcp.tool()
+async def get_log_entry(
+    id_: str = Field(..., alias="id", description="The unique identifier of the log entry to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    time_zone: str | None = Field(None, description="Time zone for rendering timestamps in the response, specified in IANA tzinfo format (e.g., America/New_York). Defaults to the account's configured time zone if not provided."),
+    include: Annotated[Literal["incidents", "services", "channels", "teams"], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of related resource types to include in the response. Valid options are incidents, services, channels, and teams. Omit this parameter to return only the log entry itself."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific incident log entry, including raw event data and related resources. Log entries represent all events that occur during an incident's lifecycle."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetLogEntryRequest(
+            path=_models.GetLogEntryRequestPath(id_=id_),
+            query=_models.GetLogEntryRequestQuery(time_zone=time_zone, include=include),
+            header=_models.GetLogEntryRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_log_entry: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/log_entries/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/log_entries/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_log_entry")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_log_entry", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_log_entry",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Log Entries
+@mcp.tool()
+async def update_log_entry_channel(
+    id_: str = Field(..., alias="id", description="The unique identifier of the log entry resource to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of a valid user account associated with your PagerDuty instance. Required to authenticate the request."),
+    details: str = Field(..., description="The updated channel details. Provide the new information for the channel being modified."),
+    type_: Literal["web_trigger", "mobile"] = Field(..., alias="type", description="The channel type (web_trigger or mobile). This value cannot be changed and must match the existing channel type on the log entry."),
+) -> dict[str, Any]:
+    """Update the channel information for an existing incident log entry. Modify channel details while preserving the channel type, which cannot be changed."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateLogEntryChannelRequest(
+            path=_models.UpdateLogEntryChannelRequestPath(id_=id_),
+            header=_models.UpdateLogEntryChannelRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.UpdateLogEntryChannelRequestBody(channel=_models.UpdateLogEntryChannelRequestBodyChannel(details=details, type_=type_))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_log_entry_channel: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/log_entries/{id}/channel", _request.path.model_dump(by_alias=True)) if _request.path else "/log_entries/{id}/channel"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_log_entry_channel")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_log_entry_channel", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_log_entry_channel",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Maintenance Windows
+@mcp.tool()
+async def list_maintenance_windows(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to maintenance windows associated with specific teams. Requires account to have the teams ability. Provide as an array of team identifiers."),
+    service_ids: list[str] | None = Field(None, description="Filter results to maintenance windows associated with specific services. Provide as an array of service identifiers."),
+    include: Annotated[Literal["teams", "services", "users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related data in the response. Choose from teams, services, or users to expand the response with full object details."),
+    filter_: Literal["past", "future", "ongoing", "open", "all"] | None = Field(None, alias="filter", description="Filter maintenance windows by temporal state: past (completed), future (scheduled), ongoing (currently active), open (not yet started or currently active), or all (no filtering)."),
+) -> dict[str, Any]:
+    """Retrieve maintenance windows with optional filtering by service, team, or temporal state (past, present, future). Maintenance windows temporarily disable services during scheduled maintenance periods."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListMaintenanceWindowsRequest(
+            query=_models.ListMaintenanceWindowsRequestQuery(team_ids=team_ids, service_ids=service_ids, include=include, filter_=filter_),
+            header=_models.ListMaintenanceWindowsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_maintenance_windows: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/maintenance_windows"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_maintenance_windows")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_maintenance_windows", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_maintenance_windows",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Maintenance Windows
+@mcp.tool()
+async def create_maintenance_window(
+    accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty v2 JSON format for request and response serialization."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of a valid user account associated with your PagerDuty account. This user will be recorded as the creator of the maintenance window."),
+    maintenance_window: _models.MaintenanceWindow = Field(..., description="Maintenance window configuration object containing service IDs, start time, and end time. Refer to the API Concepts Document for the required schema and field specifications."),
+) -> dict[str, Any]:
+    """Create a new maintenance window to temporarily disable one or more services for a specified period. Services in maintenance will not generate new incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateMaintenanceWindowRequest(
+            header=_models.CreateMaintenanceWindowRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateMaintenanceWindowRequestBody(maintenance_window=maintenance_window)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_maintenance_window: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/maintenance_windows"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_maintenance_window")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_maintenance_window", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_maintenance_window",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Maintenance Windows
+@mcp.tool()
+async def get_maintenance_window(
+    id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    include: Annotated[Literal["teams", "services", "users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Supported values are teams, services, and users. Specify multiple values to include multiple resource types."),
+) -> dict[str, Any]:
+    """Retrieve a specific maintenance window by ID. A maintenance window temporarily disables one or more services for a scheduled period of time."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetMaintenanceWindowRequest(
+            path=_models.GetMaintenanceWindowRequestPath(id_=id_),
+            query=_models.GetMaintenanceWindowRequestQuery(include=include),
+            header=_models.GetMaintenanceWindowRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_maintenance_window: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/maintenance_windows/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/maintenance_windows/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_maintenance_window")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_maintenance_window", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_maintenance_window",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Maintenance Windows
+@mcp.tool()
+async def update_maintenance_window(
+    id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON."),
+    maintenance_window: _models.MaintenanceWindow = Field(..., description="The maintenance window object containing the fields to update, such as the affected services and the start/end times for the maintenance period."),
+) -> dict[str, Any]:
+    """Update an existing maintenance window to modify the services affected or the time period during which they are temporarily disabled."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateMaintenanceWindowRequest(
+            path=_models.UpdateMaintenanceWindowRequestPath(id_=id_),
+            header=_models.UpdateMaintenanceWindowRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateMaintenanceWindowRequestBody(maintenance_window=maintenance_window)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_maintenance_window: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/maintenance_windows/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/maintenance_windows/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_maintenance_window")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_maintenance_window", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_maintenance_window",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Maintenance Windows
+@mcp.tool()
+async def delete_maintenance_window(
+    id_: str = Field(..., alias="id", description="The unique identifier of the maintenance window to delete or end."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version (defaults to PagerDuty API v2)."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body, must be JSON."),
+) -> dict[str, Any]:
+    """Delete a future maintenance window or end an ongoing one. Maintenance windows that have already ended cannot be deleted."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteMaintenanceWindowRequest(
+            path=_models.DeleteMaintenanceWindowRequestPath(id_=id_),
+            header=_models.DeleteMaintenanceWindowRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_maintenance_window: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/maintenance_windows/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/maintenance_windows/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_maintenance_window")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_maintenance_window", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_maintenance_window",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Notifications
+@mcp.tool()
+async def list_notifications(
+    since: str = Field(..., description="Start of the search date range in ISO 8601 format (date-time). The time component is optional; if omitted, defaults to the start of the day."),
+    until: str = Field(..., description="End of the search date range in ISO 8601 format (date-time), matching the format of the since parameter. The date range span must not exceed 3 months."),
+    accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to application/vnd.pagerduty+json;version=2 to request the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying the request body format. Must be application/json."),
+    time_zone: str | None = Field(None, description="Time zone for rendering results in IANA tzinfo format (e.g., America/New_York). Defaults to the account's configured time zone if not specified."),
+    filter_: Literal["sms_notification", "email_notification", "phone_notification", "push_notification"] | None = Field(None, alias="filter", description="Filter results to a single notification type: sms_notification, email_notification, phone_notification, or push_notification. Omit to return all notification types."),
+    include: Annotated[Literal["users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of additional related resources to include in the response. Currently supports 'users' to include user details associated with notifications."),
+) -> dict[str, Any]:
+    """Retrieve notifications triggered by incidents within a specified time range, with optional filtering by notification type (SMS, email, phone, or push). Results can be rendered in a specific time zone and include related user details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListNotificationsRequest(
+            query=_models.ListNotificationsRequestQuery(time_zone=time_zone, since=since, until=until, filter_=filter_, include=include),
+            header=_models.ListNotificationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_notifications: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/notifications"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_notifications")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_notifications", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_notifications",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: OAuth Delegations
+@mcp.tool()
+async def revoke_user_oauth_delegations(
+    user_id: str = Field(..., description="The unique identifier of the user whose OAuth delegations should be revoked."),
+    type_: Literal["mobile", "web"] = Field(..., alias="type", description="The delegation type(s) to revoke: 'mobile' to sign out of the mobile app, 'web' to sign out of the web app, or both types separated by commas (e.g., 'web,mobile')."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Revoke OAuth delegations for a user by type, effectively signing them out of the specified app(s). This synchronous operation revokes access for mobile app, web app, or both delegation types."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteOauthDelegationsRequest(
+            query=_models.DeleteOauthDelegationsRequestQuery(user_id=user_id, type_=type_),
+            header=_models.DeleteOauthDelegationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for revoke_user_oauth_delegations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/oauth_delegations"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("revoke_user_oauth_delegations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("revoke_user_oauth_delegations", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="revoke_user_oauth_delegations",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: On-Calls
+@mcp.tool()
+async def list_oncalls(
+    accept: str = Field(..., alias="Accept", description="HTTP Accept header for API versioning. Must be set to the PagerDuty API version 2 media type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP Content-Type header specifying the request body format. Must be application/json."),
+    time_zone: str | None = Field(None, description="Time zone for rendering results (e.g., America/New_York, Europe/London). Defaults to the account's configured time zone. Must be a valid IANA time zone identifier."),
+    include: Annotated[Literal["escalation_policies", "users", "schedules"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related resource details in the response. Specify any combination of escalation policies, users, or schedules to expand the response with full resource objects."),
+    user_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to show on-calls only for the specified user IDs. Provide as a comma-separated list or array of user identifiers."),
+    escalation_policy_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to show on-calls only for the specified escalation policy IDs. Provide as a comma-separated list or array of escalation policy identifiers."),
+    schedule_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to show on-calls only for the specified schedule IDs. Provide as a comma-separated list or array of schedule identifiers. Include `null` in the array to also return permanent on-calls from direct user escalation targets."),
+    since: str | None = Field(None, description="Start of the time range to search (ISO 8601 format). On-call periods overlapping this range are included. Defaults to the current time. On-call shifts are limited to 90 days in the future."),
+    until: str | None = Field(None, description="End of the time range to search (ISO 8601 format). On-call periods overlapping this range are included. Defaults to the current time. Must be at or after the `since` time, and on-call shifts are limited to 90 days in the future."),
+    earliest: bool | None = Field(None, description="When enabled, returns only the earliest on-call for each unique combination of escalation policy, escalation level, and user. Useful for identifying the next upcoming on-calls."),
+) -> dict[str, Any]:
+    """Retrieve all on-call entries within a specified time range. An on-call represents a contiguous period during which a user is assigned to an escalation policy. Results can be filtered by user, escalation policy, or schedule, and optionally enriched with related resource details."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListOnCallsRequest(
+            query=_models.ListOnCallsRequestQuery(time_zone=time_zone, include=include, user_ids=user_ids, escalation_policy_ids=escalation_policy_ids, schedule_ids=schedule_ids, since=since, until=until, earliest=earliest),
+            header=_models.ListOnCallsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_oncalls: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/oncalls"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_oncalls")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_oncalls", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_oncalls",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Paused Incident Reports
+@mcp.tool()
+async def list_paused_incident_report_alerts(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to 'application/vnd.pagerduty+json;version=2' to request the correct response format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be 'application/json'."),
+    since: str | None = Field(None, description="Start of the date range for the report in ISO 8601 date-time format (e.g., 2024-01-15T10:30:00Z). If omitted, defaults to 6 months before the until date."),
+    until: str | None = Field(None, description="End of the date range for the report in ISO 8601 date-time format (e.g., 2024-01-15T10:30:00Z). If omitted, defaults to the current time."),
+    service_id: str | None = Field(None, description="Limit results to alerts for a specific service by providing the service ID (e.g., P123456). Omit to include all services."),
+    suspended_by: Literal["auto_pause", "rules"] | None = Field(None, description="Filter alerts by suspension source: 'auto_pause' for alerts suspended by automatic pause rules, or 'rules' for alerts suspended by event rules. Omit to include both sources."),
+) -> dict[str, Any]:
+    """Retrieve the 5 most recent alerts triggered after being paused and the 5 most recent alerts resolved after being paused within a specified reporting period (up to 6 months lookback). Available only with Event Intelligence package or Digital Operations plan."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetPausedIncidentReportAlertsRequest(
+            query=_models.GetPausedIncidentReportAlertsRequestQuery(since=since, until=until, service_id=service_id, suspended_by=suspended_by),
+            header=_models.GetPausedIncidentReportAlertsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_paused_incident_report_alerts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/paused_incident_reports/alerts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_paused_incident_report_alerts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_paused_incident_report_alerts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_paused_incident_report_alerts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Paused Incident Reports
+@mcp.tool()
+async def list_paused_incident_report_counts(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    since: str | None = Field(None, description="Start of the reporting period as an ISO 8601 datetime. If omitted, defaults to 6 months before the until date."),
+    until: str | None = Field(None, description="End of the reporting period as an ISO 8601 datetime. If omitted, defaults to the current time."),
+    service_id: str | None = Field(None, description="Filter results to a specific service by its ID (e.g., P123456). Omit to include all services."),
+    suspended_by: Literal["auto_pause", "rules"] | None = Field(None, description="Filter results by the source of the pause: auto_pause for automatically paused incidents, or rules for incidents paused by Event Rules."),
+) -> dict[str, Any]:
+    """Retrieve reporting counts for paused incidents over a specified period (up to 6 months lookback). Available only with Event Intelligence package or Digital Operations plan."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetPausedIncidentReportCountsRequest(
+            query=_models.GetPausedIncidentReportCountsRequestQuery(since=since, until=until, service_id=service_id, suspended_by=suspended_by),
+            header=_models.GetPausedIncidentReportCountsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_paused_incident_report_counts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/paused_incident_reports/counts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_paused_incident_report_counts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_paused_incident_report_counts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_paused_incident_report_counts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Priorities
+@mcp.tool()
+async def list_priorities(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all priorities ordered by severity from most to least severe. Priorities are labels that represent the importance and impact of incidents in PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListPrioritiesRequest(
+            header=_models.ListPrioritiesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_priorities: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/priorities"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_priorities")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_priorities", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_priorities",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Rulesets
+@mcp.tool()
+async def delete_ruleset_event_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the ruleset containing the event rule to delete."),
+    rule_id: str = Field(..., description="The unique identifier of the event rule to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be application/json."),
+) -> dict[str, Any]:
+    """Delete an Event Rule from a ruleset. Note: Rulesets and Event Rules are end-of-life; migrate to Event Orchestration for improved functionality and ongoing support."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteRulesetEventRuleRequest(
+            path=_models.DeleteRulesetEventRuleRequestPath(id_=id_, rule_id=rule_id),
+            header=_models.DeleteRulesetEventRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_ruleset_event_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/rulesets/{id}/rules/{rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/rulesets/{id}/rules/{rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_ruleset_event_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_ruleset_event_rule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_ruleset_event_rule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules
+@mcp.tool()
+async def list_schedules_audit_records(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to retrieve audit records."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the PagerDuty API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be `application/json`."),
+    since: str | None = Field(None, description="The start of the date range for the audit search (ISO 8601 format). Defaults to 24 hours before the current time if not specified."),
+    until: str | None = Field(None, description="The end of the date range for the audit search (ISO 8601 format). Defaults to the current time if not specified. Cannot be more than 31 days after the `since` parameter."),
+) -> dict[str, Any]:
+    """Retrieve audit records for a specific schedule, sorted by execution time from newest to oldest. Supports date range filtering and cursor-based pagination."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListSchedulesAuditRecordsRequest(
+            path=_models.ListSchedulesAuditRecordsRequestPath(id_=id_),
+            query=_models.ListSchedulesAuditRecordsRequestQuery(since=since, until=until),
+            header=_models.ListSchedulesAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_schedules_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/schedules/{id}/audit/records", _request.path.model_dump(by_alias=True)) if _request.path else "/schedules/{id}/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_schedules_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_schedules_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_schedules_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules
+@mcp.tool()
+async def list_schedule_users(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to query for on-call users."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the response content type. Must be `application/json`."),
+    since: str | None = Field(None, description="The start of the time range to search, specified as an ISO 8601 date-time. If omitted, defaults to the current time."),
+    until: str | None = Field(None, description="The end of the time range to search, specified as an ISO 8601 date-time. If omitted, defaults to the current time."),
+) -> dict[str, Any]:
+    """Retrieve all users currently on call for a specific schedule within an optional time range. Use this to see who is responsible for on-call duties during a given period."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListScheduleUsersRequest(
+            path=_models.ListScheduleUsersRequestPath(id_=id_),
+            query=_models.ListScheduleUsersRequestQuery(since=since, until=until),
+            header=_models.ListScheduleUsersRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_schedule_users: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/schedules/{id}/users", _request.path.model_dump(by_alias=True)) if _request.path else "/schedules/{id}/users"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_schedule_users")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_schedule_users", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_schedule_users",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules
+@mcp.tool()
+async def preview_schedule(
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be application/json."),
+    schedule: _models.Schedule = Field(..., description="The schedule configuration object to preview, containing rotation rules and user assignments."),
+    since: str | None = Field(None, description="The start of the date range for the preview, specified in ISO 8601 date-time format."),
+    until: str | None = Field(None, description="The end of the date range for the preview, specified in ISO 8601 date-time format."),
+    overflow: bool | None = Field(None, description="When true, schedule entries that span beyond the date range bounds are returned in full; when false (default), entries are truncated at the range boundaries."),
+) -> dict[str, Any]:
+    """Generate a preview of an on-call schedule without persisting it, showing what user coverage would look like across a specified time range."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateSchedulePreviewRequest(
+            query=_models.CreateSchedulePreviewRequestQuery(since=since, until=until, overflow=overflow),
+            header=_models.CreateSchedulePreviewRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateSchedulePreviewRequestBody(schedule=schedule)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for preview_schedule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/schedules/preview"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("preview_schedule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("preview_schedule", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="preview_schedule",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Dependencies
+@mcp.tool()
+async def associate_service_dependencies(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON media type version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
+    relationships: list[_models.CreateServiceDependencyBodyRelationshipsItem] | None = Field(None, description="Array of service dependency objects to create. Each object defines a relationship between two services. Order is preserved as provided."),
+) -> dict[str, Any]:
+    """Create dependencies between two services within a business service model. Each service can have up to 2,000 dependencies with a maximum depth of 100; the API will return an error if either limit is exceeded."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateServiceDependencyRequest(
+            header=_models.CreateServiceDependencyRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateServiceDependencyRequestBody(relationships=relationships)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for associate_service_dependencies: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/service_dependencies/associate"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("associate_service_dependencies")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("associate_service_dependencies", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="associate_service_dependencies",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Dependencies
+@mcp.tool()
+async def get_business_service_dependencies(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Business Service resource."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all immediate dependencies of a Business Service, which may span multiple technical services and teams. Use this to understand what services a Business Service depends on."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetBusinessServiceServiceDependenciesRequest(
+            path=_models.GetBusinessServiceServiceDependenciesRequestPath(id_=id_),
+            header=_models.GetBusinessServiceServiceDependenciesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_business_service_dependencies: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/service_dependencies/business_services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/service_dependencies/business_services/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_business_service_dependencies")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_business_service_dependencies", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_business_service_dependencies",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Dependencies
+@mcp.tool()
+async def remove_service_dependencies(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    relationships: list[_models.DeleteServiceDependencyBodyRelationshipsItem] | None = Field(None, description="Array of service dependency relationships to remove. Each entry specifies a dependency pair to disassociate. Order is not significant."),
+) -> dict[str, Any]:
+    """Remove dependencies between services in a business service model. This operation disassociates technical service relationships that may span multiple teams."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceDependencyRequest(
+            header=_models.DeleteServiceDependencyRequestHeader(accept=accept, content_type=content_type),
+            body=_models.DeleteServiceDependencyRequestBody(relationships=relationships)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_service_dependencies: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/service_dependencies/disassociate"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_service_dependencies")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_service_dependencies", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_service_dependencies",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Dependencies
+@mcp.tool()
+async def get_technical_service_dependencies(
+    id_: str = Field(..., alias="id", description="The unique identifier of the technical service for which to retrieve dependencies."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all immediate dependencies for a specified technical service. This returns the services that the given service directly depends on to function."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTechnicalServiceServiceDependenciesRequest(
+            path=_models.GetTechnicalServiceServiceDependenciesRequestPath(id_=id_),
+            header=_models.GetTechnicalServiceServiceDependenciesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_technical_service_dependencies: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/service_dependencies/technical_services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/service_dependencies/technical_services/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_technical_service_dependencies")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_technical_service_dependencies", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_technical_service_dependencies",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def list_services(
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Required for all requests. Must be set to `application/vnd.pagerduty+json;version=2`."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be `application/json`."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only include services associated with specific teams. Requires the `teams` ability on your account. Provide an array of team IDs."),
+    time_zone: str | None = Field(None, description="Specify the time zone for rendering results in the response. Defaults to your account's configured time zone. Use standard time zone identifiers (tzinfo format)."),
+    sort_by: Literal["name", "name:asc", "name:desc"] | None = Field(None, description="Sort results by the specified field. Defaults to sorting by service name in ascending order. Supports sorting by name in ascending or descending order."),
+    include: Annotated[Literal["escalation_policies", "teams", "integrations", "auto_pause_notifications_parameters"], AfterValidator(_check_unique_items)] | None = Field(None, description="Include additional related data in the response. Specify an array of resource types to expand: escalation policies, teams, integrations, or auto-pause notification parameters."),
+) -> dict[str, Any]:
+    """Retrieve a list of services in your PagerDuty account. Services represent applications, components, or teams that can have incidents opened against them."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServicesRequest(
+            query=_models.ListServicesRequestQuery(team_ids=team_ids, time_zone=time_zone, sort_by=sort_by, include=include),
+            header=_models.ListServicesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_services: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/services"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_services")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_services", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_services",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def create_service(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to 'application/vnd.pagerduty+json;version=2'."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be 'application/json'."),
+    service: _models.Service = Field(..., description="Service object containing the service configuration. Required fields and structure depend on the service definition schema. Note: accounts are limited to 25,000 services; if this limit is reached, the API will return an error. Services are also limited to 100,000 open incidents; if exceeded and auto-resolution is disabled, the auto_resolve_timeout will automatically be set to 1 day (84600 seconds)."),
+) -> dict[str, Any]:
+    """Create a new service to represent an application, component, or team for incident management. If a status is provided, it must be set to 'active'; use a separate update request to change the status later."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateServiceRequest(
+            header=_models.CreateServiceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateServiceRequestBody(service=service)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/services"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_service", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_service",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def get_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["escalation_policies", "teams", "auto_pause_notifications_parameters", "integrations"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Valid options are escalation_policies, teams, auto_pause_notifications_parameters, and integrations. Specify multiple values to include multiple resource types."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a service, which represents an application, component, or team for incident management. Optionally include related resources such as escalation policies, teams, auto-pause settings, or integrations."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetServiceRequest(
+            path=_models.GetServiceRequestPath(id_=id_),
+            query=_models.GetServiceRequestQuery(include=include),
+            header=_models.GetServiceRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def update_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    service: _models.Service = Field(..., description="The service object containing the fields to update. Refer to the service schema for available properties and validation rules."),
+) -> dict[str, Any]:
+    """Update an existing service's configuration. Services represent applications, components, or teams for incident management. Note: Services are limited to 100,000 open incidents; disabling auto_resolve_timeout when at capacity will result in an error."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateServiceRequest(
+            path=_models.UpdateServiceRequestPath(id_=id_),
+            header=_models.UpdateServiceRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateServiceRequestBody(service=service)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def delete_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Permanently delete a service, making it inaccessible in the web UI and preventing new incidents from being created against it. Services represent applications, components, or teams for incident management."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceRequest(
+            path=_models.DeleteServiceRequestPath(id_=id_),
+            header=_models.DeleteServiceRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_service", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_service",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def list_service_audit_records(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve audit records."),
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to `application/vnd.pagerduty+json;version=2` for this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be `application/json`."),
+    since: str | None = Field(None, description="The start of the date range for the search in ISO 8601 format. Defaults to 24 hours before the current time if not specified."),
+    until: str | None = Field(None, description="The end of the date range for the search in ISO 8601 format. Defaults to the current time if not specified. Cannot be more than 31 days after the `since` parameter."),
+) -> dict[str, Any]:
+    """Retrieve audit records for a specific service, sorted by execution time from newest to oldest. Results support cursor-based pagination for efficient browsing of large datasets."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceAuditRecordsRequest(
+            path=_models.ListServiceAuditRecordsRequestPath(id_=id_),
+            query=_models.ListServiceAuditRecordsRequestQuery(since=since, until=until),
+            header=_models.ListServiceAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_service_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/audit/records", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_service_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_service_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_service_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Change Events
+@mcp.tool()
+async def list_service_change_events(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve change events."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    since: str | None = Field(None, description="Filter results to changes occurring on or after this date. Specify as a UTC ISO 8601 datetime string (format: YYYY-MM-DDThh:mm:ssZ). Non-UTC datetimes will return an error.", pattern="YYYY-MM-DDThh:mm:ssZ"),
+    until: str | None = Field(None, description="Filter results to changes occurring on or before this date. Specify as a UTC ISO 8601 datetime string (format: YYYY-MM-DDThh:mm:ssZ). Non-UTC datetimes will return an error.", pattern="YYYY-MM-DDThh:mm:ssZ"),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Restrict results to change events associated with specific teams. Provide an array of team IDs. Requires the account to have the `teams` ability."),
+    integration_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Restrict results to change events associated with specific integrations. Provide an array of integration IDs."),
+) -> dict[str, Any]:
+    """Retrieve all change events for a specific service, with optional filtering by date range, team, or integration. Change events track modifications and updates to the service over time."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceChangeEventsRequest(
+            path=_models.ListServiceChangeEventsRequestPath(id_=id_),
+            query=_models.ListServiceChangeEventsRequestQuery(since=since, until=until, team_ids=team_ids, integration_ids=integration_ids),
+            header=_models.ListServiceChangeEventsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_service_change_events: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/change_events", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/change_events"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_service_change_events")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_service_change_events", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_service_change_events",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def create_service_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service to which the integration will be added."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    integration: _models.Integration = Field(..., description="The integration configuration object containing the details of the integration to be created."),
+) -> dict[str, Any]:
+    """Create a new integration for a service. Integrations allow you to connect external applications, components, or tools to a service for incident management."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateServiceIntegrationRequest(
+            path=_models.CreateServiceIntegrationRequestPath(id_=id_),
+            header=_models.CreateServiceIntegrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateServiceIntegrationRequestBody(integration=integration)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_service_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/integrations", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/integrations"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_service_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_service_integration", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_service_integration",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def get_service_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service resource."),
+    integration_id: str = Field(..., description="The unique identifier of the integration attached to the service."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["services", "vendors"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Specify 'services' to include parent service details or 'vendors' to include vendor information."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific integration configured for a service. Use this to view integration settings, status, and configuration details for a service that represents an application, component, or team."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetServiceIntegrationRequest(
+            path=_models.GetServiceIntegrationRequestPath(id_=id_, integration_id=integration_id),
+            query=_models.GetServiceIntegrationRequestQuery(include=include),
+            header=_models.GetServiceIntegrationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/integrations/{integration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/integrations/{integration_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_integration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_integration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def update_service_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service containing the integration to update."),
+    integration_id: str = Field(..., description="The unique identifier of the integration within the service to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    integration: _models.Integration = Field(..., description="The integration object containing the fields to update. Refer to the API documentation for the complete schema of updatable fields."),
+) -> dict[str, Any]:
+    """Update an existing integration for a service. Services represent applications, components, or teams against which you can open incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateServiceIntegrationRequest(
+            path=_models.UpdateServiceIntegrationRequestPath(id_=id_, integration_id=integration_id),
+            header=_models.UpdateServiceIntegrationRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateServiceIntegrationRequestBody(integration=integration)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/integrations/{integration_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/integrations/{integration_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service_integration", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service_integration",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def list_service_event_rules(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service whose event rules you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["migrated_metadata"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional metadata in the response, such as migrated_metadata to show migration status information."),
+) -> dict[str, Any]:
+    """Retrieve all Event Rules configured for a specific service. Note: Event Rules are deprecated; migrate to Event Orchestration for improved functionality and ongoing support."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceEventRulesRequest(
+            path=_models.ListServiceEventRulesRequestPath(id_=id_),
+            query=_models.ListServiceEventRulesRequestQuery(include=include),
+            header=_models.ListServiceEventRulesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_service_event_rules: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/rules", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/rules"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_service_event_rules")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_service_event_rules", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_service_event_rules",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def delete_service_event_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Service from which the Event Rule will be deleted."),
+    rule_id: str = Field(..., description="The unique identifier of the Event Rule to be deleted."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Remove an Event Rule from a Service. Note: Event Rules are end-of-life; migrate to Event Orchestration for improved functionality and ongoing support."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceEventRuleRequest(
+            path=_models.DeleteServiceEventRuleRequestPath(id_=id_, rule_id=rule_id),
+            header=_models.DeleteServiceEventRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_service_event_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/rules/{rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/rules/{rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_service_event_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_service_event_rule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_service_event_rule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def list_service_custom_fields(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be set to JSON format."),
+    include: Annotated[Literal["field_options"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of additional details to include in the response. Specify 'field_options' to include the available options for each custom field."),
+) -> dict[str, Any]:
+    """Retrieve all custom fields available for Services in PagerDuty. Optionally include additional details such as field options."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceCustomFieldsRequest(
+            query=_models.ListServiceCustomFieldsRequestQuery(include=include),
+            header=_models.ListServiceCustomFieldsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_service_custom_fields: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/services/custom_fields"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_service_custom_fields")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_service_custom_fields", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_service_custom_fields",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def get_service_custom_field(
+    field_id: str = Field(..., description="The unique identifier of the custom field to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API v2 format for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    include: Annotated[Literal["field_options"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related data to include in the response. Specify 'field_options' to include the list of available options for this field."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a custom field for PagerDuty Services, including its configuration and available options."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetServiceCustomFieldRequest(
+            path=_models.GetServiceCustomFieldRequestPath(field_id=field_id),
+            query=_models.GetServiceCustomFieldRequestQuery(include=include),
+            header=_models.GetServiceCustomFieldRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_custom_field", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_custom_field",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def update_service_custom_field(
+    field_id: str = Field(..., description="The unique identifier of the custom field to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    description: str | None = Field(None, description="A description explaining what data this field contains. Limited to 1000 characters.", max_length=1000),
+    display_name: str | None = Field(None, description="The human-readable name displayed for this field. Must be unique within the account and limited to 50 characters.", max_length=50),
+    enabled: Literal[True, False] | None = Field(None, description="Whether this field is active and available for use."),
+    field_options: list[_models.UpdateServiceCustomFieldBodyFieldFieldOptionsItem] | None = Field(None, description="List of field options to manage. An empty array deletes all options; omitting this field preserves existing options; unlisted existing options are deleted unless they are the current default value."),
+) -> dict[str, Any]:
+    """Update a custom field for services, including its display name, description, enabled status, and field options. Changes to field options support selective updates, deletions, or complete replacement."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateServiceCustomFieldRequest(
+            path=_models.UpdateServiceCustomFieldRequestPath(field_id=field_id),
+            header=_models.UpdateServiceCustomFieldRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateServiceCustomFieldRequestBody(field=_models.UpdateServiceCustomFieldRequestBodyField(description=description, display_name=display_name, enabled=enabled, field_options=field_options) if any(v is not None for v in [description, display_name, enabled, field_options]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service_custom_field", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service_custom_field",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def delete_service_custom_field(
+    field_id: str = Field(..., description="The unique identifier of the custom field to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete a custom field from Services. This operation requires write access to custom fields and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceCustomFieldRequest(
+            path=_models.DeleteServiceCustomFieldRequestPath(field_id=field_id),
+            header=_models.DeleteServiceCustomFieldRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_service_custom_field: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_service_custom_field")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_service_custom_field", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_service_custom_field",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def list_custom_field_options(
+    field_id: str = Field(..., description="The unique identifier of the custom field whose options you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all available options for a specific custom field in PagerDuty services. Use this to populate dropdowns or validate field option values."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceCustomFieldOptionsRequest(
+            path=_models.ListServiceCustomFieldOptionsRequestPath(field_id=field_id),
+            header=_models.ListServiceCustomFieldOptionsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_custom_field_options: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}/field_options", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}/field_options"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_custom_field_options")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_custom_field_options", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_custom_field_options",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def create_service_custom_field_option(
+    field_id: str = Field(..., description="The unique identifier of the custom field to which this option will be added."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version to use."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body, must be JSON."),
+    data_type: Literal["string"] = Field(..., description="The data type of this option, which must match the parent field's data type. Currently supports string values."),
+    value: str = Field(..., description="The value for this field option. Must be unique among all options within the same field and cannot exceed 200 characters.", max_length=200),
+) -> dict[str, Any]:
+    """Create a new option for a custom field in a service. The option value must be unique within the field and match the field's data type."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateServiceCustomFieldOptionRequest(
+            path=_models.CreateServiceCustomFieldOptionRequestPath(field_id=field_id),
+            header=_models.CreateServiceCustomFieldOptionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateServiceCustomFieldOptionRequestBody(field_option=_models.CreateServiceCustomFieldOptionRequestBodyFieldOption(
+                    data=_models.CreateServiceCustomFieldOptionRequestBodyFieldOptionData(data_type=data_type, value=value)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_service_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}/field_options", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}/field_options"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_service_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_service_custom_field_option", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_service_custom_field_option",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def get_service_custom_field_option(
+    field_id: str = Field(..., description="The unique identifier of the custom field that contains the field option."),
+    field_option_id: str = Field(..., description="The unique identifier of the specific field option to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific field option for a custom field in a service. This operation requires read access to custom fields and returns the configuration details of the requested field option."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetServiceCustomFieldOptionRequest(
+            path=_models.GetServiceCustomFieldOptionRequestPath(field_id=field_id, field_option_id=field_option_id),
+            header=_models.GetServiceCustomFieldOptionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}/field_options/{field_option_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}/field_options/{field_option_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_custom_field_option", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_custom_field_option",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Service Custom Fields
+@mcp.tool()
+async def delete_service_custom_field_option(
+    field_id: str = Field(..., description="The unique identifier of the custom field containing the option to delete."),
+    field_option_id: str = Field(..., description="The unique identifier of the field option to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Remove a specific field option from a custom field in a service. This permanently deletes the option and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteServiceCustomFieldOptionRequest(
+            path=_models.DeleteServiceCustomFieldOptionRequestPath(field_id=field_id, field_option_id=field_option_id),
+            header=_models.DeleteServiceCustomFieldOptionRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_service_custom_field_option: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/custom_fields/{field_id}/field_options/{field_option_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/custom_fields/{field_id}/field_options/{field_option_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_service_custom_field_option")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_service_custom_field_option", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_service_custom_field_option",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def get_service_custom_field_values(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve custom field values."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and API version. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve all custom field values associated with a specific service. Returns the current values of custom fields configured for the service."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetServiceCustomFieldValuesRequest(
+            path=_models.GetServiceCustomFieldValuesRequestPath(id_=id_),
+            header=_models.GetServiceCustomFieldValuesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_custom_field_values: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/custom_fields/values", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/custom_fields/values"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_custom_field_values")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_custom_field_values", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_custom_field_values",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def update_service_custom_field_values(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service resource to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty API version 2 media type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    custom_fields: list[_models.ServiceCustomFieldsFieldValueUpdateModel] = Field(..., description="An array of custom field objects to set for the service. Each object should contain the field identifier and its corresponding value."),
+) -> dict[str, Any]:
+    """Update custom field values for a specific service. This operation allows you to set or modify custom field data associated with a service resource."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateServiceCustomFieldValuesRequest(
+            path=_models.UpdateServiceCustomFieldValuesRequestPath(id_=id_),
+            header=_models.UpdateServiceCustomFieldValuesRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateServiceCustomFieldValuesRequestBody(custom_fields=custom_fields)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service_custom_field_values: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/custom_fields/values", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/custom_fields/values"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service_custom_field_values")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service_custom_field_values", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service_custom_field_values",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def list_service_feature_enablements(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service for which to retrieve feature enablements."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all feature enablement settings for a service, including AIOps features. Services with the AIOps product addon have AIOps enabled by default, and a warning is returned if the account lacks AIOps entitlement."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListServiceFeatureEnablementsRequest(
+            path=_models.ListServiceFeatureEnablementsRequestPath(id_=id_),
+            header=_models.ListServiceFeatureEnablementsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_service_feature_enablements: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/enablements", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/enablements"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_service_feature_enablements")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_service_feature_enablements", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_service_feature_enablements",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Services
+@mcp.tool()
+async def update_service_feature_enablement(
+    id_: str = Field(..., alias="id", description="The unique identifier of the service resource to update."),
+    feature_name: Literal["aiops"] = Field(..., description="The feature addon identifier to enable or disable. Currently only 'aiops' is supported."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value for PagerDuty API v2 compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    enabled: bool = Field(..., description="Boolean flag to enable (true) or disable (false) the specified product addon feature."),
+) -> dict[str, Any]:
+    """Enable or disable a product addon feature for a service. Currently supports the AIOps feature enablement. Note: if the account lacks entitlement for the feature, the setting will still update but return a warning."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateServiceFeatureEnablementRequest(
+            path=_models.UpdateServiceFeatureEnablementRequestPath(id_=id_, feature_name=feature_name),
+            header=_models.UpdateServiceFeatureEnablementRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateServiceFeatureEnablementRequestBody(enablement=_models.UpdateServiceFeatureEnablementRequestBodyEnablement(enabled=enabled))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_service_feature_enablement: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/services/{id}/enablements/{feature_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/services/{id}/enablements/{feature_name}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_service_feature_enablement")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_service_feature_enablement", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_service_feature_enablement",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Standards
+@mcp.tool()
+async def list_standards(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to 'application/vnd.pagerduty+json;version=2' to request the current API version."),
+    active: bool | None = Field(None, description="Filter standards to only include active or inactive standards. Omit to retrieve all standards regardless of status."),
+    resource_type: Literal["technical_service"] | None = Field(None, description="Filter standards by resource type. Currently supports 'technical_service' to retrieve standards associated with technical services."),
+) -> dict[str, Any]:
+    """Retrieve all standards configured for your account, with optional filtering by active status and resource type."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStandardsRequest(
+            query=_models.ListStandardsRequestQuery(active=active, resource_type=resource_type),
+            header=_models.ListStandardsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_standards: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/standards"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_standards")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_standards", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_standards",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Standards
+@mcp.tool()
+async def update_standard(
+    id_: str = Field(..., alias="id", description="The unique identifier of the standard to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    body: _models.UpdateStandardBody | None = Field(None, description="The standard properties to update. Supports properties like active status to enable or disable the standard."),
+) -> dict[str, Any]:
+    """Update an existing standard by ID. Modify standard properties such as active status to manage its state."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateStandardRequest(
+            path=_models.UpdateStandardRequestPath(id_=id_),
+            header=_models.UpdateStandardRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateStandardRequestBody(body=body)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_standard: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/standards/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/standards/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_body = next(iter(_http_body.values()), None) if _http_body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_standard")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_standard", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_standard",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Standards
+@mcp.tool()
+async def list_standards_scores_for_services(
+    resource_type: Literal["technical_services"] = Field(..., description="The type of resource to retrieve standards for. Currently supports technical services only."),
+    ids: list[str] = Field(..., description="A list of resource identifiers to fetch standards scores for. Accepts up to 100 IDs per request."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve standards compliance scores for multiple technical services. Returns the standards applied to each specified resource along with their scores."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListResourceStandardsManyServicesRequest(
+            path=_models.ListResourceStandardsManyServicesRequestPath(resource_type=resource_type),
+            query=_models.ListResourceStandardsManyServicesRequestQuery(ids=ids),
+            header=_models.ListResourceStandardsManyServicesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_standards_scores_for_services: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/standards/scores/{resource_type}", _request.path.model_dump(by_alias=True)) if _request.path else "/standards/scores/{resource_type}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_standards_scores_for_services")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_standards_scores_for_services", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_standards_scores_for_services",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Standards
+@mcp.tool()
+async def list_resource_standards_scores(
+    id_: str = Field(..., alias="id", description="The unique identifier of the resource to retrieve standards scores for."),
+    resource_type: Literal["technical_services"] = Field(..., description="The type of resource being evaluated. Currently supports technical services resources."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+) -> dict[str, Any]:
+    """Retrieve all standards scores applied to a specific resource. Returns a collection of standards evaluations for the given resource."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListResourceStandardsRequest(
+            path=_models.ListResourceStandardsRequestPath(id_=id_, resource_type=resource_type),
+            header=_models.ListResourceStandardsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_resource_standards_scores: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/standards/scores/{resource_type}/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/standards/scores/{resource_type}/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_resource_standards_scores")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_resource_standards_scores", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_resource_standards_scores",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Dashboards
+@mcp.tool()
+async def list_status_dashboards(accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default PagerDuty JSON v2 format.")) -> dict[str, Any]:
+    """Retrieve all custom Status Dashboard views configured for your PagerDuty account. Use this to discover available dashboards for monitoring and status tracking."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusDashboardsRequest(
+            header=_models.ListStatusDashboardsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_dashboards: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/status_dashboards"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_dashboards")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_dashboards", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_dashboards",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Dashboards
+@mcp.tool()
+async def get_status_dashboard(
+    id_: str = Field(..., alias="id", description="The unique PagerDuty identifier for the Status Dashboard resource."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default application/vnd.pagerduty+json;version=2 to ensure compatibility with the current API version."),
+) -> dict[str, Any]:
+    """Retrieve a single Status Dashboard by its PagerDuty ID. Returns the complete dashboard configuration and current status information."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusDashboardByIdRequest(
+            path=_models.GetStatusDashboardByIdRequestPath(id_=id_),
+            header=_models.GetStatusDashboardByIdRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_dashboard: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_dashboards/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_dashboards/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_dashboard")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_dashboard", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_dashboard",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Dashboards
+@mcp.tool()
+async def get_service_impacts_for_status_dashboard(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Status Dashboard to retrieve service impacts for."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    additional_fields: Literal["services.highest_impacting_priority", "total_impacted_count"] | None = Field(None, description="Optional fields to include in the response: 'services.highest_impacting_priority' returns the highest priority incident per service, and 'total_impacted_count' returns the total number of impacted services. Specify as a comma-separated list or multiple array parameters."),
+) -> dict[str, Any]:
+    """Retrieve the most impacted Business Services for a specific Status Dashboard, sorted by impact severity and recency. Returns up to 200 services; use the Business Services impacts endpoint with specific IDs to query services not included in this impact-sorted list."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusDashboardServiceImpactsByIdRequest(
+            path=_models.GetStatusDashboardServiceImpactsByIdRequestPath(id_=id_),
+            query=_models.GetStatusDashboardServiceImpactsByIdRequestQuery(additional_fields=additional_fields),
+            header=_models.GetStatusDashboardServiceImpactsByIdRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_impacts_for_status_dashboard: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_dashboards/{id}/service_impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/status_dashboards/{id}/service_impacts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_impacts_for_status_dashboard")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_impacts_for_status_dashboard", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_impacts_for_status_dashboard",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Dashboards
+@mcp.tool()
+async def get_status_dashboard_by_url_slug(
+    url_slug: str = Field(..., description="The human-readable URL slug that uniquely identifies the status dashboard (e.g., 'my-status-page' or 'incident-tracking')"),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Retrieve a single Status Dashboard using its human-readable URL slug identifier. The URL slug is a dash-separated string that uniquely identifies a custom Status Dashboard in PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusDashboardByUrlSlugRequest(
+            path=_models.GetStatusDashboardByUrlSlugRequestPath(url_slug=url_slug),
+            header=_models.GetStatusDashboardByUrlSlugRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_dashboard_by_url_slug: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_dashboards/url_slugs/{url_slug}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_dashboards/url_slugs/{url_slug}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_dashboard_by_url_slug")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_dashboard_by_url_slug", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_dashboard_by_url_slug",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Dashboards
+@mcp.tool()
+async def get_service_impacts_for_status_dashboard_by_url_slug(
+    url_slug: str = Field(..., description="The URL slug identifier for the Status Dashboard (typically a dash-separated string like 'my-dashboard-name')"),
+    accept: str = Field(..., alias="Accept", description="API versioning header; defaults to PagerDuty JSON API version 2"),
+    additional_fields: Literal["services.highest_impacting_priority", "total_impacted_count"] | None = Field(None, description="Optional fields to include in the response: 'services.highest_impacting_priority' returns the highest priority incident per service, and 'total_impacted_count' returns the total number of impacted services"),
+) -> dict[str, Any]:
+    """Retrieve the most impacted Business Services displayed on a Status Dashboard, identified by its URL slug. Results are sorted by impact severity, recency, and name, with a maximum of 200 services returned."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusDashboardServiceImpactsByUrlSlugRequest(
+            path=_models.GetStatusDashboardServiceImpactsByUrlSlugRequestPath(url_slug=url_slug),
+            query=_models.GetStatusDashboardServiceImpactsByUrlSlugRequestQuery(additional_fields=additional_fields),
+            header=_models.GetStatusDashboardServiceImpactsByUrlSlugRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_service_impacts_for_status_dashboard_by_url_slug: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_dashboards/url_slugs/{url_slug}/service_impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/status_dashboards/url_slugs/{url_slug}/service_impacts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_service_impacts_for_status_dashboard_by_url_slug")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_service_impacts_for_status_dashboard_by_url_slug", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_service_impacts_for_status_dashboard_by_url_slug",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_pages(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON v2 format for compatibility."),
+    status_page_type: Literal["public", "private"] | None = Field(None, description="Filter status pages by visibility type: 'public' for publicly accessible pages or 'private' for restricted access. Omit to retrieve all status pages regardless of type."),
+) -> dict[str, Any]:
+    """Retrieve a list of status pages, optionally filtered by type (public or private). Requires status_pages.read OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPagesRequest(
+            query=_models.ListStatusPagesRequestQuery(status_page_type=status_page_type),
+            header=_models.ListStatusPagesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_pages: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/status_pages"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_pages")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_pages", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_pages",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_impacts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve impacts."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default value to ensure compatibility with the current API version."),
+    post_type: Literal["incident", "maintenance"] | None = Field(None, description="Filter impacts by post type: either 'incident' for unplanned service disruptions or 'maintenance' for scheduled maintenance events. Omit to retrieve all impact types."),
+) -> dict[str, Any]:
+    """Retrieve all impacts associated with a specific status page. Impacts represent incidents or maintenance events that affect services tracked on the status page."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPageImpactsRequest(
+            path=_models.ListStatusPageImpactsRequestPath(id_=id_),
+            query=_models.ListStatusPageImpactsRequestQuery(post_type=post_type),
+            header=_models.ListStatusPageImpactsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_impacts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/impacts", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/impacts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_impacts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_impacts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_impacts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_impact(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    impact_id: str = Field(..., description="The unique identifier of the impact record within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific impact associated with a status page. Returns detailed information about how an incident or maintenance event affects the status page's components and services."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPageImpactRequest(
+            path=_models.GetStatusPageImpactRequestPath(id_=id_, impact_id=impact_id),
+            header=_models.GetStatusPageImpactRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_impact: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/impacts/{impact_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/impacts/{impact_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_impact")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_impact", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_impact",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_services(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve associated services."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all services associated with a specific status page. This returns the complete list of services monitored and displayed on the given status page."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPageServicesRequest(
+            path=_models.ListStatusPageServicesRequestPath(id_=id_),
+            header=_models.ListStatusPageServicesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_services: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/services", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/services"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_services")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_services", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_services",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_service(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    service_id: str = Field(..., description="The unique identifier of the service within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific service associated with a status page. Use this to fetch details about an individual service tracked on a status page by providing both the status page ID and the service ID."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPageServiceRequest(
+            path=_models.GetStatusPageServiceRequestPath(id_=id_, service_id=service_id),
+            header=_models.GetStatusPageServiceRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_service: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/services/{service_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/services/{service_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_service")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_service", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_service",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_severities(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve severities."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    post_type: Literal["incident", "maintenance"] | None = Field(None, description="Optional filter to return severities associated only with specific post types: either 'incident' for incident-related severities or 'maintenance' for maintenance-related severities."),
+) -> dict[str, Any]:
+    """Retrieve the list of severity levels configured for a specific status page. Severities define the impact classification for incidents and maintenance events displayed on the status page."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPageSeveritiesRequest(
+            path=_models.ListStatusPageSeveritiesRequestPath(id_=id_),
+            query=_models.ListStatusPageSeveritiesRequestQuery(post_type=post_type),
+            header=_models.ListStatusPageSeveritiesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_severities: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/severities", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/severities"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_severities")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_severities", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_severities",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_severity(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    severity_id: str = Field(..., description="The unique identifier of the severity level within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific severity level associated with a status page. Use this to fetch details about how a particular severity is configured for a given status page."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPageSeverityRequest(
+            path=_models.GetStatusPageSeverityRequestPath(id_=id_, severity_id=severity_id),
+            header=_models.GetStatusPageSeverityRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_severity: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/severities/{severity_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/severities/{severity_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_severity")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_severity", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_severity",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_statuses(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page whose statuses you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+    post_type: Literal["incident", "maintenance"] | None = Field(None, description="Filter results to show only posts of a specific type: either incidents or maintenance updates. Omit to retrieve all post types."),
+) -> dict[str, Any]:
+    """Retrieve all statuses (incidents and maintenance updates) for a specific status page. Optionally filter results by post type to show only incidents or maintenance notifications."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPageStatusesRequest(
+            path=_models.ListStatusPageStatusesRequestPath(id_=id_),
+            query=_models.ListStatusPageStatusesRequestQuery(post_type=post_type),
+            header=_models.ListStatusPageStatusesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_statuses: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/statuses", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/statuses"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_statuses")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_statuses", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_statuses",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_status(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    status_id: str = Field(..., description="The unique identifier of the status entry within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific status entry from a status page using the status page ID and status ID. This allows you to fetch detailed information about an individual status update."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPageStatusRequest(
+            path=_models.GetStatusPageStatusRequestPath(id_=id_, status_id=status_id),
+            header=_models.GetStatusPageStatusRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_status: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/statuses/{status_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/statuses/{status_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_status")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_status", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_status",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_posts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page for which to retrieve posts."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value 'application/vnd.pagerduty+json;version=2' to request the current API version."),
+    post_type: Literal["incident", "maintenance"] | None = Field(None, description="Filter posts by type: either 'incident' for incident reports or 'maintenance' for maintenance notifications."),
+    reviewed_status: Literal["approved", "not_reviewed"] | None = Field(None, description="Filter posts by their review status: 'approved' for reviewed posts or 'not_reviewed' for posts pending review."),
+    status: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter posts by one or more status identifiers. Provide as an array of status IDs to return only posts associated with those statuses."),
+) -> dict[str, Any]:
+    """Retrieve all posts for a specific status page, with optional filtering by post type, review status, and status identifiers. Posts can represent incidents or maintenance events."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPagePostsRequest(
+            path=_models.ListStatusPagePostsRequestPath(id_=id_),
+            query=_models.ListStatusPagePostsRequestQuery(post_type=post_type, reviewed_status=reviewed_status, status=status),
+            header=_models.ListStatusPagePostsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_posts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_posts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_posts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_posts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def create_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page where the post will be created."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+    status_page_id: str = Field(..., alias="status_pageId", description="The unique identifier of the status page to associate with this post (must match the status page ID in the path)."),
+    type_: Literal["status_page_post"] = Field(..., alias="type", description="The resource type identifier for this object. Must be set to 'status_page_post'."),
+    title: str = Field(..., description="A descriptive title for the post between 1 and 128 characters that summarizes the incident or maintenance event.", min_length=1, max_length=128),
+    post_type: Literal["incident", "maintenance"] = Field(..., description="Classifies the post as either an 'incident' (unplanned event) or 'maintenance' (scheduled downtime)."),
+    starts_at: str | None = Field(..., description="The date and time when the maintenance event begins, specified in ISO 8601 format. Required for maintenance post types."),
+    ends_at: str | None = Field(..., description="The date and time when the maintenance event concludes, specified in ISO 8601 format. Required for maintenance post types."),
+    updates: list[_models.StatusPagePostUpdateRequest] = Field(..., description="An array of 1 to 50 post updates providing detailed information about the event. Updates are displayed in the order provided.", min_length=1, max_length=50),
+) -> dict[str, Any]:
+    """Create a new post on a status page to communicate incidents or scheduled maintenance to subscribers. Posts can be associated with multiple updates to provide detailed information about the event."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateStatusPagePostRequest(
+            path=_models.CreateStatusPagePostRequestPath(id_=id_),
+            header=_models.CreateStatusPagePostRequestHeader(accept=accept),
+            body=_models.CreateStatusPagePostRequestBody(post=_models.CreateStatusPagePostRequestBodyPost(
+                    type_=type_, title=title, post_type=post_type, starts_at=starts_at, ends_at=ends_at, updates=updates,
+                    status_page=_models.CreateStatusPagePostRequestBodyPostStatusPage(id_=status_page_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_status_page_post", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_status_page_post",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
+    post_id: str = Field(..., description="The unique identifier of the post to retrieve from the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Defaults to PagerDuty JSON API version 2."),
+    include: list[Literal["status_page_post_update"]] | None = Field(None, description="Optional array of related models to include in the response for richer context (e.g., author details, attachments). Specify model names as array elements."),
+) -> dict[str, Any]:
+    """Retrieve a specific post from a status page using the status page ID and post ID. Returns detailed information about the post including its content and metadata."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPagePostRequest(
+            path=_models.GetStatusPagePostRequestPath(id_=id_, post_id=post_id),
+            query=_models.GetStatusPagePostRequestQuery(include=include),
+            header=_models.GetStatusPagePostRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_post", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_post",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def update_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post to update."),
+    post_id: str = Field(..., description="The unique identifier of the specific post within the status page to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header; use the default value to ensure compatibility with the current API version."),
+    status_page_id: str = Field(..., alias="status_pageId", description="The unique identifier of the status page that owns this post; must match the status page specified in the path."),
+    type_: Literal["status_page_post"] = Field(..., alias="type", description="The resource type identifier; must be set to 'status_page_post' to indicate this is a status page post object."),
+    title: str = Field(..., description="A descriptive title for the post, between 1 and 128 characters in length.", min_length=1, max_length=128),
+    post_type: Literal["incident", "maintenance"] = Field(..., description="Classifies the post as either an 'incident' (unplanned event) or 'maintenance' (scheduled event)."),
+    starts_at: str | None = Field(..., description="The date and time when the post's event becomes effective, specified in ISO 8601 format; required for maintenance post types."),
+    ends_at: str | None = Field(..., description="The date and time when the post's event concludes, specified in ISO 8601 format; required for maintenance post types."),
+) -> dict[str, Any]:
+    """Update an existing post on a status page, allowing you to modify incident or maintenance event details including title, type, and timing information."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateStatusPagePostRequest(
+            path=_models.UpdateStatusPagePostRequestPath(id_=id_, post_id=post_id),
+            header=_models.UpdateStatusPagePostRequestHeader(accept=accept),
+            body=_models.UpdateStatusPagePostRequestBody(post=_models.UpdateStatusPagePostRequestBodyPost(
+                    type_=type_, title=title, post_type=post_type, starts_at=starts_at, ends_at=ends_at,
+                    status_page=_models.UpdateStatusPagePostRequestBodyPostStatusPage(id_=status_page_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_status_page_post", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_status_page_post",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def delete_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post to delete."),
+    post_id: str = Field(..., description="The unique identifier of the post to delete from the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default value for PagerDuty API v2 responses."),
+) -> dict[str, Any]:
+    """Permanently delete a specific post from a status page. Requires the status page ID and the post ID to identify which post to remove."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteStatusPagePostRequest(
+            path=_models.DeleteStatusPagePostRequestPath(id_=id_, post_id=post_id),
+            header=_models.DeleteStatusPagePostRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_status_page_post", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_status_page_post",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_post_updates(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
+    post_id: str = Field(..., description="The unique identifier of the post within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Specifies the response format and API version (defaults to application/vnd.pagerduty+json;version=2)."),
+    reviewed_status: Literal["approved", "not_reviewed"] | None = Field(None, description="Filter results by review status. Use 'approved' to show only reviewed updates or 'not_reviewed' to show updates pending review."),
+) -> dict[str, Any]:
+    """Retrieve all updates for a specific post within a status page. Use this to track the history of changes and status communications for a particular post."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPagePostUpdatesRequest(
+            path=_models.ListStatusPagePostUpdatesRequestPath(id_=id_, post_id=post_id),
+            query=_models.ListStatusPagePostUpdatesRequestQuery(reviewed_status=reviewed_status),
+            header=_models.ListStatusPagePostUpdatesRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_post_updates: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/post_updates", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/post_updates"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_post_updates")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_post_updates", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_post_updates",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def create_post_update_for_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id2: str = Field(..., alias="post_id", description="The unique identifier of the severity level for this post update."),
+    accept: str = Field(..., alias="Accept", description="The HTTP Accept header for API versioning. Use the default application/vnd.pagerduty+json;version=2 unless a different API version is required."),
+    post_id: str = Field(..., alias="postId", description="The unique identifier of the status page post to which this update belongs."),
+    status_id: str = Field(..., alias="statusId", description="The unique identifier of the status page post being updated."),
+    severity_id: str = Field(..., alias="severityId", description="The unique identifier of the status to assign to this post update."),
+    type_: str = Field(..., alias="type", description="The resource type identifier. Must be set to indicate this is a Status Page Post Update object."),
+    message: str = Field(..., description="The update message communicating the status change or additional information to subscribers."),
+    impacted_services: list[_models.CreateStatusPagePostUpdateBodyPostUpdateImpactedServicesItem] = Field(..., description="An array of services affected by this post update and their impact levels. Can be empty if no specific services are impacted.", min_length=0),
+    update_frequency_ms: int | None = Field(..., description="The interval in milliseconds before the next post update is expected. Helps set expectations for update frequency."),
+    notify_subscribers: bool = Field(..., description="Whether to send notifications to status page subscribers about this post update."),
+    reported_at: str | None = Field(None, description="The date and time when the post update was initially reported, formatted as an ISO 8601 datetime string. If omitted, the current time is used."),
+) -> dict[str, Any]:
+    """Create a new update for an existing status page post, allowing you to add messages, impact information, and subscriber notifications to communicate status changes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateStatusPagePostUpdateRequest(
+            path=_models.CreateStatusPagePostUpdateRequestPath(id_=id_, post_id2=post_id2),
+            header=_models.CreateStatusPagePostUpdateRequestHeader(accept=accept),
+            body=_models.CreateStatusPagePostUpdateRequestBody(post_update=_models.CreateStatusPagePostUpdateRequestBodyPostUpdate(
+                    type_=type_, message=message, impacted_services=impacted_services, update_frequency_ms=update_frequency_ms, notify_subscribers=notify_subscribers, reported_at=reported_at,
+                    post=_models.CreateStatusPagePostUpdateRequestBodyPostUpdatePost(id_=post_id),
+                    status=_models.CreateStatusPagePostUpdateRequestBodyPostUpdateStatus(id_=status_id),
+                    severity=_models.CreateStatusPagePostUpdateRequestBodyPostUpdateSeverity(id_=severity_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_post_update_for_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/post_updates", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/post_updates"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_post_update_for_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_post_update_for_status_page_post", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_post_update_for_status_page_post",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_post_update(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id: str = Field(..., description="The unique identifier of the status page post containing the update."),
+    post_update_id: str = Field(..., description="The unique identifier of the specific post update to retrieve."),
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the response format and API version. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific update for a status page post. Use this to fetch details about a particular post update by providing the status page ID, post ID, and post update ID."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetPostUpdateRequest(
+            path=_models.GetPostUpdateRequestPath(id_=id_, post_id=post_id, post_update_id=post_update_id),
+            header=_models.GetPostUpdateRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_post_update: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_post_update")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_post_update", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_post_update",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def update_status_page_post_update(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post being updated."),
+    post_update_id: str = Field(..., description="The unique identifier of the status page status to associate with this update."),
+    accept: str = Field(..., alias="Accept", description="The unique identifier of the severity level for this update."),
+    post_id: str = Field(..., alias="postId", description="The unique identifier of the status page post that contains this update."),
+    status_id: str = Field(..., alias="statusId", description="The unique identifier of the post update to modify."),
+    severity_id: str = Field(..., alias="severityId", description="The API version header. Use application/vnd.pagerduty+json;version=2 for this operation."),
+    type_: str = Field(..., alias="type", description="The object type identifier. Must be set to the Status Page Post Update type."),
+    message: str = Field(..., description="The message content describing the post update. This is the primary communication to subscribers."),
+    impacted_services: list[_models.UpdateStatusPagePostUpdateBodyPostUpdateImpactedServicesItem] = Field(..., description="An array of services affected by this post update and their impact levels. Can be empty if no specific services are impacted.", min_length=0),
+    update_frequency_ms: int | None = Field(..., description="The interval in milliseconds before the next post update is expected. Helps set subscriber expectations for update frequency."),
+    notify_subscribers: bool = Field(..., description="Whether to send notifications to subscribers about this post update."),
+    reported_at: str | None = Field(None, description="The date and time when this post update was initially reported, in ISO 8601 format."),
+) -> dict[str, Any]:
+    """Update an existing post update within a status page post. Modify the message, impacted services, notification settings, and other details of a specific post update."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateStatusPagePostUpdateRequest(
+            path=_models.UpdateStatusPagePostUpdateRequestPath(id_=id_, post_id2=post_id2, post_update_id=post_update_id),
+            header=_models.UpdateStatusPagePostUpdateRequestHeader(accept=accept),
+            body=_models.UpdateStatusPagePostUpdateRequestBody(post_update=_models.UpdateStatusPagePostUpdateRequestBodyPostUpdate(
+                    type_=type_, message=message, impacted_services=impacted_services, update_frequency_ms=update_frequency_ms, notify_subscribers=notify_subscribers, reported_at=reported_at,
+                    post=_models.UpdateStatusPagePostUpdateRequestBodyPostUpdatePost(id_=post_id),
+                    status=_models.UpdateStatusPagePostUpdateRequestBodyPostUpdateStatus(id_=status_id),
+                    severity=_models.UpdateStatusPagePostUpdateRequestBodyPostUpdateSeverity(id_=severity_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_status_page_post_update: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_status_page_post_update")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_status_page_post_update", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_status_page_post_update",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def delete_post_update(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page containing the post."),
+    post_id: str = Field(..., description="The unique identifier of the post within the status page."),
+    post_update_id: str = Field(..., description="The unique identifier of the post update to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+) -> dict[str, Any]:
+    """Delete a specific update from a status page post. Requires the status page ID, post ID, and post update ID to identify the exact update to remove."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteStatusPagePostUpdateRequest(
+            path=_models.DeleteStatusPagePostUpdateRequestPath(id_=id_, post_id=post_id, post_update_id=post_update_id),
+            header=_models.DeleteStatusPagePostUpdateRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_post_update: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/post_updates/{post_update_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_post_update")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_post_update", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_post_update",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_postmortem_for_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id: str = Field(..., description="The unique identifier of the status page post for which to retrieve the postmortem."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve the postmortem details for a specific post on a status page. Postmortems provide analysis and context for incidents or events documented in status page posts."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetPostmortemRequest(
+            path=_models.GetPostmortemRequestPath(id_=id_, post_id=post_id),
+            header=_models.GetPostmortemRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_postmortem_for_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/postmortem", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/postmortem"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_postmortem_for_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_postmortem_for_post", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_postmortem_for_post",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def create_postmortem_for_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post (path parameter)."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default value to request the current API version."),
+    post_id: str = Field(..., alias="postId", description="The unique identifier of the status page post for which the postmortem is being created."),
+    message: str = Field(..., description="The postmortem message content, which supports rich-text formatting. Maximum length is 10,000 characters.", max_length=10000),
+    notify_subscribers: bool = Field(..., description="Whether to notify all subscribers of the status page about this postmortem. Set to true to send notifications, false to skip."),
+    type_: str | None = Field(None, alias="type", description="A string that determines the schema of the postmortem object. Typically used for API versioning and object type identification."),
+) -> dict[str, Any]:
+    """Create a postmortem for a specific status page post. The postmortem message supports rich-text formatting and can optionally notify all subscribers of the status page."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateStatusPagePostmortemRequest(
+            path=_models.CreateStatusPagePostmortemRequestPath(id_=id_, post_id2=post_id2),
+            header=_models.CreateStatusPagePostmortemRequestHeader(accept=accept),
+            body=_models.CreateStatusPagePostmortemRequestBody(postmortem=_models.CreateStatusPagePostmortemRequestBodyPostmortem(
+                    message=message, notify_subscribers=notify_subscribers,
+                    post=_models.CreateStatusPagePostmortemRequestBodyPostmortemPost(id_=post_id, type_=type_)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_postmortem_for_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/postmortem", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/postmortem"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_postmortem_for_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_postmortem_for_status_page_post", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_postmortem_for_status_page_post",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def update_status_page_post_postmortem(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id2: str = Field(..., alias="post_id", description="The unique identifier of the status page post being updated."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use application/vnd.pagerduty+json;version=2 for the current API version."),
+    post_id: str = Field(..., alias="postId", description="The unique identifier of the status page post associated with this postmortem."),
+    message: str = Field(..., description="The postmortem message content supporting rich-text formatting. Maximum length is 10,000 characters.", max_length=10000),
+    notify_subscribers: bool = Field(..., description="Whether to notify all subscribers of the status page about this postmortem update."),
+) -> dict[str, Any]:
+    """Update the postmortem for a specific status page post, including the postmortem message and subscriber notification settings. Requires write access to status pages."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateStatusPagePostmortemRequest(
+            path=_models.UpdateStatusPagePostmortemRequestPath(id_=id_, post_id2=post_id2),
+            header=_models.UpdateStatusPagePostmortemRequestHeader(accept=accept),
+            body=_models.UpdateStatusPagePostmortemRequestBody(postmortem=_models.UpdateStatusPagePostmortemRequestBodyPostmortem(
+                    message=message, notify_subscribers=notify_subscribers,
+                    post=_models.UpdateStatusPagePostmortemRequestBodyPostmortemPost(id_=post_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_status_page_post_postmortem: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/postmortem", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/postmortem"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_status_page_post_postmortem")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_status_page_post_postmortem", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_status_page_post_postmortem",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def delete_postmortem_for_status_page_post(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    post_id: str = Field(..., description="The unique identifier of the status page post from which to delete the postmortem."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Remove a postmortem document from a status page post. This permanently deletes the postmortem analysis associated with the specified post."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteStatusPagePostmortemRequest(
+            path=_models.DeleteStatusPagePostmortemRequestPath(id_=id_, post_id=post_id),
+            header=_models.DeleteStatusPagePostmortemRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_postmortem_for_status_page_post: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/posts/{post_id}/postmortem", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/posts/{post_id}/postmortem"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_postmortem_for_status_page_post")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_postmortem_for_status_page_post", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_postmortem_for_status_page_post",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def list_status_page_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page whose subscriptions you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default application/vnd.pagerduty+json;version=2 for standard responses."),
+    status: Literal["active", "pending"] | None = Field(None, description="Filter subscriptions by their current state: either active subscriptions or those pending activation."),
+    channel: Literal["webhook", "email", "slack"] | None = Field(None, description="Filter subscriptions by their notification delivery method: webhook, email, or Slack."),
+) -> dict[str, Any]:
+    """Retrieve all subscriptions for a specific status page, with optional filtering by subscription status or notification channel."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListStatusPageSubscriptionsRequest(
+            path=_models.ListStatusPageSubscriptionsRequestPath(id_=id_),
+            query=_models.ListStatusPageSubscriptionsRequestQuery(status=status, channel=channel),
+            header=_models.ListStatusPageSubscriptionsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_status_page_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/subscriptions", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/subscriptions"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_status_page_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_status_page_subscriptions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_status_page_subscriptions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def create_status_page_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page to subscribe to."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Must be set to application/vnd.pagerduty+json;version=2."),
+    status_page_id: str = Field(..., alias="status_pageId", description="The unique identifier of the status page being subscribed to (must match the status page ID in the path)."),
+    channel: Literal["webhook", "email"] = Field(..., description="The delivery method for subscription notifications. Choose 'email' to receive updates via email or 'webhook' to receive JSON payloads at a specified URL."),
+    contact: str = Field(..., description="The recipient contact information. Provide an email address for email subscriptions or a webhook URL for webhook subscriptions."),
+    type_: str = Field(..., alias="type", description="The subscription object type identifier. This determines the schema and structure of the subscription being created."),
+    subscribable_object_id: str | None = Field(None, alias="subscribable_objectId", description="Optional identifier of a specific entity (component, service, etc.) within the status page to subscribe to. If omitted, subscribes to all updates for the status page."),
+) -> dict[str, Any]:
+    """Subscribe to status page updates via email or webhook. Creates a new subscription that will deliver notifications about status page changes through your specified contact channel."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateStatusPageSubscriptionRequest(
+            path=_models.CreateStatusPageSubscriptionRequestPath(id_=id_),
+            header=_models.CreateStatusPageSubscriptionRequestHeader(accept=accept),
+            body=_models.CreateStatusPageSubscriptionRequestBody(subscription=_models.CreateStatusPageSubscriptionRequestBodySubscription(
+                    channel=channel, contact=contact, type_=type_,
+                    status_page=_models.CreateStatusPageSubscriptionRequestBodySubscriptionStatusPage(id_=status_page_id),
+                    subscribable_object=_models.CreateStatusPageSubscriptionRequestBodySubscriptionSubscribableObject(id_=subscribable_object_id) if any(v is not None for v in [subscribable_object_id]) else None
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_status_page_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/subscriptions", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/subscriptions"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_status_page_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_status_page_subscription", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_status_page_subscription",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def get_status_page_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the status page resource."),
+    subscription_id: str = Field(..., description="The unique identifier of the subscription within the status page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve a specific subscription for a status page by providing both the status page ID and subscription ID. This operation returns the subscription details including notification preferences and contact information."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetStatusPageSubscriptionRequest(
+            path=_models.GetStatusPageSubscriptionRequestPath(id_=id_, subscription_id=subscription_id),
+            header=_models.GetStatusPageSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_status_page_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/subscriptions/{subscription_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/subscriptions/{subscription_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_status_page_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_status_page_subscription", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_status_page_subscription",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Status Pages
+@mcp.tool()
+async def delete_status_page_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Status Page from which the subscription will be removed."),
+    subscription_id: str = Field(..., description="The unique identifier of the subscription to be deleted from the Status Page."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Remove a subscription from a Status Page by providing the Status Page ID and Subscription ID. This operation requires write access to status pages."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteStatusPageSubscriptionRequest(
+            path=_models.DeleteStatusPageSubscriptionRequestPath(id_=id_, subscription_id=subscription_id),
+            header=_models.DeleteStatusPageSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_status_page_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/status_pages/{id}/subscriptions/{subscription_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/status_pages/{id}/subscriptions/{subscription_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_status_page_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_status_page_subscription", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_status_page_subscription",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: SRE Agent
+@mcp.tool()
+async def list_sre_memories(
+    accept: str = Field(..., alias="Accept", description="API version header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be JSON."),
+    service_id: str | None = Field(None, description="Filter memories to a specific service by its ID."),
+    incident_id: str | None = Field(None, description="Filter memories to a specific incident by its ID."),
+) -> dict[str, Any]:
+    """Retrieve SRE Agent memories for your account, including service runbooks, profiles, incident playbooks, and summaries. Filter by service or incident to find relevant knowledge."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListSreMemoriesRequest(
+            query=_models.ListSreMemoriesRequestQuery(service_id=service_id, incident_id=incident_id),
+            header=_models.ListSreMemoriesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_sre_memories: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/sre_agent/memories"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_sre_memories")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_sre_memories", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_sre_memories",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: SRE Agent
+@mcp.tool()
+async def update_sre_memory(
+    id_: str = Field(..., alias="id", description="The unique identifier of the SRE Agent memory to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+    content: str = Field(..., description="The updated content for the SRE memory. This is the primary data being modified in the memory record."),
+) -> dict[str, Any]:
+    """Update the content of an existing SRE Agent memory by ID. Requires write access to SRE Agent memories."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateSreMemoryRequest(
+            path=_models.UpdateSreMemoryRequestPath(id_=id_),
+            header=_models.UpdateSreMemoryRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateSreMemoryRequestBody(memory=_models.UpdateSreMemoryRequestBodyMemory(content=content))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_sre_memory: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/sre_agent/memories/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/sre_agent/memories/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_sre_memory")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_sre_memory", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_sre_memory",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: SRE Agent
+@mcp.tool()
+async def delete_sre_memory(
+    id_: str = Field(..., alias="id", description="The unique identifier of the SRE Agent memory to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Permanently delete an SRE Agent memory by its ID. This action cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteSreMemoryRequest(
+            path=_models.DeleteSreMemoryRequestPath(id_=id_),
+            header=_models.DeleteSreMemoryRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_sre_memory: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/sre_agent/memories/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/sre_agent/memories/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_sre_memory")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_sre_memory", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_sre_memory",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def list_tags(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all tags in your PagerDuty account. Tags can be applied to Escalation Policies, Teams, or Users for filtering and organization purposes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListTagsRequest(
+            header=_models.ListTagsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_tags: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/tags"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_tags")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_tags", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_tags",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def create_tag(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    tag: _models.Tag = Field(..., description="The tag object containing the tag configuration to be created. Refer to the API Concepts Document for the required and optional fields."),
+) -> dict[str, Any]:
+    """Create a new tag that can be applied to Escalation Policies, Teams, or Users for filtering and organization purposes."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateTagsRequest(
+            header=_models.CreateTagsRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateTagsRequestBody(tag=tag)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_tag: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/tags"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_tag")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_tag", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_tag",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def get_tag(
+    id_: str = Field(..., alias="id", description="The unique identifier of the tag to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific tag by ID. Tags are used to organize and filter Escalation Policies, Teams, and Users."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTagRequest(
+            path=_models.GetTagRequestPath(id_=id_),
+            header=_models.GetTagRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_tag: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/tags/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/tags/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_tag")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_tag", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_tag",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def delete_tag(
+    id_: str = Field(..., alias="id", description="The unique identifier of the tag to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Permanently remove a tag from the PagerDuty system. Tags are used to organize and filter Escalation Policies, Teams, and Users."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteTagRequest(
+            path=_models.DeleteTagRequestPath(id_=id_),
+            header=_models.DeleteTagRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_tag: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/tags/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/tags/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_tag")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_tag", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_tag",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Tags
+@mcp.tool()
+async def list_entities_by_tag(
+    id_: str = Field(..., alias="id", description="The unique identifier of the tag resource."),
+    entity_type: Literal["users", "teams", "escalation_policies"] = Field(..., description="The type of entity to retrieve. Must be one of: users, teams, or escalation_policies."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve all entities (users, teams, or escalation policies) associated with a specific tag. Tags are used to organize and filter PagerDuty resources across your account."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTagsByEntityTypeRequest(
+            path=_models.GetTagsByEntityTypeRequestPath(id_=id_, entity_type=entity_type),
+            header=_models.GetTagsByEntityTypeRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_entities_by_tag: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/tags/{id}/{entity_type}", _request.path.model_dump(by_alias=True)) if _request.path else "/tags/{id}/{entity_type}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_entities_by_tag")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_entities_by_tag", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_entities_by_tag",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def list_teams(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve a list of teams in your PagerDuty account, optionally filtered by search query. Teams are collections of users and escalation policies that represent groups within your organization."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListTeamsRequest(
+            header=_models.ListTeamsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_teams: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/teams"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_teams")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_teams", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_teams",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def create_team(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be JSON."),
+    team: _models.Team = Field(..., description="The team object containing the team configuration. Include required fields such as name and any optional fields like description or default escalation policy."),
+) -> dict[str, Any]:
+    """Create a new team representing a collection of users and escalation policies within your organization. Teams are used to group people and define escalation behavior for incident management."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateTeamRequest(
+            header=_models.CreateTeamRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateTeamRequestBody(team=team)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/teams"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_team", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_team",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def get_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    include: Annotated[Literal["privileges"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional data in the response. Specify 'privileges' to include team member privileges."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific team, including its users and escalation policies. Teams represent groups of people within an organization."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTeamRequest(
+            path=_models.GetTeamRequestPath(id_=id_),
+            query=_models.GetTeamRequestQuery(include=include),
+            header=_models.GetTeamRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_team", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_team",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def update_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    team: _models.Team = Field(..., description="The team object containing the properties to update (e.g., name, description)."),
+) -> dict[str, Any]:
+    """Update an existing team's properties. A team is a collection of users and escalation policies representing a group within an organization."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateTeamRequest(
+            path=_models.UpdateTeamRequestPath(id_=id_),
+            header=_models.UpdateTeamRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateTeamRequestBody(team=team)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_team", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_team",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def delete_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    reassignment_team: str | None = Field(None, description="Optional team ID to receive unresolved incidents from the deleted team. If omitted, incidents become account-level and lose team association. Duplicate incidents are not created if they already exist on the reassignment team."),
+) -> dict[str, Any]:
+    """Permanently remove a team from the account. The team must have no associated Escalation Policies, Services, Schedules, or Subteams. Any unresolved incidents will be asynchronously reassigned to another team or converted to account-level incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteTeamRequest(
+            path=_models.DeleteTeamRequestPath(id_=id_),
+            query=_models.DeleteTeamRequestQuery(reassignment_team=reassignment_team),
+            header=_models.DeleteTeamRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_team", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_team",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def list_teams_audit_records(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team for which to retrieve audit records."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to the PagerDuty API v2 content type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body, must be JSON."),
+    since: str | None = Field(None, description="The start of the date range for the audit search in ISO 8601 format. Defaults to 24 hours before the current time if not specified."),
+    until: str | None = Field(None, description="The end of the date range for the audit search in ISO 8601 format. Defaults to the current time if not specified. Cannot be more than 31 days after the start date."),
+) -> dict[str, Any]:
+    """Retrieve audit records for a team, sorted by execution time from newest to oldest. Records default to the past 24 hours if no date range is specified."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListTeamsAuditRecordsRequest(
+            path=_models.ListTeamsAuditRecordsRequestPath(id_=id_),
+            query=_models.ListTeamsAuditRecordsRequestQuery(since=since, until=until),
+            header=_models.ListTeamsAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_teams_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/audit/records", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_teams_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_teams_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_teams_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def add_escalation_policy_to_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team resource to which the escalation policy will be added."),
+    escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy to associate with the team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Associate an escalation policy with a team to define how incidents are escalated within that team. This enables the team to use the specified escalation policy for incident routing and notification."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateTeamEscalationPolicyRequest(
+            path=_models.UpdateTeamEscalationPolicyRequestPath(id_=id_, escalation_policy_id=escalation_policy_id),
+            header=_models.UpdateTeamEscalationPolicyRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_escalation_policy_to_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/escalation_policies/{escalation_policy_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/escalation_policies/{escalation_policy_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_escalation_policy_to_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_escalation_policy_to_team", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_escalation_policy_to_team",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def remove_escalation_policy_from_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team from which the escalation policy will be removed."),
+    escalation_policy_id: str = Field(..., description="The unique identifier of the escalation policy to remove from the team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Remove an escalation policy from a team. This operation disassociates the specified escalation policy from the team, affecting how incidents are routed and escalated within that team."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteTeamEscalationPolicyRequest(
+            path=_models.DeleteTeamEscalationPolicyRequestPath(id_=id_, escalation_policy_id=escalation_policy_id),
+            header=_models.DeleteTeamEscalationPolicyRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_escalation_policy_from_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/escalation_policies/{escalation_policy_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/escalation_policies/{escalation_policy_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_escalation_policy_from_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_escalation_policy_from_team", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_escalation_policy_from_team",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def list_team_members(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team whose members you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be set to JSON format."),
+    include: Annotated[Literal["users"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of additional data models to include in the response. Specify 'users' to include detailed user information for team members."),
+) -> dict[str, Any]:
+    """Retrieve all members of a team, including users and escalation policies. Optionally include additional related data in the response."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListTeamUsersRequest(
+            path=_models.ListTeamUsersRequestPath(id_=id_),
+            query=_models.ListTeamUsersRequestQuery(include=include),
+            header=_models.ListTeamUsersRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_team_members: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/members", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/members"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_team_members")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_team_members", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_team_members",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def list_team_notification_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team whose notification subscriptions you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API version header to specify the response format. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all notification subscriptions for a specific team. Only subscriptions that were explicitly added through the create endpoint will be returned."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTeamNotificationSubscriptionsRequest(
+            path=_models.GetTeamNotificationSubscriptionsRequestPath(id_=id_),
+            header=_models.GetTeamNotificationSubscriptionsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_team_notification_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/notification_subscriptions", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/notification_subscriptions"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_team_notification_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_team_notification_subscriptions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_team_notification_subscriptions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def remove_team_notification_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team resource to unsubscribe from notifications."),
+    accept: str = Field(..., alias="Accept", description="The API version header for request/response formatting. Defaults to PagerDuty API v2 JSON format."),
+    subscribables: Annotated[list[_models.NotificationSubscribable], AfterValidator(_check_unique_items)] = Field(..., description="An array of subscribable entity identifiers to unsubscribe the team from. Must contain at least one item.", min_length=1),
+) -> dict[str, Any]:
+    """Unsubscribe a team from notifications on specified subscribable entities. This operation removes the team's notification subscriptions for the given resources."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.RemoveTeamNotificationSubscriptionsRequest(
+            path=_models.RemoveTeamNotificationSubscriptionsRequestPath(id_=id_),
+            header=_models.RemoveTeamNotificationSubscriptionsRequestHeader(accept=accept),
+            body=_models.RemoveTeamNotificationSubscriptionsRequestBody(subscribables=subscribables)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_team_notification_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/notification_subscriptions/unsubscribe", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/notification_subscriptions/unsubscribe"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_team_notification_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_team_notification_subscriptions", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_team_notification_subscriptions",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def add_user_to_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team to which the user will be added."),
+    user_id: str = Field(..., description="The unique identifier of the user to add to the team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 for the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    role: Literal["observer", "responder", "manager"] | None = Field(None, description="The role to assign the user on the team. Valid roles are observer (read-only access), responder (can respond to incidents), or manager (full team management access)."),
+) -> dict[str, Any]:
+    """Add a user to a team with a specified role. Note that users with the read_only_user role cannot be added and will result in a 400 error."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateTeamUserRequest(
+            path=_models.UpdateTeamUserRequestPath(id_=id_, user_id=user_id),
+            header=_models.UpdateTeamUserRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateTeamUserRequestBody(role=role)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for add_user_to_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/users/{user_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/users/{user_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("add_user_to_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("add_user_to_team", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="add_user_to_team",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Teams
+@mcp.tool()
+async def remove_user_from_team(
+    id_: str = Field(..., alias="id", description="The unique identifier of the team from which the user will be removed."),
+    user_id: str = Field(..., description="The unique identifier of the user to be removed from the team."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty JSON format version 2 for compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request payload. Must be application/json."),
+) -> dict[str, Any]:
+    """Remove a user from a team. This operation deletes the membership relationship between a user and a team, effectively removing the user from that team's roster."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteTeamUserRequest(
+            path=_models.DeleteTeamUserRequestPath(id_=id_, user_id=user_id),
+            header=_models.DeleteTeamUserRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_user_from_team: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/teams/{id}/users/{user_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/teams/{id}/users/{user_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_user_from_team")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_user_from_team", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_user_from_team",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def list_templates(
+    template_type: str | None = Field(None, description="Filter templates by their type. Defaults to 'status_update' if not specified."),
+    sort_by: Literal["name", "name:asc", "name:desc", "created_at", "created_at:asc", "created_at:desc"] | None = Field(None, description="Sort results by a specified field (name or created_at) in ascending or descending order. Use the format 'field:direction' (e.g., 'name:desc'). Defaults to sorting by creation date in ascending order."),
+) -> dict[str, Any]:
+    """Retrieve all templates on an account, with optional filtering by type and sorting capabilities."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTemplatesRequest(
+            query=_models.GetTemplatesRequestQuery(template_type=template_type, sort_by=sort_by)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_templates: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/templates"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_query = _serialize_query(_http_query, {
+        "sort_by": ("form", False),
+    })
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_templates")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_templates", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_templates",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def create_status_update_template(
+    template_type: Literal["status_update"] | None = Field(None, description="The category of template being created. Currently, only `status_update` templates are supported."),
+    description: str | None = Field(None, description="A brief description explaining the purpose or use case of this template."),
+    email_subject: str | None = Field(None, description="The subject line for email communications using this template."),
+    email_body: str | None = Field(None, description="The HTML-formatted body content for email messages sent using this template."),
+    message: str | None = Field(None, description="A concise message for use in SMS, push notifications, Slack, and other short-form communication channels."),
+) -> dict[str, Any]:
+    """Create a new status update template with optional email and messaging content. Templates can be used to standardize communications across email, SMS, push notifications, and Slack."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateTemplateRequest(
+            body=_models.CreateTemplateRequestBody(template=_models.CreateTemplateRequestBodyTemplate(template_type=template_type, description=description,
+                    templated_fields=_models.CreateTemplateRequestBodyTemplateTemplatedFields(email_subject=email_subject, email_body=email_body, message=message) if any(v is not None for v in [email_subject, email_body, message]) else None) if any(v is not None for v in [template_type, description, email_subject, email_body, message]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_status_update_template: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/templates"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_status_update_template")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_status_update_template", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_status_update_template",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def get_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to retrieve.")) -> dict[str, Any]:
+    """Retrieve a single template from your account by its ID. Returns the complete template details including configuration and metadata."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTemplateRequest(
+            path=_models.GetTemplateRequestPath(id_=id_)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_template: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/templates/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/templates/{id}"
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_template")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_template", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_template",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def update_template(
+    id_: str = Field(..., alias="id", description="The unique identifier of the template to update."),
+    template_type: Literal["status_update"] | None = Field(None, description="The category of template. Currently, only `status_update` templates are supported for notifications across email, SMS, push, and Slack channels."),
+    description: str | None = Field(None, description="A human-readable description of the template's purpose and usage."),
+    email_subject: str | None = Field(None, description="The subject line for email notifications sent using this template."),
+    email_body: str | None = Field(None, description="The HTML-formatted body content for email notifications sent using this template."),
+    message: str | None = Field(None, description="The concise message text for SMS, push notifications, Slack, and other short-form channels."),
+) -> dict[str, Any]:
+    """Update an existing template with new content and configuration. Modify template type, description, email subject/body, or message content for status update notifications."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateTemplateRequest(
+            path=_models.UpdateTemplateRequestPath(id_=id_),
+            body=_models.UpdateTemplateRequestBody(template=_models.UpdateTemplateRequestBodyTemplate(template_type=template_type, description=description,
+                    templated_fields=_models.UpdateTemplateRequestBodyTemplateTemplatedFields(email_subject=email_subject, email_body=email_body, message=message) if any(v is not None for v in [email_subject, email_body, message]) else None) if any(v is not None for v in [template_type, description, email_subject, email_body, message]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_template: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/templates/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/templates/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_template")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_template", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_template",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to delete.")) -> dict[str, Any]:
+    """Permanently delete a template from the account. This action cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteTemplateRequest(
+            path=_models.DeleteTemplateRequestPath(id_=id_)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_template: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/templates/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/templates/{id}"
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_template")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_template", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_template",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def render_template(
+    id_: str = Field(..., alias="id", description="The unique identifier of the template to render."),
+    body: _models.StatusUpdateTemplateInput = Field(..., description="Template-specific payload containing the data needed to render the template. For status_update templates, include incident_id (string) and status_update object with a message field."),
+) -> dict[str, Any]:
+    """Render a template by providing template-specific data. The request body structure varies based on template type; for status_update templates, provide the incident ID and status message."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.RenderTemplateRequest(
+            path=_models.RenderTemplateRequestPath(id_=id_),
+            body=_models.RenderTemplateRequestBody(body=body)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for render_template: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/templates/{id}/render", _request.path.model_dump(by_alias=True)) if _request.path else "/templates/{id}/render"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_body = next(iter(_http_body.values()), None) if _http_body else None
+    _http_headers = {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("render_template")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("render_template", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="render_template",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Templates
+@mcp.tool()
+async def list_template_fields(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request and response content type. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve all available fields that can be used when creating or configuring account templates. This operation returns the complete set of supported template field definitions."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetTemplateFieldsRequest(
+            header=_models.GetTemplateFieldsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_template_fields: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/templates/fields"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_template_fields")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_template_fields", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_template_fields",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_users(
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to application/vnd.pagerduty+json;version=2 for this operation."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request body format. Must be application/json."),
+    team_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to only include users belonging to the specified teams. Requires the account to have the teams ability enabled. Provide as an array of team IDs."),
+    include: Annotated[Literal["contact_methods", "notification_rules", "teams", "subdomains"], AfterValidator(_check_unique_items)] | None = Field(None, description="Expand the response to include additional related data such as contact methods, notification rules, team associations, or subdomains for each user."),
+) -> dict[str, Any]:
+    """Retrieve a list of users in your PagerDuty account with optional filtering by team membership and additional related data. Users are account members with the ability to interact with incidents and other account data."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListUsersRequest(
+            query=_models.ListUsersRequestQuery(team_ids=team_ids, include=include),
+            header=_models.ListUsersRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_users: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/users"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_users")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_users", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_users",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def create_user(
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the PagerDuty v2 JSON format for request and response serialization."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON format."),
+    from_: str = Field(..., alias="From", description="Email address of a valid user associated with the PagerDuty account making this request. Used to identify the requester for audit purposes."),
+    user: _models.CreateUserBodyUser = Field(..., description="User object containing the details for the new user account to be created."),
+) -> dict[str, Any]:
+    """Create a new user account in PagerDuty. Users are account members with the ability to interact with incidents and other account data. Requires the `users.write` OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateUserRequest(
+            header=_models.CreateUserRequestHeader(accept=accept, content_type=content_type, from_=from_),
+            body=_models.CreateUserRequestBody(user=user)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_user: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/users"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_user")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_user", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_user",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    include: Annotated[Literal["contact_methods", "notification_rules", "teams", "subdomains"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related data models to include in the response. Valid options are contact methods, notification rules, team memberships, and subdomains associated with the user."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific user in the PagerDuty account. Users are account members with the ability to interact with incidents and other account data."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserRequest(
+            path=_models.GetUserRequestPath(id_=id_),
+            query=_models.GetUserRequestQuery(include=include),
+            header=_models.GetUserRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def update_user(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be `application/json`."),
+    user: _models.UpdateUserBodyUser = Field(..., description="User object containing the fields to update. Refer to the API Concepts Document for the complete user schema and available fields."),
+) -> dict[str, Any]:
+    """Update an existing user in a PagerDuty account. Users are members with the ability to interact with incidents and other account data. Requires `users.write` OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateUserRequest(
+            path=_models.UpdateUserRequestPath(id_=id_),
+            header=_models.UpdateUserRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateUserRequestBody(user=user)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_user: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_user")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_user", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_user",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def delete_user(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Permanently remove a user from the PagerDuty account. Deletion may fail if the user has assigned incidents unless your pricing plan includes the offboarding feature and your account is configured for it. Note that incident reassignment is asynchronous and may not complete before the API call returns."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteUserRequest(
+            path=_models.DeleteUserRequestPath(id_=id_),
+            header=_models.DeleteUserRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_user: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_user")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_user", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_user",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_user_audit_records(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose audit records you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to `application/vnd.pagerduty+json;version=2` to specify the API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be `application/json`."),
+    since: str | None = Field(None, description="The start of the date range for the audit search in ISO 8601 format. Defaults to 24 hours before the current time if not specified."),
+    until: str | None = Field(None, description="The end of the date range for the audit search in ISO 8601 format. Defaults to the current time if not specified. Cannot be more than 31 days after the `since` parameter."),
+) -> dict[str, Any]:
+    """Retrieve audit records showing changes made to a specific user. Records are sorted by execution time from newest to oldest and support cursor-based pagination."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListUsersAuditRecordsRequest(
+            path=_models.ListUsersAuditRecordsRequestPath(id_=id_),
+            query=_models.ListUsersAuditRecordsRequestQuery(since=since, until=until),
+            header=_models.ListUsersAuditRecordsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_user_audit_records: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/audit/records", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/audit/records"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_user_audit_records")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_user_audit_records", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_user_audit_records",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_user_contact_methods(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact methods you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve all contact methods configured for a PagerDuty user. Contact methods define how a user can be reached during incidents and alerts."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserContactMethodsRequest(
+            path=_models.GetUserContactMethodsRequestPath(id_=id_),
+            header=_models.GetUserContactMethodsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_user_contact_methods: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/contact_methods", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/contact_methods"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_user_contact_methods")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_user_contact_methods", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_user_contact_methods",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def create_user_contact_method(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user for whom the contact method is being created."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format. Must be application/json."),
+    contact_method: _models.PhoneContactMethod | _models.PushContactMethod | _models.EmailContactMethod | _models.WhatsAppContactMethod = Field(..., description="The contact method object containing details such as type (email, phone, SMS, etc.) and address. Refer to API documentation for required and optional fields."),
+) -> dict[str, Any]:
+    """Create a new contact method for a PagerDuty user, enabling them to receive notifications through additional channels. Requires users:contact_methods.write OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateUserContactMethodRequest(
+            path=_models.CreateUserContactMethodRequestPath(id_=id_),
+            header=_models.CreateUserContactMethodRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateUserContactMethodRequestBody(contact_method=contact_method)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_user_contact_method: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/contact_methods", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/contact_methods"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_user_contact_method")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_user_contact_method", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_user_contact_method",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user_contact_method(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method you want to retrieve."),
+    contact_method_id: str = Field(..., description="The unique identifier of the contact method belonging to the specified user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific contact method for a PagerDuty user. Contact methods define how users can be reached for incident notifications."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserContactMethodRequest(
+            path=_models.GetUserContactMethodRequestPath(id_=id_, contact_method_id=contact_method_id),
+            header=_models.GetUserContactMethodRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user_contact_method: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/contact_methods/{contact_method_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/contact_methods/{contact_method_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user_contact_method")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_contact_method", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user_contact_method",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def update_user_contact_method(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method is being updated."),
+    contact_method_id: str = Field(..., description="The unique identifier of the contact method to update on the user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type of the request body. Must be application/json."),
+    contact_method: _models.PhoneContactMethod | _models.PushContactMethod | _models.EmailContactMethod | _models.WhatsAppContactMethod = Field(..., description="The contact method object containing the updated configuration details for the user's contact method."),
+) -> dict[str, Any]:
+    """Update a specific contact method for a PagerDuty user. This allows modification of how a user can be reached for incident notifications and communications."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateUserContactMethodRequest(
+            path=_models.UpdateUserContactMethodRequestPath(id_=id_, contact_method_id=contact_method_id),
+            header=_models.UpdateUserContactMethodRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateUserContactMethodRequestBody(contact_method=contact_method)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_user_contact_method: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/contact_methods/{contact_method_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/contact_methods/{contact_method_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_user_contact_method")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_user_contact_method", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_user_contact_method",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def delete_user_contact_method(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose contact method will be deleted."),
+    contact_method_id: str = Field(..., description="The unique identifier of the contact method to be removed from the user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty API version 2 content type."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Remove a contact method from a PagerDuty user account. This operation permanently deletes the specified contact method, preventing further notifications through that channel."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteUserContactMethodRequest(
+            path=_models.DeleteUserContactMethodRequestPath(id_=id_, contact_method_id=contact_method_id),
+            header=_models.DeleteUserContactMethodRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_user_contact_method: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/contact_methods/{contact_method_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/contact_methods/{contact_method_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_user_contact_method")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_user_contact_method", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_user_contact_method",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_user_oauth_delegations(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose delegations you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type as JSON."),
+    delegation_type: Literal["mobile", "web", "integration"] | None = Field(None, description="Filter delegations by type. Accepts one or more values (mobile, web, or integration) separated by commas to return delegations matching any of the specified types."),
+    status: Literal["issued", "revoked"] | None = Field(None, description="Filter delegations by status. Accepts one or more values (issued or revoked) separated by commas to return delegations matching any of the specified statuses."),
+) -> dict[str, Any]:
+    """Retrieve a list of OAuth delegations for a specific user, with optional filtering by delegation type and status. This endpoint replaces the deprecated sessions endpoint."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListUserDelegationsRequest(
+            path=_models.ListUserDelegationsRequestPath(id_=id_),
+            query=_models.ListUserDelegationsRequestQuery(delegation_type=delegation_type, status=status),
+            header=_models.ListUserDelegationsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_user_oauth_delegations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/oauth_delegations", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/oauth_delegations"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_user_oauth_delegations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_user_oauth_delegations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_user_oauth_delegations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user_oauth_delegation(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose delegation you want to retrieve."),
+    delegation_id: str = Field(..., description="The unique identifier of the OAuth delegation to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The content type for the request body. Must be JSON format."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific OAuth delegation for a user. This endpoint replaces the deprecated session-based endpoint and requires the `oauth_delegations.read` OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserDelegationRequest(
+            path=_models.GetUserDelegationRequestPath(id_=id_, delegation_id=delegation_id),
+            header=_models.GetUserDelegationRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user_oauth_delegation: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/oauth_delegations/{delegation_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/oauth_delegations/{delegation_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user_oauth_delegation")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_oauth_delegation", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user_oauth_delegation",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user_license(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose license allocation you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve the license currently allocated to a specific user. Returns the license details associated with the user's account."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserLicenseRequest(
+            path=_models.GetUserLicenseRequestPath(id_=id_),
+            header=_models.GetUserLicenseRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user_license: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/license", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/license"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user_license")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_license", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user_license",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_user_notification_rules(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rules you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="HTTP header specifying the API version. Must be set to 'application/vnd.pagerduty+json;version=2' to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="HTTP header specifying the request content type. Must be 'application/json'."),
+    include: Annotated[Literal["contact_methods"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional related data in the response. Specify 'contact_methods' to include the user's contact methods associated with each notification rule."),
+    urgency: Annotated[Literal["high", "low", "all"], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter notification rules by incident urgency level. Use 'high' for high-urgency incidents, 'low' for low-urgency incidents, or 'all' to retrieve rules for all urgency levels. Defaults to 'high' if not specified."),
+) -> dict[str, Any]:
+    """Retrieve notification rules configured for a PagerDuty user. Notification rules determine how and when the user receives alerts based on incident urgency."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserNotificationRulesRequest(
+            path=_models.GetUserNotificationRulesRequestPath(id_=id_),
+            query=_models.GetUserNotificationRulesRequestQuery(include=include, urgency=urgency),
+            header=_models.GetUserNotificationRulesRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_user_notification_rules: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_rules", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_rules"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_user_notification_rules")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_user_notification_rules", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_user_notification_rules",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule you want to retrieve."),
+    notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use the default PagerDuty API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be JSON format."),
+    include: Annotated[Literal["contact_methods"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array to include additional related data. Specify 'contact_methods' to include the contact methods associated with this notification rule."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific notification rule for a PagerDuty user. Notification rules define how and when users receive alerts for incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserNotificationRuleRequest(
+            path=_models.GetUserNotificationRuleRequestPath(id_=id_, notification_rule_id=notification_rule_id),
+            query=_models.GetUserNotificationRuleRequestQuery(include=include),
+            header=_models.GetUserNotificationRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_rules/{notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_rules/{notification_rule_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_notification_rule", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user_notification_rule",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def update_user_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule is being updated."),
+    notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type of the request body. Must be application/json."),
+    notification_rule: _models.NotificationRule = Field(..., description="The notification rule object containing the updated configuration for the notification rule."),
+) -> dict[str, Any]:
+    """Update a specific notification rule for a PagerDuty user. Notification rules control how and when users receive alerts for incidents."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateUserNotificationRuleRequest(
+            path=_models.UpdateUserNotificationRuleRequestPath(id_=id_, notification_rule_id=notification_rule_id),
+            header=_models.UpdateUserNotificationRuleRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateUserNotificationRuleRequestBody(notification_rule=notification_rule)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_user_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_rules/{notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_rules/{notification_rule_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_user_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_user_notification_rule", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_user_notification_rule",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def delete_user_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule will be deleted."),
+    notification_rule_id: str = Field(..., description="The unique identifier of the notification rule to be removed from the user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request body format as JSON."),
+) -> dict[str, Any]:
+    """Remove a specific notification rule from a PagerDuty user. This permanently deletes the user's notification rule configuration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteUserNotificationRuleRequest(
+            path=_models.DeleteUserNotificationRuleRequestPath(id_=id_, notification_rule_id=notification_rule_id),
+            header=_models.DeleteUserNotificationRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_user_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_rules/{notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_rules/{notification_rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_user_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_user_notification_rule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_user_notification_rule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def list_user_notification_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification subscriptions you want to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format if not specified."),
+) -> dict[str, Any]:
+    """Retrieve all notification subscriptions for a specific user. Only subscriptions that were explicitly added through the create endpoint will be returned."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserNotificationSubscriptionsRequest(
+            path=_models.GetUserNotificationSubscriptionsRequestPath(id_=id_),
+            header=_models.GetUserNotificationSubscriptionsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_user_notification_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_subscriptions", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_subscriptions"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_user_notification_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_user_notification_subscriptions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_user_notification_subscriptions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def create_user_notification_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user for whom to create notification subscriptions."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+    subscribables: Annotated[list[_models.NotificationSubscribable], AfterValidator(_check_unique_items)] = Field(..., description="Array of subscribable resources to create subscriptions for. Must contain at least one item. Each item specifies a resource the user wants to receive notifications about.", min_length=1),
+) -> dict[str, Any]:
+    """Create one or more notification subscriptions for a user to receive alerts about specific resources or events. Requires the `subscribers.write` OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateUserNotificationSubscriptionsRequest(
+            path=_models.CreateUserNotificationSubscriptionsRequestPath(id_=id_),
+            header=_models.CreateUserNotificationSubscriptionsRequestHeader(accept=accept),
+            body=_models.CreateUserNotificationSubscriptionsRequestBody(subscribables=subscribables)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_user_notification_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_subscriptions", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_subscriptions"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_user_notification_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_user_notification_subscriptions", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_user_notification_subscriptions",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def remove_user_notification_subscriptions(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user to unsubscribe from notifications."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Use application/vnd.pagerduty+json;version=2 to specify the response format and API version."),
+    subscribables: Annotated[list[_models.NotificationSubscribable], AfterValidator(_check_unique_items)] = Field(..., description="Array of subscribable entity identifiers to unsubscribe from. Must contain at least one entity ID. Order is not significant.", min_length=1),
+) -> dict[str, Any]:
+    """Unsubscribe a user from notifications on specified subscribable entities. Requires the subscribers.write OAuth scope."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UnsubscribeUserNotificationSubscriptionsRequest(
+            path=_models.UnsubscribeUserNotificationSubscriptionsRequestPath(id_=id_),
+            header=_models.UnsubscribeUserNotificationSubscriptionsRequestHeader(accept=accept),
+            body=_models.UnsubscribeUserNotificationSubscriptionsRequestBody(subscribables=subscribables)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for remove_user_notification_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/notification_subscriptions/unsubscribe", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/notification_subscriptions/unsubscribe"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("remove_user_notification_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("remove_user_notification_subscriptions", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="remove_user_notification_subscriptions",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_user_oncall_handoff_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user resource."),
+    oncall_handoff_notification_rule_id: str = Field(..., description="The unique identifier of the on-call handoff notification rule associated with the user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve a specific on-call handoff notification rule for a user. This returns the configuration details for how a user is notified when on-call responsibilities are handed off."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetUserHandoffNotifiactionRuleRequest(
+            path=_models.GetUserHandoffNotifiactionRuleRequestPath(id_=id_, oncall_handoff_notification_rule_id=oncall_handoff_notification_rule_id),
+            header=_models.GetUserHandoffNotifiactionRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_user_oncall_handoff_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/oncall_handoff_notification_rules/{oncall_handoff_notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/oncall_handoff_notification_rules/{oncall_handoff_notification_rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_user_oncall_handoff_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_user_oncall_handoff_notification_rule", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_user_oncall_handoff_notification_rule",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def delete_user_oncall_handoff_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose handoff notification rule should be deleted."),
+    oncall_handoff_notification_rule_id: str = Field(..., description="The unique identifier of the specific handoff notification rule to delete from the user's account."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Must be set to application/vnd.pagerduty+json;version=2 to use the current API version."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Remove a specific handoff notification rule from a user's on-call settings. This operation permanently deletes the rule, preventing further notifications based on that rule's configuration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteUserHandoffNotificationRuleRequest(
+            path=_models.DeleteUserHandoffNotificationRuleRequestPath(id_=id_, oncall_handoff_notification_rule_id=oncall_handoff_notification_rule_id),
+            header=_models.DeleteUserHandoffNotificationRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_user_oncall_handoff_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/oncall_handoff_notification_rules/{oncall_handoff_notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/oncall_handoff_notification_rules/{oncall_handoff_notification_rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_user_oncall_handoff_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_user_oncall_handoff_notification_rule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_user_oncall_handoff_notification_rule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def delete_user_status_update_notification_rule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the user whose notification rule will be deleted."),
+    status_update_notification_rule_id: str = Field(..., description="The unique identifier of the status update notification rule to be removed from the user."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be application/json."),
+) -> dict[str, Any]:
+    """Remove a specific status update notification rule from a user's account. This operation permanently deletes the notification rule, preventing further status update notifications according to that rule's configuration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteUserStatusUpdateNotificationRuleRequest(
+            path=_models.DeleteUserStatusUpdateNotificationRuleRequestPath(id_=id_, status_update_notification_rule_id=status_update_notification_rule_id),
+            header=_models.DeleteUserStatusUpdateNotificationRuleRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_user_status_update_notification_rule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/users/{id}/status_update_notification_rules/{status_update_notification_rule_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/users/{id}/status_update_notification_rules/{status_update_notification_rule_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_user_status_update_notification_rule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_user_status_update_notification_rule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_user_status_update_notification_rule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Users
+@mcp.tool()
+async def get_current_user(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Content type for the request body. Must be application/json."),
+    include: Annotated[Literal["contact_methods", "notification_rules", "teams", "subdomains"], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional array of related resources to include in the response. Valid options are contact_methods, notification_rules, teams, and subdomains."),
+) -> dict[str, Any]:
+    """Retrieve details about the authenticated user. This operation requires a user-level API key or OAuth token and cannot be used with account-level access tokens."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetCurrentUserRequest(
+            query=_models.GetCurrentUserRequestQuery(include=include),
+            header=_models.GetCurrentUserRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_current_user: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/users/me"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_current_user")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_current_user", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_current_user",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Vendors
+@mcp.tool()
+async def list_vendors(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to the PagerDuty JSON API version 2 format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Specifies the request content type. Must be set to application/json."),
+) -> dict[str, Any]:
+    """Retrieve a list of all available PagerDuty vendors, which represent specific types of integrations such as AWS Cloudwatch, Splunk, and Datadog. Use this to discover supported integration types for your account."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListVendorsRequest(
+            header=_models.ListVendorsRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_vendors: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/vendors"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_vendors")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_vendors", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_vendors",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def list_schedules(x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API contract. This endpoint is under active development and may change without notice—do not use in production. Must be set to the fixed value `flexible-schedules-early-access`.")) -> dict[str, Any]:
+    """Retrieve a paginated list of schedule references with lightweight objects. Results are automatically filtered by your read permissions; schedules you cannot access are excluded."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListSchedulesV3Request(
+            header=_models.ListSchedulesV3RequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_schedules: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/v3/schedules"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_schedules")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_schedules", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_schedules",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def create_schedule(
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Early access header required to use this API. Must be set to the fixed value `flexible-schedules-early-access`. This endpoint is under active development and may change without notice."),
+    name: str = Field(..., description="The name of the schedule. Must be between 1 and 255 characters.", min_length=1, max_length=255),
+    time_zone: str = Field(..., description="IANA timezone identifier (e.g., America/New_York, Europe/London) that determines the timezone context for all schedule operations."),
+    description: str | None = Field(None, description="Optional description of the schedule's purpose or scope. Maximum 1024 characters.", max_length=1024),
+    teams: list[_models.CreateScheduleV3BodyScheduleTeamsItem] | None = Field(None, description="Optional list of teams to associate with this schedule. Teams will have access to and visibility of this schedule."),
+) -> dict[str, Any]:
+    """Create a new on-call schedule with basic metadata. Rotations and events must be added separately after creation using dedicated API endpoints."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateScheduleV3Request(
+            header=_models.CreateScheduleV3RequestHeader(x_early_access=x_early_access),
+            body=_models.CreateScheduleV3RequestBody(schedule=_models.CreateScheduleV3RequestBodySchedule(name=name, time_zone=time_zone, description=description, teams=teams))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_schedule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/v3/schedules"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_schedule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_schedule", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_schedule",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def get_schedule_with_final_assignments(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API terms. Must be set to 'flexible-schedules-early-access'. This endpoint is under construction and may change without notice."),
+    since: str | None = Field(None, description="Start of the time range for computing final schedule assignments, specified in ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z). Only used when final_schedule is included."),
+    until: str | None = Field(None, description="End of the time range for computing final schedule assignments, specified in ISO 8601 date-time format (e.g., 2025-01-31T23:59:59Z). Only used when final_schedule is included."),
+    time_zone: str | None = Field(None, description="IANA timezone identifier for rendering shift times in the response (e.g., America/New_York). If not specified, defaults to the schedule's configured timezone."),
+    overflow: bool | None = Field(None, description="When true, includes shifts that extend beyond the requested time range boundaries. Defaults to false."),
+    include: list[Literal["final_schedule"]] | None = Field(None, description="Array of additional data to include in the response. Use 'final_schedule' to compute on-call assignments for the specified time range."),
+) -> dict[str, Any]:
+    """Retrieve a schedule by ID with its rotations and events. Optionally compute on-call assignments for a specified time range by including the final schedule in the response."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetScheduleV3Request(
+            path=_models.GetScheduleV3RequestPath(id_=id_),
+            query=_models.GetScheduleV3RequestQuery(since=since, until=until, time_zone=time_zone, overflow=overflow, include=include),
+            header=_models.GetScheduleV3RequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_schedule_with_final_assignments: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_schedule_with_final_assignments")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_schedule_with_final_assignments", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_schedule_with_final_assignments",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def update_schedule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to update."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to indicate acceptance of potential API changes. Must be set to the fixed value 'flexible-schedules-early-access'. Do not use this endpoint in production."),
+    time_zone: str | None = Field(None, description="The time zone for the schedule (e.g., 'America/Los_Angeles'). Optional; only provided values are updated."),
+    description: str | None = Field(None, description="A description of the schedule, up to 1024 characters. Optional; only provided values are updated.", max_length=1024),
+) -> dict[str, Any]:
+    """Update schedule metadata including name, description, and time zone. This is an early access endpoint that only modifies schedule properties; use dedicated endpoints to modify rotations or events."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateScheduleV3Request(
+            path=_models.UpdateScheduleV3RequestPath(id_=id_),
+            header=_models.UpdateScheduleV3RequestHeader(x_early_access=x_early_access),
+            body=_models.UpdateScheduleV3RequestBody(schedule=_models.UpdateScheduleV3RequestBodySchedule(time_zone=time_zone, description=description) if any(v is not None for v in [time_zone, description]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_schedule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_schedule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_schedule", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_schedule",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def delete_schedule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to delete."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header to access this early-access API endpoint. Must be set to `flexible-schedules-early-access`. This API is under active development and may change without notice—do not use in production."),
+) -> dict[str, Any]:
+    """Permanently delete a schedule along with all its associated rotations and events. The operation will fail if the schedule is currently referenced by an active escalation policy."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteScheduleV3Request(
+            path=_models.DeleteScheduleV3RequestPath(id_=id_),
+            header=_models.DeleteScheduleV3RequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_schedule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_schedule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_schedule", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_schedule",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def list_custom_shifts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve custom shifts for."),
+    since: str = Field(..., description="Start of the time range for retrieving shifts, specified in ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z). Required parameter."),
+    until: str = Field(..., description="End of the time range for retrieving shifts, specified in ISO 8601 date-time format (e.g., 2025-01-31T23:59:59Z). Required parameter."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to the value 'flexible-schedules-early-access'. This endpoint is under construction and may change without notice."),
+    time_zone: str | None = Field(None, description="IANA timezone identifier used to render shift times in the response. If not provided, defaults to the schedule's configured timezone (e.g., America/New_York)."),
+    overflow: bool | None = Field(None, description="When enabled, includes shifts that extend beyond the requested time range boundaries. Defaults to false, returning only shifts fully contained within the range."),
+) -> dict[str, Any]:
+    """Retrieve custom shifts for a schedule within a specified time range. This endpoint is in Early Access and requires the X-EARLY-ACCESS header on every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListCustomShiftsRequest(
+            path=_models.ListCustomShiftsRequestPath(id_=id_),
+            query=_models.ListCustomShiftsRequestQuery(since=since, until=until, time_zone=time_zone, overflow=overflow),
+            header=_models.ListCustomShiftsRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_custom_shifts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/custom_shifts", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/custom_shifts"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_custom_shifts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_custom_shifts", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_custom_shifts",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def create_custom_shifts(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule where custom shifts will be created."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to the fixed value 'flexible-schedules-early-access'. Do not use this endpoint in production as it may change without notice."),
+    custom_shifts: list[_models.CreateCustomShiftsBodyCustomShiftsItem] = Field(..., description="Array of custom shift objects to create. At least one custom shift is required per request. Each shift must include exactly one assignment.", min_length=1),
+) -> dict[str, Any]:
+    """Create one or more ad-hoc custom shifts for a schedule that exist outside of rotation events. Each custom shift requires exactly one assignment. This endpoint is in Early Access and may change at any time."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateCustomShiftsRequest(
+            path=_models.CreateCustomShiftsRequestPath(id_=id_),
+            header=_models.CreateCustomShiftsRequestHeader(x_early_access=x_early_access),
+            body=_models.CreateCustomShiftsRequestBody(custom_shifts=custom_shifts)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_custom_shifts: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/custom_shifts", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/custom_shifts"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_custom_shifts")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_custom_shifts", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_custom_shifts",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def get_custom_shift(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
+    custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to retrieve."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to indicate acceptance of the API's early access status and potential changes. Must be set to the fixed value `flexible-schedules-early-access`. Do not use this endpoint in production."),
+) -> dict[str, Any]:
+    """Retrieve a single custom shift by its ID from a schedule. This endpoint is in early access and requires the early access header to be passed with every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetCustomShiftRequest(
+            path=_models.GetCustomShiftRequestPath(id_=id_, custom_shift_id=custom_shift_id),
+            header=_models.GetCustomShiftRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_custom_shift: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/custom_shifts/{custom_shift_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/custom_shifts/{custom_shift_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_custom_shift")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_custom_shift", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_custom_shift",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def update_custom_shift(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
+    custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to update."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to 'flexible-schedules-early-access'. This API is under construction and may change without notice—do not use in production."),
+    start_time: str | None = Field(None, description="The start time for the custom shift in ISO 8601 date-time format. Cannot be modified if the shift has already started."),
+    end_time: str | None = Field(None, description="The end time for the custom shift in ISO 8601 date-time format. This is the only field that can be modified after a shift has started."),
+    assignments: list[_models.UpdateCustomShiftBodyCustomShiftAssignmentsItem] | None = Field(None, description="Array of shift assignments. Must contain exactly one assignment. Order and format follow the API's assignment schema.", min_length=1, max_length=1),
+) -> dict[str, Any]:
+    """Update an existing custom shift in a schedule. If the shift has already started, only the end time can be modified. This endpoint is in Early Access and requires the X-EARLY-ACCESS header."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateCustomShiftRequest(
+            path=_models.UpdateCustomShiftRequestPath(id_=id_, custom_shift_id=custom_shift_id),
+            header=_models.UpdateCustomShiftRequestHeader(x_early_access=x_early_access),
+            body=_models.UpdateCustomShiftRequestBody(custom_shift=_models.UpdateCustomShiftRequestBodyCustomShift(start_time=start_time, end_time=end_time, assignments=assignments) if any(v is not None for v in [start_time, end_time, assignments]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_custom_shift: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/custom_shifts/{custom_shift_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/custom_shifts/{custom_shift_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_custom_shift")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_custom_shift", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_custom_shift",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def delete_custom_shift(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the custom shift."),
+    custom_shift_id: str = Field(..., description="The unique identifier of the custom shift to delete."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to use this API endpoint. Must be set to `flexible-schedules-early-access`. This endpoint is under active development and may change without notice—do not use in production."),
+) -> dict[str, Any]:
+    """Delete a custom shift from a schedule. If the shift hasn't started, it removes the shift entirely; if already in progress, it ends the shift immediately. Returns an error if the shift has already ended."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteCustomShiftRequest(
+            path=_models.DeleteCustomShiftRequestPath(id_=id_, custom_shift_id=custom_shift_id),
+            header=_models.DeleteCustomShiftRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_custom_shift: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/custom_shifts/{custom_shift_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/custom_shifts/{custom_shift_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_custom_shift")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_custom_shift", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_custom_shift",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def list_schedule_overrides(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve overrides for."),
+    since: str = Field(..., description="Start of the time range for retrieving overrides, specified in ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z)."),
+    until: str = Field(..., description="End of the time range for retrieving overrides, specified in ISO 8601 date-time format (e.g., 2025-01-31T23:59:59Z). Must be after the since parameter."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required Early Access header that must be set to 'flexible-schedules-early-access' to use this endpoint. This API is under construction and may change without notice."),
+    time_zone: str | None = Field(None, description="IANA timezone identifier used to render shift times in the response. If not provided, defaults to the schedule's configured timezone (e.g., America/New_York)."),
+    overflow: bool | None = Field(None, description="When enabled, includes shifts that extend beyond the requested time range boundaries. Defaults to false."),
+) -> dict[str, Any]:
+    """Retrieve all schedule overrides within a specified time range. This endpoint requires the Early Access header and both start and end times in ISO 8601 format."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListOverridesRequest(
+            path=_models.ListOverridesRequestPath(id_=id_),
+            query=_models.ListOverridesRequestQuery(since=since, until=until, time_zone=time_zone, overflow=overflow),
+            header=_models.ListOverridesRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_schedule_overrides: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/overrides", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/overrides"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_schedule_overrides")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_schedule_overrides", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_schedule_overrides",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def create_schedule_overrides(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to create overrides."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required Early Access header that must be set to 'flexible-schedules-early-access' to use this endpoint. This API is under construction and may change at any time."),
+    overrides: list[_models.CreateOverridesBodyOverridesItem] = Field(..., description="Array of one or more override objects to create. Each override must reference either a rotation_id or custom_shift_id (not both), and the overriding member must belong to the account.", min_length=1),
+) -> dict[str, Any]:
+    """Create one or more overrides for a schedule to temporarily replace scheduled on-call members with different members for specific time periods. This endpoint is in Early Access and requires the X-EARLY-ACCESS header."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateOverridesRequest(
+            path=_models.CreateOverridesRequestPath(id_=id_),
+            header=_models.CreateOverridesRequestHeader(x_early_access=x_early_access),
+            body=_models.CreateOverridesRequestBody(overrides=overrides)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_schedule_overrides: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/overrides", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/overrides"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_schedule_overrides")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_schedule_overrides", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_schedule_overrides",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def get_override(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override."),
+    override_id: str = Field(..., description="The unique identifier of the override to retrieve."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to use this endpoint. Must be set to `flexible-schedules-early-access`. This API is under construction and may change at any time; do not use in production."),
+) -> dict[str, Any]:
+    """Retrieve a single schedule override by its ID. This endpoint is in early access and requires the early access header on every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetOverrideRequest(
+            path=_models.GetOverrideRequestPath(id_=id_, override_id=override_id),
+            header=_models.GetOverrideRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_override: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/overrides/{override_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/overrides/{override_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_override")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_override", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_override",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def update_schedule_override(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override to update."),
+    override_id: str = Field(..., description="The unique identifier of the override to update."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header that must be set to `flexible-schedules-early-access` to use this endpoint. This API is under construction and may change without notice."),
+    type_: Literal["user_member", "empty_member"] = Field(..., alias="type", description="The type of override assignment: `user_member` to assign a specific user, or `empty_member` to intentionally leave the slot unassigned."),
+    start_time: str | None = Field(None, description="The start time for the override in ISO 8601 date-time format. Defines when the override begins."),
+    end_time: str | None = Field(None, description="The end time for the override in ISO 8601 date-time format. Defines when the override ends."),
+    user_id: str | None = Field(None, description="The ID of the user to assign to this override. Required when type is set to `user_member`."),
+) -> dict[str, Any]:
+    """Update an existing override for a schedule, allowing you to modify the time window and assignment (either to a specific user or leave the slot intentionally unassigned). This endpoint is in early access and requires the early access header."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateOverrideRequest(
+            path=_models.UpdateOverrideRequestPath(id_=id_, override_id=override_id),
+            header=_models.UpdateOverrideRequestHeader(x_early_access=x_early_access),
+            body=_models.UpdateOverrideRequestBody(override=_models.UpdateOverrideRequestBodyOverride(
+                    start_time=start_time, end_time=end_time,
+                    overriding_member=_models.UpdateOverrideRequestBodyOverrideOverridingMember(type_=type_, user_id=user_id)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_schedule_override: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/overrides/{override_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/overrides/{override_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_schedule_override")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_schedule_override", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_schedule_override",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def delete_schedule_override(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the override to delete."),
+    override_id: str = Field(..., description="The unique identifier of the override to delete."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to acknowledge this API is under construction and subject to change. Must be set to the fixed value `flexible-schedules-early-access`."),
+) -> dict[str, Any]:
+    """Remove a specific override from a schedule. This endpoint is in early access and may change; include the required early access header with every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteOverrideRequest(
+            path=_models.DeleteOverrideRequestPath(id_=id_, override_id=override_id),
+            header=_models.DeleteOverrideRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_schedule_override: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/overrides/{override_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/overrides/{override_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_schedule_override")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_schedule_override", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_schedule_override",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def list_rotations(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule for which to retrieve rotations."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to acknowledge this API is under construction and may change. Must be set to the fixed value `flexible-schedules-early-access`."),
+) -> dict[str, Any]:
+    """Retrieve all rotations configured for a specific schedule. This endpoint is in early access and requires the early access header on every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListRotationsRequest(
+            path=_models.ListRotationsRequestPath(id_=id_),
+            header=_models.ListRotationsRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_rotations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_rotations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_rotations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_rotations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def create_rotation_for_schedule(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule to which the rotation will be added."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of Early Access API terms. Must be set to the specified value to proceed with the request."),
+    body: dict[str, Any] | None = Field(None, description="Request body must be empty or an empty object. Rotations carry no configuration at creation time; all scheduling logic is defined through events added after creation."),
+) -> dict[str, Any]:
+    """Create a new empty rotation within a schedule. After creation, add events to define the on-call pattern and scheduling logic. Note: This API is in Early Access and may change at any time."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateRotationRequest(
+            path=_models.CreateRotationRequestPath(id_=id_),
+            header=_models.CreateRotationRequestHeader(x_early_access=x_early_access),
+            body=_models.CreateRotationRequestBody(body=body)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_rotation_for_schedule: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_body = next(iter(_http_body.values()), None) if _http_body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_rotation_for_schedule")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_rotation_for_schedule", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_rotation_for_schedule",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def get_rotation(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation to retrieve."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API status. Must be set to `flexible-schedules-early-access`. This endpoint is under construction and may change without notice—do not use in production."),
+    since: str | None = Field(None, description="Optional start of the time range for filtering events, specified in ISO 8601 format (e.g., 2025-01-01T00:00:00Z)."),
+    until: str | None = Field(None, description="Optional end of the time range for filtering events, specified in ISO 8601 format (e.g., 2025-01-31T23:59:59Z)."),
+) -> dict[str, Any]:
+    """Retrieve a specific rotation by ID, including all its scheduled events. Optionally filter events by a time range using ISO 8601 timestamps."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetRotationRequest(
+            path=_models.GetRotationRequestPath(id_=id_, rotation_id=rotation_id),
+            query=_models.GetRotationRequestQuery(since=since, until=until),
+            header=_models.GetRotationRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_rotation: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_rotation")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_rotation", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_rotation",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def delete_rotation(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation to delete."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation to delete."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API terms. This endpoint is under active development and may change without notice. Must be set to the fixed value `flexible-schedules-early-access`. Do not use in production environments."),
+) -> dict[str, Any]:
+    """Permanently delete a rotation and all its associated events from a schedule. Past events are preserved in audit history, the current active event is truncated to the deletion time, and all future events are removed."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteRotationRequest(
+            path=_models.DeleteRotationRequestPath(id_=id_, rotation_id=rotation_id),
+            header=_models.DeleteRotationRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_rotation: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_rotation")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_rotation", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_rotation",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def list_rotation_events(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation within the schedule."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to use this endpoint. Must be set to `flexible-schedules-early-access`. This API is under construction and may change at any time; do not use in production."),
+) -> dict[str, Any]:
+    """Retrieve all events for a rotation within a schedule, ordered by start time. This endpoint is in early access and requires the early access header."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListEventsRequest(
+            path=_models.ListEventsRequestPath(id_=id_, rotation_id=rotation_id),
+            header=_models.ListEventsRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_rotation_events: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}/events", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}/events"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_rotation_events")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_rotation_events", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_rotation_events",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def create_rotation_event(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation within the schedule."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required header indicating acceptance of the Early Access API. Must be set to `flexible-schedules-early-access`. This endpoint is under construction and may change without notice—do not use in production."),
+    name: str = Field(..., description="A descriptive name for the event, up to 255 characters.", max_length=255),
+    start_time_date_time: str = Field(..., alias="start_timeDate_time", description="The start date and time for the event in ISO 8601 format (e.g., 2025-03-03T09:00:00Z)."),
+    end_time_date_time: str = Field(..., alias="end_timeDate_time", description="The end date and time for the event in ISO 8601 format (e.g., 2025-03-03T09:00:00Z). Must be after the start time."),
+    start_time_time_zone: str = Field(..., alias="start_timeTime_zone", description="IANA timezone identifier for the event start time (e.g., America/New_York). Used to interpret the start_time in local context."),
+    end_time_time_zone: str = Field(..., alias="end_timeTime_zone", description="IANA timezone identifier for the event end time (e.g., America/New_York). Used to interpret the end_time in local context."),
+    effective_since: str = Field(..., description="The date and time when this event begins generating shifts, in ISO 8601 format. Past values are automatically adjusted to the current time."),
+    recurrence: list[str] = Field(..., description="An array of RFC 5545 recurrence rules that define how often the event repeats (e.g., daily, weekly, monthly patterns)."),
+    type_: Literal["rotating_member_assignment_strategy", "every_member_assignment_strategy"] = Field(..., alias="type", description="The assignment strategy type: `rotating_member_assignment_strategy` rotates members through shifts sequentially, while `every_member_assignment_strategy` assigns all members to each shift."),
+    members: list[_models.ShiftMember] = Field(..., description="An array of user IDs to include in the rotation, between 1 and 20 members. All users must exist and belong to the account.", min_length=1, max_length=20),
+    effective_until: str | None = Field(None, description="The date and time when this event stops generating shifts, in ISO 8601 format. Omit or set to null for indefinite duration."),
+    shifts_per_member: int | None = Field(None, description="Required only for `rotating_member_assignment_strategy`. Specifies how many consecutive shift occurrences each member covers before the next member takes over. Must be at least 1.", ge=1),
+) -> dict[str, Any]:
+    """Create a new event that defines when and how users are on-call within a rotation. Events specify time periods, recurrence patterns, and member assignment strategies, with a maximum of 5 non-overlapping events per rotation."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateEventRequest(
+            path=_models.CreateEventRequestPath(id_=id_, rotation_id=rotation_id),
+            header=_models.CreateEventRequestHeader(x_early_access=x_early_access),
+            body=_models.CreateEventRequestBody(event=_models.CreateEventRequestBodyEvent(
+                    name=name, effective_since=effective_since, effective_until=effective_until, recurrence=recurrence,
+                    start_time=_models.CreateEventRequestBodyEventStartTime(date_time=start_time_date_time, time_zone=start_time_time_zone),
+                    end_time=_models.CreateEventRequestBodyEventEndTime(date_time=end_time_date_time, time_zone=end_time_time_zone),
+                    assignment_strategy=_models.CreateEventRequestBodyEventAssignmentStrategy(type_=type_, shifts_per_member=shifts_per_member, members=members)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_rotation_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}/events", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}/events"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_rotation_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_rotation_event", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_rotation_event",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def get_event_in_rotation(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event."),
+    event_id: str = Field(..., description="The unique identifier of the event to retrieve."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header that must be set to `flexible-schedules-early-access` to use this endpoint. This API is under construction and may change at any time; do not use in production."),
+    since: str | None = Field(None, description="Optional start of the time range for filtering results, specified in ISO 8601 format (e.g., 2025-01-01T00:00:00Z)."),
+    until: str | None = Field(None, description="Optional end of the time range for filtering results, specified in ISO 8601 format (e.g., 2025-01-31T23:59:59Z)."),
+) -> dict[str, Any]:
+    """Retrieve a specific event from a schedule rotation by its ID. This endpoint is in early access and requires the early access header on every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetEventRequest(
+            path=_models.GetEventRequestPath(id_=id_, rotation_id=rotation_id, event_id=event_id),
+            query=_models.GetEventRequestQuery(since=since, until=until),
+            header=_models.GetEventRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_event_in_rotation: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_event_in_rotation")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_event_in_rotation", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_event_in_rotation",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def update_rotation_event(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event to update."),
+    event_id: str = Field(..., description="The unique identifier of the event to update."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required Early Access header to acknowledge this API is under construction and may change. Must be set to the fixed value 'flexible-schedules-early-access'."),
+    start_time_date_time: str = Field(..., alias="start_timeDate_time", description="The start date and time for the event in ISO 8601 format (e.g., 2025-03-03T09:00:00Z)."),
+    end_time_date_time: str = Field(..., alias="end_timeDate_time", description="The end date and time for the event in ISO 8601 format (e.g., 2025-03-03T09:00:00Z)."),
+    start_time_time_zone: str = Field(..., alias="start_timeTime_zone", description="IANA timezone identifier for the event start time (e.g., America/New_York). Determines how the start_time.date_time is interpreted."),
+    end_time_time_zone: str = Field(..., alias="end_timeTime_zone", description="IANA timezone identifier for the event end time (e.g., America/New_York). Determines how the end_time.date_time is interpreted."),
+    type_: Literal["rotating_member_assignment_strategy", "every_member_assignment_strategy"] = Field(..., alias="type", description="The assignment strategy type for the event. Choose 'rotating_member_assignment_strategy' to rotate members through shifts, or 'every_member_assignment_strategy' to assign all members to each shift."),
+    members: list[_models.ShiftMember] = Field(..., description="Array of members assigned to this event. Must contain between 1 and 20 members. Order may be significant depending on the assignment strategy.", min_length=1, max_length=20),
+    effective_since: str | None = Field(None, description="Optional date-time in ISO 8601 format marking when this event becomes effective. Only modifiable for future events."),
+    effective_until: str | None = Field(None, description="Optional date-time in ISO 8601 format marking when this event expires. Can be updated for active events even if other fields cannot be modified."),
+    recurrence: list[str] | None = Field(None, description="Optional array defining recurrence rules for the event. Specify recurrence pattern details if the event should repeat."),
+    shifts_per_member: int | None = Field(None, description="Required when using 'rotating_member_assignment_strategy'. Specifies how many consecutive shift occurrences each member covers before the next member takes over. Must be at least 1.", ge=1),
+) -> dict[str, Any]:
+    """Update an existing event in a rotation schedule. Modification capabilities depend on event timing: past events cannot be modified, active events can only update the effective_until date, and future events support full updates. Requires the Early Access header as this API is under construction."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateEventRequest(
+            path=_models.UpdateEventRequestPath(id_=id_, rotation_id=rotation_id, event_id=event_id),
+            header=_models.UpdateEventRequestHeader(x_early_access=x_early_access),
+            body=_models.UpdateEventRequestBody(event=_models.UpdateEventRequestBodyEvent(
+                    effective_since=effective_since, effective_until=effective_until, recurrence=recurrence,
+                    start_time=_models.UpdateEventRequestBodyEventStartTime(date_time=start_time_date_time, time_zone=start_time_time_zone),
+                    end_time=_models.UpdateEventRequestBodyEventEndTime(date_time=end_time_date_time, time_zone=end_time_time_zone),
+                    assignment_strategy=_models.UpdateEventRequestBodyEventAssignmentStrategy(type_=type_, shifts_per_member=shifts_per_member, members=members)
+                ))
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_rotation_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_rotation_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_rotation_event", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_rotation_event",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Schedules_v3
+@mcp.tool()
+async def delete_rotation_event(
+    id_: str = Field(..., alias="id", description="The unique identifier of the schedule containing the rotation."),
+    rotation_id: str = Field(..., description="The unique identifier of the rotation containing the event to delete."),
+    event_id: str = Field(..., description="The unique identifier of the event to delete from the rotation."),
+    x_early_access: Literal["flexible-schedules-early-access"] = Field(..., alias="X-EARLY-ACCESS", description="Required early access header to acknowledge this API is under construction and subject to change. Must be set to `flexible-schedules-early-access`."),
+) -> dict[str, Any]:
+    """Remove an event from a rotation within a schedule. This endpoint is in early access and may change; include the required early access header with every request."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteEventRequest(
+            path=_models.DeleteEventRequestPath(id_=id_, rotation_id=rotation_id, event_id=event_id),
+            header=_models.DeleteEventRequestHeader(x_early_access=x_early_access)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_rotation_event: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/schedules/{id}/rotations/{rotation_id}/events/{event_id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_rotation_event")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_rotation_event", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_rotation_event",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Vendors
+@mcp.tool()
+async def get_vendor(
+    id_: str = Field(..., alias="id", description="The unique identifier of the vendor to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API version 2 in JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type for the request body. Must be application/json."),
+) -> dict[str, Any]:
+    """Retrieve details about a specific vendor integration type. Vendors represent integration sources like AWS Cloudwatch, Splunk, or Datadog that can be configured in PagerDuty."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetVendorRequest(
+            path=_models.GetVendorRequestPath(id_=id_),
+            header=_models.GetVendorRequestHeader(accept=accept, content_type=content_type)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_vendor: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/vendors/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/vendors/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_vendor")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_vendor", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_vendor",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Webhooks
+@mcp.tool()
+async def list_webhook_subscriptions(
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version."),
+    filter_type: Literal["account", "service", "team"] | None = Field(None, description="Filter subscriptions by resource type. When set to 'service' or 'team', the filter_id parameter becomes required to specify which resource to filter by."),
+    filter_id: str | None = Field(None, description="The ID of the resource to filter subscriptions by. Required when filter_type is 'service' or 'team'; ignored for 'account' filter type."),
+) -> dict[str, Any]:
+    """Retrieve all webhook subscriptions, optionally filtered by resource type (account, service, or team). Use filter parameters to narrow results to subscriptions for a specific service or team."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListWebhookSubscriptionsRequest(
+            query=_models.ListWebhookSubscriptionsRequestQuery(filter_type=filter_type, filter_id=filter_id),
+            header=_models.ListWebhookSubscriptionsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_webhook_subscriptions: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/webhook_subscriptions"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_webhook_subscriptions")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_webhook_subscriptions", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_webhook_subscriptions",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Webhooks
+@mcp.tool()
+async def get_webhook_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific webhook subscription by its ID. Returns the subscription's configuration, URL, event filters, and status."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetWebhookSubscriptionRequest(
+            path=_models.GetWebhookSubscriptionRequestPath(id_=id_),
+            header=_models.GetWebhookSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_webhook_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/webhook_subscriptions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook_subscriptions/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_webhook_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_webhook_subscription", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_webhook_subscription",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Webhooks
+@mcp.tool()
+async def update_webhook_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to update."),
+    accept: str = Field(..., alias="Accept", description="API versioning header. Defaults to application/vnd.pagerduty+json;version=2."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request content type. Must be application/json."),
+    filter_id: str | None = Field(None, alias="filterId", description="The ID of the object being filtered on. Required for all filter types except account_reference filters."),
+    description: str | None = Field(None, description="A brief description of the webhook subscription's purpose."),
+    events: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="The outbound event types this subscription will receive. At least one event type must be specified.", min_length=1),
+    active: bool | None = Field(None, description="Whether the webhook is active and will send events. Defaults to true when not specified."),
+    oauth_client_id: str | None = Field(None, description="The OAuth client ID to use for authenticating outbound webhook requests. Optional; if not provided, webhook requests will use default authentication."),
+) -> dict[str, Any]:
+    """Update an existing webhook subscription's configuration. Only specified fields will be updated; the delivery method cannot be changed through this operation."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateWebhookSubscriptionRequest(
+            path=_models.UpdateWebhookSubscriptionRequestPath(id_=id_),
+            header=_models.UpdateWebhookSubscriptionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateWebhookSubscriptionRequestBody(webhook_subscription=_models.UpdateWebhookSubscriptionRequestBodyWebhookSubscription(description=description, events=events, active=active, oauth_client_id=oauth_client_id,
+                    filter_=_models.UpdateWebhookSubscriptionRequestBodyWebhookSubscriptionFilter(id_=filter_id) if any(v is not None for v in [filter_id]) else None) if any(v is not None for v in [filter_id, description, events, active, oauth_client_id]) else None)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_webhook_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/webhook_subscriptions/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook_subscriptions/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_webhook_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_webhook_subscription", "PUT", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_webhook_subscription",
+        method="PUT",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Webhooks
+@mcp.tool()
+async def enable_webhook_subscription(
+    id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to enable."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Re-enable a webhook subscription that has been temporarily disabled due to repeated delivery failures. Use this operation to restore a subscription's functionality after the underlying delivery issue has been resolved."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.EnableWebhookSubscriptionRequest(
+            path=_models.EnableWebhookSubscriptionRequestPath(id_=id_),
+            header=_models.EnableWebhookSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for enable_webhook_subscription: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/webhook_subscriptions/{id}/enable", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook_subscriptions/{id}/enable"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("enable_webhook_subscription")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("enable_webhook_subscription", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="enable_webhook_subscription",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Webhooks
+@mcp.tool()
+async def send_webhook_subscription_test_ping(
+    id_: str = Field(..., alias="id", description="The unique identifier of the webhook subscription to test."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+) -> dict[str, Any]:
+    """Send a test event to a webhook subscription to verify it's properly configured. This fires a `pagey.ping` event to the webhook's destination endpoint."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.TestWebhookSubscriptionRequest(
+            path=_models.TestWebhookSubscriptionRequestPath(id_=id_),
+            header=_models.TestWebhookSubscriptionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for send_webhook_subscription_test_ping: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/webhook_subscriptions/{id}/ping", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook_subscriptions/{id}/ping"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("send_webhook_subscription_test_ping")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("send_webhook_subscription_test_ping", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="send_webhook_subscription_test_ping",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def list_workflow_integrations(
+    accept: str = Field(..., alias="Accept", description="Specifies the API version for the response format. Use the default application/vnd.pagerduty+json;version=2 for standard responses."),
+    include_deprecated: bool | None = Field(None, description="Set to true to include integrations that have been deprecated and are no longer actively maintained. By default, only active integrations are returned."),
+) -> dict[str, Any]:
+    """Retrieve a list of available workflow integrations that can be used to connect external services and tools to your workflows."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListWorkflowIntegrationsRequest(
+            query=_models.ListWorkflowIntegrationsRequestQuery(include_deprecated=include_deprecated),
+            header=_models.ListWorkflowIntegrationsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_workflow_integrations: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/workflows/integrations"
+    _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_workflow_integrations")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_workflow_integrations", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_workflow_integrations",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        params=_http_query,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def get_workflow_integration(
+    id_: str = Field(..., alias="id", description="The unique identifier of the Workflow Integration resource to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2 for compatibility."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific Workflow Integration by its ID. Returns the configuration and status of the integration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetWorkflowIntegrationRequest(
+            path=_models.GetWorkflowIntegrationRequestPath(id_=id_),
+            header=_models.GetWorkflowIntegrationRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_workflow_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_workflow_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_workflow_integration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_workflow_integration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def list_workflow_integration_connections(accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format and schema version. Use the default PagerDuty JSON format version 2.")) -> dict[str, Any]:
+    """Retrieve all configured workflow integration connections. Returns a list of all active connections between workflows and external integrations."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListWorkflowIntegrationConnectionsRequest(
+            header=_models.ListWorkflowIntegrationConnectionsRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_workflow_integration_connections: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = "/workflows/integrations/connections"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_workflow_integration_connections")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_workflow_integration_connections", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_workflow_integration_connections",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def list_workflow_integration_connections_for_integration(
+    integration_id: str = Field(..., description="The unique identifier of the workflow integration whose connections you want to list."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Defaults to PagerDuty JSON API version 2."),
+) -> dict[str, Any]:
+    """Retrieve all connections associated with a specific workflow integration. Use this to view all configured connections for a given integration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.ListWorkflowIntegrationConnectionsByIntegrationRequest(
+            path=_models.ListWorkflowIntegrationConnectionsByIntegrationRequestPath(integration_id=integration_id),
+            header=_models.ListWorkflowIntegrationConnectionsByIntegrationRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for list_workflow_integration_connections_for_integration: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{integration_id}/connections", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{integration_id}/connections"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("list_workflow_integration_connections_for_integration")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("list_workflow_integration_connections_for_integration", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="list_workflow_integration_connections_for_integration",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def create_workflow_integration_connection(
+    integration_id: str = Field(..., description="The unique identifier of the Workflow Integration for which this connection is being created."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Must be set to application/vnd.pagerduty+json;version=2 to ensure compatibility."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body. Must be application/json."),
+    name: str = Field(..., description="A human-readable name for this connection to identify it within the integration."),
+    secrets: dict[str, Any] = Field(..., description="An object containing sensitive authentication credentials required for this connection. The structure and required fields are defined by the Workflow Integration's secrets_schema property. This field is write-only and will not be returned in responses to prevent credential exposure."),
+    service_url: str | None = Field(None, description="The base URL of the external service this connection communicates with."),
+    external_id: str | None = Field(None, description="The identifier used by the external system to reference this connection."),
+    external_id_label: str | None = Field(None, description="A display label for the external system, used to identify the external_id in user interfaces."),
+    scopes: list[str] | None = Field(None, description="An array of permission scopes or capabilities granted to this connection for the external system."),
+    is_default: bool | None = Field(None, description="If true, designates this connection as the default for this integration when multiple connections exist."),
+    configuration: dict[str, Any] | None = Field(None, description="An object containing integration-specific configuration settings. The structure and required fields are defined by the Workflow Integration's configuration_schema property."),
+    teams: list[_models.CreateWorkflowIntegrationConnectionBodyTeamsItem] | None = Field(None, description="An array of team identifiers whose managers are permitted to use or modify this connection."),
+    apps: list[_models.CreateWorkflowIntegrationConnectionBodyAppsItem] | None = Field(None, description="An array of application identifiers that are associated with and can use this connection."),
+) -> dict[str, Any]:
+    """Create a new connection for a Workflow Integration to enable external system communication. The connection stores authentication credentials, configuration, and metadata needed to establish and manage the integration."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.CreateWorkflowIntegrationConnectionRequest(
+            path=_models.CreateWorkflowIntegrationConnectionRequestPath(integration_id=integration_id),
+            header=_models.CreateWorkflowIntegrationConnectionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.CreateWorkflowIntegrationConnectionRequestBody(name=name, service_url=service_url, external_id=external_id, external_id_label=external_id_label, scopes=scopes, is_default=is_default, configuration=configuration, secrets=secrets, teams=teams, apps=apps)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for create_workflow_integration_connection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{integration_id}/connections", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{integration_id}/connections"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("create_workflow_integration_connection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("create_workflow_integration_connection", "POST", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="create_workflow_integration_connection",
+        method="POST",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def get_workflow_integration_connection(
+    integration_id: str = Field(..., description="The unique identifier of the workflow integration that contains the connection."),
+    id_: str = Field(..., alias="id", description="The unique identifier of the workflow integration connection to retrieve."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Retrieve detailed information about a specific connection within a workflow integration. This operation returns the configuration and status of a single integration connection."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.GetWorkflowIntegrationConnectionRequest(
+            path=_models.GetWorkflowIntegrationConnectionRequestPath(integration_id=integration_id, id_=id_),
+            header=_models.GetWorkflowIntegrationConnectionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for get_workflow_integration_connection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{integration_id}/connections/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{integration_id}/connections/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("get_workflow_integration_connection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("get_workflow_integration_connection", "GET", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="get_workflow_integration_connection",
+        method="GET",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def update_workflow_integration_connection(
+    integration_id: str = Field(..., description="The unique identifier of the workflow integration that owns this connection."),
+    id_: str = Field(..., alias="id", description="The unique identifier of the connection resource to update."),
+    accept: str = Field(..., alias="Accept", description="API version header for response formatting. Defaults to PagerDuty API v2 JSON format."),
+    content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="Request body content type. Must be JSON."),
+    name: str = Field(..., description="A human-readable name for this connection."),
+    secrets: dict[str, Any] = Field(..., description="A JSON object containing sensitive credentials or API keys required for authentication. The schema is defined by the workflow integration's secrets_schema property. This field is write-only and always returns null in responses to prevent secret exposure."),
+    service_url: str | None = Field(None, description="The URL endpoint of the external service this connection integrates with."),
+    external_id: str | None = Field(None, description="The identifier used by the external system to reference this connection."),
+    external_id_label: str | None = Field(None, description="A display label for the external system identifier."),
+    scopes: list[str] | None = Field(None, description="An array of permission scopes or capabilities granted to this connection."),
+    is_default: bool | None = Field(None, description="Set to true to designate this as the default connection for this integration type."),
+    configuration: dict[str, Any] | None = Field(None, description="A JSON object containing connection-specific configuration parameters. The schema is defined by the workflow integration's configuration_schema property and varies by integration type."),
+    teams: list[_models.UpdateWorkflowIntegrationConnectionBodyTeamsItem] | None = Field(None, description="An array of team identifiers whose managers are permitted to use or modify this connection."),
+    apps: list[_models.UpdateWorkflowIntegrationConnectionBodyAppsItem] | None = Field(None, description="An array of application identifiers that can use this connection."),
+) -> dict[str, Any]:
+    """Update an existing workflow integration connection with new configuration, secrets, or metadata. Requires write access to workflow integration connections."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.UpdateWorkflowIntegrationConnectionRequest(
+            path=_models.UpdateWorkflowIntegrationConnectionRequestPath(integration_id=integration_id, id_=id_),
+            header=_models.UpdateWorkflowIntegrationConnectionRequestHeader(accept=accept, content_type=content_type),
+            body=_models.UpdateWorkflowIntegrationConnectionRequestBody(name=name, service_url=service_url, external_id=external_id, external_id_label=external_id_label, scopes=scopes, is_default=is_default, configuration=configuration, secrets=secrets, teams=teams, apps=apps)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for update_workflow_integration_connection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{integration_id}/connections/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{integration_id}/connections/{id}"
+    _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("update_workflow_integration_connection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("update_workflow_integration_connection", "PATCH", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="update_workflow_integration_connection",
+        method="PATCH",
+        path=_http_path,
+        request_id=_request_id,
+        body=_http_body,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# Tags: Workflow Integrations
+@mcp.tool()
+async def delete_workflow_integration_connection(
+    integration_id: str = Field(..., description="The unique identifier of the workflow integration that contains the connection to be deleted."),
+    id_: str = Field(..., alias="id", description="The unique identifier of the connection resource to delete."),
+    accept: str = Field(..., alias="Accept", description="API versioning header that specifies the response format. Use the default PagerDuty JSON format version 2."),
+) -> dict[str, Any]:
+    """Permanently delete a specific connection within a workflow integration. This operation removes the connection and cannot be undone."""
+
+    # Construct request model with validation
+    try:
+        _request = _models.DeleteWorkflowIntegrationConnectionRequest(
+            path=_models.DeleteWorkflowIntegrationConnectionRequestPath(integration_id=integration_id, id_=id_),
+            header=_models.DeleteWorkflowIntegrationConnectionRequestHeader(accept=accept)
+        )
+    except pydantic.ValidationError as _validation_err:
+        logging.error(f"Parameter validation failed for delete_workflow_integration_connection: {_validation_err}")
+        raise ValueError(f"Invalid parameters: {_validation_err.errors()}") from _validation_err
+
+    # Extract parameters for API call
+    _http_path = _build_path("/workflows/integrations/{integration_id}/connections/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflows/integrations/{integration_id}/connections/{id}"
+    _http_headers = _request.header.model_dump(by_alias=True, exclude_none=True) if _request.header else {}
+
+    # Inject per-operation authentication
+    _auth = await _get_auth_for_operation("delete_workflow_integration_connection")
+    _http_headers.update(_auth.get("headers", {}))
+
+    _request_id = str(uuid.uuid4())
+    _log_tool_invocation("delete_workflow_integration_connection", "DELETE", _http_path, _request_id)
+
+    # Execute request (returns normalized dict and status code)
+    _response_data, _ = await _execute_tool_request(
+        tool_name="delete_workflow_integration_connection",
+        method="DELETE",
+        path=_http_path,
+        request_id=_request_id,
+        headers=_http_headers,
+    )
+
+    return _response_data
+
+# ============================================================================
+# Schema Optimization
+# ============================================================================
+
+def _optimize_tool_schemas() -> None:
+    """Simplify anyOf nullable wrappers in tool schemas for LLM token efficiency.
+
+    Pydantic generates {"anyOf": [{"type": "T"}, {"type": "null"}], "default": null}
+    for `T | None = None` params. Both Anthropic and OpenAI recommend the simpler
+    {"type": "T"} with the param outside `required` for optimal tool-calling accuracy
+    and minimal token overhead. Runtime validation is unaffected — Python signatures
+    retain the `T | None` annotation.
+    """
+    from fastmcp.tools import Tool as _ToolCls
+    # v3: _local_provider._components, v2: _tool_manager._tools
+    _src = getattr(mcp, "_local_provider", None)
+    if _src is not None:
+        _tools = [v for v in _src._components.values() if isinstance(v, _ToolCls)]
+    else:
+        _tools = list(mcp._tool_manager._tools.values())  # type: ignore[attr-defined]
+    for _tool in _tools:
+        _simplify_schema(_tool.parameters)
+
+def _simplify_schema(schema: dict) -> None:
+    """Walk a JSON Schema dict and collapse anyOf-nullable patterns in place.
+
+    Also removes discriminator objects anywhere in the tree: after FastMCP's
+    DereferenceRefsMiddleware inlines $ref entries, discriminator.mapping values
+    point to $defs that no longer exist. The discriminator is redundant — each
+    variant already identifies itself via Literal constants on the discriminant
+    field, so MCP clients and LLMs don't need the mapping.
+    """
+    schema.pop("discriminator", None)
+    for _def_schema in schema.get("$defs", {}).values():
+        _simplify_schema(_def_schema)
+    _props = schema.get("properties", {})
+    _required = set(schema.get("required", []))
+    for _name, _prop in _props.items():
+        if "anyOf" in _prop:
+            _non_null = [b for b in _prop["anyOf"] if b.get("type") != "null"]
+            if len(_non_null) == 1:
+                _desc = _prop.get("description")
+                _prop.clear()
+                _prop.update(_non_null[0])
+                if _desc:
+                    _prop["description"] = _desc
+                _required.discard(_name)
+        _simplify_schema(_prop)
+    if _required:
+        schema["required"] = sorted(_required)
+    elif "required" in schema:
+        del schema["required"]
+    for _key in ("anyOf", "oneOf"):
+        for _branch in schema.get(_key, []):
+            if isinstance(_branch, dict):
+                _simplify_schema(_branch)
+
+_optimize_tool_schemas()
+
+# ============================================================================
+# Environment Validation
+# ============================================================================
+
+def validate_environment() -> None:
+    """Validate required environment variables at startup."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    required_vars: list[tuple[str, str, str | None]] = [
+    ]
+
+    for var_name, description, default in required_vars:
+        value = os.getenv(var_name, default)
+        if not value:
+            errors.append(f"  - {var_name}: {description}")
+
+    if errors:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Missing required environment variables", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        for error in errors:
+            print(error, file=sys.stderr)
+        print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
+        print("\nExample:", file=sys.stderr)
+        print("  python pager_duty_server.py", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    _validate_port()
+    _validate_timeout()
+    _validate_rate_limit()
+
+    logger = logging.getLogger(__name__)
+    logger.info("Environment validation passed")
+    for warning in warnings:
+        logger.warning(warning)
+
+def _validate_port() -> None:
+    port_str = os.getenv('PORT')
+    if not port_str:
+        return  # Optional, has CLI default
+
+    port: int
+    try:
+        port = int(port_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid PORT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {port_str}", file=sys.stderr)
+        print("\nPORT must be an integer between 1 and 65535", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if port < 1 or port > 65535:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: PORT out of valid range", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {port}", file=sys.stderr)
+        print("\nPORT must be between 1 and 65535", file=sys.stderr)
+        print("  Common ports: 8000, 8080, 3000", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+def _validate_timeout() -> None:
+    timeout_str = os.getenv('API_TIMEOUT')
+    if not timeout_str:
+        return  # Optional, has default
+
+    timeout: int
+    try:
+        timeout = int(timeout_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid API_TIMEOUT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {timeout_str}", file=sys.stderr)
+        print("\nAPI_TIMEOUT must be a positive integer (seconds)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if timeout < 1 or timeout > 3600:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: API_TIMEOUT out of reasonable range", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {timeout} seconds", file=sys.stderr)
+        print("\nAPI_TIMEOUT must be between 1 and 3600 seconds (1 hour max)", file=sys.stderr)
+        print("  Recommended: 30 (most APIs), 60 (slower APIs), 300 (long operations)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+def _validate_rate_limit() -> None:
+    rate_str = os.getenv('RATE_LIMIT')
+    if not rate_str:
+        return  # Optional, has default
+
+    try:
+        rate = float(rate_str)
+    except ValueError:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: Invalid RATE_LIMIT value", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {rate_str}", file=sys.stderr)
+        print("\nRATE_LIMIT must be a positive number (requests per second)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+    if rate <= 0:
+        print("=" * 70, file=sys.stderr)
+        print("ERROR: RATE_LIMIT must be positive", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"  Got: {rate}", file=sys.stderr)
+        print("\nRATE_LIMIT must be greater than 0", file=sys.stderr)
+        print("  Recommended: 1-100 requests/second depending on API limits", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+def main():
+    """CLI entry point with runtime transport selection."""
+
+    validate_environment()
+
+    parser = argparse.ArgumentParser(description="PagerDuty MCP Server")
+
+    parser.add_argument(
+        '--transport',
+        choices=['stdio', 'sse', 'streamable-http'],
+        default='stdio',
+        help='Transport protocol: stdio (default, for Claude Code), sse (remote capable), streamable-http (production)'
+    )
+    parser.add_argument(
+        '--host',
+        default='0.0.0.0',  # noqa: S104
+        help='Host address for HTTP transports (default: 0.0.0.0)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8000,
+        help='Port for HTTP transports (default: 8000)'
+    )
+    parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default=LOG_LEVEL,
+        help='Logging level (default: from LOG_LEVEL env var, or INFO)'
+    )
+    parser.add_argument(
+        '--retry',
+        action='store_true',
+        help='Enable automatic retry with exponential backoff (default: enabled)'
+    )
+    parser.add_argument(
+        '--no-retry',
+        action='store_true',
+        help='Disable automatic retry'
+    )
+    parser.add_argument(
+        '--max-retries',
+        type=int,
+        default=MAX_RETRIES,
+        help='Maximum retry attempts (default: from MAX_RETRIES env var, or 3)'
+    )
+    parser.add_argument(
+        '--retry-base-delay',
+        type=int,
+        default=RETRY_BACKOFF_FACTOR,
+        help='Base delay for exponential backoff in seconds (default: from RETRY_BACKOFF_FACTOR env var, or 2)'
+    )
+    parser.add_argument(
+        '--retry-max-delay',
+        type=int,
+        default=60,
+        help='Maximum retry delay in seconds (default: 60)'
+    )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=None,
+        help='API request timeout in seconds (default: 30, or API_TIMEOUT env var)'
+    )
+    parser.add_argument(
+        '--rate-limiting',
+        choices=['disabled', 'local'],
+        default='local',
+        help='Rate limiting mode: disabled (default) or local (in-memory token bucket)'
+    )
+    parser.add_argument(
+        '--rate-limit',
+        type=int,
+        default=RATE_LIMIT_REQUESTS_PER_SECOND,
+        help='Rate limit in requests per second (default: from RATE_LIMIT_REQUESTS_PER_SECOND env var, or 10)'
+    )
+    parser.add_argument(
+        '--burst',
+        type=int,
+        help='Burst capacity for rate limiter (default: 2x rate-limit)'
+    )
+    parser.add_argument(
+        '--circuit-breaker',
+        action='store_true',
+        help='Enable circuit breaker to prevent cascading failures'
+    )
+    parser.add_argument(
+        '--circuit-breaker-failure-threshold',
+        type=int,
+        default=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        help='Failures before opening circuit (default: from CIRCUIT_BREAKER_FAILURE_THRESHOLD env var, or 5)'
+    )
+    parser.add_argument(
+        '--circuit-breaker-timeout',
+        type=float,
+        default=CIRCUIT_BREAKER_TIMEOUT_SECONDS,
+        help='Seconds before recovery attempt (default: from CIRCUIT_BREAKER_TIMEOUT_SECONDS env var, or 60.0)'
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting PagerDuty MCP Server")
+    logger.info(f"Transport: {args.transport}")
+
+    global retry_config, rate_limiter, circuit_breaker, DEFAULT_TIMEOUT
+
+    if args.timeout is not None:
+        DEFAULT_TIMEOUT = args.timeout
+    else:
+        timeout_env = os.getenv('API_TIMEOUT')
+        if timeout_env:
+            try:
+                DEFAULT_TIMEOUT = int(timeout_env)
+            except ValueError:
+                logger.warning(f"Invalid API_TIMEOUT '{timeout_env}', using default {DEFAULT_TIMEOUT}s")
+    logger.info(f"Timeout: {DEFAULT_TIMEOUT}s")
+
+    if not args.no_retry:
+        retry_config = RetryConfig(
+            max_attempts=args.max_retries,
+            base_delay=args.retry_base_delay,
+            max_delay=args.retry_max_delay
+        )
+        logger.info(
+            f"Retry: Enabled (max attempts: {retry_config.max_attempts}, "
+            f"base delay: {retry_config.base_delay}s, max delay: {retry_config.max_delay}s)"
+        )
+    else:
+        logger.info("Retry: Disabled")
+
+    rate_limiting_mode = args.rate_limiting
+
+    if rate_limiting_mode == 'disabled':
+        rate_limiter = None
+        logger.info("Rate limiting: Disabled")
+    elif rate_limiting_mode == 'local':
+        rate_limit = args.rate_limit if args.rate_limit else 10.0
+        burst = args.burst if args.burst else int(rate_limit * 2)
+        rate_limiter = TokenBucket(rate=rate_limit, capacity=burst)
+        logger.info(f"Rate limiting: Local (rate: {rate_limit} req/sec, burst: {burst})")
+    else:
+        logger.warning(f"Unknown rate limiting mode: {rate_limiting_mode}, disabling")
+        rate_limiter = None
+
+    if args.circuit_breaker:
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=args.circuit_breaker_failure_threshold,
+            timeout=args.circuit_breaker_timeout
+        )
+        circuit_breaker = CircuitBreaker(cb_config)
+        logger.info(
+            f"Circuit breaker: Enabled (failure threshold: {cb_config.failure_threshold}, "
+            f"timeout: {cb_config.timeout}s)"
+        )
+    else:
+        logger.info("Circuit breaker: Disabled")
+    try:
+        if args.transport == 'stdio':
+            logger.info("Using stdio transport")
+            mcp.run()
+        elif args.transport == 'sse':
+            logger.info(f"Using SSE transport on http://{args.host}:{args.port}")
+            mcp.run(transport='sse', host=args.host, port=args.port)
+        elif args.transport == 'streamable-http':
+            logger.info(f"Using Streamable HTTP transport on http://{args.host}:{args.port}")
+            mcp.run(transport='streamable-http', host=args.host, port=args.port)
+
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+        raise
+
+if __name__ == "__main__":
+    main()
