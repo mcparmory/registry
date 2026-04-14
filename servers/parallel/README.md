@@ -1,6 +1,12 @@
 # Parallel API MCP Server
 
 Base URL: https://api.parallel.ai
+| | |
+|---|---|
+| **Category** | AI & Machine Learning |
+| **Tools** | 24 |
+| **Auth** | API Key |
+
 ## API Info
 - **Contact:** Parallel Support (support@parallel.ai) — [https://parallel.ai](https://parallel.ai)
 
