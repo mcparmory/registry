@@ -1,6 +1,11 @@
-# Canva Connect API MCP Server
+# Canva MCP Server
 
 Base URL: https://api.canva.com/rest
+| | |
+|---|---|
+| **Category** | Media & Entertainment |
+| **Tools** | 40 |
+| **Auth** | OAuth2, HTTP Basic |
 
 ## API Info
 - **API License:** ©2023 All Rights Reserved
