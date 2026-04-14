@@ -1,5 +1,10 @@
 # PostHog API MCP Server
 
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 618 |
+| **Auth** | Bearer Token |
 
 ---
 
