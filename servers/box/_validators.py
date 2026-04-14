@@ -1,7 +1,7 @@
 """
 Box MCP Server - Validators
 
-Generated: 2026-04-09 17:15:54 UTC
+Generated: 2026-04-14 18:16:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

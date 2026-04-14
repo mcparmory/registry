@@ -7,7 +7,7 @@ API Info:
 - Contact: Box, Inc <devrel@box.com> (https://developer.box.com)
 - Terms of Service: https://cloud.app.box.com/s/rmwxu64h1ipr41u49w3bbuvbsa29wku9
 
-Generated: 2026-04-09 17:15:54 UTC
+Generated: 2026-04-14 18:16:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1324,7 +1324,7 @@ async def delete_file(file_id: str = Field(..., description="The unique identifi
 @mcp.tool()
 async def list_file_app_item_associations(
     file_id: str = Field(..., description="The unique identifier of the file whose app item associations should be retrieved. The file ID appears in the Box web app URL when viewing the file."),
-    limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
     application_type: str | None = Field(None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned."),
 ) -> dict[str, Any]:
     """Retrieves all app items associated with a file, including associations inherited from ancestor folders. Association type and ID are returned even if the requesting user lacks View permission on the app item."""
@@ -1709,7 +1709,7 @@ async def abort_upload_session(upload_session_id: str = Field(..., description="
 async def list_upload_session_parts(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session whose uploaded parts you want to list."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through large result sets. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
-    limit: str | None = Field(None, description="The maximum number of uploaded parts to return in a single response. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of uploaded parts to return in a single response. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of all file chunks uploaded so far within a specific upload session, allowing you to track multipart upload progress."""
 
@@ -1889,7 +1889,7 @@ async def get_file_thumbnail(
 @mcp.tool()
 async def list_file_collaborations(
     file_id: str = Field(..., description="The unique identifier of the file whose collaborations you want to retrieve. You can find this ID in the file's URL in the Box web application."),
-    limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all pending and active collaborations for a specific file, including users who currently have access or have been invited to collaborate."""
 
@@ -1933,7 +1933,7 @@ async def list_file_collaborations(
 @mcp.tool()
 async def list_file_comments(
     file_id: str = Field(..., description="The unique identifier of the file whose comments you want to retrieve. Find this ID in the file's URL on the Box web application."),
-    limit: str | None = Field(None, description="The maximum number of comments to return per page. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of comments to return per page. Must be between 1 and 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 are not supported."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of comments posted on a specific file. Useful for reviewing user feedback or discussion threads associated with a file."""
@@ -2087,7 +2087,7 @@ async def permanently_delete_trashed_file(file_id: str = Field(..., description=
 @mcp.tool()
 async def list_file_versions(
     file_id: str = Field(..., description="The unique identifier of the file whose version history you want to retrieve. The file ID can be found in the URL when viewing the file in the Box web application."),
-    limit: str | None = Field(None, description="The maximum number of file versions to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of file versions to return per page. Accepts values up to 1000."),
     offset: str | None = Field(None, description="The zero-based index of the item at which to start the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error."),
 ) -> dict[str, Any]:
     """Retrieves the version history of a specific file, returning all past versions in paginated results. Version tracking is available only for Box premium accounts; use the get_file operation to retrieve the current version ID."""
@@ -3102,7 +3102,7 @@ async def get_folder(
     sort: Literal["id", "name", "date", "size"] | None = Field(None, description="The secondary attribute by which folder items are sorted. Items are always grouped by type first (folders, then files, then web links); this parameter controls ordering within those groups. Not supported for marker-based pagination on the root folder."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort order for returned items, either ascending (ASC) or descending (DESC) alphabetically."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Note that very high offset values may be unreliable for large folders; consider restructuring large folders if pagination fails."),
-    limit: str | None = Field(None, description="The maximum number of folder items to return in a single response, up to a maximum of 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of folder items to return in a single response, up to a maximum of 1000."),
 ) -> dict[str, Any]:
     """Retrieves metadata and the first 100 items for a specified folder. Use the sort, direction, offset, and limit parameters to control item ordering and pagination within the folder."""
 
@@ -3284,7 +3284,7 @@ async def delete_folder(
 @mcp.tool()
 async def list_folder_app_item_associations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose app item associations you want to retrieve. The folder ID appears in the URL when viewing the folder in the Box web app. The root folder is always ID 0."),
-    limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
     application_type: str | None = Field(None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned."),
 ) -> dict[str, Any]:
     """Retrieves all app items associated with a folder, including associations inherited from ancestor folders. App item type and ID are visible to any user with folder access, regardless of View permission on the app item."""
@@ -3331,7 +3331,7 @@ async def list_folder_items(
     folder_id: str = Field(..., description="The unique identifier of the folder whose contents you want to list. The root folder of any Box account always uses the ID '0'; for other folders, find the ID in the URL when viewing the folder in the Box web app."),
     usemarker: bool | None = Field(None, description="Set to true to enable marker-based pagination, which returns a 'marker' token in the response to fetch the next page. Cannot be combined with offset-based pagination; use one method consistently throughout a paginated sequence."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Avoid high offset values on large datasets as reliability is not guaranteed; prefer marker-based pagination in those cases."),
-    limit: str | None = Field(None, description="The maximum number of items to return in a single page of results. Accepted values range from 1 to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of items to return in a single page of results. Accepted values range from 1 to 1000."),
     sort: Literal["id", "name", "date", "size"] | None = Field(None, description="The secondary attribute by which to sort items within their type grouping — items are always sorted by type first (folders, then files, then web links). Sorting by this field is not supported for marker-based pagination on the root folder (ID '0')."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort direction for results, either ascending or descending alphabetical/numerical order."),
 ) -> dict[str, Any]:
@@ -3466,7 +3466,7 @@ async def copy_folder(
 @mcp.tool()
 async def list_folder_collaborations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose collaborations you want to retrieve. Find this ID in the Box web app by opening the folder and copying the numeric ID from the URL."),
-    limit: str | None = Field(None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all active and pending collaborations for a specified folder, returning details on users who currently have access or have been invited to collaborate."""
 
@@ -3950,7 +3950,7 @@ async def delete_folder_metadata(
 # Tags: Trashed items
 @mcp.tool()
 async def list_trash_items(
-    limit: str | None = Field(None, description="The maximum number of items to return per page. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of items to return per page. Must be between 1 and 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Offsets exceeding 10000 will result in a 400 error."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort direction for results, either ascending or descending alphabetical order. Items are always grouped by type first (folders, then files, then web links) before this ordering is applied."),
     sort: Literal["name", "date", "size"] | None = Field(None, description="The secondary attribute by which to sort items within each type group. Items are always sorted by type first; this parameter is not supported when using marker-based pagination."),
@@ -4228,7 +4228,7 @@ async def delete_folder_lock(folder_lock_id: str = Field(..., description="The u
 @mcp.tool()
 async def find_metadata_template_by_instance(
     metadata_instance_id: str = Field(..., description="The unique UUID of a metadata template instance used to identify and retrieve the associated template definition."),
-    limit: str | None = Field(None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Finds a metadata template by looking up the ID of one of its existing instances. Useful when you have an instance ID and need to retrieve the template definition it was created from."""
 
@@ -4454,7 +4454,7 @@ async def get_metadata_template_by_id(template_id: str = Field(..., description=
 
 # Tags: Metadata templates
 @mcp.tool()
-async def list_global_metadata_templates(limit: str | None = Field(None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.", le=1000)) -> dict[str, Any]:
+async def list_global_metadata_templates(limit: str | None = Field(None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.")) -> dict[str, Any]:
     """Retrieves all generic, global metadata templates available to every enterprise using Box. These templates are not organization-specific and can be applied universally across all Box accounts."""
 
     _limit = _parse_int(limit)
@@ -4494,7 +4494,7 @@ async def list_global_metadata_templates(limit: str | None = Field(None, descrip
 
 # Tags: Metadata templates
 @mcp.tool()
-async def list_enterprise_metadata_templates(limit: str | None = Field(None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.", le=1000)) -> dict[str, Any]:
+async def list_enterprise_metadata_templates(limit: str | None = Field(None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.")) -> dict[str, Any]:
     """Retrieves all metadata templates created for use within the authenticated user's enterprise. Returns a paginated list of enterprise-scoped templates available for applying structured metadata to content."""
 
     _limit = _parse_int(limit)
@@ -5109,7 +5109,7 @@ async def delete_collaboration(collaboration_id: str = Field(..., description="T
 async def list_pending_collaborations(
     status: Literal["pending"] = Field(..., description="Filters collaborations by their current status. Only pending invites are supported by this endpoint."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through results. Must not exceed 10,000; requests beyond this limit will return a 400 error."),
-    limit: str | None = Field(None, description="Limits the number of collaboration records returned in a single page. Accepts values up to 1,000.", le=1000),
+    limit: str | None = Field(None, description="Limits the number of collaboration records returned in a single page. Accepts values up to 1,000."),
 ) -> dict[str, Any]:
     """Retrieves all pending collaboration invites for the authenticated user. Returns a paginated list of collaborations awaiting the user's response."""
 
@@ -5221,7 +5221,7 @@ async def search_content(
     mdfilters: list[_models.MetadataFilter] | None = Field(None, description="Restricts results to items whose metadata matches a specific metadata template filter. Accepts exactly one metadata filter object; required when `query` is not provided.", min_length=1, max_length=1),
     sort: Literal["modified_at", "relevance"] | None = Field(None, description="Determines the ordering of search results. Use `relevance` to rank by match quality or `modified_at` to order by most recently modified first."),
     direction: Literal["DESC", "ASC"] | None = Field(None, description="Sets the sort direction for results as ascending (`ASC`) or descending (`DESC`). Ignored when `sort` is set to `relevance`, which always returns results in descending relevance order."),
-    limit: str | None = Field(None, description="Maximum number of items to return per page of results. Must be between 1 and 200.", le=200),
+    limit: str | None = Field(None, description="Maximum number of items to return per page of results. Must be between 1 and 200."),
     include_recent_shared_links: bool | None = Field(None, description="When set to true, includes items the user recently accessed via a shared link in the results. Enabling this changes the response format to include shared link metadata."),
     deleted_user_ids: list[str] | None = Field(None, description="Restricts results to items deleted by the specified users, provided as an array of user ID strings. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards."),
     deleted_at_range: list[str] | None = Field(None, description="Restricts results to items deleted within a date range, provided as an array of two RFC3339 timestamp strings representing start and end dates. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards."),
@@ -6645,7 +6645,7 @@ async def list_users(
     user_type: Literal["all", "managed", "external"] | None = Field(None, description="Filters results by user category: 'all' includes every user type with partial name/login matching (exact match required for external users), 'managed' returns only managed and app users with partial matching, and 'external' returns only external users whose login exactly matches the filter term."),
     external_app_user_id: str | None = Field(None, description="Restricts results to app users that were created with the specified external_app_user_id value, allowing lookup of app users by your own identifier assigned at creation time."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through large result sets. Must not exceed 10000."),
-    limit: str | None = Field(None, description="Maximum number of users to return in a single response page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of users to return in a single response page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of all enterprise users, including their user ID, public name, and login. Requires the authenticated user and application to have enterprise-wide user lookup permissions."""
 
@@ -7240,7 +7240,7 @@ async def remove_user_email_alias(
 @mcp.tool()
 async def list_user_memberships(
     user_id: str = Field(..., description="The unique identifier of the user whose group memberships are being retrieved."),
-    limit: str | None = Field(None, description="The maximum number of group memberships to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of group memberships to return per page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all group memberships for a specified user. Accessible only to members of the same group or users with admin-level permissions."""
 
@@ -7362,7 +7362,7 @@ async def get_invite(invite_id: str = Field(..., description="The unique identif
 @mcp.tool()
 async def list_groups(
     filter_term: str | None = Field(None, description="Narrows results to only groups whose name begins with the specified search term. Omitting this parameter returns all groups."),
-    limit: str | None = Field(None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through results. Offsets greater than 10000 are not permitted and will return a 400 error."),
 ) -> dict[str, Any]:
     """Retrieves all groups belonging to the enterprise, with optional filtering by name. Requires admin permissions to access enterprise group data."""
@@ -7609,7 +7609,7 @@ async def delete_group(group_id: str = Field(..., description="The unique identi
 @mcp.tool()
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default."),
 ) -> dict[str, Any]:
     """Retrieves all membership records for a specified group, including details about each member. Accessible only to members of the group or users with admin-level permissions."""
 
@@ -7653,7 +7653,7 @@ async def list_group_members(
 @mcp.tool()
 async def list_group_collaborations(
     group_id: str = Field(..., description="The unique identifier of the group whose collaborations you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error."),
 ) -> dict[str, Any]:
     """Retrieves all collaborations for a specified group, showing which files or folders the group can access and with what role. Requires admin permissions to inspect enterprise groups."""
@@ -7857,7 +7857,7 @@ async def remove_group_member(group_membership_id: str = Field(..., description=
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks(limit: str | None = Field(None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.", le=1000)) -> dict[str, Any]:
+async def list_webhooks(limit: str | None = Field(None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any]:
     """Retrieves all webhooks defined for the authenticated application, scoped to files and folders owned by the requesting user. Note that admins cannot view webhooks created by service accounts unless they have explicit access to those folders, and vice versa."""
 
     _limit = _parse_int(limit)
@@ -8023,7 +8023,7 @@ async def update_skill_cards_on_file(
 async def list_events(
     stream_type: Literal["all", "changes", "sync", "admin_logs", "admin_logs_streaming"] | None = Field(None, description="Controls the scope and type of events returned. Use 'all' for the authenticated user's full event history, 'changes' or 'sync' for file-tree-affecting events, 'admin_logs' for paginated historical enterprise-wide events within a date range, or 'admin_logs_streaming' for low-latency polling of recent enterprise-wide events. Admin privileges are required for the 'admin_logs' and 'admin_logs_streaming' types."),
     stream_position: str | None = Field(None, description="The cursor position in the event stream from which to begin returning events. Use 'now' to initialize a stream and receive only the latest position with no events, or '0' / null to retrieve all available events from the beginning."),
-    limit: str | None = Field(None, description="Maximum number of events to return per request, up to 500. Fewer events than requested may be returned even when more exist, as the API may return already-retrieved events rather than waiting for additional results.", le=500),
+    limit: str | None = Field(None, description="Maximum number of events to return per request, up to 500. Fewer events than requested may be returned even when more exist, as the API may return already-retrieved events rather than waiting for additional results."),
     event_type: list[Literal["ACCESS_GRANTED", "ACCESS_REVOKED", "ADD_DEVICE_ASSOCIATION", "ADD_LOGIN_ACTIVITY_DEVICE", "ADMIN_LOGIN", "APPLICATION_CREATED", "APPLICATION_PUBLIC_KEY_ADDED", "APPLICATION_PUBLIC_KEY_DELETED", "CHANGE_ADMIN_ROLE", "CHANGE_FOLDER_PERMISSION", "COLLABORATION_ACCEPT", "COLLABORATION_EXPIRATION", "COLLABORATION_INVITE", "COLLABORATION_REMOVE", "COLLABORATION_ROLE_CHANGE", "COMMENT_CREATE", "COMMENT_DELETE", "CONTENT_WORKFLOW_ABNORMAL_DOWNLOAD_ACTIVITY", "CONTENT_WORKFLOW_AUTOMATION_ADD", "CONTENT_WORKFLOW_AUTOMATION_DELETE", "CONTENT_WORKFLOW_POLICY_ADD", "CONTENT_WORKFLOW_SHARING_POLICY_VIOLATION", "CONTENT_WORKFLOW_UPLOAD_POLICY_VIOLATION", "COPY", "DATA_RETENTION_CREATE_RETENTION", "DATA_RETENTION_REMOVE_RETENTION", "DELETE", "DELETE_USER", "DEVICE_TRUST_CHECK_FAILED", "DOWNLOAD", "EDIT", "EDIT_USER", "EMAIL_ALIAS_CONFIRM", "EMAIL_ALIAS_REMOVE", "ENTERPRISE_APP_AUTHORIZATION_UPDATE", "EXTERNAL_COLLAB_SECURITY_SETTINGS", "FAILED_LOGIN", "FILE_MARKED_MALICIOUS", "FILE_WATERMARKED_DOWNLOAD", "GROUP_ADD_ITEM", "GROUP_ADD_USER", "GROUP_CREATION", "GROUP_DELETION", "GROUP_EDITED", "GROUP_REMOVE_ITEM", "GROUP_REMOVE_USER", "ITEM_EMAIL_SEND", "ITEM_MODIFY", "ITEM_OPEN", "ITEM_SHARED_UPDATE", "ITEM_SYNC", "ITEM_UNSYNC", "LEGAL_HOLD_ASSIGNMENT_CREATE", "LEGAL_HOLD_ASSIGNMENT_DELETE", "LEGAL_HOLD_POLICY_CREATE", "LEGAL_HOLD_POLICY_DELETE", "LEGAL_HOLD_POLICY_UPDATE", "LOCK", "LOGIN", "METADATA_INSTANCE_CREATE", "METADATA_INSTANCE_DELETE", "METADATA_INSTANCE_UPDATE", "METADATA_TEMPLATE_CREATE", "METADATA_TEMPLATE_DELETE", "METADATA_TEMPLATE_UPDATE", "MOVE", "NEW_USER", "OAUTH2_ACCESS_TOKEN_REVOKE", "PREVIEW", "REMOVE_DEVICE_ASSOCIATION", "REMOVE_LOGIN_ACTIVITY_DEVICE", "RENAME", "RETENTION_POLICY_ASSIGNMENT_ADD", "SHARE", "SHARED_LINK_SEND", "SHARE_EXPIRATION", "SHIELD_ALERT", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_JUSTIFICATION_APPROVAL", "SHIELD_SHARED_LINK_ACCESS_BLOCKED", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_CREATE", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_UPDATE", "SIGN_DOCUMENT_ASSIGNED", "SIGN_DOCUMENT_CANCELLED", "SIGN_DOCUMENT_COMPLETED", "SIGN_DOCUMENT_CONVERTED", "SIGN_DOCUMENT_CREATED", "SIGN_DOCUMENT_DECLINED", "SIGN_DOCUMENT_EXPIRED", "SIGN_DOCUMENT_SIGNED", "SIGN_DOCUMENT_VIEWED_BY_SIGNED", "SIGNER_DOWNLOADED", "SIGNER_FORWARDED", "STORAGE_EXPIRATION", "TASK_ASSIGNMENT_CREATE", "TASK_ASSIGNMENT_DELETE", "TASK_ASSIGNMENT_UPDATE", "TASK_CREATE", "TASK_UPDATE", "TERMS_OF_SERVICE_ACCEPT", "TERMS_OF_SERVICE_REJECT", "UNDELETE", "UNLOCK", "UNSHARE", "UPDATE_COLLABORATION_EXPIRATION", "UPDATE_SHARE_EXPIRATION", "UPLOAD", "USER_AUTHENTICATE_OAUTH2_ACCESS_TOKEN_CREATE", "WATERMARK_LABEL_CREATE", "WATERMARK_LABEL_DELETE"]] | None = Field(None, description="A list of specific event type strings to filter results by. Only applicable when 'stream_type' is 'admin_logs' or 'admin_logs_streaming'; ignored for all other stream types. Each item should be a valid Box event type identifier."),
     created_after: str | None = Field(None, description="The earliest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types."),
     created_before: str | None = Field(None, description="The latest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types."),
@@ -8072,7 +8072,7 @@ async def list_events(
 @mcp.tool()
 async def list_collections(
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, enabling pagination through large result sets. Offset values exceeding 10,000 will result in a 400 error."),
-    limit: str | None = Field(None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000."),
 ) -> dict[str, Any]:
     """Retrieves all collections belonging to the authenticated user. Currently, only the favorites collection is supported."""
 
@@ -8117,7 +8117,7 @@ async def list_collections(
 async def list_collection_items(
     collection_id: str = Field(..., description="The unique identifier of the collection whose items you want to retrieve."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through results. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
-    limit: str | None = Field(None, description="The maximum number of items to return in a single response page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of items to return in a single response page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves the files and folders contained within a specified collection. Supports pagination to navigate large result sets."""
 
@@ -8196,7 +8196,7 @@ async def get_collection(collection_id: str = Field(..., description="The unique
 
 # Tags: Recent items
 @mcp.tool()
-async def list_recent_items(limit: str | None = Field(None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.", le=1000)) -> dict[str, Any]:
+async def list_recent_items(limit: str | None = Field(None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.")) -> dict[str, Any]:
     """Retrieves a list of items recently accessed by the current user, covering activity from the last 90 days or up to the last 1000 items accessed, whichever limit is reached first."""
 
     _limit = _parse_int(limit)
@@ -8240,7 +8240,7 @@ async def list_retention_policies(
     policy_name: str | None = Field(None, description="Filters results to only retention policies whose names begin with the specified string. The match is case-sensitive and prefix-based, so partial names from the start of the policy name are supported."),
     policy_type: Literal["finite", "indefinite"] | None = Field(None, description="Filters results by the retention policy type. Use 'finite' for policies with a defined expiration period, or 'indefinite' for policies that retain content without a set end date."),
     created_by_user_id: str | None = Field(None, description="Filters results to only policies created by the user with the specified user ID. Useful for auditing or managing policies owned by a particular administrator."),
-    limit: str | None = Field(None, description="Limits the number of retention policies returned per page. Accepts values up to 1000; omitting this parameter returns the default page size.", le=1000),
+    limit: str | None = Field(None, description="Limits the number of retention policies returned per page. Accepts values up to 1000; omitting this parameter returns the default page size."),
 ) -> dict[str, Any]:
     """Retrieves all retention policies configured for the enterprise, with optional filtering by name, type, or creator. Useful for auditing data governance rules or locating specific policies before applying or modifying them."""
 
@@ -8406,7 +8406,7 @@ async def delete_retention_policy(retention_policy_id: str = Field(..., descript
 async def list_retention_policy_assignments(
     retention_policy_id: str = Field(..., description="The unique identifier of the retention policy whose assignments you want to retrieve."),
     type_: Literal["folder", "enterprise", "metadata_template"] | None = Field(None, alias="type", description="Filters the results to only return assignments of a specific type. Accepted values are 'folder', 'enterprise', or 'metadata_template'."),
-    limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all assignments for a specified retention policy, showing which folders, enterprise, or metadata templates the policy is applied to. Optionally filter results by assignment type and control page size."""
 
@@ -8567,7 +8567,7 @@ async def delete_retention_policy_assignment(retention_policy_assignment_id: str
 @mcp.tool()
 async def list_files_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained files you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of files currently under retention for a specific retention policy assignment. Useful for auditing which files are actively governed by a given retention rule."""
 
@@ -8611,7 +8611,7 @@ async def list_files_under_retention(
 @mcp.tool()
 async def list_file_versions_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained file versions you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of file versions currently under retention for a specific retention policy assignment. Useful for auditing which file versions are being preserved by a given policy."""
 
@@ -8655,7 +8655,7 @@ async def list_file_versions_under_retention(
 @mcp.tool()
 async def list_legal_hold_policies(
     policy_name: str | None = Field(None, description="Filters results to only include policies whose names begin with this search term. The match is case-insensitive."),
-    limit: str | None = Field(None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all legal hold policies belonging to the enterprise. Supports filtering by policy name prefix to narrow results."""
 
@@ -8816,7 +8816,7 @@ async def list_legal_hold_policy_assignments(
     policy_id: str = Field(..., description="The unique identifier of the legal hold policy whose assignments you want to retrieve."),
     assign_to_type: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(None, description="Narrows results to only assignments targeting a specific item type. Accepted values are 'file', 'file_version', 'folder', 'user', 'ownership', or 'interactions'."),
     assign_to_id: str | None = Field(None, description="Narrows results to only assignments targeting a specific item by its unique ID. Best used in combination with assign_to_type for precise filtering."),
-    limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves a list of all items (files, folders, users, etc.) that a specific legal hold policy has been assigned to. Supports filtering by item type and item ID for targeted lookups."""
 
@@ -8974,7 +8974,7 @@ async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: s
 @mcp.tool()
 async def list_legal_hold_assignment_files(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose held files you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of files to return per page, up to a maximum of 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of files to return per page, up to a maximum of 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of files with their current file versions held under a specific legal hold policy assignment. For previous file versions on hold, use the file versions on hold endpoint instead."""
 
@@ -9018,7 +9018,7 @@ async def list_legal_hold_assignment_files(
 @mcp.tool()
 async def list_legal_hold_assignment_file_versions(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose past file versions on hold should be retrieved."),
-    limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of previous (past) file versions placed on hold for a specific legal hold policy assignment. Use this endpoint for historical file versions; for current file versions on hold, use the files_on_hold endpoint instead."""
 
@@ -9098,7 +9098,7 @@ async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..
 @mcp.tool()
 async def list_file_version_legal_holds(
     policy_id: str = Field(..., description="The unique identifier of the legal hold policy whose file version holds you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieves file versions currently held under a specific legal hold policy, covering legacy-architecture holds only. For holds in the new architecture, use the legal hold policy assignment endpoints instead."""
 
@@ -9216,7 +9216,7 @@ async def update_shield_barrier_status(
 
 # Tags: Shield information barriers
 @mcp.tool()
-async def list_shield_information_barriers(limit: str | None = Field(None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.", le=1000)) -> dict[str, Any]:
+async def list_shield_information_barriers(limit: str | None = Field(None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any]:
     """Retrieves all shield information barriers configured for the enterprise associated with the JWT token. Shield information barriers restrict communication and data access between internal groups."""
 
     _limit = _parse_int(limit)
@@ -9296,7 +9296,7 @@ async def create_shield_information_barrier(enterprise: _models.PostShieldInform
 @mcp.tool()
 async def list_barrier_reports(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose reports should be listed."),
-    limit: str | None = Field(None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of shield information barrier reports associated with a specific barrier. Use this to audit or review compliance reports generated for a given information barrier."""
 
@@ -9531,7 +9531,7 @@ async def delete_barrier_segment(shield_information_barrier_segment_id: str = Fi
 @mcp.tool()
 async def list_barrier_segments(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose segments you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000."),
 ) -> dict[str, Any]:
     """Retrieves all shield information barrier segments associated with a specified information barrier. Segments define the groups or users separated by the barrier."""
 
@@ -9690,7 +9690,7 @@ async def delete_barrier_segment_member(shield_information_barrier_segment_membe
 @mcp.tool()
 async def list_barrier_segment_members(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose members you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of members belonging to a specific shield information barrier segment. Use this to audit or review which users are assigned to a given segment."""
 
@@ -9813,7 +9813,7 @@ async def get_barrier_segment_restriction(shield_information_barrier_segment_res
 @mcp.tool()
 async def list_barrier_segment_restrictions(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose restrictions you want to list."),
-    limit: str | None = Field(None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieves all shield information barrier segment restrictions associated with a specific segment. Use this to audit or review access restrictions applied to a given barrier segment."""
 
@@ -9928,7 +9928,7 @@ async def delete_device_pin(device_pinner_id: str = Field(..., description="The 
 @mcp.tool()
 async def list_enterprise_device_pins(
     enterprise_id: str = Field(..., description="The unique identifier of the enterprise whose device pins you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of device pins to return per page, up to a maximum of 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of device pins to return per page, up to a maximum of 1000."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort order for the returned results, either ascending (ASC) or descending (DESC) alphabetical order."),
 ) -> dict[str, Any]:
     """Retrieves all device pins registered within a specified enterprise. Requires admin privileges and the 'manage enterprise' application scope."""
@@ -10519,7 +10519,7 @@ async def get_sign_request(sign_request_id: str = Field(..., description="The un
 # Tags: Box Sign requests
 @mcp.tool()
 async def list_sign_requests(
-    limit: str | None = Field(None, description="Maximum number of signature requests to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of signature requests to return per page. Accepts values up to 1000."),
     senders: list[str] | None = Field(None, description="Filters results to only include signature requests sent by the specified email addresses. Requires `shared_requests` to be set to `true` when used. Order is not significant; each item should be a valid email address."),
     shared_requests: bool | None = Field(None, description="When `true`, returns only signature requests where the authenticated user is a collaborator (not the owner); collaborator access is determined by the user's access level on the associated sign files. Must be `true` if `senders` is provided; defaults to `false`."),
 ) -> dict[str, Any]:
@@ -10604,7 +10604,7 @@ async def create_sign_request(body: _models.SignRequestCreateRequest | None = Fi
 async def list_workflows(
     folder_id: str = Field(..., description="The unique identifier of the folder whose associated workflows you want to retrieve. The root folder of a Box account is always ID 0; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     trigger_type: str | None = Field(None, description="Filters workflows by their trigger type, returning only workflows that match the specified trigger. Use to narrow results to a specific trigger category."),
-    limit: str | None = Field(None, description="The maximum number of workflows to return in a single response, up to a limit of 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of workflows to return in a single response, up to a limit of 1000."),
 ) -> dict[str, Any]:
     """Retrieves all workflows associated with a specific folder that have a manually triggerable flow. Requires the Manage Box Relay application scope to be enabled in the developer console."""
 
@@ -10695,7 +10695,7 @@ async def start_workflow(
 
 # Tags: Box Sign templates
 @mcp.tool()
-async def list_sign_templates(limit: str | None = Field(None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.", le=1000)) -> dict[str, Any]:
+async def list_sign_templates(limit: str | None = Field(None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.")) -> dict[str, Any]:
     """Retrieves all Box Sign templates created by the authenticated user. Returns a paginated list of templates available for use in signing workflows."""
 
     _limit = _parse_int(limit)
@@ -10772,7 +10772,7 @@ async def get_sign_template(template_id: str = Field(..., description="The uniqu
 # Tags: Integration mappings
 @mcp.tool()
 async def list_slack_integration_mappings(
-    limit: str | None = Field(None, description="Maximum number of integration mappings to return per page. Accepts values up to 1000.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of integration mappings to return per page. Accepts values up to 1000."),
     partner_item_type: Literal["channel"] | None = Field(None, description="Filters results to only return mappings for the specified Slack item type. Currently only 'channel' is supported."),
     partner_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Slack partner item ID, such as a specific Slack channel ID."),
     box_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Box item ID."),
@@ -10996,7 +10996,7 @@ async def list_ai_agents(
     mode: list[str] | None = Field(None, description="Filters results to only return agents configured for the specified modes. Accepts one or more of the following values: `ask`, `text_gen`, or `extract`. Order is not significant."),
     agent_state: list[str] | None = Field(None, description="Filters results to only return agents in the specified states. Accepts one or more of the following values: `enabled`, `disabled`, or `enabled_for_selected_users`. Order is not significant."),
     include_box_default: bool | None = Field(None, description="When set to true, includes Box-provided default agents in the response alongside any custom agents."),
-    limit: str | None = Field(None, description="The maximum number of agents to return in a single response. Accepts a value between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of agents to return in a single response. Accepts a value between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieves a list of AI agents configured in the account, with optional filtering by mode, state, and whether to include Box default agents."""
 
@@ -11151,7 +11151,7 @@ async def get_ai_agent(agent_id: str = Field(..., description="The unique identi
 @mcp.tool()
 async def list_metadata_taxonomies(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomies to retrieve, typically representing an enterprise or organizational boundary."),
-    limit: str | None = Field(None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000."),
 ) -> dict[str, Any]:
     """Retrieves all metadata taxonomies within a specified namespace, enabling discovery of available taxonomy structures for organizing and classifying content metadata."""
 
@@ -11240,7 +11240,7 @@ async def list_taxonomy_nodes(
     ancestor: list[str] | None = Field(None, description="Filters nodes to only those that are descendants of the specified ancestor node identifier(s) at any depth. Multiple values may be provided; nodes matching any specified ancestor are returned."),
     query: str | None = Field(None, description="Free-text search string to find matching taxonomy nodes by name or content. When provided, results are ranked by relevance rather than lexicographic order."),
     include_total_result_count: bool | None = Field(None, alias="include-total-result-count", description="When set to true, includes the total count of matching nodes in the response. Counts are computed for up to 10,000 matching elements; defaults to false."),
-    limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1,000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1,000."),
 ) -> dict[str, Any]:
     """Retrieves nodes within a specific metadata taxonomy, supporting filtering by level, parent, or ancestor relationships. Results are sorted lexicographically by default, or by relevance when a search query is provided."""
 
@@ -11372,7 +11372,7 @@ async def list_taxonomy_field_options(
     query: str | None = Field(None, description="Free-text search string to find matching taxonomy nodes by name or label. When provided, results are ranked by relevance rather than lexicographic order."),
     include_total_result_count: bool | None = Field(None, alias="include-total-result-count", description="When set to true, the response includes the total count of nodes matching the query, computed for up to 10,000 results. Defaults to false."),
     only_selectable_options: bool | None = Field(None, alias="only-selectable-options", description="When set to true, restricts results to only those taxonomy nodes that are valid selectable options for this field. When false, all taxonomy nodes are returned regardless of selectability. Defaults to true."),
-    limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1000.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieves available taxonomy nodes for a specific taxonomy field within a metadata template, filtered by level, parent, ancestor, or search query. Results are sorted lexicographically by default, or by relevance when a query is provided."""
 

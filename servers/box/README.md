@@ -1,6 +1,12 @@
 # Box MCP Server
 
 Base URL: https://api.box.com/2.0
+| | |
+|---|---|
+| **Category** | Storage |
+| **Tools** | 246 |
+| **Auth** | OAuth2 |
+
 ## API Info
 - **API License:** Apache-2.0 — [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 - **Contact:** Box, Inc (devrel@box.com) — [https://developer.box.com](https://developer.box.com)

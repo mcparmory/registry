@@ -1,7 +1,7 @@
 """
 Box MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:15:54 UTC
+Generated: 2026-04-14 18:16:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -383,7 +383,7 @@ class DeleteFilesIdRequest(StrictModel):
 class GetFilesIdAppItemAssociationsRequestPath(StrictModel):
     file_id: str = Field(default=..., description="The unique identifier of the file whose app item associations should be retrieved. The file ID appears in the Box web app URL when viewing the file.")
 class GetFilesIdAppItemAssociationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
     application_type: str | None = Field(default=None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned.")
 class GetFilesIdAppItemAssociationsRequest(StrictModel):
     """Retrieves all app items associated with a file, including associations inherited from ancestor folders. Association type and ID are returned even if the requesting user lacks View permission on the app item."""
@@ -484,7 +484,7 @@ class GetFilesUploadSessionsIdPartsRequestPath(StrictModel):
     upload_session_id: str = Field(default=..., description="The unique identifier of the upload session whose uploaded parts you want to list.")
 class GetFilesUploadSessionsIdPartsRequestQuery(StrictModel):
     offset: int | None = Field(default=None, description="The zero-based index of the first item to return, enabling pagination through large result sets. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="The maximum number of uploaded parts to return in a single response. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of uploaded parts to return in a single response. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetFilesUploadSessionsIdPartsRequest(StrictModel):
     """Retrieves a paginated list of all file chunks uploaded so far within a specific upload session, allowing you to track multipart upload progress."""
     path: GetFilesUploadSessionsIdPartsRequestPath
@@ -535,7 +535,7 @@ class GetFilesIdThumbnailIdRequest(StrictModel):
 class GetFilesIdCollaborationsRequestPath(StrictModel):
     file_id: str = Field(default=..., description="The unique identifier of the file whose collaborations you want to retrieve. You can find this ID in the file's URL in the Box web application.")
 class GetFilesIdCollaborationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetFilesIdCollaborationsRequest(StrictModel):
     """Retrieves all pending and active collaborations for a specific file, including users who currently have access or have been invited to collaborate."""
     path: GetFilesIdCollaborationsRequestPath
@@ -545,7 +545,7 @@ class GetFilesIdCollaborationsRequest(StrictModel):
 class GetFilesIdCommentsRequestPath(StrictModel):
     file_id: str = Field(default=..., description="The unique identifier of the file whose comments you want to retrieve. Find this ID in the file's URL on the Box web application.")
 class GetFilesIdCommentsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of comments to return per page. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of comments to return per page. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 are not supported.", json_schema_extra={'format': 'int64'})
 class GetFilesIdCommentsRequest(StrictModel):
     """Retrieves a paginated list of comments posted on a specific file. Useful for reviewing user feedback or discussion threads associated with a file."""
@@ -577,7 +577,7 @@ class DeleteFilesIdTrashRequest(StrictModel):
 class GetFilesIdVersionsRequestPath(StrictModel):
     file_id: str = Field(default=..., description="The unique identifier of the file whose version history you want to retrieve. The file ID can be found in the URL when viewing the file in the Box web application.")
 class GetFilesIdVersionsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of file versions to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of file versions to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
     offset: int | None = Field(default=None, description="The zero-based index of the item at which to start the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error.", json_schema_extra={'format': 'int64'})
 class GetFilesIdVersionsRequest(StrictModel):
     """Retrieves the version history of a specific file, returning all past versions in paginated results. Version tracking is available only for Box premium accounts; use the get_file operation to retrieve the current version ID."""
@@ -814,7 +814,7 @@ class GetFoldersIdRequestQuery(StrictModel):
     sort: Literal["id", "name", "date", "size"] | None = Field(default=None, description="The secondary attribute by which folder items are sorted. Items are always grouped by type first (folders, then files, then web links); this parameter controls ordering within those groups. Not supported for marker-based pagination on the root folder.")
     direction: Literal["ASC", "DESC"] | None = Field(default=None, description="The sort order for returned items, either ascending (ASC) or descending (DESC) alphabetically.")
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Note that very high offset values may be unreliable for large folders; consider restructuring large folders if pagination fails.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="The maximum number of folder items to return in a single response, up to a maximum of 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of folder items to return in a single response, up to a maximum of 1000.", json_schema_extra={'format': 'int64'})
 class GetFoldersIdRequest(StrictModel):
     """Retrieves metadata and the first 100 items for a specified folder. Use the sort, direction, offset, and limit parameters to control item ordering and pagination within the folder."""
     path: GetFoldersIdRequestPath
@@ -865,7 +865,7 @@ class DeleteFoldersIdRequest(StrictModel):
 class GetFoldersIdAppItemAssociationsRequestPath(StrictModel):
     folder_id: str = Field(default=..., description="The unique identifier of the folder whose app item associations you want to retrieve. The folder ID appears in the URL when viewing the folder in the Box web app. The root folder is always ID 0.")
 class GetFoldersIdAppItemAssociationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
     application_type: str | None = Field(default=None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned.")
 class GetFoldersIdAppItemAssociationsRequest(StrictModel):
     """Retrieves all app items associated with a folder, including associations inherited from ancestor folders. App item type and ID are visible to any user with folder access, regardless of View permission on the app item."""
@@ -878,7 +878,7 @@ class GetFoldersIdItemsRequestPath(StrictModel):
 class GetFoldersIdItemsRequestQuery(StrictModel):
     usemarker: bool | None = Field(default=None, description="Set to true to enable marker-based pagination, which returns a 'marker' token in the response to fetch the next page. Cannot be combined with offset-based pagination; use one method consistently throughout a paginated sequence.")
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Avoid high offset values on large datasets as reliability is not guaranteed; prefer marker-based pagination in those cases.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="The maximum number of items to return in a single page of results. Accepted values range from 1 to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of items to return in a single page of results. Accepted values range from 1 to 1000.", json_schema_extra={'format': 'int64'})
     sort: Literal["id", "name", "date", "size"] | None = Field(default=None, description="The secondary attribute by which to sort items within their type grouping — items are always sorted by type first (folders, then files, then web links). Sorting by this field is not supported for marker-based pagination on the root folder (ID '0').")
     direction: Literal["ASC", "DESC"] | None = Field(default=None, description="The sort direction for results, either ascending or descending alphabetical/numerical order.")
 class GetFoldersIdItemsRequest(StrictModel):
@@ -915,7 +915,7 @@ class PostFoldersIdCopyRequest(StrictModel):
 class GetFoldersIdCollaborationsRequestPath(StrictModel):
     folder_id: str = Field(default=..., description="The unique identifier of the folder whose collaborations you want to retrieve. Find this ID in the Box web app by opening the folder and copying the numeric ID from the URL.")
 class GetFoldersIdCollaborationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetFoldersIdCollaborationsRequest(StrictModel):
     """Retrieves all active and pending collaborations for a specified folder, returning details on users who currently have access or have been invited to collaborate."""
     path: GetFoldersIdCollaborationsRequestPath
@@ -1023,7 +1023,7 @@ class DeleteFoldersIdMetadataIdIdRequest(StrictModel):
 
 # Operation: list_trash_items
 class GetFoldersTrashItemsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of items to return per page. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of items to return per page. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Offsets exceeding 10000 will result in a 400 error.", json_schema_extra={'format': 'int64'})
     direction: Literal["ASC", "DESC"] | None = Field(default=None, description="The sort direction for results, either ascending or descending alphabetical order. Items are always grouped by type first (folders, then files, then web links) before this ordering is applied.")
     sort: Literal["name", "date", "size"] | None = Field(default=None, description="The secondary attribute by which to sort items within each type group. Items are always sorted by type first; this parameter is not supported when using marker-based pagination.")
@@ -1087,7 +1087,7 @@ class DeleteFolderLocksIdRequest(StrictModel):
 # Operation: find_metadata_template_by_instance
 class GetMetadataTemplatesRequestQuery(StrictModel):
     metadata_instance_id: str = Field(default=..., description="The unique UUID of a metadata template instance used to identify and retrieve the associated template definition.", json_schema_extra={'format': 'uuid'})
-    limit: int | None = Field(default=None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetMetadataTemplatesRequest(StrictModel):
     """Finds a metadata template by looking up the ID of one of its existing instances. Useful when you have an instance ID and need to retrieve the template definition it was created from."""
     query: GetMetadataTemplatesRequestQuery
@@ -1128,14 +1128,14 @@ class GetMetadataTemplatesIdRequest(StrictModel):
 
 # Operation: list_global_metadata_templates
 class GetMetadataTemplatesGlobalRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.", json_schema_extra={'format': 'int64'})
 class GetMetadataTemplatesGlobalRequest(StrictModel):
     """Retrieves all generic, global metadata templates available to every enterprise using Box. These templates are not organization-specific and can be applied universally across all Box accounts."""
     query: GetMetadataTemplatesGlobalRequestQuery | None = None
 
 # Operation: list_enterprise_metadata_templates
 class GetMetadataTemplatesEnterpriseRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetMetadataTemplatesEnterpriseRequest(StrictModel):
     """Retrieves all metadata templates created for use within the authenticated user's enterprise. Returns a paginated list of enterprise-scoped templates available for applying structured metadata to content."""
     query: GetMetadataTemplatesEnterpriseRequestQuery | None = None
@@ -1274,7 +1274,7 @@ class DeleteCollaborationsIdRequest(StrictModel):
 class GetCollaborationsRequestQuery(StrictModel):
     status: Literal["pending"] = Field(default=..., description="Filters collaborations by their current status. Only pending invites are supported by this endpoint.")
     offset: int | None = Field(default=None, description="Zero-based index of the first item to include in the response, used for paginating through results. Must not exceed 10,000; requests beyond this limit will return a 400 error.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="Limits the number of collaboration records returned in a single page. Accepts values up to 1,000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Limits the number of collaboration records returned in a single page. Accepts values up to 1,000.", json_schema_extra={'format': 'int64'})
 class GetCollaborationsRequest(StrictModel):
     """Retrieves all pending collaboration invites for the authenticated user. Returns a paginated list of collaborations awaiting the user's response."""
     query: GetCollaborationsRequestQuery
@@ -1318,7 +1318,7 @@ class GetSearchRequestQuery(StrictModel):
     mdfilters: list[MetadataFilter] | None = Field(default=None, description="Restricts results to items whose metadata matches a specific metadata template filter. Accepts exactly one metadata filter object; required when `query` is not provided.", min_length=1, max_length=1)
     sort: Literal["modified_at", "relevance"] | None = Field(default=None, description="Determines the ordering of search results. Use `relevance` to rank by match quality or `modified_at` to order by most recently modified first.")
     direction: Literal["DESC", "ASC"] | None = Field(default=None, description="Sets the sort direction for results as ascending (`ASC`) or descending (`DESC`). Ignored when `sort` is set to `relevance`, which always returns results in descending relevance order.")
-    limit: int | None = Field(default=None, description="Maximum number of items to return per page of results. Must be between 1 and 200.", le=200, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of items to return per page of results. Must be between 1 and 200.", json_schema_extra={'format': 'int64'})
     include_recent_shared_links: bool | None = Field(default=None, description="When set to true, includes items the user recently accessed via a shared link in the results. Enabling this changes the response format to include shared link metadata.")
     deleted_user_ids: list[str] | None = Field(default=None, description="Restricts results to items deleted by the specified users, provided as an array of user ID strings. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards.")
     deleted_at_range: list[str] | None = Field(default=None, description="Restricts results to items deleted within a date range, provided as an array of two RFC3339 timestamp strings representing start and end dates. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards.")
@@ -1724,7 +1724,7 @@ class GetUsersRequestQuery(StrictModel):
     user_type: Literal["all", "managed", "external"] | None = Field(default=None, description="Filters results by user category: 'all' includes every user type with partial name/login matching (exact match required for external users), 'managed' returns only managed and app users with partial matching, and 'external' returns only external users whose login exactly matches the filter term.")
     external_app_user_id: str | None = Field(default=None, description="Restricts results to app users that were created with the specified external_app_user_id value, allowing lookup of app users by your own identifier assigned at creation time.")
     offset: int | None = Field(default=None, description="Zero-based index of the first item to include in the response, used for paginating through large result sets. Must not exceed 10000.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="Maximum number of users to return in a single response page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of users to return in a single response page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetUsersRequest(StrictModel):
     """Retrieves a paginated list of all enterprise users, including their user ID, public name, and login. Requires the authenticated user and application to have enterprise-wide user lookup permissions."""
     query: GetUsersRequestQuery | None = None
@@ -1879,7 +1879,7 @@ class DeleteUsersIdEmailAliasesIdRequest(StrictModel):
 class GetUsersIdMembershipsRequestPath(StrictModel):
     user_id: str = Field(default=..., description="The unique identifier of the user whose group memberships are being retrieved.")
 class GetUsersIdMembershipsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of group memberships to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of group memberships to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetUsersIdMembershipsRequest(StrictModel):
     """Retrieves all group memberships for a specified user. Accessible only to members of the same group or users with admin-level permissions."""
     path: GetUsersIdMembershipsRequestPath
@@ -1907,7 +1907,7 @@ class GetInvitesIdRequest(StrictModel):
 # Operation: list_groups
 class GetGroupsRequestQuery(StrictModel):
     filter_term: str | None = Field(default=None, description="Narrows results to only groups whose name begins with the specified search term. Omitting this parameter returns all groups.")
-    limit: int | None = Field(default=None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000.", json_schema_extra={'format': 'int64'})
     offset: int | None = Field(default=None, description="Zero-based index of the first item to include in the response, used for paginating through results. Offsets greater than 10000 are not permitted and will return a 400 error.", json_schema_extra={'format': 'int64'})
 class GetGroupsRequest(StrictModel):
     """Retrieves all groups belonging to the enterprise, with optional filtering by name. Requires admin permissions to access enterprise group data."""
@@ -1965,7 +1965,7 @@ class DeleteGroupsIdRequest(StrictModel):
 class GetGroupsIdMembershipsRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group whose members you want to retrieve.")
 class GetGroupsIdMembershipsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default.", json_schema_extra={'format': 'int64'})
 class GetGroupsIdMembershipsRequest(StrictModel):
     """Retrieves all membership records for a specified group, including details about each member. Accessible only to members of the group or users with admin-level permissions."""
     path: GetGroupsIdMembershipsRequestPath
@@ -1975,7 +1975,7 @@ class GetGroupsIdMembershipsRequest(StrictModel):
 class GetGroupsIdCollaborationsRequestPath(StrictModel):
     group_id: str = Field(default=..., description="The unique identifier of the group whose collaborations you want to retrieve.")
 class GetGroupsIdCollaborationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error.", json_schema_extra={'format': 'int64'})
 class GetGroupsIdCollaborationsRequest(StrictModel):
     """Retrieves all collaborations for a specified group, showing which files or folders the group can access and with what role. Requires admin permissions to inspect enterprise groups."""
@@ -2023,7 +2023,7 @@ class DeleteGroupMembershipsIdRequest(StrictModel):
 
 # Operation: list_webhooks
 class GetWebhooksRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetWebhooksRequest(StrictModel):
     """Retrieves all webhooks defined for the authenticated application, scoped to files and folders owned by the requesting user. Note that admins cannot view webhooks created by service accounts unless they have explicit access to those folders, and vice versa."""
     query: GetWebhooksRequestQuery | None = None
@@ -2069,7 +2069,7 @@ class PutSkillInvocationsIdRequest(StrictModel):
 class GetEventsRequestQuery(StrictModel):
     stream_type: Literal["all", "changes", "sync", "admin_logs", "admin_logs_streaming"] | None = Field(default=None, description="Controls the scope and type of events returned. Use 'all' for the authenticated user's full event history, 'changes' or 'sync' for file-tree-affecting events, 'admin_logs' for paginated historical enterprise-wide events within a date range, or 'admin_logs_streaming' for low-latency polling of recent enterprise-wide events. Admin privileges are required for the 'admin_logs' and 'admin_logs_streaming' types.")
     stream_position: str | None = Field(default=None, description="The cursor position in the event stream from which to begin returning events. Use 'now' to initialize a stream and receive only the latest position with no events, or '0' / null to retrieve all available events from the beginning.")
-    limit: int | None = Field(default=None, description="Maximum number of events to return per request, up to 500. Fewer events than requested may be returned even when more exist, as the API may return already-retrieved events rather than waiting for additional results.", le=500, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of events to return per request, up to 500. Fewer events than requested may be returned even when more exist, as the API may return already-retrieved events rather than waiting for additional results.", json_schema_extra={'format': 'int64'})
     event_type: list[Literal["ACCESS_GRANTED", "ACCESS_REVOKED", "ADD_DEVICE_ASSOCIATION", "ADD_LOGIN_ACTIVITY_DEVICE", "ADMIN_LOGIN", "APPLICATION_CREATED", "APPLICATION_PUBLIC_KEY_ADDED", "APPLICATION_PUBLIC_KEY_DELETED", "CHANGE_ADMIN_ROLE", "CHANGE_FOLDER_PERMISSION", "COLLABORATION_ACCEPT", "COLLABORATION_EXPIRATION", "COLLABORATION_INVITE", "COLLABORATION_REMOVE", "COLLABORATION_ROLE_CHANGE", "COMMENT_CREATE", "COMMENT_DELETE", "CONTENT_WORKFLOW_ABNORMAL_DOWNLOAD_ACTIVITY", "CONTENT_WORKFLOW_AUTOMATION_ADD", "CONTENT_WORKFLOW_AUTOMATION_DELETE", "CONTENT_WORKFLOW_POLICY_ADD", "CONTENT_WORKFLOW_SHARING_POLICY_VIOLATION", "CONTENT_WORKFLOW_UPLOAD_POLICY_VIOLATION", "COPY", "DATA_RETENTION_CREATE_RETENTION", "DATA_RETENTION_REMOVE_RETENTION", "DELETE", "DELETE_USER", "DEVICE_TRUST_CHECK_FAILED", "DOWNLOAD", "EDIT", "EDIT_USER", "EMAIL_ALIAS_CONFIRM", "EMAIL_ALIAS_REMOVE", "ENTERPRISE_APP_AUTHORIZATION_UPDATE", "EXTERNAL_COLLAB_SECURITY_SETTINGS", "FAILED_LOGIN", "FILE_MARKED_MALICIOUS", "FILE_WATERMARKED_DOWNLOAD", "GROUP_ADD_ITEM", "GROUP_ADD_USER", "GROUP_CREATION", "GROUP_DELETION", "GROUP_EDITED", "GROUP_REMOVE_ITEM", "GROUP_REMOVE_USER", "ITEM_EMAIL_SEND", "ITEM_MODIFY", "ITEM_OPEN", "ITEM_SHARED_UPDATE", "ITEM_SYNC", "ITEM_UNSYNC", "LEGAL_HOLD_ASSIGNMENT_CREATE", "LEGAL_HOLD_ASSIGNMENT_DELETE", "LEGAL_HOLD_POLICY_CREATE", "LEGAL_HOLD_POLICY_DELETE", "LEGAL_HOLD_POLICY_UPDATE", "LOCK", "LOGIN", "METADATA_INSTANCE_CREATE", "METADATA_INSTANCE_DELETE", "METADATA_INSTANCE_UPDATE", "METADATA_TEMPLATE_CREATE", "METADATA_TEMPLATE_DELETE", "METADATA_TEMPLATE_UPDATE", "MOVE", "NEW_USER", "OAUTH2_ACCESS_TOKEN_REVOKE", "PREVIEW", "REMOVE_DEVICE_ASSOCIATION", "REMOVE_LOGIN_ACTIVITY_DEVICE", "RENAME", "RETENTION_POLICY_ASSIGNMENT_ADD", "SHARE", "SHARED_LINK_SEND", "SHARE_EXPIRATION", "SHIELD_ALERT", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_JUSTIFICATION_APPROVAL", "SHIELD_SHARED_LINK_ACCESS_BLOCKED", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_CREATE", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_UPDATE", "SIGN_DOCUMENT_ASSIGNED", "SIGN_DOCUMENT_CANCELLED", "SIGN_DOCUMENT_COMPLETED", "SIGN_DOCUMENT_CONVERTED", "SIGN_DOCUMENT_CREATED", "SIGN_DOCUMENT_DECLINED", "SIGN_DOCUMENT_EXPIRED", "SIGN_DOCUMENT_SIGNED", "SIGN_DOCUMENT_VIEWED_BY_SIGNED", "SIGNER_DOWNLOADED", "SIGNER_FORWARDED", "STORAGE_EXPIRATION", "TASK_ASSIGNMENT_CREATE", "TASK_ASSIGNMENT_DELETE", "TASK_ASSIGNMENT_UPDATE", "TASK_CREATE", "TASK_UPDATE", "TERMS_OF_SERVICE_ACCEPT", "TERMS_OF_SERVICE_REJECT", "UNDELETE", "UNLOCK", "UNSHARE", "UPDATE_COLLABORATION_EXPIRATION", "UPDATE_SHARE_EXPIRATION", "UPLOAD", "USER_AUTHENTICATE_OAUTH2_ACCESS_TOKEN_CREATE", "WATERMARK_LABEL_CREATE", "WATERMARK_LABEL_DELETE"]] | None = Field(default=None, description="A list of specific event type strings to filter results by. Only applicable when 'stream_type' is 'admin_logs' or 'admin_logs_streaming'; ignored for all other stream types. Each item should be a valid Box event type identifier.")
     created_after: str | None = Field(default=None, description="The earliest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types.", json_schema_extra={'format': 'date-time'})
     created_before: str | None = Field(default=None, description="The latest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types.", json_schema_extra={'format': 'date-time'})
@@ -2080,7 +2080,7 @@ class GetEventsRequest(StrictModel):
 # Operation: list_collections
 class GetCollectionsRequestQuery(StrictModel):
     offset: int | None = Field(default=None, description="The zero-based index of the first item to include in the response, enabling pagination through large result sets. Offset values exceeding 10,000 will result in a 400 error.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000.", json_schema_extra={'format': 'int64'})
 class GetCollectionsRequest(StrictModel):
     """Retrieves all collections belonging to the authenticated user. Currently, only the favorites collection is supported."""
     query: GetCollectionsRequestQuery | None = None
@@ -2090,7 +2090,7 @@ class GetCollectionsIdItemsRequestPath(StrictModel):
     collection_id: str = Field(default=..., description="The unique identifier of the collection whose items you want to retrieve.")
 class GetCollectionsIdItemsRequestQuery(StrictModel):
     offset: int | None = Field(default=None, description="The zero-based index of the first item to return, enabling pagination through results. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error.", json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="The maximum number of items to return in a single response page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of items to return in a single response page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetCollectionsIdItemsRequest(StrictModel):
     """Retrieves the files and folders contained within a specified collection. Supports pagination to navigate large result sets."""
     path: GetCollectionsIdItemsRequestPath
@@ -2105,7 +2105,7 @@ class GetCollectionsIdRequest(StrictModel):
 
 # Operation: list_recent_items
 class GetRecentItemsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetRecentItemsRequest(StrictModel):
     """Retrieves a list of items recently accessed by the current user, covering activity from the last 90 days or up to the last 1000 items accessed, whichever limit is reached first."""
     query: GetRecentItemsRequestQuery | None = None
@@ -2115,7 +2115,7 @@ class GetRetentionPoliciesRequestQuery(StrictModel):
     policy_name: str | None = Field(default=None, description="Filters results to only retention policies whose names begin with the specified string. The match is case-sensitive and prefix-based, so partial names from the start of the policy name are supported.")
     policy_type: Literal["finite", "indefinite"] | None = Field(default=None, description="Filters results by the retention policy type. Use 'finite' for policies with a defined expiration period, or 'indefinite' for policies that retain content without a set end date.")
     created_by_user_id: str | None = Field(default=None, description="Filters results to only policies created by the user with the specified user ID. Useful for auditing or managing policies owned by a particular administrator.")
-    limit: int | None = Field(default=None, description="Limits the number of retention policies returned per page. Accepts values up to 1000; omitting this parameter returns the default page size.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Limits the number of retention policies returned per page. Accepts values up to 1000; omitting this parameter returns the default page size.", json_schema_extra={'format': 'int64'})
 class GetRetentionPoliciesRequest(StrictModel):
     """Retrieves all retention policies configured for the enterprise, with optional filtering by name, type, or creator. Useful for auditing data governance rules or locating specific policies before applying or modifying them."""
     query: GetRetentionPoliciesRequestQuery | None = None
@@ -2157,7 +2157,7 @@ class GetRetentionPoliciesIdAssignmentsRequestPath(StrictModel):
     retention_policy_id: str = Field(default=..., description="The unique identifier of the retention policy whose assignments you want to retrieve.")
 class GetRetentionPoliciesIdAssignmentsRequestQuery(StrictModel):
     type_: Literal["folder", "enterprise", "metadata_template"] | None = Field(default=None, validation_alias="type", serialization_alias="type", description="Filters the results to only return assignments of a specific type. Accepted values are 'folder', 'enterprise', or 'metadata_template'.")
-    limit: int | None = Field(default=None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetRetentionPoliciesIdAssignmentsRequest(StrictModel):
     """Retrieves all assignments for a specified retention policy, showing which folders, enterprise, or metadata templates the policy is applied to. Optionally filter results by assignment type and control page size."""
     path: GetRetentionPoliciesIdAssignmentsRequestPath
@@ -2194,7 +2194,7 @@ class DeleteRetentionPolicyAssignmentsIdRequest(StrictModel):
 class GetRetentionPolicyAssignmentsIdFilesUnderRetentionRequestPath(StrictModel):
     retention_policy_assignment_id: str = Field(default=..., description="The unique identifier of the retention policy assignment whose retained files you want to retrieve.")
 class GetRetentionPolicyAssignmentsIdFilesUnderRetentionRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default.", json_schema_extra={'format': 'int64'})
 class GetRetentionPolicyAssignmentsIdFilesUnderRetentionRequest(StrictModel):
     """Retrieves a paginated list of files currently under retention for a specific retention policy assignment. Useful for auditing which files are actively governed by a given retention rule."""
     path: GetRetentionPolicyAssignmentsIdFilesUnderRetentionRequestPath
@@ -2204,7 +2204,7 @@ class GetRetentionPolicyAssignmentsIdFilesUnderRetentionRequest(StrictModel):
 class GetRetentionPolicyAssignmentsIdFileVersionsUnderRetentionRequestPath(StrictModel):
     retention_policy_assignment_id: str = Field(default=..., description="The unique identifier of the retention policy assignment whose retained file versions you want to retrieve.")
 class GetRetentionPolicyAssignmentsIdFileVersionsUnderRetentionRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetRetentionPolicyAssignmentsIdFileVersionsUnderRetentionRequest(StrictModel):
     """Retrieves a paginated list of file versions currently under retention for a specific retention policy assignment. Useful for auditing which file versions are being preserved by a given policy."""
     path: GetRetentionPolicyAssignmentsIdFileVersionsUnderRetentionRequestPath
@@ -2213,7 +2213,7 @@ class GetRetentionPolicyAssignmentsIdFileVersionsUnderRetentionRequest(StrictMod
 # Operation: list_legal_hold_policies
 class GetLegalHoldPoliciesRequestQuery(StrictModel):
     policy_name: str | None = Field(default=None, description="Filters results to only include policies whose names begin with this search term. The match is case-insensitive.")
-    limit: int | None = Field(default=None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetLegalHoldPoliciesRequest(StrictModel):
     """Retrieves all legal hold policies belonging to the enterprise. Supports filtering by policy name prefix to narrow results."""
     query: GetLegalHoldPoliciesRequestQuery | None = None
@@ -2249,7 +2249,7 @@ class GetLegalHoldPolicyAssignmentsRequestQuery(StrictModel):
     policy_id: str = Field(default=..., description="The unique identifier of the legal hold policy whose assignments you want to retrieve.")
     assign_to_type: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(default=None, description="Narrows results to only assignments targeting a specific item type. Accepted values are 'file', 'file_version', 'folder', 'user', 'ownership', or 'interactions'.")
     assign_to_id: str | None = Field(default=None, description="Narrows results to only assignments targeting a specific item by its unique ID. Best used in combination with assign_to_type for precise filtering.")
-    limit: int | None = Field(default=None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetLegalHoldPolicyAssignmentsRequest(StrictModel):
     """Retrieves a list of all items (files, folders, users, etc.) that a specific legal hold policy has been assigned to. Supports filtering by item type and item ID for targeted lookups."""
     query: GetLegalHoldPolicyAssignmentsRequestQuery
@@ -2283,7 +2283,7 @@ class DeleteLegalHoldPolicyAssignmentsIdRequest(StrictModel):
 class GetLegalHoldPolicyAssignmentsIdFilesOnHoldRequestPath(StrictModel):
     legal_hold_policy_assignment_id: str = Field(default=..., description="The unique identifier of the legal hold policy assignment whose held files you want to retrieve.")
 class GetLegalHoldPolicyAssignmentsIdFilesOnHoldRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of files to return per page, up to a maximum of 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of files to return per page, up to a maximum of 1000.", json_schema_extra={'format': 'int64'})
 class GetLegalHoldPolicyAssignmentsIdFilesOnHoldRequest(StrictModel):
     """Retrieves a paginated list of files with their current file versions held under a specific legal hold policy assignment. For previous file versions on hold, use the file versions on hold endpoint instead."""
     path: GetLegalHoldPolicyAssignmentsIdFilesOnHoldRequestPath
@@ -2293,7 +2293,7 @@ class GetLegalHoldPolicyAssignmentsIdFilesOnHoldRequest(StrictModel):
 class GetLegalHoldPolicyAssignmentsIdFileVersionsOnHoldRequestPath(StrictModel):
     legal_hold_policy_assignment_id: str = Field(default=..., description="The unique identifier of the legal hold policy assignment whose past file versions on hold should be retrieved.")
 class GetLegalHoldPolicyAssignmentsIdFileVersionsOnHoldRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of file version records to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetLegalHoldPolicyAssignmentsIdFileVersionsOnHoldRequest(StrictModel):
     """Retrieves a paginated list of previous (past) file versions placed on hold for a specific legal hold policy assignment. Use this endpoint for historical file versions; for current file versions on hold, use the files_on_hold endpoint instead."""
     path: GetLegalHoldPolicyAssignmentsIdFileVersionsOnHoldRequestPath
@@ -2309,7 +2309,7 @@ class GetFileVersionLegalHoldsIdRequest(StrictModel):
 # Operation: list_file_version_legal_holds
 class GetFileVersionLegalHoldsRequestQuery(StrictModel):
     policy_id: str = Field(default=..., description="The unique identifier of the legal hold policy whose file version holds you want to retrieve.")
-    limit: int | None = Field(default=None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetFileVersionLegalHoldsRequest(StrictModel):
     """Retrieves file versions currently held under a specific legal hold policy, covering legacy-architecture holds only. For holds in the new architecture, use the legal hold policy assignment endpoints instead."""
     query: GetFileVersionLegalHoldsRequestQuery
@@ -2331,7 +2331,7 @@ class PostShieldInformationBarriersChangeStatusRequest(StrictModel):
 
 # Operation: list_shield_information_barriers
 class GetShieldInformationBarriersRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetShieldInformationBarriersRequest(StrictModel):
     """Retrieves all shield information barriers configured for the enterprise associated with the JWT token. Shield information barriers restrict communication and data access between internal groups."""
     query: GetShieldInformationBarriersRequestQuery | None = None
@@ -2346,7 +2346,7 @@ class PostShieldInformationBarriersRequest(StrictModel):
 # Operation: list_barrier_reports
 class GetShieldInformationBarrierReportsRequestQuery(StrictModel):
     shield_information_barrier_id: str = Field(default=..., description="The unique identifier of the shield information barrier whose reports should be listed.")
-    limit: int | None = Field(default=None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default.", json_schema_extra={'format': 'int64'})
 class GetShieldInformationBarrierReportsRequest(StrictModel):
     """Retrieves a paginated list of shield information barrier reports associated with a specific barrier. Use this to audit or review compliance reports generated for a given information barrier."""
     query: GetShieldInformationBarrierReportsRequestQuery
@@ -2396,7 +2396,7 @@ class DeleteShieldInformationBarrierSegmentsIdRequest(StrictModel):
 # Operation: list_barrier_segments
 class GetShieldInformationBarrierSegmentsRequestQuery(StrictModel):
     shield_information_barrier_id: str = Field(default=..., description="The unique identifier of the shield information barrier whose segments you want to retrieve.")
-    limit: int | None = Field(default=None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetShieldInformationBarrierSegmentsRequest(StrictModel):
     """Retrieves all shield information barrier segments associated with a specified information barrier. Segments define the groups or users separated by the barrier."""
     query: GetShieldInformationBarrierSegmentsRequestQuery
@@ -2430,7 +2430,7 @@ class DeleteShieldInformationBarrierSegmentMembersIdRequest(StrictModel):
 # Operation: list_barrier_segment_members
 class GetShieldInformationBarrierSegmentMembersRequestQuery(StrictModel):
     shield_information_barrier_segment_id: str = Field(default=..., description="The unique identifier of the shield information barrier segment whose members you want to retrieve.")
-    limit: int | None = Field(default=None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetShieldInformationBarrierSegmentMembersRequest(StrictModel):
     """Retrieves a paginated list of members belonging to a specific shield information barrier segment. Use this to audit or review which users are assigned to a given segment."""
     query: GetShieldInformationBarrierSegmentMembersRequestQuery
@@ -2458,7 +2458,7 @@ class GetShieldInformationBarrierSegmentRestrictionsIdRequest(StrictModel):
 # Operation: list_barrier_segment_restrictions
 class GetShieldInformationBarrierSegmentRestrictionsRequestQuery(StrictModel):
     shield_information_barrier_segment_id: str = Field(default=..., description="The unique identifier of the shield information barrier segment whose restrictions you want to list.")
-    limit: int | None = Field(default=None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetShieldInformationBarrierSegmentRestrictionsRequest(StrictModel):
     """Retrieves all shield information barrier segment restrictions associated with a specific segment. Use this to audit or review access restrictions applied to a given barrier segment."""
     query: GetShieldInformationBarrierSegmentRestrictionsRequestQuery
@@ -2481,7 +2481,7 @@ class DeleteDevicePinnersIdRequest(StrictModel):
 class GetEnterprisesIdDevicePinnersRequestPath(StrictModel):
     enterprise_id: str = Field(default=..., description="The unique identifier of the enterprise whose device pins you want to retrieve.")
 class GetEnterprisesIdDevicePinnersRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of device pins to return per page, up to a maximum of 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of device pins to return per page, up to a maximum of 1000.", json_schema_extra={'format': 'int64'})
     direction: Literal["ASC", "DESC"] | None = Field(default=None, description="The sort order for the returned results, either ascending (ASC) or descending (DESC) alphabetical order.")
 class GetEnterprisesIdDevicePinnersRequest(StrictModel):
     """Retrieves all device pins registered within a specified enterprise. Requires admin privileges and the 'manage enterprise' application scope."""
@@ -2610,7 +2610,7 @@ class GetSignRequestsIdRequest(StrictModel):
 
 # Operation: list_sign_requests
 class GetSignRequestsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of signature requests to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of signature requests to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
     senders: list[str] | None = Field(default=None, description="Filters results to only include signature requests sent by the specified email addresses. Requires `shared_requests` to be set to `true` when used. Order is not significant; each item should be a valid email address.")
     shared_requests: bool | None = Field(default=None, description="When `true`, returns only signature requests where the authenticated user is a collaborator (not the owner); collaborator access is determined by the user's access level on the associated sign files. Must be `true` if `senders` is provided; defaults to `false`.")
 class GetSignRequestsRequest(StrictModel):
@@ -2628,7 +2628,7 @@ class PostSignRequestsRequest(StrictModel):
 class GetWorkflowsRequestQuery(StrictModel):
     folder_id: str = Field(default=..., description="The unique identifier of the folder whose associated workflows you want to retrieve. The root folder of a Box account is always ID 0; other folder IDs can be found in the URL when viewing the folder in the Box web app.")
     trigger_type: str | None = Field(default=None, description="Filters workflows by their trigger type, returning only workflows that match the specified trigger. Use to narrow results to a specific trigger category.")
-    limit: int | None = Field(default=None, description="The maximum number of workflows to return in a single response, up to a limit of 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of workflows to return in a single response, up to a limit of 1000.", json_schema_extra={'format': 'int64'})
 class GetWorkflowsRequest(StrictModel):
     """Retrieves all workflows associated with a specific folder that have a manually triggerable flow. Requires the Manage Box Relay application scope to be enabled in the developer console."""
     query: GetWorkflowsRequestQuery
@@ -2655,7 +2655,7 @@ class PostWorkflowsIdStartRequest(StrictModel):
 
 # Operation: list_sign_templates
 class GetSignTemplatesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
 class GetSignTemplatesRequest(StrictModel):
     """Retrieves all Box Sign templates created by the authenticated user. Returns a paginated list of templates available for use in signing workflows."""
     query: GetSignTemplatesRequestQuery | None = None
@@ -2669,7 +2669,7 @@ class GetSignTemplatesIdRequest(StrictModel):
 
 # Operation: list_slack_integration_mappings
 class GetIntegrationMappingsSlackRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of integration mappings to return per page. Accepts values up to 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of integration mappings to return per page. Accepts values up to 1000.", json_schema_extra={'format': 'int64'})
     partner_item_type: Literal["channel"] | None = Field(default=None, description="Filters results to only return mappings for the specified Slack item type. Currently only 'channel' is supported.")
     partner_item_id: str | None = Field(default=None, description="Filters results to only return mappings associated with the specified Slack partner item ID, such as a specific Slack channel ID.")
     box_item_id: str | None = Field(default=None, description="Filters results to only return mappings associated with the specified Box item ID.")
@@ -2727,7 +2727,7 @@ class GetAiAgentsRequestQuery(StrictModel):
     mode: list[str] | None = Field(default=None, description="Filters results to only return agents configured for the specified modes. Accepts one or more of the following values: `ask`, `text_gen`, or `extract`. Order is not significant.")
     agent_state: list[str] | None = Field(default=None, description="Filters results to only return agents in the specified states. Accepts one or more of the following values: `enabled`, `disabled`, or `enabled_for_selected_users`. Order is not significant.")
     include_box_default: bool | None = Field(default=None, description="When set to true, includes Box-provided default agents in the response alongside any custom agents.")
-    limit: int | None = Field(default=None, description="The maximum number of agents to return in a single response. Accepts a value between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of agents to return in a single response. Accepts a value between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetAiAgentsRequest(StrictModel):
     """Retrieves a list of AI agents configured in the account, with optional filtering by mode, state, and whether to include Box default agents."""
     query: GetAiAgentsRequestQuery | None = None
@@ -2785,7 +2785,7 @@ class GetAiAgentsIdRequest(StrictModel):
 class GetMetadataTaxonomiesIdRequestPath(StrictModel):
     namespace: str = Field(default=..., description="The namespace that scopes the metadata taxonomies to retrieve, typically representing an enterprise or organizational boundary.")
 class GetMetadataTaxonomiesIdRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000.", json_schema_extra={'format': 'int64'})
 class GetMetadataTaxonomiesIdRequest(StrictModel):
     """Retrieves all metadata taxonomies within a specified namespace, enabling discovery of available taxonomy structures for organizing and classifying content metadata."""
     path: GetMetadataTaxonomiesIdRequestPath
@@ -2809,7 +2809,7 @@ class GetMetadataTaxonomiesIdIdNodesRequestQuery(StrictModel):
     ancestor: list[str] | None = Field(default=None, description="Filters nodes to only those that are descendants of the specified ancestor node identifier(s) at any depth. Multiple values may be provided; nodes matching any specified ancestor are returned.")
     query: str | None = Field(default=None, description="Free-text search string to find matching taxonomy nodes by name or content. When provided, results are ranked by relevance rather than lexicographic order.")
     include_total_result_count: bool | None = Field(default=None, validation_alias="include-total-result-count", serialization_alias="include-total-result-count", description="When set to true, includes the total count of matching nodes in the response. Counts are computed for up to 10,000 matching elements; defaults to false.")
-    limit: int | None = Field(default=None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1,000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1,000.", json_schema_extra={'format': 'int64'})
 class GetMetadataTaxonomiesIdIdNodesRequest(StrictModel):
     """Retrieves nodes within a specific metadata taxonomy, supporting filtering by level, parent, or ancestor relationships. Results are sorted lexicographically by default, or by relevance when a search query is provided."""
     path: GetMetadataTaxonomiesIdIdNodesRequestPath
@@ -2845,7 +2845,7 @@ class GetMetadataTemplatesIdIdFieldsIdOptionsRequestQuery(StrictModel):
     query: str | None = Field(default=None, description="Free-text search string to find matching taxonomy nodes by name or label. When provided, results are ranked by relevance rather than lexicographic order.")
     include_total_result_count: bool | None = Field(default=None, validation_alias="include-total-result-count", serialization_alias="include-total-result-count", description="When set to true, the response includes the total count of nodes matching the query, computed for up to 10,000 results. Defaults to false.")
     only_selectable_options: bool | None = Field(default=None, validation_alias="only-selectable-options", serialization_alias="only-selectable-options", description="When set to true, restricts results to only those taxonomy nodes that are valid selectable options for this field. When false, all taxonomy nodes are returned regardless of selectability. Defaults to true.")
-    limit: int | None = Field(default=None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class GetMetadataTemplatesIdIdFieldsIdOptionsRequest(StrictModel):
     """Retrieves available taxonomy nodes for a specific taxonomy field within a metadata template, filtered by level, parent, ancestor, or search query. Results are sorted lexicographically by default, or by relevance when a query is provided."""
     path: GetMetadataTemplatesIdIdFieldsIdOptionsRequestPath
