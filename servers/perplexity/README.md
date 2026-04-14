@@ -1,6 +1,12 @@
 # Perplexity AI API MCP Server
 
 Base URL: https://api.perplexity.ai
+| | |
+|---|---|
+| **Category** | AI & Machine Learning |
+| **Tools** | 7 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install
