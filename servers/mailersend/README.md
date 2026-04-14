@@ -1,6 +1,12 @@
 # MailerSend MCP Server
 
 Base URL: https://api.mailersend.com/v1
+| | |
+|---|---|
+| **Category** | Communication |
+| **Tools** | 89 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install

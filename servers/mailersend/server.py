@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MailerSend MCP Server
-Generated: 2026-04-09 18:53:38 UTC
+Generated: 2026-04-14 18:25:41 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
