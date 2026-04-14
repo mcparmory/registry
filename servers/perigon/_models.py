@@ -1,7 +1,7 @@
 """
 Perigon Api MCP Server - Pydantic Models
 
-Generated: 2026-04-10 13:57:37 UTC
+Generated: 2026-04-14 18:30:19 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

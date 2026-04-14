@@ -1,6 +1,12 @@
 # Perigon API MCP Server
 
 Base URL: https://api.perigon.io
+| | |
+|---|---|
+| **Category** | Media & Entertainment |
+| **Tools** | 14 |
+| **Auth** | Bearer Token |
+
 ## API Info
 - **Contact:** Perigon Support (data@perigon.io) — [https://docs.perigon.io/](https://docs.perigon.io/)
 
