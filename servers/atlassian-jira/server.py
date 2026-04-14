@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/
 
-Generated: 2026-04-09 17:15:05 UTC
+Generated: 2026-04-14 18:15:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1805,7 +1805,7 @@ async def get_bulk_operation_progress(task_id: str = Field(..., alias="taskId", 
 async def fetch_issue_changelogs(
     issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="List of issue identifiers (IDs or keys) to fetch changelogs for. You can request changelogs for up to 1000 issues. At least one issue identifier is required.", min_length=1, max_length=1000),
     field_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="fieldIds", description="Optional list of field IDs to narrow changelog results to specific fields. You can filter by up to 10 fields.", min_length=0, max_length=10),
-    max_results: str | None = Field(None, alias="maxResults", description="Maximum number of changelog items to return per page. Defaults to 1000 if not specified. Must be between 1 and 10000.", ge=1, le=10000),
+    max_results: str | None = Field(None, alias="maxResults", description="Maximum number of changelog items to return per page. Defaults to 1000 if not specified. Must be between 1 and 10000."),
 ) -> dict[str, Any]:
     """Retrieve change history for multiple issues in a paginated list, optionally filtered by specific fields. Results are sorted chronologically by changelog date and issue ID, starting from the oldest entries."""
 
@@ -4936,7 +4936,7 @@ async def fetch_issues(issue_ids_or_keys: list[str] = Field(..., alias="issueIds
 async def list_issue_types_for_creation(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified."),
-    max_results: str | None = Field(None, alias="maxResults", description="The number of issue types to return per page, with a maximum of 200. Defaults to 50 if not specified.", le=200),
+    max_results: str | None = Field(None, alias="maxResults", description="The number of issue types to return per page, with a maximum of 200. Defaults to 50 if not specified."),
 ) -> dict[str, Any]:
     """Retrieve issue type metadata for a project to determine which issue types can be created and what fields are required. Use this information to populate requests when creating issues."""
 
@@ -4983,7 +4983,7 @@ async def get_issue_creation_fields(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key."),
     issue_type_id: str = Field(..., alias="issueTypeId", description="The ID of the issue type for which to retrieve creation field metadata."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Defaults to 0 if not specified."),
-    max_results: str | None = Field(None, alias="maxResults", description="The maximum number of fields to return per page, up to 200. Defaults to 50 if not specified.", le=200),
+    max_results: str | None = Field(None, alias="maxResults", description="The maximum number of fields to return per page, up to 200. Defaults to 50 if not specified."),
 ) -> dict[str, Any]:
     """Retrieve the available fields and their metadata for creating issues of a specific type in a project. Use this information to populate requests when creating single or bulk issues."""
 
@@ -9245,7 +9245,7 @@ async def list_recent_projects() -> dict[str, Any]:
 @mcp.tool()
 async def list_projects(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
-    max_results: str | None = Field(None, alias="maxResults", description="Maximum number of projects to return per page, capped at 100. Values exceeding 100 will be automatically limited to 100.", le=100),
+    max_results: str | None = Field(None, alias="maxResults", description="Maximum number of projects to return per page, capped at 100. Values exceeding 100 will be automatically limited to 100."),
     order_by: Literal["category", "-category", "+category", "key", "-key", "+key", "name", "-name", "+name", "owner", "-owner", "+owner", "issueCount", "-issueCount", "+issueCount", "lastIssueUpdatedDate", "-lastIssueUpdatedDate", "+lastIssueUpdatedDate", "archivedDate", "+archivedDate", "-archivedDate", "deletedDate", "+deletedDate", "-deletedDate"] | None = Field(None, alias="orderBy", description="Sort results by a specific field: category, issue count, project key, last issue update time, project name, project owner/lead, archived date, or deleted date. Prefix with `-` for descending order or `+` for ascending order. Defaults to sorting by project key."),
     keys: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, description="Filter results to include only specific projects by their keys. Provide up to 50 project keys as a comma-separated list."),
     type_key: str | None = Field(None, alias="typeKey", description="Filter results by project type. Accepts comma-separated values: `business`, `service_desk`, or `software`."),
@@ -10788,8 +10788,8 @@ async def delete_project_category(id_: str = Field(..., alias="id", description=
 async def list_project_fields(
     project_id: list[int] = Field(..., alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned."),
     work_type_id: list[int] = Field(..., alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned."),
-    start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results.", ge=0),
-    max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items.", ge=1, le=100),
+    start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
+    max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items."),
     field_id: list[str] | None = Field(None, alias="fieldId", description="Optional list of specific field IDs to retrieve. If omitted, all available fields for the project and work type combination are returned."),
 ) -> dict[str, Any]:
     """Retrieve available fields for specified projects and work types. Returns a paginated list of fields that are applicable to the given project and work type combination, with optional filtering by specific field IDs."""

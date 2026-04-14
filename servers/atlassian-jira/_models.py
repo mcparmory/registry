@@ -1,7 +1,7 @@
 """
 Atlassian Jira MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:15:05 UTC
+Generated: 2026-04-14 18:15:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -526,7 +526,7 @@ class GetBulkChangelogsRequestBody(StrictModel):
     """A JSON object containing the bulk fetch changelog request filters such as issue IDs and field IDs."""
     field_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(default=None, validation_alias="fieldIds", serialization_alias="fieldIds", description="Optional list of field IDs to narrow changelog results to specific fields. You can filter by up to 10 fields.", min_length=0, max_length=10)
     issue_ids_or_keys: list[str] = Field(default=..., validation_alias="issueIdsOrKeys", serialization_alias="issueIdsOrKeys", description="List of issue identifiers (IDs or keys) to fetch changelogs for. You can request changelogs for up to 1000 issues. At least one issue identifier is required.", min_length=1, max_length=1000)
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of changelog items to return per page. Defaults to 1000 if not specified. Must be between 1 and 10000.", ge=1, le=10000, json_schema_extra={'format': 'int32'})
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of changelog items to return per page. Defaults to 1000 if not specified. Must be between 1 and 10000.", json_schema_extra={'format': 'int32'})
 class GetBulkChangelogsRequest(StrictModel):
     """Retrieve change history for multiple issues in a paginated list, optionally filtered by specific fields. Results are sorted chronologically by changelog date and issue ID, starting from the oldest entries."""
     body: GetBulkChangelogsRequestBody
@@ -1204,7 +1204,7 @@ class GetCreateIssueMetaIssueTypesRequestPath(StrictModel):
     project_id_or_key: str = Field(default=..., validation_alias="projectIdOrKey", serialization_alias="projectIdOrKey", description="The project identifier, either the project ID or project key.")
 class GetCreateIssueMetaIssueTypesRequestQuery(StrictModel):
     start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified.", json_schema_extra={'format': 'int32'})
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The number of issue types to return per page, with a maximum of 200. Defaults to 50 if not specified.", le=200, json_schema_extra={'format': 'int32'})
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The number of issue types to return per page, with a maximum of 200. Defaults to 50 if not specified.", json_schema_extra={'format': 'int32'})
 class GetCreateIssueMetaIssueTypesRequest(StrictModel):
     """Retrieve issue type metadata for a project to determine which issue types can be created and what fields are required. Use this information to populate requests when creating issues."""
     path: GetCreateIssueMetaIssueTypesRequestPath
@@ -1216,7 +1216,7 @@ class GetCreateIssueMetaIssueTypeIdRequestPath(StrictModel):
     issue_type_id: str = Field(default=..., validation_alias="issueTypeId", serialization_alias="issueTypeId", description="The ID of the issue type for which to retrieve creation field metadata.")
 class GetCreateIssueMetaIssueTypeIdRequestQuery(StrictModel):
     start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination, where 0 is the first item. Defaults to 0 if not specified.", json_schema_extra={'format': 'int32'})
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The maximum number of fields to return per page, up to 200. Defaults to 50 if not specified.", le=200, json_schema_extra={'format': 'int32'})
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The maximum number of fields to return per page, up to 200. Defaults to 50 if not specified.", json_schema_extra={'format': 'int32'})
 class GetCreateIssueMetaIssueTypeIdRequest(StrictModel):
     """Retrieve the available fields and their metadata for creating issues of a specific type in a project. Use this information to populate requests when creating single or bulk issues."""
     path: GetCreateIssueMetaIssueTypeIdRequestPath
@@ -2189,7 +2189,7 @@ class CreateProjectWithCustomTemplateRequest(StrictModel):
 # Operation: list_projects
 class SearchProjectsRequestQuery(StrictModel):
     start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results.", json_schema_extra={'format': 'int64'})
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of projects to return per page, capped at 100. Values exceeding 100 will be automatically limited to 100.", le=100, json_schema_extra={'format': 'int32'})
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="Maximum number of projects to return per page, capped at 100. Values exceeding 100 will be automatically limited to 100.", json_schema_extra={'format': 'int32'})
     order_by: Literal["category", "-category", "+category", "key", "-key", "+key", "name", "-name", "+name", "owner", "-owner", "+owner", "issueCount", "-issueCount", "+issueCount", "lastIssueUpdatedDate", "-lastIssueUpdatedDate", "+lastIssueUpdatedDate", "archivedDate", "+archivedDate", "-archivedDate", "deletedDate", "+deletedDate", "-deletedDate"] | None = Field(default=None, validation_alias="orderBy", serialization_alias="orderBy", description="Sort results by a specific field: category, issue count, project key, last issue update time, project name, project owner/lead, archived date, or deleted date. Prefix with `-` for descending order or `+` for ascending order. Defaults to sorting by project key.")
     keys: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(default=None, description="Filter results to include only specific projects by their keys. Provide up to 50 project keys as a comma-separated list.")
     type_key: str | None = Field(default=None, validation_alias="typeKey", serialization_alias="typeKey", description="Filter results by project type. Accepts comma-separated values: `business`, `service_desk`, or `software`.")
@@ -2515,8 +2515,8 @@ class RemoveProjectCategoryRequest(StrictModel):
 
 # Operation: list_project_fields
 class GetProjectFieldsRequestQuery(StrictModel):
-    start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results.", ge=0, json_schema_extra={'format': 'int64'})
-    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    start_at: int | None = Field(default=None, validation_alias="startAt", serialization_alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results.", json_schema_extra={'format': 'int64'})
+    max_results: int | None = Field(default=None, validation_alias="maxResults", serialization_alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items.", json_schema_extra={'format': 'int32'})
     project_id: list[int] = Field(default=..., validation_alias="projectId", serialization_alias="projectId", description="One or more project IDs to retrieve fields for. Only fields available to these projects will be returned.")
     work_type_id: list[int] = Field(default=..., validation_alias="workTypeId", serialization_alias="workTypeId", description="One or more work type (issue type) IDs to retrieve fields for. Only fields applicable to these work types will be returned.")
     field_id: list[str] | None = Field(default=None, validation_alias="fieldId", serialization_alias="fieldId", description="Optional list of specific field IDs to retrieve. If omitted, all available fields for the project and work type combination are returned.")

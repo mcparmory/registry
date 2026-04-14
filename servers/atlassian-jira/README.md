@@ -1,6 +1,12 @@
 # Atlassian Jira MCP Server
 
 Base URL: https://your-domain.atlassian.net
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 317 |
+| **Auth** | OAuth2, HTTP Basic |
+
 ## API Info
 - **API License:** Apache 2.0 — [http://www.apache.org/licenses/LICENSE-2.0.html](http://www.apache.org/licenses/LICENSE-2.0.html)
 - **Terms of Service:** [https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/](https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/)
