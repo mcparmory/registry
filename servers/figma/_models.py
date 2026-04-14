@@ -1,7 +1,7 @@
 """
 Figma MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:20:26 UTC
+Generated: 2026-04-14 18:21:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

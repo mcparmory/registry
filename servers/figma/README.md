@@ -1,6 +1,12 @@
 # Figma MCP Server
 
 Base URL: https://api.figma.com
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 41 |
+| **Auth** | OAuth2, OrgOAuth2Auth, API Key |
+
 ## API Info
 - **Terms of Service:** [https://www.figma.com/developer-terms/](https://www.figma.com/developer-terms/)
 
