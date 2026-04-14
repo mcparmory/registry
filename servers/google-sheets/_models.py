@@ -1,7 +1,7 @@
 """
-Google Sheets Api MCP Server - Pydantic Models
+Google Sheets MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:24:32 UTC
+Generated: 2026-04-14 18:24:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
