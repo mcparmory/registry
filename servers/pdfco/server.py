@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PDF.co API MCP Server
-Generated: 2026-04-10 13:41:20 UTC
+Generated: 2026-04-14 18:30:10 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

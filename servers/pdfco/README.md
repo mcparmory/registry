@@ -1,6 +1,12 @@
 # PDF.co API MCP Server
 
 Base URL: https://api.pdf.co
+| | |
+|---|---|
+| **Category** | Documents & Printing |
+| **Tools** | 65 |
+| **Auth** | API Key |
+
 ---
 
 ## Install
