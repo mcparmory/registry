@@ -1,6 +1,12 @@
 # Google Drive MCP Server
 
 Base URL: https://www.googleapis.com/drive/v3
+| | |
+|---|---|
+| **Category** | Storage |
+| **Tools** | 46 |
+| **Auth** | OAuth2 |
+
 ## API Info
 - **API License:** Creative Commons Attribution 3.0 — [http://creativecommons.org/licenses/by/3.0/](http://creativecommons.org/licenses/by/3.0/)
 - **Contact:** Google — [https://google.com](https://google.com)

@@ -1,7 +1,7 @@
 """
 Google Drive MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:23:28 UTC
+Generated: 2026-04-14 18:23:24 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
