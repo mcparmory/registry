@@ -1,6 +1,12 @@
 # Alpha Vantage MCP Server
 
 Base URL: https://www.alphavantage.co
+| | |
+|---|---|
+| **Category** | Finance |
+| **Tools** | 121 |
+| **Auth** | API Key |
+
 ## API Info
 - **Contact:** Alpha Vantage Support (support@alphavantage.co) — [https://www.alphavantage.co/support/](https://www.alphavantage.co/support/)
 - **Terms of Service:** [https://www.alphavantage.co/terms_of_service/](https://www.alphavantage.co/terms_of_service/)

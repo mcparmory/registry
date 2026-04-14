@@ -6,7 +6,7 @@ API Info:
 - Contact: Alpha Vantage Support <support@alphavantage.co> (https://www.alphavantage.co/support/)
 - Terms of Service: https://www.alphavantage.co/terms_of_service/
 
-Generated: 2026-04-09 17:13:40 UTC
+Generated: 2026-04-14 18:13:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -6050,7 +6050,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python alpha_vantage_api_server.py", file=sys.stderr)
+        print("  python alpha_vantage_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

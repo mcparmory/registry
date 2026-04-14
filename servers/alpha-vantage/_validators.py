@@ -1,7 +1,7 @@
 """
-Alpha Vantage Api MCP Server - Validators
+Alpha Vantage MCP Server - Validators
 
-Generated: 2026-04-09 17:13:40 UTC
+Generated: 2026-04-14 18:13:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
