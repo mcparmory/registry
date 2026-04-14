@@ -1,7 +1,7 @@
 """
-🎨 Nft Api MCP Server - Pydantic Models
+Alchemy Nft MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:13:03 UTC
+Generated: 2026-04-14 18:13:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

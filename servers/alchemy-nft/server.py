@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Alchemy NFT MCP Server
-Generated: 2026-04-09 17:13:03 UTC
+Generated: 2026-04-14 18:13:29 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -2301,7 +2301,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python __nft_api_server.py", file=sys.stderr)
+        print("  python alchemy_nft_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
