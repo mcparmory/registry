@@ -1,6 +1,12 @@
 # GitLab MCP Server
 
 Base URL: https://www.gitlab.com/api/v4
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 53 |
+| **Auth** | API Key |
+
 ## API Info
 - **API License:** CC BY-SA 4.0 — [https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE](https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
 - **Terms of Service:** [https://about.gitlab.com/terms/](https://about.gitlab.com/terms/)

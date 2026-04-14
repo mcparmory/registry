@@ -1,7 +1,7 @@
 """
 Gitlab MCP Server - Validators
 
-Generated: 2026-04-09 17:21:51 UTC
+Generated: 2026-04-14 18:22:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

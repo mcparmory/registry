@@ -6,7 +6,7 @@ API Info:
 - API License: CC BY-SA 4.0 (https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
 - Terms of Service: https://about.gitlab.com/terms/
 
-Generated: 2026-04-09 17:21:51 UTC
+Generated: 2026-04-14 18:22:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
