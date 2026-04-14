@@ -1,6 +1,12 @@
 # ElevenLabs MCP Server
 
 
+| | |
+|---|---|
+| **Category** | AI & Machine Learning |
+| **Tools** | 258 |
+| **Auth** | API Key |
+
 ---
 
 ## Install
