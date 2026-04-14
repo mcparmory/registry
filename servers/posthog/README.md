@@ -6,6 +6,12 @@
 | **Tools** | 618 |
 | **Auth** | Bearer Token |
 
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 618 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install
