@@ -1,6 +1,12 @@
 # Google Maps Platform MCP Server
 
 Base URL: https://www.googleapis.com
+| | |
+|---|---|
+| **Category** | Maps & Location |
+| **Tools** | 17 |
+| **Auth** | API Key |
+
 ---
 
 ## Install
