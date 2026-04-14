@@ -1,6 +1,12 @@
 # Contentful Management MCP Server
 
 Base URL: https://api.contentful.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 124 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install

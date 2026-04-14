@@ -1,7 +1,7 @@
 """
-Cma - Contentful Management Api MCP Server - Validators
+Contentful Management MCP Server - Validators
 
-Generated: 2026-04-09 17:18:29 UTC
+Generated: 2026-04-14 18:18:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
