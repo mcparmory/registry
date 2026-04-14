@@ -1,7 +1,7 @@
 """
 Datadog MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:19:56 UTC
+Generated: 2026-04-14 18:19:43 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -971,8 +971,8 @@ __all__ = [
 
 # Operation: list_agents
 class ListFleetAgentsRequestQuery(StrictModel):
-    page_number: int | None = Field(default=None, description="Zero-indexed page number for pagination. Use this to navigate through result sets.", ge=0, json_schema_extra={'format': 'int64'})
-    page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int64'})
+    page_number: int | None = Field(default=None, description="Zero-indexed page number for pagination. Use this to navigate through result sets.", json_schema_extra={'format': 'int64'})
+    page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 1 and 100 inclusive.", json_schema_extra={'format': 'int64'})
     tags: str | None = Field(default=None, description="Filter agents by one or more tags. Provide as a comma-separated list of tag values.")
 class ListFleetAgentsRequest(StrictModel):
     """Retrieve a paginated list of all Datadog Agents with optional filtering by tags. Results can be sorted and paginated using page number and size parameters."""
@@ -987,7 +987,7 @@ class GetFleetAgentInfoRequest(StrictModel):
 
 # Operation: list_deployments
 class ListFleetDeploymentsRequestQuery(StrictModel):
-    page_size: int | None = Field(default=None, description="Number of deployments to return per page. Maximum of 100 deployments per request.", le=100, json_schema_extra={'format': 'int64'})
+    page_size: int | None = Field(default=None, description="Number of deployments to return per page. Maximum of 100 deployments per request.", json_schema_extra={'format': 'int64'})
     page_offset: int | None = Field(default=None, description="Zero-based index of the first deployment to return. Use with page_size to paginate through results.", json_schema_extra={'format': 'int64'})
 class ListFleetDeploymentsRequest(StrictModel):
     """Retrieve a paginated list of all fleet deployments. Use pagination parameters to navigate through results efficiently."""
@@ -1025,7 +1025,7 @@ class CreateFleetDeploymentUpgradeRequest(StrictModel):
 class GetFleetDeploymentRequestPath(StrictModel):
     deployment_id: str = Field(default=..., description="The unique identifier of the deployment to retrieve.")
 class GetFleetDeploymentRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of hosts to return per page. Default is 50, maximum is 100.", le=100, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of hosts to return per page. Default is 50, maximum is 100.", json_schema_extra={'format': 'int64'})
     page: int | None = Field(default=None, description="Page index for pagination (zero-based). Use this to retrieve subsequent pages of hosts.", json_schema_extra={'format': 'int64'})
 class GetFleetDeploymentRequest(StrictModel):
     """Retrieve detailed information about a specific fleet deployment, including metadata, target hosts, current status, and per-host execution details with package versions."""
@@ -1049,7 +1049,7 @@ class CreateFleetScheduleRequestBodyDataAttributes(StrictModel):
     name: str = Field(default=..., validation_alias="name", serialization_alias="name", description="Human-readable name for the schedule.")
     query: str = Field(default=..., validation_alias="query", serialization_alias="query", description="Query filter to select target hosts for scheduled deployments using Datadog query syntax.")
     status: Literal["active", "inactive"] | None = Field(default=None, validation_alias="status", serialization_alias="status", description="Status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not.")
-    version_to_latest: int | None = Field(default=None, validation_alias="version_to_latest", serialization_alias="version_to_latest", description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version.", ge=0, le=2, json_schema_extra={'format': 'int64'})
+    version_to_latest: int | None = Field(default=None, validation_alias="version_to_latest", serialization_alias="version_to_latest", description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version.", json_schema_extra={'format': 'int64'})
     rule: CreateFleetScheduleRequestBodyDataAttributesRule
 class CreateFleetScheduleRequestBodyData(StrictModel):
     type_: Literal["schedule"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The type of schedule resource.")
@@ -1078,7 +1078,7 @@ class UpdateFleetScheduleRequestBodyDataAttributesRule(StrictModel):
     timezone_: str = Field(default=..., validation_alias="timezone", serialization_alias="timezone", description="Timezone for interpreting the maintenance window start time. Use IANA Time Zone Database format.")
 class UpdateFleetScheduleRequestBodyDataAttributes(StrictModel):
     status: Literal["active", "inactive"] | None = Field(default=None, validation_alias="status", serialization_alias="status", description="The operational status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not.")
-    version_to_latest: int | None = Field(default=None, validation_alias="version_to_latest", serialization_alias="version_to_latest", description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version, or 1-2 to target older major versions.", ge=0, le=2, json_schema_extra={'format': 'int64'})
+    version_to_latest: int | None = Field(default=None, validation_alias="version_to_latest", serialization_alias="version_to_latest", description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version, or 1-2 to target older major versions.", json_schema_extra={'format': 'int64'})
     rule: UpdateFleetScheduleRequestBodyDataAttributesRule
 class UpdateFleetScheduleRequestBodyData(StrictModel):
     type_: Literal["schedule"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The resource type identifier for this schedule.")
@@ -1155,7 +1155,7 @@ class ListDatastoreItemsRequestPath(StrictModel):
     datastore_id: str = Field(default=..., description="The unique identifier of the datastore to retrieve items from.")
 class ListDatastoreItemsRequestQuery(StrictModel):
     item_key: str | None = Field(default=None, description="Primary key value to retrieve a specific item. Cannot be used together with the filter parameter. Maximum length is 256 characters.", max_length=256)
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of items to return per page for pagination. Accepts values between 1 and 100 items per page.", ge=1, le=100, json_schema_extra={'format': 'int64'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of items to return per page for pagination. Accepts values between 1 and 100 items per page.", json_schema_extra={'format': 'int64'})
     page_offset: int | None = Field(default=None, validation_alias="page[offset]", serialization_alias="page[offset]", description="Number of items to skip from the beginning of the result set for pagination offset.", json_schema_extra={'format': 'int64'})
 class ListDatastoreItemsRequest(StrictModel):
     """Retrieve items from a datastore with optional filtering by key or query parameters, supporting server-side pagination for large datasets. Specify either an item key or filter query, but not both."""
@@ -1694,7 +1694,7 @@ class ListAuditLogsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter audit log events using Audit Logs query syntax (e.g., filter by event type, application ID, or other audit attributes).")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Minimum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Maximum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of audit log events to return in a single response. Useful for controlling response size and pagination.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of audit log events to return in a single response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int32'})
 class ListAuditLogsRequest(StrictModel):
     """Retrieve a paginated list of audit log events matching your search criteria. Use this endpoint to monitor your organization's latest audit activity with optional filtering by query, time range, and result limit."""
     query: ListAuditLogsRequestQuery | None = None
@@ -1704,7 +1704,7 @@ class SearchAuditLogsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for audit events. Accepts relative expressions (e.g., now-15m), absolute timestamps in milliseconds, or date formats.")
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for audit events. Accepts relative expressions (e.g., now), absolute timestamps in milliseconds, or date formats.")
 class SearchAuditLogsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of audit events to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of audit events to return in the response.", json_schema_extra={'format': 'int32'})
 class SearchAuditLogsRequestBody(StrictModel):
     filter_: SearchAuditLogsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchAuditLogsRequestBodyPage | None = None
@@ -2354,7 +2354,7 @@ class ListCiAppPipelineEventsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter pipeline events using CI Visibility search syntax (e.g., filter by provider name, pipeline name, or other event attributes).")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Earliest timestamp to include in results. Events before this time are excluded.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Latest timestamp to include in results. Events after this time are excluded.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response page. Useful for controlling response size and implementing pagination.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response page. Useful for controlling response size and implementing pagination.", json_schema_extra={'format': 'int32'})
 class ListCiAppPipelineEventsRequest(StrictModel):
     """Retrieve CI Visibility pipeline events matching a search query with pagination support. Use this endpoint to view your latest pipeline events filtered by provider, pipeline name, and time range."""
     query: ListCiAppPipelineEventsRequestQuery | None = None
@@ -2364,7 +2364,7 @@ class SearchCiAppPipelineEventsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds.")
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds.")
 class SearchCiAppPipelineEventsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in a single response. Use pagination to retrieve additional results.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in a single response. Use pagination to retrieve additional results.", json_schema_extra={'format': 'int32'})
 class SearchCiAppPipelineEventsRequestBody(StrictModel):
     filter_: SearchCiAppPipelineEventsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchCiAppPipelineEventsRequestBodyPage | None = None
@@ -2437,7 +2437,7 @@ class ListCiAppTestEventsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter test events using log syntax. Supports filtering by test name, suite, and other test attributes.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Minimum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Maximum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of test events to return per page. Defaults to 10 if not specified.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of test events to return per page. Defaults to 10 if not specified.", json_schema_extra={'format': 'int32'})
 class ListCiAppTestEventsRequest(StrictModel):
     """Retrieve CI Visibility test events matching a search query with pagination support. Use this endpoint to view your latest test events filtered by name, suite, timestamp, and other criteria."""
     query: ListCiAppTestEventsRequestQuery | None = None
@@ -2447,7 +2447,7 @@ class SearchCiAppTestEventsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds.")
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds.")
 class SearchCiAppTestEventsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in the response.", json_schema_extra={'format': 'int32'})
 class SearchCiAppTestEventsRequestBody(StrictModel):
     filter_: SearchCiAppTestEventsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchCiAppTestEventsRequestBodyPage | None = None
@@ -2567,7 +2567,7 @@ class GetCodeCoverageCommitSummaryRequest(StrictModel):
 class ListContainerImagesRequestQuery(StrictModel):
     filter_tags: str | None = Field(default=None, validation_alias="filter[tags]", serialization_alias="filter[tags]", description="Filter container images by one or more tags. Provide tags as a comma-separated list in key:value format.")
     group_by: str | None = Field(default=None, description="Group results by one or more tag keys. Provide tag keys as a comma-separated list to organize the returned container images.")
-    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of container images to return per request. Useful for pagination control.", ge=1, le=10000, json_schema_extra={'format': 'int32'})
+    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of container images to return per request. Useful for pagination control.", json_schema_extra={'format': 'int32'})
 class ListContainerImagesRequest(StrictModel):
     """Retrieve all container images for your organization with optional filtering and grouping. Use the security scanned assets endpoint to enrich results with security scan data."""
     query: ListContainerImagesRequestQuery | None = None
@@ -2576,7 +2576,7 @@ class ListContainerImagesRequest(StrictModel):
 class ListContainersRequestQuery(StrictModel):
     filter_tags: str | None = Field(default=None, validation_alias="filter[tags]", serialization_alias="filter[tags]", description="Filter containers by one or more tags using comma-separated key:value pairs to narrow results to specific environments, services, or other attributes.")
     group_by: str | None = Field(default=None, description="Group results by one or more tag keys in comma-separated format to organize containers hierarchically by the specified attributes.")
-    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of containers to return per page. Supports pagination for large result sets.", ge=1, le=10000, json_schema_extra={'format': 'int32'})
+    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of containers to return per page. Supports pagination for large result sets.", json_schema_extra={'format': 'int32'})
 class ListContainersRequest(StrictModel):
     """Retrieve all containers in your organization with optional filtering by tags and grouping capabilities. Results are paginated with a configurable page size."""
     query: ListContainersRequestQuery | None = None
@@ -2668,7 +2668,7 @@ class CreateCostAwscurConfigRequestBodyDataAttributes(StrictModel):
     account_id: str = Field(default=..., validation_alias="account_id", serialization_alias="account_id", description="The AWS account ID that owns the CUR configuration and S3 bucket.")
     bucket_name: str = Field(default=..., validation_alias="bucket_name", serialization_alias="bucket_name", description="The name of the S3 bucket where AWS Cost and Usage Reports are stored.")
     bucket_region: str | None = Field(default=None, validation_alias="bucket_region", serialization_alias="bucket_region", description="The AWS region where the S3 bucket is located.")
-    months: int | None = Field(default=None, validation_alias="months", serialization_alias="months", description="Number of months of historical billing data to retrieve. Maximum of 36 months.", le=36, json_schema_extra={'format': 'int32'})
+    months: int | None = Field(default=None, validation_alias="months", serialization_alias="months", description="Number of months of historical billing data to retrieve. Maximum of 36 months.", json_schema_extra={'format': 'int32'})
     report_name: str = Field(default=..., validation_alias="report_name", serialization_alias="report_name", description="The name of the Cost and Usage Report as configured in AWS.")
     report_prefix: str = Field(default=..., validation_alias="report_prefix", serialization_alias="report_prefix", description="The S3 path prefix where the Cost and Usage Report files are stored within the bucket.")
     account_filters: CreateCostAwscurConfigRequestBodyDataAttributesAccountFilters | None = None
@@ -2889,8 +2889,8 @@ class GetMonthlyCostAttributionRequest(StrictModel):
 
 # Operation: list_csm_agents
 class ListAllCsmAgentsRequestQuery(StrictModel):
-    page: int | None = Field(default=None, description="Zero-based page index for pagination. Use this to navigate through result sets when combined with size parameter.", ge=0, le=1000000, json_schema_extra={'format': 'int32'})
-    size: int | None = Field(default=None, description="Number of agents to return per page. Controls the maximum items in a single response.", ge=0, le=100, json_schema_extra={'format': 'int32'})
+    page: int | None = Field(default=None, description="Zero-based page index for pagination. Use this to navigate through result sets when combined with size parameter.", json_schema_extra={'format': 'int32'})
+    size: int | None = Field(default=None, description="Number of agents to return per page. Controls the maximum items in a single response.", json_schema_extra={'format': 'int32'})
     order_direction: Literal["asc", "desc"] | None = Field(default=None, description="Sort direction for the results. Specify ascending or descending order.")
 class ListAllCsmAgentsRequest(StrictModel):
     """Retrieve a paginated list of all CSM Agents currently running across your hosts and containers. Use pagination parameters to control result size and navigation."""
@@ -2898,8 +2898,8 @@ class ListAllCsmAgentsRequest(StrictModel):
 
 # Operation: list_serverless_agents
 class ListAllCsmServerlessAgentsRequestQuery(StrictModel):
-    page: int | None = Field(default=None, description="Zero-based page index for pagination. Use this to navigate through result sets.", ge=0, le=1000000, json_schema_extra={'format': 'int32'})
-    size: int | None = Field(default=None, description="Number of agents to return per page. Controls the batch size of results in each response.", ge=0, le=100, json_schema_extra={'format': 'int32'})
+    page: int | None = Field(default=None, description="Zero-based page index for pagination. Use this to navigate through result sets.", json_schema_extra={'format': 'int32'})
+    size: int | None = Field(default=None, description="Number of agents to return per page. Controls the batch size of results in each response.", json_schema_extra={'format': 'int32'})
     order_direction: Literal["asc", "desc"] | None = Field(default=None, description="Sort direction for the results. Use ascending to sort from lowest to highest, or descending for highest to lowest.")
 class ListAllCsmServerlessAgentsRequest(StrictModel):
     """Retrieve a paginated list of all CSM Serverless Agents currently running across your hosts and containers."""
@@ -3049,7 +3049,7 @@ class DeleteDatasetRequest(StrictModel):
 class GetDataDeletionRequestsRequestQuery(StrictModel):
     product: str | None = Field(default=None, description="Filter results to show deletion requests for a specific product.")
     status: str | None = Field(default=None, description="Filter results to show deletion requests with a specific status.")
-    page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 1 and 50.", ge=1, le=50, json_schema_extra={'format': 'int64'})
+    page_size: int | None = Field(default=None, description="Number of results to return per page. Must be between 1 and 50.", json_schema_extra={'format': 'int64'})
 class GetDataDeletionRequestsRequest(StrictModel):
     """Retrieves a paginated list of data deletion requests with optional filtering by product and status. Use this to monitor and manage pending or completed data deletion operations."""
     query: GetDataDeletionRequestsRequestQuery | None = None
@@ -3063,7 +3063,7 @@ class CancelDataDeletionRequest(StrictModel):
 
 # Operation: list_deployment_gates
 class ListDeploymentGatesRequestQuery(StrictModel):
-    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Number of results to return per page. Valid range is 1 to 1000 results.", ge=1, le=1000, json_schema_extra={'format': 'int64'})
+    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Number of results to return per page. Valid range is 1 to 1000 results.", json_schema_extra={'format': 'int64'})
 class ListDeploymentGatesRequest(StrictModel):
     """Retrieve a paginated list of all deployment gates configured for your organization. Use pagination parameters to navigate through results."""
     query: ListDeploymentGatesRequestQuery | None = None
@@ -3222,7 +3222,7 @@ class DeleteDoraDeploymentRequest(StrictModel):
 # Operation: list_deployments_event
 class ListDoraDeploymentsRequestBodyDataAttributes(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of deployment events to return in the response. Cannot exceed 1000 results per request.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of deployment events to return in the response. Cannot exceed 1000 results per request.", json_schema_extra={'format': 'int32'})
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
 class ListDoraDeploymentsRequestBodyData(StrictModel):
     attributes: ListDoraDeploymentsRequestBodyDataAttributes | None = None
@@ -3289,7 +3289,7 @@ class DeleteDoraFailureRequest(StrictModel):
 
 # Operation: list_incident_failures
 class ListDoraFailuresRequestBodyDataAttributes(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of incident failure events to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of incident failure events to return in the response.", json_schema_extra={'format': 'int32'})
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Minimum timestamp for requested events.", json_schema_extra={'format': 'date-time'})
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="Maximum timestamp for requested events.", json_schema_extra={'format': 'date-time'})
 class ListDoraFailuresRequestBodyData(StrictModel):
@@ -3442,7 +3442,7 @@ class ListEventsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter events using event search syntax. Leave empty to retrieve all events without filtering.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Minimum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or after this value will be included.")
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Maximum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or before this value will be included.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int32'})
 class ListEventsRequest(StrictModel):
     """Retrieve a paginated list of events matching a search query. Use this endpoint to view your latest events with optional filtering by time range and search criteria."""
     query: ListEventsRequestQuery | None = None
@@ -3475,7 +3475,7 @@ class SearchEventsRequestBodyFilter(StrictModel):
 class SearchEventsRequestBodyOptions(StrictModel):
     time_offset: int | None = Field(default=None, validation_alias="timeOffset", serialization_alias="timeOffset", description="An optional time offset to apply to the query in seconds, useful for timezone adjustments or relative time shifts.", json_schema_extra={'format': 'int64'})
 class SearchEventsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="The maximum number of events to return in the response. Results are paginated.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="The maximum number of events to return in the response. Results are paginated.", json_schema_extra={'format': 'int32'})
 class SearchEventsRequestBody(StrictModel):
     filter_: SearchEventsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     options: SearchEventsRequestBodyOptions | None = None
@@ -3916,9 +3916,9 @@ class ListIncidentIntegrationsRequest(StrictModel):
 class CreateIncidentIntegrationRequestPath(StrictModel):
     incident_id: str = Field(default=..., description="The unique identifier (UUID) of the incident to create the integration for.")
 class CreateIncidentIntegrationRequestBodyDataAttributes(StrictModel):
-    integration_type: int = Field(default=..., validation_alias="integration_type", serialization_alias="integration_type", description="The type of external system this integration connects to. Use 1 for Slack or 8 for Jira.", le=100, json_schema_extra={'format': 'int32'})
+    integration_type: int = Field(default=..., validation_alias="integration_type", serialization_alias="integration_type", description="The type of external system this integration connects to. Use 1 for Slack or 8 for Jira.", json_schema_extra={'format': 'int32'})
     metadata: SlackIntegrationMetadata | JiraIntegrationMetadata | MsTeamsIntegrationMetadata = Field(default=..., validation_alias="metadata", serialization_alias="metadata", description="Custom metadata attributes specific to this integration, such as channel IDs, issue keys, or sync settings.")
-    status: int | None = Field(default=None, validation_alias="status", serialization_alias="status", description="The current state of the integration. Values indicate: 0 (unknown), 1 (pending), 2 (complete), 3 (manually created), 4 (manually updated), or 5 (failed).", le=5, json_schema_extra={'format': 'int32'})
+    status: int | None = Field(default=None, validation_alias="status", serialization_alias="status", description="The current state of the integration. Values indicate: 0 (unknown), 1 (pending), 2 (complete), 3 (manually created), 4 (manually updated), or 5 (failed).", json_schema_extra={'format': 'int32'})
 class CreateIncidentIntegrationRequestBodyData(StrictModel):
     type_: Literal["incident_integrations"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The resource type identifier for this integration metadata.")
     attributes: CreateIncidentIntegrationRequestBodyDataAttributes
@@ -3943,9 +3943,9 @@ class UpdateIncidentIntegrationRequestPath(StrictModel):
     incident_id: str = Field(default=..., description="The UUID of the incident to update.")
     integration_metadata_id: str = Field(default=..., description="The UUID of the incident integration metadata record to update.")
 class UpdateIncidentIntegrationRequestBodyDataAttributes(StrictModel):
-    integration_type: int = Field(default=..., validation_alias="integration_type", serialization_alias="integration_type", description="The type of integration this metadata is for. Slack is type 1, Jira is type 8.", le=100, json_schema_extra={'format': 'int32'})
+    integration_type: int = Field(default=..., validation_alias="integration_type", serialization_alias="integration_type", description="The type of integration this metadata is for. Slack is type 1, Jira is type 8.", json_schema_extra={'format': 'int32'})
     metadata: SlackIntegrationMetadata | JiraIntegrationMetadata | MsTeamsIntegrationMetadata = Field(default=..., validation_alias="metadata", serialization_alias="metadata", description="Custom metadata attributes associated with this incident integration. Structure depends on the integration type.")
-    status: int | None = Field(default=None, validation_alias="status", serialization_alias="status", description="The current status of this integration metadata. Unknown (0), pending (1), complete (2), manually created (3), manually updated (4), or failed (5).", le=5, json_schema_extra={'format': 'int32'})
+    status: int | None = Field(default=None, validation_alias="status", serialization_alias="status", description="The current status of this integration metadata. Unknown (0), pending (1), complete (2), manually created (3), manually updated (4), or failed (5).", json_schema_extra={'format': 'int32'})
 class UpdateIncidentIntegrationRequestBodyData(StrictModel):
     type_: Literal["incident_integrations"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The resource type identifier for this integration metadata.")
     attributes: UpdateIncidentIntegrationRequestBodyDataAttributes
@@ -5314,7 +5314,7 @@ class ListLogsGetRequestQuery(StrictModel):
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Start of the time range for log search. Logs with timestamps at or after this value are included.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="End of the time range for log search. Logs with timestamps at or before this value are included.", json_schema_extra={'format': 'date-time'})
     filter_storage_tier: Literal["indexes", "online-archives", "flex"] | None = Field(default=None, validation_alias="filter[storage_tier]", serialization_alias="filter[storage_tier]", description="Storage tier to query. Use 'indexes' for standard logs, 'online-archives' for archived logs, or 'flex' for flexible storage.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of logs to return in a single response. Use pagination to retrieve additional results.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of logs to return in a single response. Use pagination to retrieve additional results.", json_schema_extra={'format': 'int32'})
 class ListLogsGetRequest(StrictModel):
     """Search and filter logs matching a query with optional time range and index selection. Results are paginated and support multiple storage tiers including archives."""
     query: ListLogsGetRequestQuery | None = None
@@ -5328,7 +5328,7 @@ class ListLogsRequestBodyFilter(StrictModel):
 class ListLogsRequestBodyOptions(StrictModel):
     time_offset: int | None = Field(default=None, validation_alias="timeOffset", serialization_alias="timeOffset", description="Time offset in seconds to apply to the query timestamps. Useful for adjusting time-based filtering.", json_schema_extra={'format': 'int64'})
 class ListLogsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of logs to return in the response. Useful for controlling response size and pagination.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of logs to return in the response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int32'})
 class ListLogsRequestBody(StrictModel):
     filter_: ListLogsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     options: ListLogsRequestBodyOptions | None = None
@@ -5345,8 +5345,8 @@ class ListTagConfigurationsRequestQuery(StrictModel):
     filter_include_percentiles: bool | None = Field(default=None, validation_alias="filter[include_percentiles]", serialization_alias="filter[include_percentiles]", description="Filter to return only distribution metrics with percentile aggregations enabled (true) or disabled (false).")
     filter_queried: bool | None = Field(default=None, validation_alias="filter[queried]", serialization_alias="filter[queried]", description="Filter to return only metrics that have been queried (true) or not queried (false) within the specified lookback window. If no window is specified, a default window is applied.")
     filter_related_assets: bool | None = Field(default=None, validation_alias="filter[related_assets]", serialization_alias="filter[related_assets]", description="Filter to return only metrics that are actively used in at least one dashboard, monitor, notebook, or SLO.")
-    window_seconds: int | None = Field(default=None, validation_alias="window[seconds]", serialization_alias="window[seconds]", description="Specify the time window in seconds for evaluating metric activity. Used with the queried filter to determine which metrics have been actively reporting.", ge=1, le=2592000, json_schema_extra={'format': 'int64'})
-    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of results to return per page. Use with cursor-based pagination for retrieving large result sets.", ge=1, le=10000, json_schema_extra={'format': 'int32'})
+    window_seconds: int | None = Field(default=None, validation_alias="window[seconds]", serialization_alias="window[seconds]", description="Specify the time window in seconds for evaluating metric activity. Used with the queried filter to determine which metrics have been actively reporting.", json_schema_extra={'format': 'int64'})
+    page_size: int | None = Field(default=None, validation_alias="page[size]", serialization_alias="page[size]", description="Maximum number of results to return per page. Use with cursor-based pagination for retrieving large result sets.", json_schema_extra={'format': 'int32'})
     filter_tags: str | None = Field(default=None, validation_alias="filter[tags]", serialization_alias="filter[tags]", description="Only return metrics that were submitted with tags matching this expression. You can use AND, OR, IN, and wildcards (for example, service:web*).")
 class ListTagConfigurationsRequest(StrictModel):
     """Retrieve a list of actively reporting metrics for your organization with optional filtering by configuration, type, and usage. Supports pagination via cursor-based navigation."""
@@ -5401,7 +5401,7 @@ class ListTagsByMetricNameRequestQuery(StrictModel):
     filter_match: str | None = Field(default=None, validation_alias="filter[match]", serialization_alias="filter[match]", description="Filter returned tags to those matching the specified substring pattern.")
     filter_include_tag_values: bool | None = Field(default=None, validation_alias="filter[include_tag_values]", serialization_alias="filter[include_tag_values]", description="Include tag values in the response. Defaults to true.")
     filter_allow_partial: bool | None = Field(default=None, validation_alias="filter[allow_partial]", serialization_alias="filter[allow_partial]", description="Allow partial results to be returned if the query cannot complete fully. Defaults to false.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return in the response.", ge=1, le=1000000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return in the response.", json_schema_extra={'format': 'int32'})
 class ListTagsByMetricNameRequest(StrictModel):
     """Retrieve indexed and ingested tags for a specified metric, with results filtered by a configurable time window (default 4 hours)."""
     path: ListTagsByMetricNameRequestPath
@@ -5419,9 +5419,9 @@ class EstimateMetricsOutputSeriesRequestPath(StrictModel):
     metric_name: str = Field(default=..., description="The name of the metric to estimate cardinality for.")
 class EstimateMetricsOutputSeriesRequestQuery(StrictModel):
     filter_groups: str | None = Field(default=None, validation_alias="filter[groups]", serialization_alias="filter[groups]", description="Comma-separated list of tag keys to filter the cardinality estimation. Only metrics configured with these tags will be included in the calculation.")
-    filter_hours_ago: int | None = Field(default=None, validation_alias="filter[hours_ago]", serialization_alias="filter[hours_ago]", description="Number of hours to look back from the current time when estimating cardinality. Determines the historical data range used for the estimate.", ge=49, le=2147483647, json_schema_extra={'format': 'int32'})
+    filter_hours_ago: int | None = Field(default=None, validation_alias="filter[hours_ago]", serialization_alias="filter[hours_ago]", description="Number of hours to look back from the current time when estimating cardinality. Determines the historical data range used for the estimate.", json_schema_extra={'format': 'int32'})
     filter_pct: bool | None = Field(default=None, validation_alias="filter[pct]", serialization_alias="filter[pct]", description="For distribution metrics only, set to true to estimate cardinality including additional percentile aggregators in the calculation.")
-    filter_timespan_h: int | None = Field(default=None, validation_alias="filter[timespan_h]", serialization_alias="filter[timespan_h]", description="Time window in hours within the lookback period to use for cardinality estimation. Minimum and default is 1 hour.", le=2147483647, json_schema_extra={'format': 'int32'})
+    filter_timespan_h: int | None = Field(default=None, validation_alias="filter[timespan_h]", serialization_alias="filter[timespan_h]", description="Time window in hours within the lookback period to use for cardinality estimation. Minimum and default is 1 hour.", json_schema_extra={'format': 'int32'})
 class EstimateMetricsOutputSeriesRequest(StrictModel):
     """Estimates the cardinality (unique value count) for a metric based on tag configuration, aggregation settings, and historical data window. Uses Metrics without Limits™ to optimize metric storage and query performance."""
     path: EstimateMetricsOutputSeriesRequestPath
@@ -5694,7 +5694,7 @@ class GetAggregatedConnectionsRequestQuery(StrictModel):
     to: int | None = Field(default=None, description="End of the query time window as a Unix timestamp in seconds. Defaults to the current time if not provided. If neither `from` nor `to` are specified, the window defaults to the last 15 minutes.", json_schema_extra={'format': 'int64'})
     group_by: str | None = Field(default=None, description="Comma-separated list of fields to group connections by for aggregation. Maximum of 10 fields allowed.")
     tags: str | None = Field(default=None, description="Comma-separated list of tags to filter connections. Only connections matching all specified tags are returned.")
-    limit: int | None = Field(default=None, description="Maximum number of aggregated connection records to return in the response.", ge=1, le=7500, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of aggregated connection records to return in the response.", json_schema_extra={'format': 'int32'})
 class GetAggregatedConnectionsRequest(StrictModel):
     """Retrieve aggregated network connections with optional filtering by time range, tags, and grouping criteria. Supports pagination and flexible aggregation across multiple fields."""
     query: GetAggregatedConnectionsRequestQuery | None = None
@@ -5705,7 +5705,7 @@ class GetAggregatedDnsRequestQuery(StrictModel):
     to: int | None = Field(default=None, description="End of the query time window as a Unix timestamp (seconds since epoch). Defaults to the current time if not provided. If neither `from` nor `to` are specified, defaults to the current time.", json_schema_extra={'format': 'int64'})
     group_by: str | None = Field(default=None, description="Comma-separated list of fields to group DNS traffic results by. Defaults to `network.dns_query` if not specified. Use `server_ungrouped` to retrieve ungrouped results. Maximum of 10 grouping fields allowed.")
     tags: str | None = Field(default=None, description="Comma-separated list of tags to filter DNS traffic results. Only traffic matching all specified tags will be included in the response.")
-    limit: int | None = Field(default=None, description="Maximum number of aggregated DNS entries to return in the response.", ge=1, le=7500, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of aggregated DNS entries to return in the response.", json_schema_extra={'format': 'int32'})
 class GetAggregatedDnsRequest(StrictModel):
     """Retrieve aggregated DNS traffic data within a specified time window, optionally grouped by selected fields and filtered by tags. Useful for analyzing DNS query patterns and network behavior."""
     query: GetAggregatedDnsRequestQuery | None = None
@@ -6027,8 +6027,8 @@ class DeleteOrgConnectionsRequest(StrictModel):
 
 # Operation: list_findings
 class ListFindingsRequestQuery(StrictModel):
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of findings to return per request. Useful for pagination and controlling response size.", ge=1, le=1000, json_schema_extra={'format': 'int64'})
-    snapshot_timestamp: int | None = Field(default=None, description="Retrieve findings from a specific point in time using a Unix timestamp in milliseconds. Useful for historical analysis or comparing findings across different snapshots.", ge=1, json_schema_extra={'format': 'int64'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of findings to return per request. Useful for pagination and controlling response size.", json_schema_extra={'format': 'int64'})
+    snapshot_timestamp: int | None = Field(default=None, description="Retrieve findings from a specific point in time using a Unix timestamp in milliseconds. Useful for historical analysis or comparing findings across different snapshots.", json_schema_extra={'format': 'int64'})
     filter_tags: str | None = Field(default=None, validation_alias="filter[tags]", serialization_alias="filter[tags]", description="Filter findings by associated tags using key:value format. Multiple tag filters can be chained to narrow results. Use `dd_rule_type:ciem` to return only identity risks.")
     filter_evaluation_changed_at: str | None = Field(default=None, validation_alias="filter[evaluation_changed_at]", serialization_alias="filter[evaluation_changed_at]", description="Filter findings by evaluation change date using Unix timestamp in milliseconds. Supports comparison operators (>, >=, <, <=) to find findings that changed status within a specific time range.")
     filter_muted: bool | None = Field(default=None, validation_alias="filter[muted]", serialization_alias="filter[muted]", description="Filter findings by mute status. Set to true for muted findings or false for active findings.")
@@ -6079,7 +6079,7 @@ class MuteFindingsRequest(StrictModel):
 class GetFindingRequestPath(StrictModel):
     finding_id: str = Field(default=..., description="The unique identifier of the finding to retrieve.")
 class GetFindingRequestQuery(StrictModel):
-    snapshot_timestamp: int | None = Field(default=None, description="Retrieve the finding as it existed at a specific point in time, specified as a Unix timestamp in milliseconds. If omitted, returns the current state of the finding.", ge=1, json_schema_extra={'format': 'int64'})
+    snapshot_timestamp: int | None = Field(default=None, description="Retrieve the finding as it existed at a specific point in time, specified as a Unix timestamp in milliseconds. If omitted, returns the current state of the finding.", json_schema_extra={'format': 'int64'})
 class GetFindingRequest(StrictModel):
     """Retrieve a specific finding with its message and resource configuration. Optionally retrieve the finding state at a particular point in time."""
     path: GetFindingRequestPath
@@ -6087,7 +6087,7 @@ class GetFindingRequest(StrictModel):
 
 # Operation: list_powerpacks
 class ListPowerpacksRequestQuery(StrictModel):
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of powerpacks to return in a single response. Useful for controlling response size and pagination.", le=1000, json_schema_extra={'format': 'int64'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of powerpacks to return in a single response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int64'})
     page_offset: int | None = Field(default=None, validation_alias="page[offset]", serialization_alias="page[offset]", description="Number of powerpacks to skip from the beginning of the result set. Use this to navigate through paginated results.", json_schema_extra={'format': 'int64'})
 class ListPowerpacksRequest(StrictModel):
     """Retrieve a paginated list of all available powerpacks. Use limit and offset parameters to control pagination."""
@@ -6156,7 +6156,7 @@ class ListProcessesRequestQuery(StrictModel):
     tags: str | None = Field(default=None, description="Filter processes by one or more tags using a comma-separated list. Multiple tags narrow results to processes matching all specified tags.")
     from_: int | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Unix timestamp marking the start of the query window in seconds since epoch. Defaults to 15 minutes before the `to` timestamp if not provided. If neither `from` nor `to` are specified, defaults to 15 minutes before the current time.", json_schema_extra={'format': 'int64'})
     to: int | None = Field(default=None, description="Unix timestamp marking the end of the query window in seconds since epoch. Defaults to 15 minutes after the `from` timestamp if not provided. If neither `from` nor `to` are specified, defaults to the current time.", json_schema_extra={'format': 'int64'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return per request for pagination. Adjust to balance response size and data completeness.", ge=1, le=10000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return per request for pagination. Adjust to balance response size and data completeness.", json_schema_extra={'format': 'int32'})
 class ListProcessesRequest(StrictModel):
     """Retrieve all processes for your organization with optional filtering by search terms, tags, and time range. Results are paginated with a default limit of 1000 items."""
     query: ListProcessesRequestQuery | None = None
@@ -6409,8 +6409,8 @@ class BatchRowsQueryRequest(StrictModel):
 
 # Operation: list_reference_tables
 class ListTablesRequestQuery(StrictModel):
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of tables to return per page. Use this to control result set size.", ge=1, le=100, json_schema_extra={'format': 'int64'})
-    page_offset: int | None = Field(default=None, validation_alias="page[offset]", serialization_alias="page[offset]", description="Number of tables to skip from the beginning for pagination. Use with limit to navigate through results.", ge=0, json_schema_extra={'format': 'int64'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of tables to return per page. Use this to control result set size.", json_schema_extra={'format': 'int64'})
+    page_offset: int | None = Field(default=None, validation_alias="page[offset]", serialization_alias="page[offset]", description="Number of tables to skip from the beginning for pagination. Use with limit to navigate through results.", json_schema_extra={'format': 'int64'})
     filter_status: str | None = Field(default=None, validation_alias="filter[status]", serialization_alias="filter[status]", description="Filter results by table status to show only tables in a specific state.")
 class ListTablesRequest(StrictModel):
     """Retrieve all reference tables in your organization with pagination and optional status filtering."""
@@ -6504,7 +6504,7 @@ class DeleteRowsRequest(StrictModel):
 # Operation: initiate_reference_table_upload
 class CreateReferenceTableUploadRequestBodyDataAttributes(StrictModel):
     headers: list[str] = Field(default=..., validation_alias="headers", serialization_alias="headers", description="Ordered list of column names that define the schema for the reference table. The order must match the column sequence in the CSV file being uploaded.")
-    part_count: int = Field(default=..., validation_alias="part_count", serialization_alias="part_count", description="Number of parts the file will be split into for multipart upload. Limits concurrent upload segments to prevent resource exhaustion.", le=20, json_schema_extra={'format': 'int32'})
+    part_count: int = Field(default=..., validation_alias="part_count", serialization_alias="part_count", description="Number of parts the file will be split into for multipart upload. Limits concurrent upload segments to prevent resource exhaustion.", json_schema_extra={'format': 'int32'})
     part_size: int = Field(default=..., validation_alias="part_size", serialization_alias="part_size", description="Size of each upload part in bytes. All parts except the final one must be at least 5,000,000 bytes to meet multipart upload requirements.", json_schema_extra={'format': 'int64'})
     table_name: str = Field(default=..., validation_alias="table_name", serialization_alias="table_name", description="Name of the reference table where the uploaded data will be stored.")
 class CreateReferenceTableUploadRequestBodyData(StrictModel):
@@ -6861,7 +6861,7 @@ class AggregateRumEventsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for events. Accepts ISO 8601 dates with UTC timezone, relative expressions (e.g., 'now-15m'), or millisecond timestamps.")
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for events. Accepts ISO 8601 dates with UTC timezone, relative expressions (e.g., 'now'), or millisecond timestamps.")
 class AggregateRumEventsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of buckets to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of buckets to return in the response.", json_schema_extra={'format': 'int32'})
 class AggregateRumEventsRequestBody(StrictModel):
     compute: list[RumCompute] | None = Field(default=None, description="List of metrics or timeseries to compute for each aggregated bucket (e.g., count, duration, error_rate).")
     group_by: list[RumGroupBy] | None = Field(default=None, description="Grouping rules to organize aggregated results by specified dimensions (e.g., by service, by browser type). Order matters for hierarchical grouping.")
@@ -7062,7 +7062,7 @@ class ListRumEventsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query using RUM syntax to filter events. Supports filtering by event type, application ID, and other RUM attributes.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Earliest timestamp to include in results. Events before this time are excluded.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Latest timestamp to include in results. Events after this time are excluded.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int32'})
 class ListRumEventsRequest(StrictModel):
     """Retrieve a paginated list of Real User Monitoring (RUM) events matching your search criteria. Use this endpoint to query your latest RUM events with optional filtering by time range and custom RUM search syntax."""
     query: ListRumEventsRequestQuery | None = None
@@ -7072,7 +7072,7 @@ class SearchRumEventsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now-15m), or millisecond timestamps.")
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now), or millisecond timestamps.")
 class SearchRumEventsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in the response. Useful for controlling pagination and response size.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of events to return in the response. Useful for controlling pagination and response size.", json_schema_extra={'format': 'int32'})
 class SearchRumEventsRequestBody(StrictModel):
     filter_: SearchRumEventsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchRumEventsRequestBodyPage | None = None
@@ -7298,7 +7298,7 @@ class CreateScorecardRuleRequestBodyDataAttributes(StrictModel):
     custom: bool | None = Field(default=None, validation_alias="custom", serialization_alias="custom", description="Whether this rule is a custom rule created by the user or a built-in rule provided by the system.")
     description: str | None = Field(default=None, validation_alias="description", serialization_alias="description", description="A detailed explanation of what this rule measures or validates.")
     enabled: bool | None = Field(default=None, validation_alias="enabled", serialization_alias="enabled", description="Whether this rule is active and should be included in scorecard calculations.")
-    level: int | None = Field(default=None, validation_alias="level", serialization_alias="level", description="The maturity level this rule applies to, ranging from 1 (lowest) to 3 (highest).", ge=1, le=3, json_schema_extra={'format': 'int32'})
+    level: int | None = Field(default=None, validation_alias="level", serialization_alias="level", description="The maturity level this rule applies to, ranging from 1 (lowest) to 3 (highest).", json_schema_extra={'format': 'int32'})
     owner: str | None = Field(default=None, validation_alias="owner", serialization_alias="owner", description="The user or team responsible for maintaining and updating this rule.")
     scorecard_name: str | None = Field(default=None, validation_alias="scorecard_name", serialization_alias="scorecard_name", description="The name of the scorecard this rule belongs to and will contribute to.")
 class CreateScorecardRuleRequestBodyData(StrictModel):
@@ -7317,7 +7317,7 @@ class UpdateScorecardRuleRequestBodyDataAttributes(StrictModel):
     custom: bool | None = Field(default=None, validation_alias="custom", serialization_alias="custom", description="Whether this rule is a custom rule (true) or a built-in rule (false).")
     description: str | None = Field(default=None, validation_alias="description", serialization_alias="description", description="A detailed explanation of what this rule evaluates and its purpose.")
     enabled: bool | None = Field(default=None, validation_alias="enabled", serialization_alias="enabled", description="Whether this rule is active and included in scorecard calculations.")
-    level: int | None = Field(default=None, validation_alias="level", serialization_alias="level", description="The maturity level this rule assesses, ranging from 1 (basic) to 3 (advanced).", ge=1, le=3, json_schema_extra={'format': 'int32'})
+    level: int | None = Field(default=None, validation_alias="level", serialization_alias="level", description="The maturity level this rule assesses, ranging from 1 (basic) to 3 (advanced).", json_schema_extra={'format': 'int32'})
     owner: str | None = Field(default=None, validation_alias="owner", serialization_alias="owner", description="The user or team responsible for maintaining and updating this rule.")
     scorecard_name: str | None = Field(default=None, validation_alias="scorecard_name", serialization_alias="scorecard_name", description="The name of the scorecard this rule belongs to and contributes to.")
 class UpdateScorecardRuleRequestBodyData(StrictModel):
@@ -7386,7 +7386,7 @@ class ListEntityRiskScoresRequest(StrictModel):
 # Operation: search_security_findings
 class ListSecurityFindingsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query using log syntax to filter findings. Prefix finding attributes with @ (e.g., @severity, @status) and query tags without a prefix. Combine multiple conditions with AND/OR operators.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of findings to return in the response.", ge=1, le=150, json_schema_extra={'format': 'int64'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of findings to return in the response.", json_schema_extra={'format': 'int64'})
 class ListSecurityFindingsRequestBody(StrictModel):
     facet_filters: str | None = Field(default=None, description="List of facet filters. Each dict has 'facet' (string) and 'values' (list of strings). Multiple values within a facet are OR'd together.")
     combine_operator: str | None = Field(default=None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'.")
@@ -7453,7 +7453,7 @@ class AttachJiraIssueRequest(StrictModel):
 
 # Operation: search_findings
 class SearchSecurityFindingsRequestBodyDataAttributesPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security findings to return in the response.", ge=1, le=150, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security findings to return in the response.", json_schema_extra={'format': 'int64'})
 class SearchSecurityFindingsRequestBodyDataAttributes(StrictModel):
     page: SearchSecurityFindingsRequestBodyDataAttributesPage | None = None
 class SearchSecurityFindingsRequestBodyData(StrictModel):
@@ -7466,7 +7466,7 @@ class SearchSecurityFindingsRequest(StrictModel):
 
 # Operation: list_sboms
 class ListAssetsSboMsRequestQuery(StrictModel):
-    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", ge=1, json_schema_extra={'format': 'int64'})
+    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", json_schema_extra={'format': 'int64'})
     filter_asset_type: Literal["Repository", "Service", "Host", "HostImage", "Image"] | None = Field(default=None, validation_alias="filter[asset_type]", serialization_alias="filter[asset_type]", description="Filter results by the type of asset (Repository, Service, Host, HostImage, or Image).")
     filter_asset_name: str | None = Field(default=None, validation_alias="filter[asset_name]", serialization_alias="filter[asset_name]", description="Filter results by the name of the asset to retrieve SBOMs for.")
     filter_package_name: str | None = Field(default=None, validation_alias="filter[package_name]", serialization_alias="filter[package_name]", description="Filter results by the name of a package or dependency component included in the asset.")
@@ -7491,7 +7491,7 @@ class GetSbomRequest(StrictModel):
 
 # Operation: list_scanned_assets
 class ListScannedAssetsMetadataRequestQuery(StrictModel):
-    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", ge=1, json_schema_extra={'format': 'int64'})
+    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", json_schema_extra={'format': 'int64'})
     filter_asset_type: Literal["Host", "HostImage", "Image"] | None = Field(default=None, validation_alias="filter[asset.type]", serialization_alias="filter[asset.type]", description="Filter results by asset type: Host (EC2 instances, VMs), HostImage (AMIs, VM images), or Image (container images).")
     filter_asset_name: str | None = Field(default=None, validation_alias="filter[asset.name]", serialization_alias="filter[asset.name]", description="Filter results by the name or identifier of the scanned asset (e.g., instance ID, image name, or digest).")
     filter_last_success_origin: str | None = Field(default=None, validation_alias="filter[last_success.origin]", serialization_alias="filter[last_success.origin]", description="Filter results by the origin of the last successful scan (e.g., agent, scanner, or other source).")
@@ -7525,7 +7525,7 @@ class PatchSignalNotificationRuleRequest(StrictModel):
 
 # Operation: list_vulnerabilities
 class ListVulnerabilitiesRequestQuery(StrictModel):
-    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use the token from the first request to retrieve subsequent pages consistently.", ge=1, json_schema_extra={'format': 'int64'})
+    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use the token from the first request to retrieve subsequent pages consistently.", json_schema_extra={'format': 'int64'})
     filter_type: Literal["AdminConsoleActive", "CodeInjection", "CommandInjection", "ComponentWithKnownVulnerability", "DangerousWorkflows", "DefaultAppDeployed", "DefaultHtmlEscapeInvalid", "DirectoryListingLeak", "EmailHtmlInjection", "EndOfLife", "HardcodedPassword", "HardcodedSecret", "HeaderInjection", "HstsHeaderMissing", "InsecureAuthProtocol", "InsecureCookie", "InsecureJspLayout", "LdapInjection", "MaliciousPackage", "MandatoryRemediation", "NoHttpOnlyCookie", "NoSameSiteCookie", "NoSqlMongoDbInjection", "PathTraversal", "ReflectionInjection", "RiskyLicense", "SessionRewriting", "SessionTimeout", "SqlInjection", "Ssrf", "StackTraceLeak", "TrustBoundaryViolation", "Unmaintained", "UntrustedDeserialization", "UnvalidatedRedirect", "VerbTampering", "WeakCipher", "WeakHash", "WeakRandomness", "XContentTypeHeaderMissing", "XPathInjection", "Xss"] | None = Field(default=None, validation_alias="filter[type]", serialization_alias="filter[type]", description="Filter vulnerabilities by type classification (e.g., injection attacks, weak cryptography, known component vulnerabilities).")
     filter_cvss_base_severity: Literal["Unknown", "None", "Low", "Medium", "High", "Critical"] | None = Field(default=None, validation_alias="filter[cvss.base.severity]", serialization_alias="filter[cvss.base.severity]", description="Filter vulnerabilities by CVSS base severity level, ranging from None to Critical.")
     filter_cvss_base_vector: str | None = Field(default=None, validation_alias="filter[cvss.base.vector]", serialization_alias="filter[cvss.base.vector]", description="Filter vulnerabilities by their CVSS base vector string, which encodes attack complexity, privileges required, and impact metrics.")
@@ -7570,7 +7570,7 @@ class ListVulnerabilitiesRequest(StrictModel):
 
 # Operation: list_vulnerable_assets
 class ListVulnerableAssetsRequestQuery(StrictModel):
-    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through results.", ge=1, json_schema_extra={'format': 'int64'})
+    page_number: int | None = Field(default=None, validation_alias="page[number]", serialization_alias="page[number]", description="The page number to retrieve, starting from 1. Use this to paginate through results.", json_schema_extra={'format': 'int64'})
     filter_type: Literal["Repository", "Service", "Host", "HostImage", "Image"] | None = Field(default=None, validation_alias="filter[type]", serialization_alias="filter[type]", description="Filter results by asset type to focus on specific infrastructure components.")
     filter_version_first: str | None = Field(default=None, validation_alias="filter[version.first]", serialization_alias="filter[version.first]", description="Filter by the earliest version in which the asset became vulnerable.")
     filter_version_last: str | None = Field(default=None, validation_alias="filter[version.last]", serialization_alias="filter[version.last]", description="Filter by the most recent version of the asset detected.")
@@ -8012,7 +8012,7 @@ class ListSecurityMonitoringSignalsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter security signals by attributes such as security type and status (e.g., 'security:attack status:high').")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Minimum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Maximum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in the response. Must be between 1 and 1000.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in the response. Must be between 1 and 1000.", json_schema_extra={'format': 'int32'})
 class ListSecurityMonitoringSignalsRequest(StrictModel):
     """Retrieve a list of security signals matching specified search criteria and time range. Use this endpoint to quickly query security signals with optional filtering by query, timestamp bounds, and result limit."""
     query: ListSecurityMonitoringSignalsRequestQuery | None = None
@@ -8022,7 +8022,7 @@ class SearchSecurityMonitoringSignalsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for security signals. Only signals at or after this timestamp will be included in results.", json_schema_extra={'format': 'date-time'})
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for security signals. Only signals at or before this timestamp will be included in results.", json_schema_extra={'format': 'date-time'})
 class SearchSecurityMonitoringSignalsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security signals to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security signals to return in the response.", json_schema_extra={'format': 'int32'})
 class SearchSecurityMonitoringSignalsRequestBody(StrictModel):
     filter_: SearchSecurityMonitoringSignalsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchSecurityMonitoringSignalsRequestBodyPage | None = None
@@ -8140,7 +8140,7 @@ class DeleteScanningGroupRequest(StrictModel):
 
 # Operation: create_scanning_rule
 class CreateScanningRuleRequestBodyDataAttributesIncludedKeywordConfiguration(StrictModel):
-    character_count: int = Field(default=..., validation_alias="character_count", serialization_alias="character_count", description="Number of characters following a detected match to examine for keywords. Must exceed the longest keyword length in the rule.", ge=1, le=50, json_schema_extra={'format': 'int64'})
+    character_count: int = Field(default=..., validation_alias="character_count", serialization_alias="character_count", description="Number of characters following a detected match to examine for keywords. Must exceed the longest keyword length in the rule.", json_schema_extra={'format': 'int64'})
     keywords: list[str] = Field(default=..., validation_alias="keywords", serialization_alias="keywords", description="Keywords to match during scanning. Maximum 30 keywords per rule. Matches are validated against these terms.")
     use_recommended_keywords: bool | None = Field(default=None, validation_alias="use_recommended_keywords", serialization_alias="use_recommended_keywords", description="When true, applies the keyword configuration from the associated standard pattern instead of the specified keywords. Requires a standard pattern relationship.")
 class CreateScanningRuleRequestBodyDataAttributesSuppressions(StrictModel):
@@ -8148,7 +8148,7 @@ class CreateScanningRuleRequestBodyDataAttributesSuppressions(StrictModel):
     exact_match: list[str] | None = Field(default=None, validation_alias="exact_match", serialization_alias="exact_match", description="Strings that suppress matches when they exactly match the detected value.")
     starts_with: list[str] | None = Field(default=None, validation_alias="starts_with", serialization_alias="starts_with", description="Strings that suppress matches when they appear at the beginning of a detected value.")
 class CreateScanningRuleRequestBodyDataAttributesTextReplacement(StrictModel):
-    number_of_chars: int | None = Field(default=None, validation_alias="number_of_chars", serialization_alias="number_of_chars", description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", ge=0, json_schema_extra={'format': 'int64'})
+    number_of_chars: int | None = Field(default=None, validation_alias="number_of_chars", serialization_alias="number_of_chars", description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", json_schema_extra={'format': 'int64'})
     replacement_string: str | None = Field(default=None, validation_alias="replacement_string", serialization_alias="replacement_string", description="Static string to replace matched sensitive data. Required when masking type is replacement_string.")
     should_save_match: bool | None = Field(default=None, validation_alias="should_save_match", serialization_alias="should_save_match", description="When enabled with replacement_string masking, allows authorized users to unmask matched values in logs. Use cautiously for highly sensitive, long-lived data.")
 class CreateScanningRuleRequestBodyDataAttributes(StrictModel):
@@ -8157,7 +8157,7 @@ class CreateScanningRuleRequestBodyDataAttributes(StrictModel):
     is_enabled: bool | None = Field(default=None, validation_alias="is_enabled", serialization_alias="is_enabled", description="Activates or deactivates the rule for scanning operations.")
     namespaces: list[str] | None = Field(default=None, validation_alias="namespaces", serialization_alias="namespaces", description="Attributes to include in scanning. When empty or omitted, all attributes except excluded_namespaces are scanned. If both namespaces and excluded_namespaces are omitted, the entire event is scanned.")
     pattern: str | None = Field(default=None, validation_alias="pattern", serialization_alias="pattern", description="Custom regex pattern for matching sensitive data. Omitted when using a standard pattern relationship.")
-    priority: int | None = Field(default=None, validation_alias="priority", serialization_alias="priority", description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", ge=1, le=5, json_schema_extra={'format': 'int64'})
+    priority: int | None = Field(default=None, validation_alias="priority", serialization_alias="priority", description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", json_schema_extra={'format': 'int64'})
     tags: list[str] | None = Field(default=None, validation_alias="tags", serialization_alias="tags", description="Metadata tags for organizing and categorizing the scanning rule.")
     included_keyword_configuration: CreateScanningRuleRequestBodyDataAttributesIncludedKeywordConfiguration
     suppressions: CreateScanningRuleRequestBodyDataAttributesSuppressions | None = None
@@ -8183,7 +8183,7 @@ class CreateScanningRuleRequest(StrictModel):
 class UpdateScanningRuleRequestPath(StrictModel):
     rule_id: str = Field(default=..., description="The unique identifier of the scanning rule to update.")
 class UpdateScanningRuleRequestBodyDataAttributesIncludedKeywordConfiguration(StrictModel):
-    character_count: int = Field(default=..., validation_alias="character_count", serialization_alias="character_count", description="Number of characters following a match to examine for keyword validation. Must exceed the longest keyword length in the rule.", ge=1, le=50, json_schema_extra={'format': 'int64'})
+    character_count: int = Field(default=..., validation_alias="character_count", serialization_alias="character_count", description="Number of characters following a match to examine for keyword validation. Must exceed the longest keyword length in the rule.", json_schema_extra={'format': 'int64'})
     keywords: list[str] = Field(default=..., validation_alias="keywords", serialization_alias="keywords", description="Keywords to validate matches during scanning. Maximum 30 keywords per rule.")
     use_recommended_keywords: bool | None = Field(default=None, validation_alias="use_recommended_keywords", serialization_alias="use_recommended_keywords", description="When true, applies the standard pattern's built-in keywords and configuration. Requires the rule to be associated with a standard pattern. When false, uses the specified keywords and character_count.")
 class UpdateScanningRuleRequestBodyDataAttributesSuppressions(StrictModel):
@@ -8191,7 +8191,7 @@ class UpdateScanningRuleRequestBodyDataAttributesSuppressions(StrictModel):
     exact_match: list[str] | None = Field(default=None, validation_alias="exact_match", serialization_alias="exact_match", description="Suppression list for matches exactly matching specified strings. Prevents flagging known safe values.")
     starts_with: list[str] | None = Field(default=None, validation_alias="starts_with", serialization_alias="starts_with", description="Suppression list for matches starting with specified strings. Useful for filtering false positives by prefix.")
 class UpdateScanningRuleRequestBodyDataAttributesTextReplacement(StrictModel):
-    number_of_chars: int | None = Field(default=None, validation_alias="number_of_chars", serialization_alias="number_of_chars", description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", ge=0, json_schema_extra={'format': 'int64'})
+    number_of_chars: int | None = Field(default=None, validation_alias="number_of_chars", serialization_alias="number_of_chars", description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", json_schema_extra={'format': 'int64'})
     replacement_string: str | None = Field(default=None, validation_alias="replacement_string", serialization_alias="replacement_string", description="Static string to replace matched sensitive data. Required when masking type is replacement_string.")
     should_save_match: bool | None = Field(default=None, validation_alias="should_save_match", serialization_alias="should_save_match", description="When enabled with replacement_string masking, allows authorized users to unmask matches in logs. Use cautiously for highly sensitive, long-lived data.")
 class UpdateScanningRuleRequestBodyDataAttributes(StrictModel):
@@ -8200,7 +8200,7 @@ class UpdateScanningRuleRequestBodyDataAttributes(StrictModel):
     is_enabled: bool | None = Field(default=None, validation_alias="is_enabled", serialization_alias="is_enabled", description="Activates or deactivates the rule for scanning operations.")
     namespaces: list[str] | None = Field(default=None, validation_alias="namespaces", serialization_alias="namespaces", description="Attributes to include in scanning. If empty or omitted, all attributes except excluded_namespaces are scanned. If both namespaces and excluded_namespaces are omitted, the entire event is scanned.")
     pattern: str | None = Field(default=None, validation_alias="pattern", serialization_alias="pattern", description="Regular expression pattern for match detection. Not applicable if the rule is linked to a standard pattern.")
-    priority: int | None = Field(default=None, validation_alias="priority", serialization_alias="priority", description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", ge=1, le=5, json_schema_extra={'format': 'int64'})
+    priority: int | None = Field(default=None, validation_alias="priority", serialization_alias="priority", description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", json_schema_extra={'format': 'int64'})
     tags: list[str] | None = Field(default=None, validation_alias="tags", serialization_alias="tags", description="Organizational tags for categorizing and filtering rules.")
     included_keyword_configuration: UpdateScanningRuleRequestBodyDataAttributesIncludedKeywordConfiguration
     suppressions: UpdateScanningRuleRequestBodyDataAttributesSuppressions | None = None
@@ -8347,7 +8347,7 @@ class ListSecurityMonitoringHistsignalsRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query to filter security signals by threat characteristics, status, or other signal attributes.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Start of the time range for retrieving security signals. Only signals at or after this timestamp will be included.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="End of the time range for retrieving security signals. Only signals at or before this timestamp will be included.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in the response. Useful for pagination and controlling response size.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in the response. Useful for pagination and controlling response size.", json_schema_extra={'format': 'int32'})
 class ListSecurityMonitoringHistsignalsRequest(StrictModel):
     """Retrieve historical security signals from your threat hunting data with optional filtering by query, time range, and result limits. Use this to search and analyze security events within specified parameters."""
     query: ListSecurityMonitoringHistsignalsRequestQuery | None = None
@@ -8357,7 +8357,7 @@ class SearchSecurityMonitoringHistsignalsRequestBodyFilter(StrictModel):
     from_: str | None = Field(default=None, validation_alias="from", serialization_alias="from", description="Start of the time range for security signals. Only signals with timestamps at or after this value are included in results.", json_schema_extra={'format': 'date-time'})
     to: str | None = Field(default=None, validation_alias="to", serialization_alias="to", description="End of the time range for security signals. Only signals with timestamps at or before this value are included in results.", json_schema_extra={'format': 'date-time'})
 class SearchSecurityMonitoringHistsignalsRequestBodyPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security signals to return in the response. Useful for pagination and controlling result set size.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of security signals to return in the response. Useful for pagination and controlling result set size.", json_schema_extra={'format': 'int32'})
 class SearchSecurityMonitoringHistsignalsRequestBody(StrictModel):
     filter_: SearchSecurityMonitoringHistsignalsRequestBodyFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     page: SearchSecurityMonitoringHistsignalsRequestBodyPage | None = None
@@ -8455,7 +8455,7 @@ class GetSecurityMonitoringHistsignalsByJobIdRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Filter security signals using a search query syntax to match specific threat indicators and signal attributes.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="The earliest timestamp to include in results. Signals before this time are excluded.", json_schema_extra={'format': 'date-time'})
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="The latest timestamp to include in results. Signals after this time are excluded.", json_schema_extra={'format': 'date-time'})
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in a single response. Useful for pagination and controlling response size.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of security signals to return in a single response. Useful for pagination and controlling response size.", json_schema_extra={'format': 'int32'})
 class GetSecurityMonitoringHistsignalsByJobIdRequest(StrictModel):
     """Retrieve historical security signals for a specific threat hunting job. Results can be filtered by query, time range, and paginated for large result sets."""
     path: GetSecurityMonitoringHistsignalsByJobIdRequestPath
@@ -8526,7 +8526,7 @@ class ListSpansGetRequestQuery(StrictModel):
     filter_query: str | None = Field(default=None, validation_alias="filter[query]", serialization_alias="filter[query]", description="Search query using spans syntax to filter results by span attributes and tags.")
     filter_from: str | None = Field(default=None, validation_alias="filter[from]", serialization_alias="filter[from]", description="Minimum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps.")
     filter_to: str | None = Field(default=None, validation_alias="filter[to]", serialization_alias="filter[to]", description="Maximum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of spans to return in a single response page.", le=1000, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of spans to return in a single response page.", json_schema_extra={'format': 'int32'})
 class ListSpansGetRequest(StrictModel):
     """Retrieve a paginated list of spans matching your search criteria. Use this endpoint to query your latest spans with filtering by time range and custom span syntax queries."""
     query: ListSpansGetRequestQuery | None = None
@@ -8538,7 +8538,7 @@ class ListSpansRequestBodyDataAttributesFilter(StrictModel):
 class ListSpansRequestBodyDataAttributesOptions(StrictModel):
     time_offset: int | None = Field(default=None, validation_alias="timeOffset", serialization_alias="timeOffset", description="An optional time offset in seconds to shift the query time range.", json_schema_extra={'format': 'int64'})
 class ListSpansRequestBodyDataAttributesPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="The maximum number of spans to return in the response.", le=1000, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="The maximum number of spans to return in the response.", json_schema_extra={'format': 'int32'})
 class ListSpansRequestBodyDataAttributes(StrictModel):
     filter_: ListSpansRequestBodyDataAttributesFilter | None = Field(default=None, validation_alias="filter", serialization_alias="filter")
     options: ListSpansRequestBodyDataAttributesOptions | None = None
@@ -9085,10 +9085,10 @@ class CreateSyntheticsNetworkTestRequestBodyDataAttributesOptions(StrictModel):
     min_location_failed: int | None = Field(default=None, validation_alias="min_location_failed", serialization_alias="min_location_failed", description="Minimum number of test locations that must fail simultaneously to trigger an alert.", json_schema_extra={'format': 'int64'})
     monitor_name: str | None = Field(default=None, validation_alias="monitor_name", serialization_alias="monitor_name", description="Custom name for the associated monitor, used in alert titles and dashboard widgets. If not specified, defaults to the test name.")
     monitor_options: dict[str, Any] | None = Field(default=None, validation_alias="monitor_options", serialization_alias="monitor_options", description="Configuration object for monitor-specific settings such as renotification intervals and notification preferences.")
-    monitor_priority: int | None = Field(default=None, validation_alias="monitor_priority", serialization_alias="monitor_priority", description="Alert severity level for the test monitor, where 1 is highest priority and 5 is lowest.", ge=1, le=5, json_schema_extra={'format': 'int32'})
+    monitor_priority: int | None = Field(default=None, validation_alias="monitor_priority", serialization_alias="monitor_priority", description="Alert severity level for the test monitor, where 1 is highest priority and 5 is lowest.", json_schema_extra={'format': 'int32'})
     retry: dict[str, Any] | None = Field(default=None, validation_alias="retry", serialization_alias="retry", description="Configuration object defining retry behavior when the test fails, including retry count and interval settings.")
     scheduling: dict[str, Any] | None = Field(default=None, validation_alias="scheduling", serialization_alias="scheduling", description="Configuration object for advanced scheduling, allowing tests to run on specific days and times within a defined timezone.")
-    tick_every: int | None = Field(default=None, validation_alias="tick_every", serialization_alias="tick_every", description="Frequency in seconds at which the test executes. Must be between 30 seconds and 7 days.", ge=30, le=604800, json_schema_extra={'format': 'int64'})
+    tick_every: int | None = Field(default=None, validation_alias="tick_every", serialization_alias="tick_every", description="Frequency in seconds at which the test executes. Must be between 30 seconds and 7 days.", json_schema_extra={'format': 'int64'})
 class CreateSyntheticsNetworkTestRequestBodyDataAttributes(StrictModel):
     locations: list[str] = Field(default=..., validation_alias="locations", serialization_alias="locations", description="Array of locations where the test will execute. Use managed location identifiers (e.g., 'aws:us-east-1') for public endpoints or agent identifiers (e.g., 'agent:my-agent-name') for private environments.")
     message: str = Field(default=..., validation_alias="message", serialization_alias="message", description="Notification message sent when the test triggers an alert, providing context about the test failure.")
@@ -9126,10 +9126,10 @@ class UpdateSyntheticsNetworkTestRequestBodyDataAttributesOptions(StrictModel):
     min_location_failed: int | None = Field(default=None, validation_alias="min_location_failed", serialization_alias="min_location_failed", description="Minimum number of locations that must fail simultaneously to trigger an alert.", json_schema_extra={'format': 'int64'})
     monitor_name: str | None = Field(default=None, validation_alias="monitor_name", serialization_alias="monitor_name", description="Custom name for the associated monitor, used in alert titles and dashboard widgets.")
     monitor_options: dict[str, Any] | None = Field(default=None, validation_alias="monitor_options", serialization_alias="monitor_options", description="Configuration object for monitor-specific settings such as renotification intervals and escalation policies.")
-    monitor_priority: int | None = Field(default=None, validation_alias="monitor_priority", serialization_alias="monitor_priority", description="Alert severity level for the test monitor.", ge=1, le=5, json_schema_extra={'format': 'int32'})
+    monitor_priority: int | None = Field(default=None, validation_alias="monitor_priority", serialization_alias="monitor_priority", description="Alert severity level for the test monitor.", json_schema_extra={'format': 'int32'})
     retry: dict[str, Any] | None = Field(default=None, validation_alias="retry", serialization_alias="retry", description="Configuration object defining retry behavior when the test fails, including retry count and interval.")
     scheduling: dict[str, Any] | None = Field(default=None, validation_alias="scheduling", serialization_alias="scheduling", description="Configuration object for advanced scheduling, including specific timeframes and timezone settings.")
-    tick_every: int | None = Field(default=None, validation_alias="tick_every", serialization_alias="tick_every", description="Execution frequency of the test in seconds.", ge=30, le=604800, json_schema_extra={'format': 'int64'})
+    tick_every: int | None = Field(default=None, validation_alias="tick_every", serialization_alias="tick_every", description="Execution frequency of the test in seconds.", json_schema_extra={'format': 'int64'})
 class UpdateSyntheticsNetworkTestRequestBodyDataAttributes(StrictModel):
     locations: list[str] = Field(default=..., validation_alias="locations", serialization_alias="locations", description="Array of locations where the test will execute. Use managed locations (e.g., aws:us-east-1) for public endpoints or agent locations (e.g., agent:name) for private environments.")
     message: str = Field(default=..., validation_alias="message", serialization_alias="message", description="Notification message sent when the test triggers an alert.")
@@ -9338,7 +9338,7 @@ class CreateTeamLinkRequestPath(StrictModel):
     team_id: str = Field(default=..., description="The unique identifier of the team to which the link will be added.")
 class CreateTeamLinkRequestBodyDataAttributes(StrictModel):
     label: str = Field(default=..., validation_alias="label", serialization_alias="label", description="A descriptive label for the link, displayed to team members and visitors.", max_length=256)
-    position: int | None = Field(default=None, validation_alias="position", serialization_alias="position", description="The display order of the link within the team's link list. Lower values appear first. Omit to append at the end.", le=2147483647, json_schema_extra={'format': 'int32'})
+    position: int | None = Field(default=None, validation_alias="position", serialization_alias="position", description="The display order of the link within the team's link list. Lower values appear first. Omit to append at the end.", json_schema_extra={'format': 'int32'})
     url: str = Field(default=..., validation_alias="url", serialization_alias="url", description="The destination URL for the link. Must be a valid, fully-qualified web address.")
 class CreateTeamLinkRequestBodyData(StrictModel):
     type_: Literal["team_links"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The classification type for this link. Currently only team links are supported.")
@@ -9364,7 +9364,7 @@ class UpdateTeamLinkRequestPath(StrictModel):
     link_id: str = Field(default=..., description="The unique identifier of the link to update.")
 class UpdateTeamLinkRequestBodyDataAttributes(StrictModel):
     label: str = Field(default=..., validation_alias="label", serialization_alias="label", description="A descriptive label for the link displayed to team members. Maximum 256 characters.", max_length=256)
-    position: int | None = Field(default=None, validation_alias="position", serialization_alias="position", description="The display order of the link within the team's link collection. Lower values appear first. Maximum value is 2,147,483,647.", le=2147483647, json_schema_extra={'format': 'int32'})
+    position: int | None = Field(default=None, validation_alias="position", serialization_alias="position", description="The display order of the link within the team's link collection. Lower values appear first. Maximum value is 2,147,483,647.", json_schema_extra={'format': 'int32'})
     url: str = Field(default=..., validation_alias="url", serialization_alias="url", description="The destination URL for the link. Must be a valid web address.")
 class UpdateTeamLinkRequestBodyData(StrictModel):
     type_: Literal["team_links"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The classification type for this team link. Currently only team links are supported.")
@@ -9437,7 +9437,7 @@ class DeleteTeamMembershipRequest(StrictModel):
 
 # Operation: list_flaky_tests
 class SearchFlakyTestsRequestBodyDataAttributesPage(StrictModel):
-    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of flaky tests to return in the response. Must be between 1 and 1000.", ge=1, le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, validation_alias="limit", serialization_alias="limit", description="Maximum number of flaky tests to return in the response. Must be between 1 and 1000.", json_schema_extra={'format': 'int64'})
 class SearchFlakyTestsRequestBodyDataAttributes(StrictModel):
     include_history: bool | None = Field(default=None, validation_alias="include_history", serialization_alias="include_history", description="Include the complete status change history for each flaky test, ordered from most recent to oldest. Disabled by default for better performance.")
     page: SearchFlakyTestsRequestBodyDataAttributesPage | None = None
@@ -9496,7 +9496,7 @@ class GetHourlyUsageRequestQuery(StrictModel):
     filter_include_descendants: bool | None = Field(default=None, validation_alias="filter[include_descendants]", serialization_alias="filter[include_descendants]", description="Include usage from child organizations in the response. When enabled, aggregates usage across the organizational hierarchy.")
     filter_include_connected_accounts: bool | None = Field(default=None, validation_alias="filter[include_connected_accounts]", serialization_alias="filter[include_connected_accounts]", description="Include usage from accounts connected as partner customers in the Datadog partner network program. When enabled, aggregates usage across partner-connected accounts.")
     filter_include_breakdown: bool | None = Field(default=None, validation_alias="filter[include_breakdown]", serialization_alias="filter[include_breakdown]", description="Include detailed breakdown of usage by subcategories where applicable. Currently supported for the logs product family only.")
-    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return per page. Useful for paginating large result sets.", ge=1, le=500, json_schema_extra={'format': 'int32'})
+    page_limit: int | None = Field(default=None, validation_alias="page[limit]", serialization_alias="page[limit]", description="Maximum number of results to return per page. Useful for paginating large result sets.", json_schema_extra={'format': 'int32'})
     page_next_record_id: str | None = Field(default=None, validation_alias="page[next_record_id]", serialization_alias="page[next_record_id]", description="Pagination token from a previous response. Use this to retrieve the next page of results when the response contains additional records.")
 class GetHourlyUsageRequest(StrictModel):
     """Retrieve hourly usage metrics aggregated by product family for a specified time range. Supports filtering by product families, organizational hierarchy, and partner accounts with optional usage breakdowns."""

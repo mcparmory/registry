@@ -1,6 +1,12 @@
 # Datadog MCP Server
 
 Base URL: https://api.datadoghq.com
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 770 |
+| **Auth** | OAuth2, API Key, Bearer Token |
+
 ## API Info
 - **Contact:** Datadog Support (support@datadoghq.com) — [https://www.datadoghq.com/support/](https://www.datadoghq.com/support/)
 

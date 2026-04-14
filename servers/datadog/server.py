@@ -5,7 +5,7 @@ Datadog MCP Server
 API Info:
 - Contact: Datadog Support <support@datadoghq.com> (https://www.datadoghq.com/support/)
 
-Generated: 2026-04-09 17:19:56 UTC
+Generated: 2026-04-14 18:19:43 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1350,8 +1350,8 @@ async def list_agent_versions() -> dict[str, Any]:
 # Tags: Fleet Automation
 @mcp.tool()
 async def list_agents(
-    page_number: str | None = Field(None, description="Zero-indexed page number for pagination. Use this to navigate through result sets.", ge=0),
-    page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 100 inclusive.", ge=1, le=100),
+    page_number: str | None = Field(None, description="Zero-indexed page number for pagination. Use this to navigate through result sets."),
+    page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 100 inclusive."),
     tags: str | None = Field(None, description="Filter agents by one or more tags. Provide as a comma-separated list of tag values."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of all Datadog Agents with optional filtering by tags. Results can be sorted and paginated using page number and size parameters."""
@@ -1431,7 +1431,7 @@ async def get_agent_info(agent_key: str = Field(..., description="The unique ide
 # Tags: Fleet Automation
 @mcp.tool()
 async def list_deployments(
-    page_size: str | None = Field(None, description="Number of deployments to return per page. Maximum of 100 deployments per request.", le=100),
+    page_size: str | None = Field(None, description="Number of deployments to return per page. Maximum of 100 deployments per request."),
     page_offset: str | None = Field(None, description="Zero-based index of the first deployment to return. Use with page_size to paginate through results."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of all fleet deployments. Use pagination parameters to navigate through results efficiently."""
@@ -1566,7 +1566,7 @@ async def start_agent_upgrade(
 @mcp.tool()
 async def get_deployment(
     deployment_id: str = Field(..., description="The unique identifier of the deployment to retrieve."),
-    limit: str | None = Field(None, description="Maximum number of hosts to return per page. Default is 50, maximum is 100.", le=100),
+    limit: str | None = Field(None, description="Maximum number of hosts to return per page. Default is 50, maximum is 100."),
     page: str | None = Field(None, description="Page index for pagination (zero-based). Use this to retrieve subsequent pages of hosts."),
 ) -> dict[str, Any]:
     """Retrieve detailed information about a specific fleet deployment, including metadata, target hosts, current status, and per-host execution details with package versions."""
@@ -1682,7 +1682,7 @@ async def create_fleet_upgrade_schedule(
     timezone_: str = Field(..., alias="timezone", description="Timezone for the schedule using IANA Time Zone Database format."),
     type_: Literal["schedule"] = Field(..., alias="type", description="The type of schedule resource."),
     status: Literal["active", "inactive"] | None = Field(None, description="Status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not."),
-    version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version.", ge=0, le=2),
+    version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version."),
 ) -> dict[str, Any]:
     """Create an automated schedule for deploying Datadog Agent upgrades to a fleet of hosts. The schedule defines target hosts via query filter, maintenance windows, and version strategy to automatically trigger deployments on a recurring basis."""
 
@@ -1774,7 +1774,7 @@ async def update_schedule(
     timezone_: str = Field(..., alias="timezone", description="Timezone for interpreting the maintenance window start time. Use IANA Time Zone Database format."),
     type_: Literal["schedule"] = Field(..., alias="type", description="The resource type identifier for this schedule."),
     status: Literal["active", "inactive"] | None = Field(None, description="The operational status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not."),
-    version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version, or 1-2 to target older major versions.", ge=0, le=2),
+    version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version, or 1-2 to target older major versions."),
 ) -> dict[str, Any]:
     """Partially update a fleet deployment schedule by modifying specific attributes such as recurrence days, maintenance window timing, or deployment strategy. Only provided fields are updated; omitted fields remain unchanged."""
 
@@ -2091,7 +2091,7 @@ async def delete_datastore(datastore_id: str = Field(..., description="The uniqu
 async def list_datastore_items(
     datastore_id: str = Field(..., description="The unique identifier of the datastore to retrieve items from."),
     item_key: str | None = Field(None, description="Primary key value to retrieve a specific item. Cannot be used together with the filter parameter. Maximum length is 256 characters.", max_length=256),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of items to return per page for pagination. Accepts values between 1 and 100 items per page.", ge=1, le=100),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of items to return per page for pagination. Accepts values between 1 and 100 items per page."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Number of items to skip from the beginning of the result set for pagination offset."),
 ) -> dict[str, Any]:
     """Retrieve items from a datastore with optional filtering by key or query parameters, supporting server-side pagination for large datasets. Specify either an item key or filter query, but not both."""
@@ -4225,7 +4225,7 @@ async def list_audit_logs(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter audit log events using Audit Logs query syntax (e.g., filter by event type, application ID, or other audit attributes)."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of audit log events to return in a single response. Useful for controlling response size and pagination.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of audit log events to return in a single response. Useful for controlling response size and pagination."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of audit log events matching your search criteria. Use this endpoint to monitor your organization's latest audit activity with optional filtering by query, time range, and result limit."""
 
@@ -4269,7 +4269,7 @@ async def list_audit_logs(
 async def search_audit_logs(
     from_: str | None = Field(None, alias="from", description="Start of the time range for audit events. Accepts relative expressions (e.g., now-15m), absolute timestamps in milliseconds, or date formats."),
     to: str | None = Field(None, description="End of the time range for audit events. Accepts relative expressions (e.g., now), absolute timestamps in milliseconds, or date formats."),
-    limit: str | None = Field(None, description="Maximum number of audit events to return in the response.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of audit events to return in the response."),
 ) -> dict[str, Any]:
     """Search and filter audit log events using complex query criteria with paginated results. Use this endpoint to retrieve audit events within a specified time range with customizable result limits."""
 
@@ -6515,7 +6515,7 @@ async def list_pipeline_events(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter pipeline events using CI Visibility search syntax (e.g., filter by provider name, pipeline name, or other event attributes)."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Earliest timestamp to include in results. Events before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="Latest timestamp to include in results. Events after this time are excluded."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response page. Useful for controlling response size and implementing pagination.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response page. Useful for controlling response size and implementing pagination."),
 ) -> dict[str, Any]:
     """Retrieve CI Visibility pipeline events matching a search query with pagination support. Use this endpoint to view your latest pipeline events filtered by provider, pipeline name, and time range."""
 
@@ -6559,7 +6559,7 @@ async def list_pipeline_events(
 async def search_pipeline_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds."),
     to: str | None = Field(None, description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds."),
-    limit: str | None = Field(None, description="Maximum number of events to return in a single response. Use pagination to retrieve additional results.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of events to return in a single response. Use pagination to retrieve additional results."),
 ) -> dict[str, Any]:
     """Search CI Visibility pipeline events using a search query to filter and retrieve matching events. Results are paginated to handle large datasets efficiently."""
 
@@ -6793,7 +6793,7 @@ async def list_test_events(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter test events using log syntax. Supports filtering by test name, suite, and other test attributes."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of test events to return per page. Defaults to 10 if not specified.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of test events to return per page. Defaults to 10 if not specified."),
 ) -> dict[str, Any]:
     """Retrieve CI Visibility test events matching a search query with pagination support. Use this endpoint to view your latest test events filtered by name, suite, timestamp, and other criteria."""
 
@@ -6837,7 +6837,7 @@ async def list_test_events(
 async def search_test_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds."),
     to: str | None = Field(None, description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds."),
-    limit: str | None = Field(None, description="Maximum number of events to return in the response.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of events to return in the response."),
 ) -> dict[str, Any]:
     """Search CI Visibility test events using a search query to filter results. Results are paginated and can be used to build complex event filtering."""
 
@@ -7273,7 +7273,7 @@ async def get_commit_coverage_summary(
 async def list_container_images(
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter container images by one or more tags. Provide tags as a comma-separated list in key:value format."),
     group_by: str | None = Field(None, description="Group results by one or more tag keys. Provide tag keys as a comma-separated list to organize the returned container images."),
-    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of container images to return per request. Useful for pagination control.", ge=1, le=10000),
+    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of container images to return per request. Useful for pagination control."),
 ) -> dict[str, Any]:
     """Retrieve all container images for your organization with optional filtering and grouping. Use the security scanned assets endpoint to enrich results with security scan data."""
 
@@ -7317,7 +7317,7 @@ async def list_container_images(
 async def list_containers(
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter containers by one or more tags using comma-separated key:value pairs to narrow results to specific environments, services, or other attributes."),
     group_by: str | None = Field(None, description="Group results by one or more tag keys in comma-separated format to organize containers hierarchically by the specified attributes."),
-    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of containers to return per page. Supports pagination for large result sets.", ge=1, le=10000),
+    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of containers to return per page. Supports pagination for large result sets."),
 ) -> dict[str, Any]:
     """Retrieve all containers in your organization with optional filtering by tags and grouping capabilities. Results are paginated with a configurable page size."""
 
@@ -7663,7 +7663,7 @@ async def create_aws_cur_config(
     include_new_accounts: bool | None = Field(None, description="When enabled, automatically includes new member accounts in the billing dataset by default. Use excluded_accounts to specify exceptions."),
     included_accounts: list[str] | None = Field(None, description="List of AWS account IDs to include in billing data collection. Only used when automatically including new accounts is disabled."),
     bucket_region: str | None = Field(None, description="The AWS region where the S3 bucket is located."),
-    months: str | None = Field(None, description="Number of months of historical billing data to retrieve. Maximum of 36 months.", le=36),
+    months: str | None = Field(None, description="Number of months of historical billing data to retrieve. Maximum of 36 months."),
 ) -> dict[str, Any]:
     """Create a Cloud Cost Management configuration for AWS Cost and Usage Reports (CUR). This sets up billing data collection from a specified S3 bucket and configures which AWS accounts to include in the dataset."""
 
@@ -8621,8 +8621,8 @@ async def list_monthly_cost_attribution(
 # Tags: CSM Agents
 @mcp.tool()
 async def list_csm_agents(
-    page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets when combined with size parameter.", ge=0, le=1000000),
-    size: str | None = Field(None, description="Number of agents to return per page. Controls the maximum items in a single response.", ge=0, le=100),
+    page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets when combined with size parameter."),
+    size: str | None = Field(None, description="Number of agents to return per page. Controls the maximum items in a single response."),
     order_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results. Specify ascending or descending order."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of all CSM Agents currently running across your hosts and containers. Use pagination parameters to control result size and navigation."""
@@ -8747,8 +8747,8 @@ async def analyze_serverless_csm_coverage() -> dict[str, Any]:
 # Tags: CSM Agents
 @mcp.tool()
 async def list_serverless_agents(
-    page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets.", ge=0, le=1000000),
-    size: str | None = Field(None, description="Number of agents to return per page. Controls the batch size of results in each response.", ge=0, le=100),
+    page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets."),
+    size: str | None = Field(None, description="Number of agents to return per page. Controls the batch size of results in each response."),
     order_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results. Use ascending to sort from lowest to highest, or descending for highest to lowest."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of all CSM Serverless Agents currently running across your hosts and containers."""
@@ -9367,7 +9367,7 @@ async def delete_dataset(dataset_id: str = Field(..., description="The unique id
 async def list_deletion_requests(
     product: str | None = Field(None, description="Filter results to show deletion requests for a specific product."),
     status: str | None = Field(None, description="Filter results to show deletion requests with a specific status."),
-    page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 50.", ge=1, le=50),
+    page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 50."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of data deletion requests with optional filtering by product and status. Use this to monitor and manage pending or completed data deletion operations."""
 
@@ -9444,7 +9444,7 @@ async def cancel_deletion_request(id_: str = Field(..., alias="id", description=
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def list_deployment_gates(page_size: str | None = Field(None, alias="pagesize", description="Number of results to return per page. Valid range is 1 to 1000 results.", ge=1, le=1000)) -> dict[str, Any]:
+async def list_deployment_gates(page_size: str | None = Field(None, alias="pagesize", description="Number of results to return per page. Valid range is 1 to 1000 results.")) -> dict[str, Any]:
     """Retrieve a paginated list of all deployment gates configured for your organization. Use pagination parameters to navigate through results."""
 
     _page_size = _parse_int(page_size)
@@ -10036,7 +10036,7 @@ async def delete_deployment(deployment_id: str = Field(..., description="The uni
 @mcp.tool()
 async def list_deployments_event(
     from_: str | None = Field(None, alias="from", description="Start of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format."),
-    limit: str | None = Field(None, description="Maximum number of deployment events to return in the response. Cannot exceed 1000 results per request.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of deployment events to return in the response. Cannot exceed 1000 results per request."),
     to: str | None = Field(None, description="End of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format."),
 ) -> dict[str, Any]:
     """Retrieve a list of deployment events within an optional time range. Use the from and to parameters to filter events by timestamp, and limit to control the maximum number of results returned."""
@@ -10257,7 +10257,7 @@ async def delete_incident_event(failure_id: str = Field(..., description="The un
 # Tags: DORA Metrics
 @mcp.tool()
 async def list_incident_failures(
-    limit: str | None = Field(None, description="Maximum number of incident failure events to return in the response.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of incident failure events to return in the response."),
     time_range: str | None = Field(None, description="Time range as ISO 8601 timestamps in format 'from/to' (e.g., '2024-01-01T00:00:00Z/2024-01-31T23:59:59Z')"),
 ) -> dict[str, Any]:
     """Retrieve a list of incident failure events from DORA metrics. Use this to analyze deployment and incident patterns."""
@@ -10778,7 +10778,7 @@ async def list_events(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter events using event search syntax. Leave empty to retrieve all events without filtering."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or after this value will be included."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or before this value will be included."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of events matching a search query. Use this endpoint to view your latest events with optional filtering by time range and search criteria."""
 
@@ -10875,7 +10875,7 @@ async def search_events(
     from_: str | None = Field(None, alias="from", description="The start time for the search range. Accepts date math expressions (e.g., now-15m) or millisecond timestamps."),
     to: str | None = Field(None, description="The end time for the search range. Accepts date math expressions (e.g., now) or millisecond timestamps."),
     time_offset: str | None = Field(None, alias="timeOffset", description="An optional time offset to apply to the query in seconds, useful for timezone adjustments or relative time shifts."),
-    limit: str | None = Field(None, description="The maximum number of events to return in the response. Results are paginated.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of events to return in the response. Results are paginated."),
 ) -> dict[str, Any]:
     """Search and filter events within a specified time range with pagination support. Use this endpoint to build complex event queries and retrieve matching results."""
 
@@ -12600,10 +12600,10 @@ async def list_incident_integrations(incident_id: str = Field(..., description="
 @mcp.tool()
 async def create_incident_integration(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident to create the integration for."),
-    integration_type: str = Field(..., description="The type of external system this integration connects to. Use 1 for Slack or 8 for Jira.", le=100),
+    integration_type: str = Field(..., description="The type of external system this integration connects to. Use 1 for Slack or 8 for Jira."),
     metadata: _models.SlackIntegrationMetadata | _models.JiraIntegrationMetadata | _models.MsTeamsIntegrationMetadata = Field(..., description="Custom metadata attributes specific to this integration, such as channel IDs, issue keys, or sync settings."),
     type_: Literal["incident_integrations"] = Field(..., alias="type", description="The resource type identifier for this integration metadata."),
-    status: str | None = Field(None, description="The current state of the integration. Values indicate: 0 (unknown), 1 (pending), 2 (complete), 3 (manually created), 4 (manually updated), or 5 (failed).", le=5),
+    status: str | None = Field(None, description="The current state of the integration. Values indicate: 0 (unknown), 1 (pending), 2 (complete), 3 (manually created), 4 (manually updated), or 5 (failed)."),
 ) -> dict[str, Any]:
     """Create integration metadata for an incident, linking it to external systems like Slack or Jira. This establishes the connection and tracks the integration status."""
 
@@ -12691,10 +12691,10 @@ async def get_incident_integration(
 async def update_incident_integration(
     incident_id: str = Field(..., description="The UUID of the incident to update."),
     integration_metadata_id: str = Field(..., description="The UUID of the incident integration metadata record to update."),
-    integration_type: str = Field(..., description="The type of integration this metadata is for. Slack is type 1, Jira is type 8.", le=100),
+    integration_type: str = Field(..., description="The type of integration this metadata is for. Slack is type 1, Jira is type 8."),
     metadata: _models.SlackIntegrationMetadata | _models.JiraIntegrationMetadata | _models.MsTeamsIntegrationMetadata = Field(..., description="Custom metadata attributes associated with this incident integration. Structure depends on the integration type."),
     type_: Literal["incident_integrations"] = Field(..., alias="type", description="The resource type identifier for this integration metadata."),
-    status: str | None = Field(None, description="The current status of this integration metadata. Unknown (0), pending (1), complete (2), manually created (3), manually updated (4), or failed (5).", le=5),
+    status: str | None = Field(None, description="The current status of this integration metadata. Unknown (0), pending (1), complete (2), manually created (3), manually updated (4), or failed (5)."),
 ) -> dict[str, Any]:
     """Update an existing incident integration metadata record. Modify integration details such as type, status, and associated metadata for a specific incident."""
 
@@ -18046,7 +18046,7 @@ async def search_logs(
     filter_from: str | None = Field(None, alias="filterfrom", description="Start of the time range for log search. Logs with timestamps at or after this value are included."),
     filter_to: str | None = Field(None, alias="filterto", description="End of the time range for log search. Logs with timestamps at or before this value are included."),
     filter_storage_tier: Literal["indexes", "online-archives", "flex"] | None = Field(None, alias="filterstorage_tier", description="Storage tier to query. Use 'indexes' for standard logs, 'online-archives' for archived logs, or 'flex' for flexible storage."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of logs to return in a single response. Use pagination to retrieve additional results.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of logs to return in a single response. Use pagination to retrieve additional results."),
 ) -> dict[str, Any]:
     """Search and filter logs matching a query with optional time range and index selection. Results are paginated and support multiple storage tiers including archives."""
 
@@ -18096,7 +18096,7 @@ async def search_logs_advanced(
     storage_tier: Literal["indexes", "online-archives", "flex"] | None = Field(None, description="Storage tier to query. Select 'indexes' for standard logs, 'online-archives' for archived logs, or 'flex' for flexible storage."),
     to: str | None = Field(None, description="The end time for the log search. Supports date math expressions and Unix timestamps in milliseconds."),
     time_offset: str | None = Field(None, alias="timeOffset", description="Time offset in seconds to apply to the query timestamps. Useful for adjusting time-based filtering."),
-    limit: str | None = Field(None, description="Maximum number of logs to return in the response. Useful for controlling response size and pagination.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of logs to return in the response. Useful for controlling response size and pagination."),
 ) -> dict[str, Any]:
     """Search and filter logs matching a query with support for date ranges, index selection, and pagination. Results are paginated and can be retrieved from indexes, online archives, or flex storage."""
 
@@ -18147,8 +18147,8 @@ async def list_metrics(
     filter_include_percentiles: bool | None = Field(None, alias="filterinclude_percentiles", description="Filter to return only distribution metrics with percentile aggregations enabled (true) or disabled (false)."),
     filter_queried: bool | None = Field(None, alias="filterqueried", description="Filter to return only metrics that have been queried (true) or not queried (false) within the specified lookback window. If no window is specified, a default window is applied."),
     filter_related_assets: bool | None = Field(None, alias="filterrelated_assets", description="Filter to return only metrics that are actively used in at least one dashboard, monitor, notebook, or SLO."),
-    window_seconds: str | None = Field(None, alias="windowseconds", description="Specify the time window in seconds for evaluating metric activity. Used with the queried filter to determine which metrics have been actively reporting.", ge=1, le=2592000),
-    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of results to return per page. Use with cursor-based pagination for retrieving large result sets.", ge=1, le=10000),
+    window_seconds: str | None = Field(None, alias="windowseconds", description="Specify the time window in seconds for evaluating metric activity. Used with the queried filter to determine which metrics have been actively reporting."),
+    page_size: str | None = Field(None, alias="pagesize", description="Maximum number of results to return per page. Use with cursor-based pagination for retrieving large result sets."),
     tag_filters: list[dict[str, Any]] | None = Field(None, description="List of tag filter conditions. Each dict has 'key' (tag key), 'operator' (AND/OR/IN), and 'value' (tag value or comma-separated values for IN)"),
     tag_filter_logic: str | None = Field(None, description="How to combine multiple filters: 'AND' or 'OR'"),
     tag_wildcards_enabled: bool | None = Field(None, description="Whether to enable wildcard matching (e.g., service:web*)"),
@@ -18341,7 +18341,7 @@ async def list_metric_tags(
     filter_match: str | None = Field(None, alias="filtermatch", description="Filter returned tags to those matching the specified substring pattern."),
     filter_include_tag_values: bool | None = Field(None, alias="filterinclude_tag_values", description="Include tag values in the response. Defaults to true."),
     filter_allow_partial: bool | None = Field(None, alias="filterallow_partial", description="Allow partial results to be returned if the query cannot complete fully. Defaults to false."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return in the response.", ge=1, le=1000000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return in the response."),
 ) -> dict[str, Any]:
     """Retrieve indexed and ingested tags for a specified metric, with results filtered by a configurable time window (default 4 hours)."""
 
@@ -18423,9 +18423,9 @@ async def get_metric_assets(metric_name: str = Field(..., description="The name 
 async def estimate_metric_cardinality(
     metric_name: str = Field(..., description="The name of the metric to estimate cardinality for."),
     filter_groups: str | None = Field(None, alias="filtergroups", description="Comma-separated list of tag keys to filter the cardinality estimation. Only metrics configured with these tags will be included in the calculation."),
-    filter_hours_ago: str | None = Field(None, alias="filterhours_ago", description="Number of hours to look back from the current time when estimating cardinality. Determines the historical data range used for the estimate.", ge=49, le=2147483647),
+    filter_hours_ago: str | None = Field(None, alias="filterhours_ago", description="Number of hours to look back from the current time when estimating cardinality. Determines the historical data range used for the estimate."),
     filter_pct: bool | None = Field(None, alias="filterpct", description="For distribution metrics only, set to true to estimate cardinality including additional percentile aggregators in the calculation."),
-    filter_timespan_h: str | None = Field(None, alias="filtertimespan_h", description="Time window in hours within the lookback period to use for cardinality estimation. Minimum and default is 1 hour.", le=2147483647),
+    filter_timespan_h: str | None = Field(None, alias="filtertimespan_h", description="Time window in hours within the lookback period to use for cardinality estimation. Minimum and default is 1 hour."),
 ) -> dict[str, Any]:
     """Estimates the cardinality (unique value count) for a metric based on tag configuration, aggregation settings, and historical data window. Uses Metrics without Limits™ to optimize metric storage and query performance."""
 
@@ -19515,7 +19515,7 @@ async def list_aggregated_connections(
     to: str | None = Field(None, description="End of the query time window as a Unix timestamp in seconds. Defaults to the current time if not provided. If neither `from` nor `to` are specified, the window defaults to the last 15 minutes."),
     group_by: str | None = Field(None, description="Comma-separated list of fields to group connections by for aggregation. Maximum of 10 fields allowed."),
     tags: str | None = Field(None, description="Comma-separated list of tags to filter connections. Only connections matching all specified tags are returned."),
-    limit: str | None = Field(None, description="Maximum number of aggregated connection records to return in the response.", ge=1, le=7500),
+    limit: str | None = Field(None, description="Maximum number of aggregated connection records to return in the response."),
 ) -> dict[str, Any]:
     """Retrieve aggregated network connections with optional filtering by time range, tags, and grouping criteria. Supports pagination and flexible aggregation across multiple fields."""
 
@@ -19563,7 +19563,7 @@ async def list_aggregated_dns_traffic(
     to: str | None = Field(None, description="End of the query time window as a Unix timestamp (seconds since epoch). Defaults to the current time if not provided. If neither `from` nor `to` are specified, defaults to the current time."),
     group_by: str | None = Field(None, description="Comma-separated list of fields to group DNS traffic results by. Defaults to `network.dns_query` if not specified. Use `server_ungrouped` to retrieve ungrouped results. Maximum of 10 grouping fields allowed."),
     tags: str | None = Field(None, description="Comma-separated list of tags to filter DNS traffic results. Only traffic matching all specified tags will be included in the response."),
-    limit: str | None = Field(None, description="Maximum number of aggregated DNS entries to return in the response.", ge=1, le=7500),
+    limit: str | None = Field(None, description="Maximum number of aggregated DNS entries to return in the response."),
 ) -> dict[str, Any]:
     """Retrieve aggregated DNS traffic data within a specified time window, optionally grouped by selected fields and filtered by tags. Useful for analyzing DNS query patterns and network behavior."""
 
@@ -20844,8 +20844,8 @@ async def delete_org_connection(connection_id: str = Field(..., description="The
 # Tags: Security Monitoring
 @mcp.tool()
 async def list_findings(
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of findings to return per request. Useful for pagination and controlling response size.", ge=1, le=1000),
-    snapshot_timestamp: str | None = Field(None, description="Retrieve findings from a specific point in time using a Unix timestamp in milliseconds. Useful for historical analysis or comparing findings across different snapshots.", ge=1),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of findings to return per request. Useful for pagination and controlling response size."),
+    snapshot_timestamp: str | None = Field(None, description="Retrieve findings from a specific point in time using a Unix timestamp in milliseconds. Useful for historical analysis or comparing findings across different snapshots."),
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter findings by associated tags using key:value format. Multiple tag filters can be chained to narrow results. Use `dd_rule_type:ciem` to return only identity risks."),
     filter_evaluation_changed_at: str | None = Field(None, alias="filterevaluation_changed_at", description="Filter findings by evaluation change date using Unix timestamp in milliseconds. Supports comparison operators (>, >=, <, <=) to find findings that changed status within a specific time range."),
     filter_muted: bool | None = Field(None, alias="filtermuted", description="Filter findings by mute status. Set to true for muted findings or false for active findings."),
@@ -20954,7 +20954,7 @@ async def update_findings_mute_status(
 @mcp.tool()
 async def get_finding(
     finding_id: str = Field(..., description="The unique identifier of the finding to retrieve."),
-    snapshot_timestamp: str | None = Field(None, description="Retrieve the finding as it existed at a specific point in time, specified as a Unix timestamp in milliseconds. If omitted, returns the current state of the finding.", ge=1),
+    snapshot_timestamp: str | None = Field(None, description="Retrieve the finding as it existed at a specific point in time, specified as a Unix timestamp in milliseconds. If omitted, returns the current state of the finding."),
 ) -> dict[str, Any]:
     """Retrieve a specific finding with its message and resource configuration. Optionally retrieve the finding state at a particular point in time."""
 
@@ -20997,7 +20997,7 @@ async def get_finding(
 # Tags: Powerpack
 @mcp.tool()
 async def list_powerpacks(
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of powerpacks to return in a single response. Useful for controlling response size and pagination.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of powerpacks to return in a single response. Useful for controlling response size and pagination."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Number of powerpacks to skip from the beginning of the result set. Use this to navigate through paginated results."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of all available powerpacks. Use limit and offset parameters to control pagination."""
@@ -21221,7 +21221,7 @@ async def list_processes(
     tags: str | None = Field(None, description="Filter processes by one or more tags using a comma-separated list. Multiple tags narrow results to processes matching all specified tags."),
     from_: str | None = Field(None, alias="from", description="Unix timestamp marking the start of the query window in seconds since epoch. Defaults to 15 minutes before the `to` timestamp if not provided. If neither `from` nor `to` are specified, defaults to 15 minutes before the current time."),
     to: str | None = Field(None, description="Unix timestamp marking the end of the query window in seconds since epoch. Defaults to 15 minutes after the `from` timestamp if not provided. If neither `from` nor `to` are specified, defaults to the current time."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per request for pagination. Adjust to balance response size and data completeness.", ge=1, le=10000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per request for pagination. Adjust to balance response size and data completeness."),
 ) -> dict[str, Any]:
     """Retrieve all processes for your organization with optional filtering by search terms, tags, and time range. Results are paginated with a default limit of 1000 items."""
 
@@ -22032,8 +22032,8 @@ async def query_reference_table_rows(
 # Tags: Reference Tables
 @mcp.tool()
 async def list_reference_tables(
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of tables to return per page. Use this to control result set size.", ge=1, le=100),
-    page_offset: str | None = Field(None, alias="pageoffset", description="Number of tables to skip from the beginning for pagination. Use with limit to navigate through results.", ge=0),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of tables to return per page. Use this to control result set size."),
+    page_offset: str | None = Field(None, alias="pageoffset", description="Number of tables to skip from the beginning for pagination. Use with limit to navigate through results."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter results by table status to show only tables in a specific state."),
 ) -> dict[str, Any]:
     """Retrieve all reference tables in your organization with pagination and optional status filtering."""
@@ -22382,7 +22382,7 @@ async def delete_reference_table_rows(
 @mcp.tool()
 async def initiate_reference_table_upload(
     headers: list[str] = Field(..., description="Ordered list of column names that define the schema for the reference table. The order must match the column sequence in the CSV file being uploaded."),
-    part_count: str = Field(..., description="Number of parts the file will be split into for multipart upload. Limits concurrent upload segments to prevent resource exhaustion.", le=20),
+    part_count: str = Field(..., description="Number of parts the file will be split into for multipart upload. Limits concurrent upload segments to prevent resource exhaustion."),
     part_size: str = Field(..., description="Size of each upload part in bytes. All parts except the final one must be at least 5,000,000 bytes to meet multipart upload requirements."),
     table_name: str = Field(..., description="Name of the reference table where the uploaded data will be stored."),
     type_: Literal["upload"] = Field(..., alias="type", description="Classification of this upload resource. Indicates this is a standard upload operation."),
@@ -23703,7 +23703,7 @@ async def aggregate_rum_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts ISO 8601 dates with UTC timezone, relative expressions (e.g., 'now-15m'), or millisecond timestamps."),
     to: str | None = Field(None, description="End of the time range for events. Accepts ISO 8601 dates with UTC timezone, relative expressions (e.g., 'now'), or millisecond timestamps."),
     group_by: list[_models.RumGroupBy] | None = Field(None, description="Grouping rules to organize aggregated results by specified dimensions (e.g., by service, by browser type). Order matters for hierarchical grouping."),
-    limit: str | None = Field(None, description="Maximum number of buckets to return in the response.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of buckets to return in the response."),
 ) -> dict[str, Any]:
     """Aggregate Real User Monitoring (RUM) events into time-series buckets with computed metrics. Use this to analyze RUM data across specified time ranges with optional grouping and filtering."""
 
@@ -24409,7 +24409,7 @@ async def list_rum_events(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query using RUM syntax to filter events. Supports filtering by event type, application ID, and other RUM attributes."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Earliest timestamp to include in results. Events before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="Latest timestamp to include in results. Events after this time are excluded."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of Real User Monitoring (RUM) events matching your search criteria. Use this endpoint to query your latest RUM events with optional filtering by time range and custom RUM search syntax."""
 
@@ -24453,7 +24453,7 @@ async def list_rum_events(
 async def search_rum_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now-15m), or millisecond timestamps."),
     to: str | None = Field(None, description="End of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now), or millisecond timestamps."),
-    limit: str | None = Field(None, description="Maximum number of events to return in the response. Useful for controlling pagination and response size.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of events to return in the response. Useful for controlling pagination and response size."),
 ) -> dict[str, Any]:
     """Search and filter RUM (Real User Monitoring) events using complex query criteria with paginated results. Use this endpoint to retrieve events within a specified time range with customizable result limits."""
 
@@ -25281,7 +25281,7 @@ async def create_scorecard_rule(
     custom: bool | None = Field(None, description="Whether this rule is a custom rule created by the user or a built-in rule provided by the system."),
     description: str | None = Field(None, description="A detailed explanation of what this rule measures or validates."),
     enabled: bool | None = Field(None, description="Whether this rule is active and should be included in scorecard calculations."),
-    level: str | None = Field(None, description="The maturity level this rule applies to, ranging from 1 (lowest) to 3 (highest).", ge=1, le=3),
+    level: str | None = Field(None, description="The maturity level this rule applies to, ranging from 1 (lowest) to 3 (highest)."),
     owner: str | None = Field(None, description="The user or team responsible for maintaining and updating this rule."),
     scorecard_name: str | None = Field(None, description="The name of the scorecard this rule belongs to and will contribute to."),
 ) -> dict[str, Any]:
@@ -25329,7 +25329,7 @@ async def update_scorecard_rule(
     custom: bool | None = Field(None, description="Whether this rule is a custom rule (true) or a built-in rule (false)."),
     description: str | None = Field(None, description="A detailed explanation of what this rule evaluates and its purpose."),
     enabled: bool | None = Field(None, description="Whether this rule is active and included in scorecard calculations."),
-    level: str | None = Field(None, description="The maturity level this rule assesses, ranging from 1 (basic) to 3 (advanced).", ge=1, le=3),
+    level: str | None = Field(None, description="The maturity level this rule assesses, ranging from 1 (basic) to 3 (advanced)."),
     owner: str | None = Field(None, description="The user or team responsible for maintaining and updating this rule."),
     scorecard_name: str | None = Field(None, description="The name of the scorecard this rule belongs to and contributes to."),
 ) -> dict[str, Any]:
@@ -25623,7 +25623,7 @@ async def download_workload_policy() -> dict[str, Any]:
 @mcp.tool()
 async def search_security_findings(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query using log syntax to filter findings. Prefix finding attributes with @ (e.g., @severity, @status) and query tags without a prefix. Combine multiple conditions with AND/OR operators."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of findings to return in the response.", ge=1, le=150),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of findings to return in the response."),
     facet_filters: str | None = Field(None, description="List of facet filters. Each dict has 'facet' (string) and 'values' (list of strings). Multiple values within a facet are OR'd together."),
     combine_operator: str | None = Field(None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'."),
 ) -> dict[str, Any]:
@@ -25874,7 +25874,7 @@ async def attach_security_findings_to_jira_issue(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def search_findings(limit: str | None = Field(None, description="Maximum number of security findings to return in the response.", ge=1, le=150)) -> dict[str, Any]:
+async def search_findings(limit: str | None = Field(None, description="Maximum number of security findings to return in the response.")) -> dict[str, Any]:
     """Search security findings using the logs query syntax to filter by attributes (prefixed with @) and tags. Returns a list of findings matching your search criteria."""
 
     _limit = _parse_int(limit)
@@ -25915,7 +25915,7 @@ async def search_findings(limit: str | None = Field(None, description="Maximum n
 # Tags: Security Monitoring
 @mcp.tool()
 async def list_sboms(
-    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", ge=1),
+    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets."),
     filter_asset_type: Literal["Repository", "Service", "Host", "HostImage", "Image"] | None = Field(None, alias="filterasset_type", description="Filter results by the type of asset (Repository, Service, Host, HostImage, or Image)."),
     filter_asset_name: str | None = Field(None, alias="filterasset_name", description="Filter results by the name of the asset to retrieve SBOMs for."),
     filter_package_name: str | None = Field(None, alias="filterpackage_name", description="Filter results by the name of a package or dependency component included in the asset."),
@@ -26007,7 +26007,7 @@ async def get_sbom(
 # Tags: Security Monitoring
 @mcp.tool()
 async def list_scanned_assets(
-    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets.", ge=1),
+    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through large result sets."),
     filter_asset_type: Literal["Host", "HostImage", "Image"] | None = Field(None, alias="filterasset.type", description="Filter results by asset type: Host (EC2 instances, VMs), HostImage (AMIs, VM images), or Image (container images)."),
     filter_asset_name: str | None = Field(None, alias="filterasset.name", description="Filter results by the name or identifier of the scanned asset (e.g., instance ID, image name, or digest)."),
     filter_last_success_origin: str | None = Field(None, alias="filterlast_success.origin", description="Filter results by the origin of the last successful scan (e.g., agent, scanner, or other source)."),
@@ -26110,7 +26110,7 @@ async def update_signal_notification_rule(
 # Tags: Security Monitoring
 @mcp.tool()
 async def list_vulnerabilities(
-    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use the token from the first request to retrieve subsequent pages consistently.", ge=1),
+    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use the token from the first request to retrieve subsequent pages consistently."),
     filter_type: Literal["AdminConsoleActive", "CodeInjection", "CommandInjection", "ComponentWithKnownVulnerability", "DangerousWorkflows", "DefaultAppDeployed", "DefaultHtmlEscapeInvalid", "DirectoryListingLeak", "EmailHtmlInjection", "EndOfLife", "HardcodedPassword", "HardcodedSecret", "HeaderInjection", "HstsHeaderMissing", "InsecureAuthProtocol", "InsecureCookie", "InsecureJspLayout", "LdapInjection", "MaliciousPackage", "MandatoryRemediation", "NoHttpOnlyCookie", "NoSameSiteCookie", "NoSqlMongoDbInjection", "PathTraversal", "ReflectionInjection", "RiskyLicense", "SessionRewriting", "SessionTimeout", "SqlInjection", "Ssrf", "StackTraceLeak", "TrustBoundaryViolation", "Unmaintained", "UntrustedDeserialization", "UnvalidatedRedirect", "VerbTampering", "WeakCipher", "WeakHash", "WeakRandomness", "XContentTypeHeaderMissing", "XPathInjection", "Xss"] | None = Field(None, alias="filtertype", description="Filter vulnerabilities by type classification (e.g., injection attacks, weak cryptography, known component vulnerabilities)."),
     filter_cvss_base_severity: Literal["Unknown", "None", "Low", "Medium", "High", "Critical"] | None = Field(None, alias="filtercvss.base.severity", description="Filter vulnerabilities by CVSS base severity level, ranging from None to Critical."),
     filter_cvss_base_vector: str | None = Field(None, alias="filtercvss.base.vector", description="Filter vulnerabilities by their CVSS base vector string, which encodes attack complexity, privileges required, and impact metrics."),
@@ -26190,7 +26190,7 @@ async def list_vulnerabilities(
 # Tags: Security Monitoring
 @mcp.tool()
 async def list_vulnerable_assets(
-    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through results.", ge=1),
+    page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 1. Use this to paginate through results."),
     filter_type: Literal["Repository", "Service", "Host", "HostImage", "Image"] | None = Field(None, alias="filtertype", description="Filter results by asset type to focus on specific infrastructure components."),
     filter_version_first: str | None = Field(None, alias="filterversion.first", description="Filter by the earliest version in which the asset became vulnerable."),
     filter_version_last: str | None = Field(None, alias="filterversion.last", description="Filter by the most recent version of the asset detected."),
@@ -27839,7 +27839,7 @@ async def list_security_signals(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter security signals by attributes such as security type and status (e.g., 'security:attack status:high')."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Must be between 1 and 1000.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieve a list of security signals matching specified search criteria and time range. Use this endpoint to quickly query security signals with optional filtering by query, timestamp bounds, and result limit."""
 
@@ -27883,7 +27883,7 @@ async def list_security_signals(
 async def list_security_signals_search(
     from_: str | None = Field(None, alias="from", description="Start of the time range for security signals. Only signals at or after this timestamp will be included in results."),
     to: str | None = Field(None, description="End of the time range for security signals. Only signals at or before this timestamp will be included in results."),
-    limit: str | None = Field(None, description="Maximum number of security signals to return in the response.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of security signals to return in the response."),
 ) -> dict[str, Any]:
     """Retrieve security signals matching optional time range and result limit criteria. Use this endpoint to search and filter security signals by timestamp."""
 
@@ -28286,7 +28286,7 @@ async def delete_scanning_group(group_id: str = Field(..., description="The uniq
 # Tags: Sensitive Data Scanner
 @mcp.tool()
 async def create_scanning_rule(
-    character_count: str = Field(..., description="Number of characters following a detected match to examine for keywords. Must exceed the longest keyword length in the rule.", ge=1, le=50),
+    character_count: str = Field(..., description="Number of characters following a detected match to examine for keywords. Must exceed the longest keyword length in the rule."),
     keywords: list[str] = Field(..., description="Keywords to match during scanning. Maximum 30 keywords per rule. Matches are validated against these terms."),
     type_: Literal["sensitive_data_scanner_rule"] = Field(..., alias="type", description="Resource type identifier for the scanning rule."),
     description: str | None = Field(None, description="Human-readable description of the scanning rule's purpose and scope."),
@@ -28295,12 +28295,12 @@ async def create_scanning_rule(
     is_enabled: bool | None = Field(None, description="Activates or deactivates the rule for scanning operations."),
     namespaces: list[str] | None = Field(None, description="Attributes to include in scanning. When empty or omitted, all attributes except excluded_namespaces are scanned. If both namespaces and excluded_namespaces are omitted, the entire event is scanned."),
     pattern: str | None = Field(None, description="Custom regex pattern for matching sensitive data. Omitted when using a standard pattern relationship."),
-    priority: str | None = Field(None, description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", ge=1, le=5),
+    priority: str | None = Field(None, description="Severity level of detected matches, where 1 is highest priority and 5 is lowest."),
     ends_with: list[str] | None = Field(None, description="Strings that suppress matches when they appear at the end of a detected value."),
     exact_match: list[str] | None = Field(None, description="Strings that suppress matches when they exactly match the detected value."),
     starts_with: list[str] | None = Field(None, description="Strings that suppress matches when they appear at the beginning of a detected value."),
     tags: list[str] | None = Field(None, description="Metadata tags for organizing and categorizing the scanning rule."),
-    number_of_chars: str | None = Field(None, description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", ge=0),
+    number_of_chars: str | None = Field(None, description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero."),
     replacement_string: str | None = Field(None, description="Static string to replace matched sensitive data. Required when masking type is replacement_string."),
     should_save_match: bool | None = Field(None, description="When enabled with replacement_string masking, allows authorized users to unmask matched values in logs. Use cautiously for highly sensitive, long-lived data."),
     group_data: dict[str, Any] | None = Field(None, alias="groupData", description="Reference to the sensitive data scanner group that contains this rule."),
@@ -28359,7 +28359,7 @@ async def create_scanning_rule(
 @mcp.tool()
 async def update_scanning_rule(
     rule_id: str = Field(..., description="The unique identifier of the scanning rule to update."),
-    character_count: str = Field(..., description="Number of characters following a match to examine for keyword validation. Must exceed the longest keyword length in the rule.", ge=1, le=50),
+    character_count: str = Field(..., description="Number of characters following a match to examine for keyword validation. Must exceed the longest keyword length in the rule."),
     keywords: list[str] = Field(..., description="Keywords to validate matches during scanning. Maximum 30 keywords per rule."),
     description: str | None = Field(None, description="A human-readable description of the rule's purpose and behavior."),
     excluded_namespaces: list[str] | None = Field(None, description="Attributes to exclude from scanning. Must be sub-paths of the namespaces array if both are specified."),
@@ -28367,12 +28367,12 @@ async def update_scanning_rule(
     is_enabled: bool | None = Field(None, description="Activates or deactivates the rule for scanning operations."),
     namespaces: list[str] | None = Field(None, description="Attributes to include in scanning. If empty or omitted, all attributes except excluded_namespaces are scanned. If both namespaces and excluded_namespaces are omitted, the entire event is scanned."),
     pattern: str | None = Field(None, description="Regular expression pattern for match detection. Not applicable if the rule is linked to a standard pattern."),
-    priority: str | None = Field(None, description="Severity level of detected matches, where 1 is highest priority and 5 is lowest.", ge=1, le=5),
+    priority: str | None = Field(None, description="Severity level of detected matches, where 1 is highest priority and 5 is lowest."),
     ends_with: list[str] | None = Field(None, description="Suppression list for matches ending with specified strings. Useful for filtering false positives by suffix."),
     exact_match: list[str] | None = Field(None, description="Suppression list for matches exactly matching specified strings. Prevents flagging known safe values."),
     starts_with: list[str] | None = Field(None, description="Suppression list for matches starting with specified strings. Useful for filtering false positives by prefix."),
     tags: list[str] | None = Field(None, description="Organizational tags for categorizing and filtering rules."),
-    number_of_chars: str | None = Field(None, description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero.", ge=0),
+    number_of_chars: str | None = Field(None, description="Number of characters to retain when using partial replacement masking. Required for partial_replacement_from_beginning or partial_replacement_from_end masking types. Must be greater than zero."),
     replacement_string: str | None = Field(None, description="Static string to replace matched sensitive data. Required when masking type is replacement_string."),
     should_save_match: bool | None = Field(None, description="When enabled with replacement_string masking, allows authorized users to unmask matches in logs. Use cautiously for highly sensitive, long-lived data."),
     data: dict[str, Any] | None = Field(None, description="Associates the rule with a scanning group for organizational management and policy application."),
@@ -28930,7 +28930,7 @@ async def list_security_signals_threat_hunting(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query to filter security signals by threat characteristics, status, or other signal attributes."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Start of the time range for retrieving security signals. Only signals at or after this timestamp will be included."),
     filter_to: str | None = Field(None, alias="filterto", description="End of the time range for retrieving security signals. Only signals at or before this timestamp will be included."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Useful for pagination and controlling response size.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Useful for pagination and controlling response size."),
 ) -> dict[str, Any]:
     """Retrieve historical security signals from your threat hunting data with optional filtering by query, time range, and result limits. Use this to search and analyze security events within specified parameters."""
 
@@ -28974,7 +28974,7 @@ async def list_security_signals_threat_hunting(
 async def search_security_signals(
     from_: str | None = Field(None, alias="from", description="Start of the time range for security signals. Only signals with timestamps at or after this value are included in results."),
     to: str | None = Field(None, description="End of the time range for security signals. Only signals with timestamps at or before this value are included in results."),
-    limit: str | None = Field(None, description="Maximum number of security signals to return in the response. Useful for pagination and controlling result set size.", le=1000),
+    limit: str | None = Field(None, description="Maximum number of security signals to return in the response. Useful for pagination and controlling result set size."),
 ) -> dict[str, Any]:
     """Search historical security signals within a specified time range. Returns matching signals up to the specified limit for threat hunting and investigation purposes."""
 
@@ -29322,7 +29322,7 @@ async def list_security_signals_by_job(
     filter_query: str | None = Field(None, alias="filterquery", description="Filter security signals using a search query syntax to match specific threat indicators and signal attributes."),
     filter_from: str | None = Field(None, alias="filterfrom", description="The earliest timestamp to include in results. Signals before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="The latest timestamp to include in results. Signals after this time are excluded."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in a single response. Useful for pagination and controlling response size.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in a single response. Useful for pagination and controlling response size."),
 ) -> dict[str, Any]:
     """Retrieve historical security signals for a specific threat hunting job. Results can be filtered by query, time range, and paginated for large result sets."""
 
@@ -29583,7 +29583,7 @@ async def list_spans(
     filter_query: str | None = Field(None, alias="filterquery", description="Search query using spans syntax to filter results by span attributes and tags."),
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of spans to return in a single response page.", le=1000),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of spans to return in a single response page."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of spans matching your search criteria. Use this endpoint to query your latest spans with filtering by time range and custom span syntax queries."""
 
@@ -29628,7 +29628,7 @@ async def search_spans(
     from_: str | None = Field(None, alias="from", description="The start of the time range for the search. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     to: str | None = Field(None, description="The end of the time range for the search. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     time_offset: str | None = Field(None, alias="timeOffset", description="An optional time offset in seconds to shift the query time range."),
-    limit: str | None = Field(None, description="The maximum number of spans to return in the response.", le=1000),
+    limit: str | None = Field(None, description="The maximum number of spans to return in the response."),
 ) -> dict[str, Any]:
     """Search and filter spans using complex query criteria with paginated results. This endpoint supports flexible time range queries and is rate limited to 300 requests per hour."""
 
@@ -31420,10 +31420,10 @@ async def create_network_test(
     min_location_failed: str | None = Field(None, description="Minimum number of test locations that must fail simultaneously to trigger an alert."),
     monitor_name: str | None = Field(None, description="Custom name for the associated monitor, used in alert titles and dashboard widgets. If not specified, defaults to the test name."),
     monitor_options: dict[str, Any] | None = Field(None, description="Configuration object for monitor-specific settings such as renotification intervals and notification preferences."),
-    monitor_priority: str | None = Field(None, description="Alert severity level for the test monitor, where 1 is highest priority and 5 is lowest.", ge=1, le=5),
+    monitor_priority: str | None = Field(None, description="Alert severity level for the test monitor, where 1 is highest priority and 5 is lowest."),
     retry: dict[str, Any] | None = Field(None, description="Configuration object defining retry behavior when the test fails, including retry count and interval settings."),
     scheduling: dict[str, Any] | None = Field(None, description="Configuration object for advanced scheduling, allowing tests to run on specific days and times within a defined timezone."),
-    tick_every: str | None = Field(None, description="Frequency in seconds at which the test executes. Must be between 30 seconds and 7 days.", ge=30, le=604800),
+    tick_every: str | None = Field(None, description="Frequency in seconds at which the test executes. Must be between 30 seconds and 7 days."),
     status: Literal["live", "paused"] | None = Field(None, description="Initial test state: 'live' to start monitoring immediately or 'paused' to defer execution."),
     subtype: Literal["tcp", "udp", "icmp"] | None = Field(None, description="Network protocol type for the test: 'tcp' for TCP connections, 'udp' for UDP packets, or 'icmp' for ping-style connectivity checks."),
     tags: list[str] | None = Field(None, description="Array of tags for organizing and filtering the test in dashboards and reports. Use key:value format for structured tagging."),
@@ -31526,10 +31526,10 @@ async def update_network_test(
     min_location_failed: str | None = Field(None, description="Minimum number of locations that must fail simultaneously to trigger an alert."),
     monitor_name: str | None = Field(None, description="Custom name for the associated monitor, used in alert titles and dashboard widgets."),
     monitor_options: dict[str, Any] | None = Field(None, description="Configuration object for monitor-specific settings such as renotification intervals and escalation policies."),
-    monitor_priority: str | None = Field(None, description="Alert severity level for the test monitor.", ge=1, le=5),
+    monitor_priority: str | None = Field(None, description="Alert severity level for the test monitor."),
     retry: dict[str, Any] | None = Field(None, description="Configuration object defining retry behavior when the test fails, including retry count and interval."),
     scheduling: dict[str, Any] | None = Field(None, description="Configuration object for advanced scheduling, including specific timeframes and timezone settings."),
-    tick_every: str | None = Field(None, description="Execution frequency of the test in seconds.", ge=30, le=604800),
+    tick_every: str | None = Field(None, description="Execution frequency of the test in seconds."),
     status: Literal["live", "paused"] | None = Field(None, description="Test execution state: use 'live' to run the test or 'paused' to disable it."),
     subtype: Literal["tcp", "udp", "icmp"] | None = Field(None, description="Network protocol type for the test."),
     tags: list[str] | None = Field(None, description="Array of tags for organizing and filtering the test in Datadog."),
@@ -32364,7 +32364,7 @@ async def add_team_link(
     label: str = Field(..., description="A descriptive label for the link, displayed to team members and visitors.", max_length=256),
     url: str = Field(..., description="The destination URL for the link. Must be a valid, fully-qualified web address."),
     type_: Literal["team_links"] = Field(..., alias="type", description="The classification type for this link. Currently only team links are supported."),
-    position: str | None = Field(None, description="The display order of the link within the team's link list. Lower values appear first. Omit to append at the end.", le=2147483647),
+    position: str | None = Field(None, description="The display order of the link within the team's link list. Lower values appear first. Omit to append at the end."),
 ) -> dict[str, Any]:
     """Add a new link to a team. Links are displayed on the team's profile and can be sorted by position."""
 
@@ -32454,7 +32454,7 @@ async def update_team_link(
     label: str = Field(..., description="A descriptive label for the link displayed to team members. Maximum 256 characters.", max_length=256),
     url: str = Field(..., description="The destination URL for the link. Must be a valid web address."),
     type_: Literal["team_links"] = Field(..., alias="type", description="The classification type for this team link. Currently only team links are supported."),
-    position: str | None = Field(None, description="The display order of the link within the team's link collection. Lower values appear first. Maximum value is 2,147,483,647.", le=2147483647),
+    position: str | None = Field(None, description="The display order of the link within the team's link collection. Lower values appear first. Maximum value is 2,147,483,647."),
 ) -> dict[str, Any]:
     """Update an existing team link with new label, URL, position, or type. Changes are applied immediately to the team's link collection."""
 
@@ -32719,7 +32719,7 @@ async def remove_team_member(
 @mcp.tool()
 async def list_flaky_tests(
     include_history: bool | None = Field(None, description="Include the complete status change history for each flaky test, ordered from most recent to oldest. Disabled by default for better performance."),
-    limit: str | None = Field(None, description="Maximum number of flaky tests to return in the response. Must be between 1 and 1000.", ge=1, le=1000),
+    limit: str | None = Field(None, description="Maximum number of flaky tests to return in the response. Must be between 1 and 1000."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of flaky tests from Flaky Test Management with comprehensive metadata including failure rates, pipeline impact, and optional status change history."""
 
@@ -32938,7 +32938,7 @@ async def list_hourly_usage(
     filter_include_descendants: bool | None = Field(None, alias="filterinclude_descendants", description="Include usage from child organizations in the response. When enabled, aggregates usage across the organizational hierarchy."),
     filter_include_connected_accounts: bool | None = Field(None, alias="filterinclude_connected_accounts", description="Include usage from accounts connected as partner customers in the Datadog partner network program. When enabled, aggregates usage across partner-connected accounts."),
     filter_include_breakdown: bool | None = Field(None, alias="filterinclude_breakdown", description="Include detailed breakdown of usage by subcategories where applicable. Currently supported for the logs product family only."),
-    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per page. Useful for paginating large result sets.", ge=1, le=500),
+    page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per page. Useful for paginating large result sets."),
     page_next_record_id: str | None = Field(None, alias="pagenext_record_id", description="Pagination token from a previous response. Use this to retrieve the next page of results when the response contains additional records."),
 ) -> dict[str, Any]:
     """Retrieve hourly usage metrics aggregated by product family for a specified time range. Supports filtering by product families, organizational hierarchy, and partner accounts with optional usage breakdowns."""
