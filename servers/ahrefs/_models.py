@@ -1,7 +1,7 @@
 """
 Ahrefs Api MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:13:05 UTC
+Generated: 2026-04-14 18:13:08 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

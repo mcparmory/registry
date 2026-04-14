@@ -1,6 +1,12 @@
 # Ahrefs API MCP Server
 
 Base URL: https://api.ahrefs.com
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 118 |
+| **Auth** | Bearer Token |
+
 ## API Info
 - **Terms of Service:** [https://ahrefs.com/terms](https://ahrefs.com/terms)
 
