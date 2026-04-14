@@ -1,6 +1,12 @@
 # Apollo MCP Server
 
 Base URL: https://api.apollo.io
+| | |
+|---|---|
+| **Category** | CRM & Sales |
+| **Tools** | 52 |
+| **Auth** | OAuth2, API Key |
+
 ---
 
 ## Install

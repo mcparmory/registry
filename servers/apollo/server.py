@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Apollo MCP Server
-Generated: 2026-04-09 17:13:58 UTC
+Generated: 2026-04-14 18:14:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -3281,7 +3281,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python apollo_rest_api_server.py", file=sys.stderr)
+        print("  python apollo_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
