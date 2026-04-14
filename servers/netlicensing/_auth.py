@@ -1,7 +1,7 @@
 """
 Authentication module for NetLicensing MCP server.
 
-Generated: 2026-04-09 17:28:31 UTC
+Generated: 2026-04-14 18:26:21 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -28,7 +28,7 @@ __all__ = [
 
 class BasicAuth:
     """
-    HTTP Basic Authentication for NetLicensing.
+    HTTP Basic Authentication for Labs64 NetLicensing RESTful API Test Center.
 
     Configuration:
         Credentials are automatically Base64-encoded.

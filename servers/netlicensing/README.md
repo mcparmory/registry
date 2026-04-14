@@ -1,6 +1,12 @@
 # NetLicensing MCP Server
 
 Base URL: https://go.netlicensing.io/core/v2/rest
+| | |
+|---|---|
+| **Category** | Legal & Compliance |
+| **Tools** | 40 |
+| **Auth** | HTTP Basic |
+
 ## API Info
 - **Terms of Service:** [https://www.labs64.com/legal/terms-of-service/netlicensing](https://www.labs64.com/legal/terms-of-service/netlicensing)
 
