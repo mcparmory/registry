@@ -1,6 +1,12 @@
 # Globalping MCP Server
 
 Base URL: https://api.globalping.io
+| | |
+|---|---|
+| **Category** | Infrastructure |
+| **Tools** | 3 |
+| **Auth** | OAuth2, Bearer Token |
+
 ## API Info
 - **API License:** Open Software License 3.0 (OSL-3.0)
 - **Terms of Service:** [https://github.com/jsdelivr/globalping](https://github.com/jsdelivr/globalping)

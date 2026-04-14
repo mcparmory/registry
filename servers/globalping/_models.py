@@ -1,7 +1,7 @@
 """
 Globalping MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:22:47 UTC
+Generated: 2026-04-14 18:23:05 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
