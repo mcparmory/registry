@@ -1,6 +1,12 @@
 # Bright Data MCP Server
 
 Base URL: https://api.brightdata.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 35 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install
