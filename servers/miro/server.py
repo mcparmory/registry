@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Miro MCP Server
-Generated: 2026-04-10 09:37:06 UTC
+Generated: 2026-04-14 18:26:04 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

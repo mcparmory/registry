@@ -1,6 +1,12 @@
 # Miro MCP Server
 
 Base URL: https://api.miro.com
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 176 |
+| **Auth** | OAuth2 |
+
 ---
 
 ## Install
