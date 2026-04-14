@@ -1,6 +1,12 @@
 # Airtable MCP Server
 
 Base URL: https://api.airtable.com
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 12 |
+| **Auth** | OAuth2, Bearer Token |
+
 ## API Info
 - **Terms of Service:** [https://www.airtable.com/tos](https://www.airtable.com/tos)
 

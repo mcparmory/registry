@@ -5,7 +5,7 @@ Airtable MCP Server
 API Info:
 - Terms of Service: https://www.airtable.com/tos
 
-Generated: 2026-04-09 17:12:58 UTC
+Generated: 2026-04-14 18:13:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
