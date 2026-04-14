@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 E2B MCP Server
-Generated: 2026-04-09 17:19:54 UTC
+Generated: 2026-04-14 18:20:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1165,8 +1165,8 @@ async def list_teams() -> dict[str, Any]:
 @mcp.tool()
 async def get_team_metrics(
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team for which to retrieve metrics."),
-    start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period.", ge=0),
-    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics interval. If omitted, defaults to the current time.", ge=0),
+    start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period."),
+    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics interval. If omitted, defaults to the current time."),
 ) -> dict[str, Any]:
     """Retrieve performance and activity metrics for a specific team over an optional time interval. If no time range is specified, returns metrics for the current period."""
 
@@ -1212,8 +1212,8 @@ async def get_team_metrics(
 async def get_team_metrics_maximum(
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team for which to retrieve metrics."),
     metric: Literal["concurrent_sandboxes", "sandbox_start_rate"] = Field(..., description="The specific metric to retrieve the maximum value for during the interval."),
-    start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the interval. If omitted, metrics from the earliest available data are included.", ge=0),
-    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the interval. If omitted, metrics up to the current time are included.", ge=0),
+    start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the interval. If omitted, metrics from the earliest available data are included."),
+    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the interval. If omitted, metrics up to the current time are included."),
 ) -> dict[str, Any]:
     """Retrieve the maximum value for a specified metric within a given time interval for a team. Useful for understanding peak performance or resource utilization."""
 
@@ -1309,7 +1309,7 @@ async def create_sandbox(
 async def list_sandboxes(
     metadata: str | None = Field(None, description="Filter sandboxes by metadata key-value pairs. Use URL encoding for both keys and values (e.g., user=abc&app=prod)."),
     state: list[Literal["running", "paused"]] | None = Field(None, description="Filter sandboxes by one or more states. Provide as an array of state values."),
-    limit: str | None = Field(None, description="Maximum number of sandboxes to return per page. Must be between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of sandboxes to return per page. Must be between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieve a list of all sandboxes with optional filtering by metadata and state. Results are paginated with a configurable limit."""
 
@@ -1396,8 +1396,8 @@ async def list_sandbox_metrics(sandbox_ids: Annotated[list[str], AfterValidator(
 @mcp.tool()
 async def list_sandbox_logs(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve logs."),
-    cursor: str | None = Field(None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time.", ge=0),
-    limit: str | None = Field(None, description="Maximum number of log entries to return in a single response.", ge=0, le=1000),
+    cursor: str | None = Field(None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time."),
+    limit: str | None = Field(None, description="Maximum number of log entries to return in a single response."),
     direction: Literal["forward", "backward"] | None = Field(None, description="Order in which logs should be returned relative to the cursor timestamp."),
 ) -> dict[str, Any]:
     """Retrieve logs from a specific sandbox with optional filtering by time range and result limit. Logs can be returned in forward or backward chronological order."""
@@ -1515,8 +1515,8 @@ async def terminate_sandbox(sandbox_id: str = Field(..., alias="sandboxID", desc
 @mcp.tool()
 async def get_sandbox_metrics(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve metrics."),
-    start: str | None = Field(None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data.", ge=0),
-    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics collection interval. If omitted, metrics are retrieved up to the current time.", ge=0),
+    start: str | None = Field(None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data."),
+    end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics collection interval. If omitted, metrics are retrieved up to the current time."),
 ) -> dict[str, Any]:
     """Retrieve performance and resource metrics for a specific sandbox over an optional time interval. Metrics are aggregated between the specified start and end timestamps."""
 
@@ -1597,7 +1597,7 @@ async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", descript
 @mcp.tool()
 async def connect_sandbox(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to connect to."),
-    timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value.", ge=0),
+    timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value."),
 ) -> dict[str, Any]:
     """Establish a connection to a sandbox and extend its time-to-live. If the sandbox is paused, it will be automatically resumed."""
 
@@ -1641,7 +1641,7 @@ async def connect_sandbox(
 @mcp.tool()
 async def set_sandbox_timeout(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to configure."),
-    timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer.", ge=0),
+    timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer."),
 ) -> dict[str, Any]:
     """Set the expiration time for a sandbox by specifying a timeout duration in seconds from the current request time. Calling this operation multiple times resets the sandbox's time-to-live (TTL), with each call using the current timestamp as the new starting point."""
 
@@ -1769,7 +1769,7 @@ async def create_sandbox_snapshot(
 @mcp.tool()
 async def list_snapshots(
     sandbox_id: str | None = Field(None, alias="sandboxID", description="Filter results to snapshots created from a specific sandbox ID."),
-    limit: str | None = Field(None, description="Number of snapshots to return per page. Useful for paginating through large result sets.", ge=1, le=100),
+    limit: str | None = Field(None, description="Number of snapshots to return per page. Useful for paginating through large result sets."),
 ) -> dict[str, Any]:
     """Retrieve all snapshots for your team, with optional filtering by source sandbox and pagination support."""
 
@@ -1813,8 +1813,8 @@ async def list_snapshots(
 async def create_template(
     name: str | None = Field(None, description="Name of the template. Optionally include a version tag using colon separator (e.g., 'my-template:v1'). If a tag is provided in the name, it will be added to the tags array automatically."),
     tags: list[str] | None = Field(None, description="Tags to assign to the template for organization and categorization. Tags help identify and group related templates."),
-    cpu_count: str | None = Field(None, alias="cpuCount", description="Number of CPU cores to allocate to the sandbox. Must be at least 1 core.", ge=1),
-    memory_mb: str | None = Field(None, alias="memoryMB", description="Memory to allocate to the sandbox in mebibytes (MiB). Must be at least 128 MiB.", ge=128),
+    cpu_count: str | None = Field(None, alias="cpuCount", description="Number of CPU cores to allocate to the sandbox. Must be at least 1 core."),
+    memory_mb: str | None = Field(None, alias="memoryMB", description="Memory to allocate to the sandbox in mebibytes (MiB). Must be at least 128 MiB."),
 ) -> dict[str, Any]:
     """Create a new template with optional resource specifications and organizational tags. Templates define sandbox configurations for reproducible environments."""
 
@@ -1935,7 +1935,7 @@ async def list_templates(team_id: str | None = Field(None, alias="teamID", descr
 @mcp.tool()
 async def list_template_builds(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve builds."),
-    limit: str | None = Field(None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieve all builds associated with a specific template. Use pagination to control the number of results returned per page."""
 
@@ -2106,8 +2106,8 @@ async def update_template(
 async def get_template_build_status(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template containing the build."),
     build_id: str = Field(..., alias="buildID", description="The unique identifier of the build whose status should be retrieved."),
-    logs_offset: str | None = Field(None, alias="logsOffset", description="The starting index for build logs to return. Use this to paginate through large log sets.", ge=0),
-    limit: str | None = Field(None, description="The maximum number of build logs to return in the response. Useful for controlling response size and pagination.", ge=0, le=100),
+    logs_offset: str | None = Field(None, alias="logsOffset", description="The starting index for build logs to return. Use this to paginate through large log sets."),
+    limit: str | None = Field(None, description="The maximum number of build logs to return in the response. Useful for controlling response size and pagination."),
     level: Literal["debug", "info", "warn", "error"] | None = Field(None, description="Filter logs by severity level. Returns only logs matching the specified level or higher priority."),
 ) -> dict[str, Any]:
     """Retrieve the current status and build logs for a specific template build. Returns build information with optional log filtering by offset, limit, and severity level."""
@@ -2154,8 +2154,8 @@ async def get_template_build_status(
 async def list_template_build_logs(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template containing the build."),
     build_id: str = Field(..., alias="buildID", description="The unique identifier of the build whose logs should be retrieved."),
-    cursor: str | None = Field(None, description="Starting point for log retrieval specified as a Unix timestamp in milliseconds. Logs returned will be from this timestamp onward (or backward, depending on direction).", ge=0),
-    limit: str | None = Field(None, description="Maximum number of log entries to return in a single response.", ge=0, le=100),
+    cursor: str | None = Field(None, description="Starting point for log retrieval specified as a Unix timestamp in milliseconds. Logs returned will be from this timestamp onward (or backward, depending on direction)."),
+    limit: str | None = Field(None, description="Maximum number of log entries to return in a single response."),
     direction: Literal["forward", "backward"] | None = Field(None, description="Order in which log entries should be returned relative to the cursor timestamp."),
     level: Literal["debug", "info", "warn", "error"] | None = Field(None, description="Filter logs by severity level. Only entries matching the specified level will be returned."),
     source: Literal["temporary", "persistent"] | None = Field(None, description="Filter logs by their storage source. Temporary logs are transient, while persistent logs are retained long-term."),

@@ -1,6 +1,12 @@
 # E2B MCP Server
 
 Base URL: https://api.e2b.app
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 43 |
+| **Auth** | API Key, Bearer Token |
+
 ---
 
 ## Install

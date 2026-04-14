@@ -1,7 +1,7 @@
 """
 E2b MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:19:54 UTC
+Generated: 2026-04-14 18:20:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -78,8 +78,8 @@ __all__ = [
 class GetTeamsMetricsRequestPath(StrictModel):
     team_id: str = Field(default=..., validation_alias="teamID", serialization_alias="teamID", description="The unique identifier of the team for which to retrieve metrics.")
 class GetTeamsMetricsRequestQuery(StrictModel):
-    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period.", ge=0, json_schema_extra={'format': 'int64'})
-    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the metrics interval. If omitted, defaults to the current time.", ge=0, json_schema_extra={'format': 'int64'})
+    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period.", json_schema_extra={'format': 'int64'})
+    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the metrics interval. If omitted, defaults to the current time.", json_schema_extra={'format': 'int64'})
 class GetTeamsMetricsRequest(StrictModel):
     """Retrieve performance and activity metrics for a specific team over an optional time interval. If no time range is specified, returns metrics for the current period."""
     path: GetTeamsMetricsRequestPath
@@ -89,8 +89,8 @@ class GetTeamsMetricsRequest(StrictModel):
 class GetTeamsMetricsMaxRequestPath(StrictModel):
     team_id: str = Field(default=..., validation_alias="teamID", serialization_alias="teamID", description="The unique identifier of the team for which to retrieve metrics.")
 class GetTeamsMetricsMaxRequestQuery(StrictModel):
-    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the start of the interval. If omitted, metrics from the earliest available data are included.", ge=0, json_schema_extra={'format': 'int64'})
-    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the interval. If omitted, metrics up to the current time are included.", ge=0, json_schema_extra={'format': 'int64'})
+    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the start of the interval. If omitted, metrics from the earliest available data are included.", json_schema_extra={'format': 'int64'})
+    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the interval. If omitted, metrics up to the current time are included.", json_schema_extra={'format': 'int64'})
     metric: Literal["concurrent_sandboxes", "sandbox_start_rate"] = Field(default=..., description="The specific metric to retrieve the maximum value for during the interval.")
 class GetTeamsMetricsMaxRequest(StrictModel):
     """Retrieve the maximum value for a specified metric within a given time interval for a team. Useful for understanding peak performance or resource utilization."""
@@ -120,7 +120,7 @@ class PostSandboxesRequest(StrictModel):
 class GetV2SandboxesRequestQuery(StrictModel):
     metadata: str | None = Field(default=None, description="Filter sandboxes by metadata key-value pairs. Use URL encoding for both keys and values (e.g., user=abc&app=prod).")
     state: list[Literal["running", "paused"]] | None = Field(default=None, description="Filter sandboxes by one or more states. Provide as an array of state values.")
-    limit: int | None = Field(default=None, description="Maximum number of sandboxes to return per page. Must be between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of sandboxes to return per page. Must be between 1 and 100.", json_schema_extra={'format': 'int32'})
 class GetV2SandboxesRequest(StrictModel):
     """Retrieve a list of all sandboxes with optional filtering by metadata and state. Results are paginated with a configurable limit."""
     query: GetV2SandboxesRequestQuery | None = None
@@ -136,8 +136,8 @@ class GetSandboxesMetricsRequest(StrictModel):
 class GetV2SandboxesLogsRequestPath(StrictModel):
     sandbox_id: str = Field(default=..., validation_alias="sandboxID", serialization_alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve logs.")
 class GetV2SandboxesLogsRequestQuery(StrictModel):
-    cursor: int | None = Field(default=None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time.", ge=0, json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="Maximum number of log entries to return in a single response.", ge=0, le=1000, json_schema_extra={'format': 'int32'})
+    cursor: int | None = Field(default=None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time.", json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of log entries to return in a single response.", json_schema_extra={'format': 'int32'})
     direction: Literal["forward", "backward"] | None = Field(default=None, description="Order in which logs should be returned relative to the cursor timestamp.")
 class GetV2SandboxesLogsRequest(StrictModel):
     """Retrieve logs from a specific sandbox with optional filtering by time range and result limit. Logs can be returned in forward or backward chronological order."""
@@ -162,8 +162,8 @@ class DeleteSandboxesRequest(StrictModel):
 class GetSandboxesBySandboxIdMetricsRequestPath(StrictModel):
     sandbox_id: str = Field(default=..., validation_alias="sandboxID", serialization_alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve metrics.")
 class GetSandboxesBySandboxIdMetricsRequestQuery(StrictModel):
-    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data.", ge=0, json_schema_extra={'format': 'int64'})
-    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the metrics collection interval. If omitted, metrics are retrieved up to the current time.", ge=0, json_schema_extra={'format': 'int64'})
+    start: int | None = Field(default=None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data.", json_schema_extra={'format': 'int64'})
+    end: int | None = Field(default=None, description="Unix timestamp in seconds marking the end of the metrics collection interval. If omitted, metrics are retrieved up to the current time.", json_schema_extra={'format': 'int64'})
 class GetSandboxesBySandboxIdMetricsRequest(StrictModel):
     """Retrieve performance and resource metrics for a specific sandbox over an optional time interval. Metrics are aggregated between the specified start and end timestamps."""
     path: GetSandboxesBySandboxIdMetricsRequestPath
@@ -180,7 +180,7 @@ class PostSandboxesPauseRequest(StrictModel):
 class PostSandboxesConnectRequestPath(StrictModel):
     sandbox_id: str = Field(default=..., validation_alias="sandboxID", serialization_alias="sandboxID", description="The unique identifier of the sandbox to connect to.")
 class PostSandboxesConnectRequestBody(StrictModel):
-    timeout: int = Field(default=..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value.", ge=0, json_schema_extra={'format': 'int32'})
+    timeout: int = Field(default=..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value.", json_schema_extra={'format': 'int32'})
 class PostSandboxesConnectRequest(StrictModel):
     """Establish a connection to a sandbox and extend its time-to-live. If the sandbox is paused, it will be automatically resumed."""
     path: PostSandboxesConnectRequestPath
@@ -190,7 +190,7 @@ class PostSandboxesConnectRequest(StrictModel):
 class PostSandboxesTimeoutRequestPath(StrictModel):
     sandbox_id: str = Field(default=..., validation_alias="sandboxID", serialization_alias="sandboxID", description="The unique identifier of the sandbox to configure.")
 class PostSandboxesTimeoutRequestBody(StrictModel):
-    timeout: int = Field(default=..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer.", ge=0, json_schema_extra={'format': 'int32'})
+    timeout: int = Field(default=..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer.", json_schema_extra={'format': 'int32'})
 class PostSandboxesTimeoutRequest(StrictModel):
     """Set the expiration time for a sandbox by specifying a timeout duration in seconds from the current request time. Calling this operation multiple times resets the sandbox's time-to-live (TTL), with each call using the current timestamp as the new starting point."""
     path: PostSandboxesTimeoutRequestPath
@@ -219,7 +219,7 @@ class PostSandboxesSnapshotsRequest(StrictModel):
 # Operation: list_snapshots
 class GetSnapshotsRequestQuery(StrictModel):
     sandbox_id: str | None = Field(default=None, validation_alias="sandboxID", serialization_alias="sandboxID", description="Filter results to snapshots created from a specific sandbox ID.")
-    limit: int | None = Field(default=None, description="Number of snapshots to return per page. Useful for paginating through large result sets.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Number of snapshots to return per page. Useful for paginating through large result sets.", json_schema_extra={'format': 'int32'})
 class GetSnapshotsRequest(StrictModel):
     """Retrieve all snapshots for your team, with optional filtering by source sandbox and pagination support."""
     query: GetSnapshotsRequestQuery | None = None
@@ -228,8 +228,8 @@ class GetSnapshotsRequest(StrictModel):
 class PostV3TemplatesRequestBody(StrictModel):
     name: str | None = Field(default=None, description="Name of the template. Optionally include a version tag using colon separator (e.g., 'my-template:v1'). If a tag is provided in the name, it will be added to the tags array automatically.")
     tags: list[str] | None = Field(default=None, description="Tags to assign to the template for organization and categorization. Tags help identify and group related templates.")
-    cpu_count: int | None = Field(default=None, validation_alias="cpuCount", serialization_alias="cpuCount", description="Number of CPU cores to allocate to the sandbox. Must be at least 1 core.", ge=1, json_schema_extra={'format': 'int32'})
-    memory_mb: int | None = Field(default=None, validation_alias="memoryMB", serialization_alias="memoryMB", description="Memory to allocate to the sandbox in mebibytes (MiB). Must be at least 128 MiB.", ge=128, json_schema_extra={'format': 'int32'})
+    cpu_count: int | None = Field(default=None, validation_alias="cpuCount", serialization_alias="cpuCount", description="Number of CPU cores to allocate to the sandbox. Must be at least 1 core.", json_schema_extra={'format': 'int32'})
+    memory_mb: int | None = Field(default=None, validation_alias="memoryMB", serialization_alias="memoryMB", description="Memory to allocate to the sandbox in mebibytes (MiB). Must be at least 128 MiB.", json_schema_extra={'format': 'int32'})
 class PostV3TemplatesRequest(StrictModel):
     """Create a new template with optional resource specifications and organizational tags. Templates define sandbox configurations for reproducible environments."""
     body: PostV3TemplatesRequestBody | None = None
@@ -253,7 +253,7 @@ class GetTemplatesRequest(StrictModel):
 class GetTemplatesByTemplateIdRequestPath(StrictModel):
     template_id: str = Field(default=..., validation_alias="templateID", serialization_alias="templateID", description="The unique identifier of the template for which to retrieve builds.")
 class GetTemplatesByTemplateIdRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class GetTemplatesByTemplateIdRequest(StrictModel):
     """Retrieve all builds associated with a specific template. Use pagination to control the number of results returned per page."""
     path: GetTemplatesByTemplateIdRequestPath
@@ -297,8 +297,8 @@ class GetTemplatesBuildsStatusRequestPath(StrictModel):
     template_id: str = Field(default=..., validation_alias="templateID", serialization_alias="templateID", description="The unique identifier of the template containing the build.")
     build_id: str = Field(default=..., validation_alias="buildID", serialization_alias="buildID", description="The unique identifier of the build whose status should be retrieved.")
 class GetTemplatesBuildsStatusRequestQuery(StrictModel):
-    logs_offset: int | None = Field(default=None, validation_alias="logsOffset", serialization_alias="logsOffset", description="The starting index for build logs to return. Use this to paginate through large log sets.", ge=0, json_schema_extra={'format': 'int32'})
-    limit: int | None = Field(default=None, description="The maximum number of build logs to return in the response. Useful for controlling response size and pagination.", ge=0, le=100, json_schema_extra={'format': 'int32'})
+    logs_offset: int | None = Field(default=None, validation_alias="logsOffset", serialization_alias="logsOffset", description="The starting index for build logs to return. Use this to paginate through large log sets.", json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of build logs to return in the response. Useful for controlling response size and pagination.", json_schema_extra={'format': 'int32'})
     level: Literal["debug", "info", "warn", "error"] | None = Field(default=None, description="Filter logs by severity level. Returns only logs matching the specified level or higher priority.")
 class GetTemplatesBuildsStatusRequest(StrictModel):
     """Retrieve the current status and build logs for a specific template build. Returns build information with optional log filtering by offset, limit, and severity level."""
@@ -310,8 +310,8 @@ class GetTemplatesBuildsLogsRequestPath(StrictModel):
     template_id: str = Field(default=..., validation_alias="templateID", serialization_alias="templateID", description="The unique identifier of the template containing the build.")
     build_id: str = Field(default=..., validation_alias="buildID", serialization_alias="buildID", description="The unique identifier of the build whose logs should be retrieved.")
 class GetTemplatesBuildsLogsRequestQuery(StrictModel):
-    cursor: int | None = Field(default=None, description="Starting point for log retrieval specified as a Unix timestamp in milliseconds. Logs returned will be from this timestamp onward (or backward, depending on direction).", ge=0, json_schema_extra={'format': 'int64'})
-    limit: int | None = Field(default=None, description="Maximum number of log entries to return in a single response.", ge=0, le=100, json_schema_extra={'format': 'int32'})
+    cursor: int | None = Field(default=None, description="Starting point for log retrieval specified as a Unix timestamp in milliseconds. Logs returned will be from this timestamp onward (or backward, depending on direction).", json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of log entries to return in a single response.", json_schema_extra={'format': 'int32'})
     direction: Literal["forward", "backward"] | None = Field(default=None, description="Order in which log entries should be returned relative to the cursor timestamp.")
     level: Literal["debug", "info", "warn", "error"] | None = Field(default=None, description="Filter logs by severity level. Only entries matching the specified level will be returned.")
     source: Literal["temporary", "persistent"] | None = Field(default=None, description="Filter logs by their storage source. Temporary logs are transient, while persistent logs are retained long-term.")
