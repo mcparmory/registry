@@ -1,6 +1,12 @@
 # Canvas MCP Server
 
 
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 696 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install
