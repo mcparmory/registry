@@ -1,7 +1,7 @@
 """
-Linkly Api Specification MCP Server - Pydantic Models
+Linkly MCP Server - Pydantic Models
 
-Generated: 2026-04-09 19:17:56 UTC
+Generated: 2026-04-14 18:25:25 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

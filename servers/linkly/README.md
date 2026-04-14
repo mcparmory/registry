@@ -1,6 +1,12 @@
 # Linkly MCP Server
 
 Base URL: https://app.linklyhq.com
+| | |
+|---|---|
+| **Category** | Analytics |
+| **Tools** | 18 |
+| **Auth** | API Key |
+
 ---
 
 ## Install
