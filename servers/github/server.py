@@ -7,7 +7,7 @@ API Info:
 - Contact: Support (https://support.github.com/contact?tags=dotcom-rest-api)
 - Terms of Service: https://docs.github.com/articles/github-terms-of-service
 
-Generated: 2026-04-09 17:23:14 UTC
+Generated: 2026-04-14 18:22:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

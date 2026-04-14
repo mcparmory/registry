@@ -1,6 +1,12 @@
 # GitHub MCP Server
 
 Base URL: https://api.github.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 929 |
+| **Auth** | OAuth2, Bearer Token, JWTBearerAuth |
+
 ## API Info
 - **API License:** MIT — [https://spdx.org/licenses/MIT](https://spdx.org/licenses/MIT)
 - **Contact:** Support — [https://support.github.com/contact?tags=dotcom-rest-api](https://support.github.com/contact?tags=dotcom-rest-api)
