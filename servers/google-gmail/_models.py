@@ -1,7 +1,7 @@
 """
-Gmail Api MCP Server - Pydantic Models
+Google Gmail MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:23:45 UTC
+Generated: 2026-04-14 18:23:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

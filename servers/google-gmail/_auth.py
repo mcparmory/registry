@@ -1,7 +1,7 @@
 """
 Authentication module for Google Gmail MCP server.
 
-Generated: 2026-04-09 17:23:45 UTC
+Generated: 2026-04-14 18:23:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -46,7 +46,7 @@ OAUTH2_CALLBACK_PORT = int(os.environ.get("OAUTH2_CALLBACK_PORT", 9400))
 
 class OAuth2Auth:
     """
-    OAuth 2.0 authentication for Google Gmail.
+    OAuth 2.0 authentication for Gmail API.
 
     Flow: authorizationCode
     Uses: authlib for OAuth2 protocol handling
@@ -152,8 +152,13 @@ class OAuth2Auth:
     def _save_token(self, token: dict) -> None:
         """Save token to disk with restricted permissions."""
         normalized = dict(token)
-        if "expires_in" in normalized and "expires_at" not in normalized:
-            normalized["expires_at"] = time.time() + int(normalized["expires_in"])
+        # Only set expires_at when expires_in is positive. A value of 0 (some
+        # providers return this for non-expiring tokens) would otherwise mark
+        # the token as immediately expired on every request.
+        if "expires_at" not in normalized:
+            expires_in = normalized.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                normalized["expires_at"] = time.time() + int(expires_in)
         self.token_dir.mkdir(parents=True, exist_ok=True)
         self.token_file.write_text(json.dumps(normalized, indent=2))
         self.token_file.chmod(0o600)
