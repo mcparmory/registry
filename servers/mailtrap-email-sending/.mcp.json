@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "mailtrap-email-sending": {
-      "command": "python",
-      "args": ["<SERVER_DIR>/server.py"]
-    }
-  }
-}
