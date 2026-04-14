@@ -1,7 +1,7 @@
 """
 Posthog Api MCP Server - Pydantic Models
 
-Generated: 2026-04-11 17:53:40 UTC
+Generated: 2026-04-14 19:06:20 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -21,8 +21,6 @@ __all__ = [
     "ActionsRetrieveRequest",
     "ActionsUpdateRequest",
     "ActivityLogListRequest",
-    "ActivityRetrieveRequest",
-    "AddProductIntentPartialUpdateRequest",
     "AdvancedActivityLogsListRequest",
     "AlertsCreateRequest",
     "AlertsDestroyRequest",
@@ -44,14 +42,10 @@ __all__ = [
     "BatchExportsBackfillsCreateRequest",
     "BatchExportsBackfillsListRequest",
     "BatchExportsBackfillsRetrieveRequest",
-    "BatchExportsCreate2Request",
-    "BatchExportsCreateRequest",
     "BatchExportsDestroy2Request",
     "BatchExportsDestroyRequest",
     "BatchExportsList2Request",
     "BatchExportsListRequest",
-    "BatchExportsLogsRetrieve2Request",
-    "BatchExportsLogsRetrieveRequest",
     "BatchExportsPartialUpdate2Request",
     "BatchExportsPartialUpdateRequest",
     "BatchExportsPauseCreate2Request",
@@ -60,19 +54,14 @@ __all__ = [
     "BatchExportsRetrieveRequest",
     "BatchExportsRunsCancelCreateRequest",
     "BatchExportsRunsListRequest",
-    "BatchExportsRunsLogsRetrieveRequest",
     "BatchExportsRunsRetrieveRequest",
     "BatchExportsRunsRetryCreateRequest",
     "BatchExportsRunTestStepCreate2Request",
     "BatchExportsRunTestStepCreateRequest",
     "BatchExportsRunTestStepNewCreateRequest",
-    "BatchExportsTestRetrieveRequest",
-    "BatchExportsUnpauseCreate2Request",
     "BatchExportsUnpauseCreateRequest",
     "BatchExportsUpdate2Request",
     "BatchExportsUpdateRequest",
-    "ChangeOrganizationCreateRequest",
-    "CodeInvitesRedeemCreateRequest",
     "CohortsActivityRetrieve2Request",
     "CohortsActivityRetrieveRequest",
     "CohortsAddPersonsToStaticCohortPartialUpdateRequest",
@@ -85,7 +74,6 @@ __all__ = [
     "CohortsRemovePersonFromStaticCohortPartialUpdateRequest",
     "CohortsRetrieveRequest",
     "CohortsUpdateRequest",
-    "CompleteProductOnboardingPartialUpdateRequest",
     "ConversationsCreateRequest",
     "ConversationsListRequest",
     "ConversationsRetrieveRequest",
@@ -94,22 +82,17 @@ __all__ = [
     "ConversationsTicketsListRequest",
     "ConversationsTicketsPartialUpdateRequest",
     "ConversationsTicketsRetrieveRequest",
-    "ConversationsTicketsSuggestReplyCreateRequest",
     "ConversationsTicketsUpdateRequest",
     "Create2Request",
     "CreateRequest",
-    "CreateSessionSummariesIndividuallyRequest",
-    "CreateSessionSummariesRequest",
     "CustomerProfileConfigsListRequest",
     "CustomerProfileConfigsRetrieveRequest",
     "DashboardsCollaboratorsCreate2Request",
-    "DashboardsCollaboratorsCreateRequest",
     "DashboardsCollaboratorsDestroy2Request",
     "DashboardsCollaboratorsDestroyRequest",
     "DashboardsCollaboratorsList2Request",
     "DashboardsCollaboratorsListRequest",
     "DashboardsCopyTileCreateRequest",
-    "DashboardsCreateFromTemplateJsonCreateRequest",
     "DashboardsCreateRequest",
     "DashboardsDestroyRequest",
     "DashboardsGenerateMetadataCreateRequest",
@@ -142,11 +125,6 @@ __all__ = [
     "DatasetsPartialUpdateRequest",
     "DatasetsRetrieveRequest",
     "DatasetsUpdateRequest",
-    "DefaultEvaluationContextsCreateRequest",
-    "DefaultEvaluationContextsDestroyRequest",
-    "DefaultReleaseConditionsRetrieveRequest",
-    "DefaultReleaseConditionsUpdateRequest",
-    "DeleteSecretTokenBackupPartialUpdateRequest",
     "DesktopRecordingsAppendSegmentsCreateRequest",
     "DesktopRecordingsCreateRequest",
     "DesktopRecordingsDestroyRequest",
@@ -161,9 +139,7 @@ __all__ = [
     "DomainsListRequest",
     "DomainsPartialUpdateRequest",
     "DomainsRetrieveRequest",
-    "DomainsScimLogsRetrieveRequest",
     "DomainsUpdateRequest",
-    "DomainsVerifyCreateRequest",
     "EarlyAccessFeatureCreateRequest",
     "EarlyAccessFeatureDestroyRequest",
     "EarlyAccessFeatureListRequest",
@@ -178,7 +154,6 @@ __all__ = [
     "ElementsStatsRetrieveRequest",
     "ElementsUpdateRequest",
     "ElementsValuesRetrieveRequest",
-    "EndpointsCreateRequest",
     "EndpointsDestroyRequest",
     "EndpointsListRequest",
     "EndpointsMaterializationPreviewCreateRequest",
@@ -228,32 +203,22 @@ __all__ = [
     "ErrorTrackingSuppressionRulesPartialUpdateRequest",
     "ErrorTrackingSuppressionRulesRetrieveRequest",
     "ErrorTrackingSuppressionRulesUpdateRequest",
-    "ErrorTrackingSymbolSetsBulkDeleteCreate2Request",
     "ErrorTrackingSymbolSetsBulkFinishUploadCreate2Request",
     "ErrorTrackingSymbolSetsBulkFinishUploadCreateRequest",
     "ErrorTrackingSymbolSetsBulkStartUploadCreate2Request",
     "ErrorTrackingSymbolSetsBulkStartUploadCreateRequest",
-    "ErrorTrackingSymbolSetsCreate2Request",
-    "ErrorTrackingSymbolSetsCreateRequest",
     "ErrorTrackingSymbolSetsDestroy2Request",
     "ErrorTrackingSymbolSetsDestroyRequest",
-    "ErrorTrackingSymbolSetsFinishUploadUpdate2Request",
-    "ErrorTrackingSymbolSetsFinishUploadUpdateRequest",
     "ErrorTrackingSymbolSetsList2Request",
     "ErrorTrackingSymbolSetsListRequest",
     "ErrorTrackingSymbolSetsPartialUpdate2Request",
     "ErrorTrackingSymbolSetsRetrieve2Request",
     "ErrorTrackingSymbolSetsRetrieveRequest",
-    "ErrorTrackingSymbolSetsStartUploadCreate2Request",
-    "ErrorTrackingSymbolSetsStartUploadCreateRequest",
-    "ErrorTrackingSymbolSetsUpdate2Request",
     "ErrorTrackingSymbolSetsUpdateRequest",
-    "EvaluationRunsCreateRequest",
     "EvaluationsCreateRequest",
     "EvaluationsListRequest",
     "EvaluationsPartialUpdateRequest",
     "EvaluationsRetrieveRequest",
-    "EvaluationsTestHogCreateRequest",
     "EvaluationsUpdateRequest",
     "EventDefinitionsByNameRetrieveRequest",
     "EventDefinitionsCreateRequest",
@@ -270,7 +235,6 @@ __all__ = [
     "EventSchemasPartialUpdateRequest",
     "EventSchemasUpdateRequest",
     "EventsRetrieveRequest",
-    "ExperimentHoldoutsCreateRequest",
     "ExperimentHoldoutsDestroyRequest",
     "ExperimentHoldoutsListRequest",
     "ExperimentHoldoutsPartialUpdateRequest",
@@ -304,10 +268,7 @@ __all__ = [
     "ExportsCreateRequest",
     "ExportsListRequest",
     "ExportsRetrieveRequest",
-    "ExternalDataSourcesConnectionsListRequest",
-    "ExternalDataSourcesCreateRequest",
     "ExternalDataSourcesCreateWebhookCreateRequest",
-    "ExternalDataSourcesDatabaseSchemaCreateRequest",
     "ExternalDataSourcesDeleteWebhookCreateRequest",
     "ExternalDataSourcesDestroyRequest",
     "ExternalDataSourcesJobsRetrieveRequest",
@@ -317,20 +278,13 @@ __all__ = [
     "ExternalDataSourcesReloadCreateRequest",
     "ExternalDataSourcesRetrieveRequest",
     "ExternalDataSourcesRevenueAnalyticsConfigPartialUpdateRequest",
-    "ExternalDataSourcesSourcePrefixCreateRequest",
     "ExternalDataSourcesUpdateRequest",
     "ExternalDataSourcesUpdateWebhookInputsCreateRequest",
     "ExternalDataSourcesWebhookInfoRetrieveRequest",
-    "ExternalDataSourcesWizardRetrieveRequest",
     "FeatureFlagsActivityRetrieve2Request",
     "FeatureFlagsActivityRetrieveRequest",
-    "FeatureFlagsBulkDeleteCreateRequest",
-    "FeatureFlagsBulkKeysCreateRequest",
     "FeatureFlagsCreateRequest",
-    "FeatureFlagsCreateStaticCohortForFlagCreateRequest",
-    "FeatureFlagsDashboardCreateRequest",
     "FeatureFlagsDependentFlagsListRequest",
-    "FeatureFlagsEnrichUsageDashboardCreateRequest",
     "FeatureFlagsEvaluationReasonsRetrieveRequest",
     "FeatureFlagsListRequest",
     "FeatureFlagsLocalEvaluationRetrieveRequest",
@@ -342,21 +296,14 @@ __all__ = [
     "FeatureFlagsStatusRetrieveRequest",
     "FeatureFlagsUpdateRequest",
     "FeatureFlagsUserBlastRadiusCreateRequest",
-    "FileSystemDestroyRequest",
-    "FileSystemLogViewCreateRequest",
-    "FileSystemPartialUpdateRequest",
     "FileSystemShortcutCreateRequest",
     "FileSystemShortcutDestroyRequest",
     "FileSystemShortcutListRequest",
     "FileSystemShortcutPartialUpdateRequest",
     "FileSystemShortcutRetrieveRequest",
     "FileSystemShortcutUpdateRequest",
-    "FileSystemUnfiledRetrieveRequest",
-    "FlagValueValuesRetrieveRequest",
-    "GenerateConversationsPublicTokenCreateRequest",
     "GroupsActivityRetrieveRequest",
     "GroupsCreateRequest",
-    "GroupsDeletePropertyCreateRequest",
     "GroupsFindRetrieveRequest",
     "GroupsListRequest",
     "GroupsPropertyDefinitionsRetrieveRequest",
@@ -369,39 +316,20 @@ __all__ = [
     "GroupsTypesMetricsPartialUpdateRequest",
     "GroupsTypesMetricsRetrieveRequest",
     "GroupsTypesMetricsUpdateRequest",
-    "GroupsTypesUpdateMetadataPartialUpdateRequest",
     "HealthIssuesListRequest",
     "HealthIssuesPartialUpdateRequest",
     "HealthIssuesRetrieveRequest",
     "HeatmapScreenshotsContentRetrieveRequest",
     "HeatmapsListRequest",
-    "HogFlowsBatchJobsCreateRequest",
-    "HogFlowsBatchJobsRetrieveRequest",
-    "HogFlowsBulkDeleteCreateRequest",
     "HogFlowsCreateRequest",
     "HogFlowsDestroyRequest",
-    "HogFlowsInvocationsCreateRequest",
     "HogFlowsListRequest",
-    "HogFlowsLogsRetrieveRequest",
-    "HogFlowsMetricsRetrieveRequest",
-    "HogFlowsMetricsTotalsRetrieveRequest",
     "HogFlowsPartialUpdateRequest",
     "HogFlowsRetrieveRequest",
-    "HogFlowsSchedulesCreateRequest",
-    "HogFlowsSchedulesDestroyRequest",
-    "HogFlowsSchedulesListRequest",
-    "HogFlowsSchedulesPartialUpdateRequest",
     "HogFlowsUpdateRequest",
-    "HogFlowsUserBlastRadiusCreateRequest",
     "HogFunctionsCreateRequest",
-    "HogFunctionsEnableBackfillsCreateRequest",
-    "HogFunctionsIconRetrieveRequest",
-    "HogFunctionsIconsRetrieveRequest",
     "HogFunctionsInvocationsCreateRequest",
     "HogFunctionsListRequest",
-    "HogFunctionsLogsRetrieveRequest",
-    "HogFunctionsMetricsRetrieveRequest",
-    "HogFunctionsMetricsTotalsRetrieveRequest",
     "HogFunctionsPartialUpdateRequest",
     "HogFunctionsRearrangePartialUpdateRequest",
     "HogFunctionsRetrieveRequest",
@@ -410,24 +338,18 @@ __all__ = [
     "HogFunctionTemplatesRetrieveRequest",
     "InsightsActivityRetrieve2Request",
     "InsightsActivityRetrieveRequest",
-    "InsightsAnalyzeRetrieveRequest",
-    "InsightsCancelCreateRequest",
     "InsightsCreateRequest",
     "InsightsDestroyRequest",
     "InsightsGenerateMetadataCreateRequest",
     "InsightsListRequest",
-    "InsightsMyLastViewedRetrieveRequest",
     "InsightsPartialUpdateRequest",
     "InsightsRetrieveRequest",
     "InsightsSharingListRequest",
     "InsightsSharingPasswordsCreateRequest",
     "InsightsSharingPasswordsDestroyRequest",
     "InsightsSharingRefreshCreateRequest",
-    "InsightsSuggestionsCreateRequest",
-    "InsightsSuggestionsRetrieveRequest",
     "InsightsThresholdsListRequest",
     "InsightsThresholdsRetrieveRequest",
-    "InsightsTrendingRetrieveRequest",
     "InsightsUpdateRequest",
     "InsightVariablesCreateRequest",
     "InsightVariablesDestroyRequest",
@@ -435,33 +357,16 @@ __all__ = [
     "InsightVariablesPartialUpdateRequest",
     "InsightVariablesRetrieveRequest",
     "InsightVariablesUpdateRequest",
-    "IntegrationsChannelsRetrieveRequest",
-    "IntegrationsClickupListsRetrieveRequest",
-    "IntegrationsClickupSpacesRetrieveRequest",
-    "IntegrationsClickupWorkspacesRetrieveRequest",
     "IntegrationsDestroyRequest",
-    "IntegrationsEmailPartialUpdateRequest",
-    "IntegrationsEnvironmentMappingPartialUpdateRequest",
     "IntegrationsGithubBranchesRetrieveRequest",
     "IntegrationsGithubReposRetrieveRequest",
-    "IntegrationsGoogleAccessibleAccountsRetrieveRequest",
-    "IntegrationsGoogleConversionActionsRetrieveRequest",
-    "IntegrationsJiraProjectsRetrieveRequest",
-    "IntegrationsLinearTeamsRetrieveRequest",
-    "IntegrationsLinkedinAdsAccountsRetrieveRequest",
-    "IntegrationsLinkedinAdsConversionRulesRetrieveRequest",
     "IntegrationsList2Request",
     "IntegrationsListRequest",
     "IntegrationsRetrieve2Request",
     "IntegrationsRetrieveRequest",
-    "IntegrationsTwilioPhoneNumbersRetrieveRequest",
-    "InvitesBulkCreateRequest",
     "InvitesCreateRequest",
     "InvitesDestroyRequest",
     "InvitesListRequest",
-    "IsGeneratingDemoDataRetrieveRequest",
-    "JsSnippetVersionPartialUpdateRequest",
-    "JsSnippetVersionRetrieveRequest",
     "List2Request",
     "ListRequest",
     "LiveDebuggerBreakpointsActiveRetrieveRequest",
@@ -480,7 +385,6 @@ __all__ = [
     "LlmAnalyticsClusteringJobsUpdateRequest",
     "LlmAnalyticsEvaluationConfigRetrieveRequest",
     "LlmAnalyticsEvaluationSummaryCreateRequest",
-    "LlmAnalyticsProviderKeysAssignCreateRequest",
     "LlmAnalyticsProviderKeysDependentConfigsRetrieveRequest",
     "LlmAnalyticsProviderKeysDestroyRequest",
     "LlmAnalyticsProviderKeysListRequest",
@@ -500,11 +404,9 @@ __all__ = [
     "LlmAnalyticsReviewQueuesRetrieveRequest",
     "LlmAnalyticsScoreDefinitionsCreateRequest",
     "LlmAnalyticsScoreDefinitionsListRequest",
-    "LlmAnalyticsScoreDefinitionsNewVersionCreateRequest",
     "LlmAnalyticsScoreDefinitionsPartialUpdateRequest",
     "LlmAnalyticsScoreDefinitionsRetrieveRequest",
     "LlmAnalyticsSentimentCreateRequest",
-    "LlmAnalyticsSummarizationBatchCheckCreateRequest",
     "LlmAnalyticsTraceReviewsCreateRequest",
     "LlmAnalyticsTraceReviewsDestroyRequest",
     "LlmAnalyticsTraceReviewsListRequest",
@@ -514,57 +416,32 @@ __all__ = [
     "LlmPromptsListRequest",
     "LlmPromptsNameArchiveCreateRequest",
     "LlmPromptsNameDuplicateCreateRequest",
-    "LlmPromptsNamePartialUpdateRequest",
     "LlmPromptsNameRetrieveRequest",
     "LlmPromptsResolveNameRetrieveRequest",
-    "LogsAlertsCreateRequest",
-    "LogsAlertsDestroyRequest",
-    "LogsAlertsListRequest",
-    "LogsAlertsPartialUpdateRequest",
-    "LogsAlertsRetrieveRequest",
-    "LogsAlertsUpdateRequest",
     "LogsAttributesRetrieveRequest",
     "LogsExplainLogWithAiCreateRequest",
-    "LogsExportCreateRequest",
     "LogsHasLogsRetrieveRequest",
-    "LogsQueryCreateRequest",
-    "LogsSparklineCreateRequest",
-    "LogsValuesRetrieveRequest",
     "LogsViewsCreateRequest",
     "LogsViewsDestroyRequest",
     "LogsViewsListRequest",
     "LogsViewsPartialUpdateRequest",
     "LogsViewsRetrieveRequest",
     "LogsViewsUpdateRequest",
-    "MaxToolsCreateAndQueryInsightCreateRequest",
     "MembersDestroyRequest",
     "MembersListRequest",
     "MembersPartialUpdateRequest",
-    "MembersScopedApiKeysRetrieveRequest",
     "MembersUpdateRequest",
     "NotebooksActivityRetrieve2Request",
-    "NotebooksActivityRetrieveRequest",
     "NotebooksCreateRequest",
     "NotebooksDestroyRequest",
-    "NotebooksHogqlExecuteCreateRequest",
-    "NotebooksKernelDataframeRetrieveRequest",
-    "NotebooksKernelExecuteCreateRequest",
-    "NotebooksKernelExecuteStreamCreateRequest",
-    "NotebooksKernelRestartCreateRequest",
-    "NotebooksKernelStartCreateRequest",
-    "NotebooksKernelStatusRetrieveRequest",
-    "NotebooksKernelStopCreateRequest",
     "NotebooksListRequest",
     "NotebooksPartialUpdateRequest",
-    "NotebooksRecordingCommentsRetrieveRequest",
     "NotebooksRetrieveRequest",
     "NotebooksUpdateRequest",
     "OauthApplicationsListRequest",
-    "ObjectMediaPreviewsCreateRequest",
     "ObjectMediaPreviewsDestroyRequest",
     "ObjectMediaPreviewsListRequest",
     "ObjectMediaPreviewsPartialUpdateRequest",
-    "ObjectMediaPreviewsPreferredForEventRetrieveRequest",
     "ObjectMediaPreviewsRetrieveRequest",
     "ObjectMediaPreviewsUpdateRequest",
     "PartialUpdate2Request",
@@ -577,22 +454,11 @@ __all__ = [
     "PersistedFolderUpdateRequest",
     "PersonsActivityRetrieve2Request",
     "PersonsActivityRetrieveRequest",
-    "PersonsBatchByDistinctIdsCreateRequest",
-    "PersonsBatchByUuidsCreateRequest",
-    "PersonsBulkDeleteCreateRequest",
     "PersonsCohortsRetrieveRequest",
     "PersonsDeletePropertyCreateRequest",
-    "PersonsFunnelCorrelationRetrieveRequest",
-    "PersonsFunnelRetrieveRequest",
-    "PersonsLifecycleRetrieveRequest",
     "PersonsListRequest",
-    "PersonsPropertiesAtTimeRetrieveRequest",
-    "PersonsPropertiesTimelineRetrieveRequest",
-    "PersonsResetPersonDistinctIdCreateRequest",
     "PersonsRetrieveRequest",
     "PersonsSplitCreateRequest",
-    "PersonsStickinessRetrieveRequest",
-    "PersonsTrendsRetrieveRequest",
     "PersonsUpdatePropertyCreateRequest",
     "PersonsUpdateRequest",
     "PersonsValuesRetrieveRequest",
@@ -602,37 +468,28 @@ __all__ = [
     "ProductToursDiscardDraftDestroyRequest",
     "ProductToursDraftPartialUpdateRequest",
     "ProductToursDraftStatusRetrieveRequest",
-    "ProductToursGenerateCreateRequest",
     "ProductToursListRequest",
     "ProductToursPartialUpdateRequest",
     "ProductToursPublishDraftCreateRequest",
     "ProductToursRetrieveRequest",
     "ProductToursUpdateRequest",
-    "ProjectSecretApiKeysCreateRequest",
     "ProjectSecretApiKeysDestroyRequest",
     "ProjectSecretApiKeysPartialUpdateRequest",
     "ProjectSecretApiKeysRetrieveRequest",
-    "ProjectSecretApiKeysRollCreateRequest",
     "ProjectSecretApiKeysUpdateRequest",
     "PropertyDefinitionsDestroyRequest",
     "PropertyDefinitionsListRequest",
     "PropertyDefinitionsPartialUpdateRequest",
     "PropertyDefinitionsRetrieveRequest",
-    "PropertyDefinitionsSeenTogetherRetrieveRequest",
     "PropertyDefinitionsUpdateRequest",
     "ProxyRecordsCreateRequest",
     "ProxyRecordsDestroyRequest",
     "ProxyRecordsListRequest",
     "ProxyRecordsRetrieveRequest",
     "PublicHogFunctionTemplatesListRequest",
-    "QueryCreate2Request",
     "QueryCreateRequest",
     "QueryDestroyRequest",
-    "QueryDraftSqlRetrieveRequest",
-    "QueryLogRetrieveRequest",
     "QueryRetrieveRequest",
-    "QueryUpgradeCreateRequest",
-    "ResetTokenPartialUpdateRequest",
     "Retrieve2Request",
     "RetrieveRequest",
     "RolesDestroyRequest",
@@ -642,16 +499,13 @@ __all__ = [
     "RolesRoleMembershipsDestroyRequest",
     "RolesRoleMembershipsListRequest",
     "RolesRoleMembershipsRetrieveRequest",
-    "RotateSecretTokenPartialUpdateRequest",
     "SandboxDestroyRequest",
-    "SandboxListRequest",
     "SandboxPartialUpdateRequest",
     "SandboxRetrieveRequest",
     "SavedCreateRequest",
     "SavedDestroyRequest",
     "SavedListRequest",
     "SavedPartialUpdateRequest",
-    "SavedRegenerateCreateRequest",
     "SavedRetrieveRequest",
     "SchemaPropertyGroupsCreateRequest",
     "SchemaPropertyGroupsDestroyRequest",
@@ -659,18 +513,13 @@ __all__ = [
     "SchemaPropertyGroupsPartialUpdateRequest",
     "SchemaPropertyGroupsRetrieveRequest",
     "SchemaPropertyGroupsUpdateRequest",
-    "SessionGroupSummariesCreateRequest",
     "SessionGroupSummariesDestroyRequest",
     "SessionGroupSummariesListRequest",
     "SessionGroupSummariesPartialUpdateRequest",
     "SessionGroupSummariesRetrieveRequest",
     "SessionGroupSummariesUpdateRequest",
-    "SessionRecordingPlaylistsCreateRequest",
-    "SessionRecordingPlaylistsDestroyRequest",
     "SessionRecordingPlaylistsListRequest",
     "SessionRecordingPlaylistsPartialUpdateRequest",
-    "SessionRecordingPlaylistsRecordingsCreateRequest",
-    "SessionRecordingPlaylistsRecordingsDestroyRequest",
     "SessionRecordingPlaylistsRecordingsRetrieveRequest",
     "SessionRecordingPlaylistsRetrieveRequest",
     "SessionRecordingPlaylistsUpdateRequest",
@@ -680,12 +529,9 @@ __all__ = [
     "SessionRecordingsRetrieveRequest",
     "SessionRecordingsSharingListRequest",
     "SessionRecordingsSharingPasswordsCreateRequest",
-    "SessionRecordingsSharingPasswordsDestroyRequest",
     "SessionRecordingsSharingRefreshCreateRequest",
     "SessionRecordingsUpdateRequest",
     "SessionsPropertyDefinitionsRetrieveRequest",
-    "SessionsValuesRetrieveRequest",
-    "SettingsAsOfRetrieveRequest",
     "SignalSourceConfigsCreateRequest",
     "SignalSourceConfigsDestroyRequest",
     "SignalSourceConfigsListRequest",
@@ -694,7 +540,6 @@ __all__ = [
     "SignalSourceConfigsUpdateRequest",
     "SubscriptionsCreateRequest",
     "SubscriptionsDestroyRequest",
-    "SubscriptionsListRequest",
     "SubscriptionsPartialUpdateRequest",
     "SubscriptionsRetrieveRequest",
     "SubscriptionsUpdateRequest",
@@ -703,7 +548,6 @@ __all__ = [
     "SurveysArchivedResponseUuidsRetrieveRequest",
     "SurveysCreateRequest",
     "SurveysDestroyRequest",
-    "SurveysDuplicateToProjectsCreateRequest",
     "SurveysListRequest",
     "SurveysPartialUpdateRequest",
     "SurveysResponsesArchiveCreateRequest",
@@ -737,27 +581,13 @@ __all__ = [
     "TasksUpdateRequest",
     "Update2Request",
     "UpdateRequest",
-    "UploadedMediaCreateRequest",
-    "UserInterviewsCreateRequest",
     "UserInterviewsDestroyRequest",
     "UserInterviewsListRequest",
     "UserInterviewsPartialUpdateRequest",
     "UserInterviewsRetrieveRequest",
     "UserInterviewsUpdateRequest",
-    "UsersCancelEmailChangeRequestPartialUpdateRequest",
-    "UsersDestroyRequest",
     "UsersListRequest",
-    "UsersPartialUpdateRequest",
     "UsersRequestEmailVerificationCreateRequest",
-    "UsersRetrieveRequest",
-    "UsersScenePersonalisationCreateRequest",
-    "UsersStart2faSetupRetrieveRequest",
-    "UsersTwoFactorBackupCodesCreateRequest",
-    "UsersTwoFactorStartSetupRetrieveRequest",
-    "UsersTwoFactorStatusRetrieveRequest",
-    "UsersTwoFactorValidateCreateRequest",
-    "UsersUpdateRequest",
-    "UsersValidate2faCreateRequest",
     "UsersVerifyEmailCreateRequest",
     "VisualReviewReposCreateRequest",
     "VisualReviewReposListRequest",
@@ -770,19 +600,13 @@ __all__ = [
     "VisualReviewRunsCreateRequest",
     "VisualReviewRunsListRequest",
     "VisualReviewRunsRetrieveRequest",
-    "VisualReviewRunsSnapshotHistoryListRequest",
     "VisualReviewRunsSnapshotsListRequest",
     "WarehouseSavedQueriesActivityRetrieveRequest",
-    "WarehouseSavedQueriesAncestorsCreateRequest",
-    "WarehouseSavedQueriesCancelCreateRequest",
     "WarehouseSavedQueriesCreateRequest",
-    "WarehouseSavedQueriesDependenciesRetrieveRequest",
-    "WarehouseSavedQueriesDescendantsCreateRequest",
     "WarehouseSavedQueriesDestroyRequest",
     "WarehouseSavedQueriesListRequest",
     "WarehouseSavedQueriesMaterializeCreateRequest",
     "WarehouseSavedQueriesPartialUpdateRequest",
-    "WarehouseSavedQueriesResumeSchedulesCreateRequest",
     "WarehouseSavedQueriesRetrieveRequest",
     "WarehouseSavedQueriesRevertMaterializationCreateRequest",
     "WarehouseSavedQueriesRunCreateRequest",
@@ -798,10 +622,8 @@ __all__ = [
     "WarehouseTablesFileCreateRequest",
     "WarehouseTablesListRequest",
     "WarehouseTablesPartialUpdateRequest",
-    "WarehouseTablesRefreshSchemaCreateRequest",
     "WarehouseTablesRetrieveRequest",
     "WarehouseTablesUpdateRequest",
-    "WarehouseTablesUpdateSchemaCreateRequest",
     "WebExperimentsCreateRequest",
     "WebExperimentsDestroyRequest",
     "WebExperimentsListRequest",
@@ -814,6 +636,7 @@ __all__ = [
     "ActorsPropertyTaxonomyQuery",
     "ActorsQuery",
     "AlertsCreateBodyCondition",
+    "AlertsCreateBodyConfig",
     "AlertsCreateBodyThreshold",
     "AlertsPartialUpdateBodyCondition",
     "AlertsUpdateBodyCondition",
@@ -849,7 +672,6 @@ __all__ = [
     "ErrorTrackingSimilarIssuesQuery",
     "EvaluationsCreateBodyModelConfiguration",
     "EvaluationsPartialUpdateBodyModelConfiguration",
-    "EvaluationsTestHogCreateBodyModelConfiguration",
     "EvaluationsUpdateBodyModelConfiguration",
     "EventMetadataPropertyFilter",
     "EventPropertyFilter",
@@ -873,8 +695,6 @@ __all__ = [
     "HogFlowAction",
     "HogFunctionsCreateBodyFilters",
     "HogFunctionsCreateBodyMasking",
-    "HogFunctionsEnableBackfillsCreateBodyFilters",
-    "HogFunctionsEnableBackfillsCreateBodyMasking",
     "HogFunctionsInvocationsCreateBodyConfiguration",
     "HogFunctionsPartialUpdateBodyFilters",
     "HogFunctionsPartialUpdateBodyMasking",
@@ -972,13 +792,6 @@ __all__ = [
 # Request Models
 # ============================================================================
 
-# Operation: redeem_invite_code
-class CodeInvitesRedeemCreateRequestBody(StrictModel):
-    code: str = Field(default=..., description="The invite code to redeem. Must be 50 characters or fewer.", max_length=50)
-class CodeInvitesRedeemCreateRequest(StrictModel):
-    """Redeem a PostHog invite code to activate access. Submit a valid code to enable the associated account or workspace permissions."""
-    body: CodeInvitesRedeemCreateRequestBody
-
 # Operation: list_conversations
 class ConversationsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the conversations. Obtain this ID by calling the /api/projects/ endpoint.")
@@ -1040,18 +853,6 @@ class DashboardsCollaboratorsListRequestPath(StrictModel):
 class DashboardsCollaboratorsListRequest(StrictModel):
     """Retrieve the list of collaborators who have access to a specific dashboard within a project. This shows all users with whom the dashboard is shared and their access permissions."""
     path: DashboardsCollaboratorsListRequestPath
-
-# Operation: add_collaborator_to_dashboard
-class DashboardsCollaboratorsCreateRequestPath(StrictModel):
-    dashboard_id: int = Field(default=..., description="The unique identifier of the dashboard to which you're adding a collaborator.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the dashboard. You can retrieve project IDs by calling the /api/projects/ endpoint.")
-class DashboardsCollaboratorsCreateRequestBody(StrictModel):
-    level: Literal[21, 37] = Field(default=..., description="The permission level for the collaborator, specified as an integer between 0 and 32767. Higher values typically grant greater permissions.", ge=0, le=32767)
-    user_uuid: str = Field(default=..., description="The UUID of the user to add as a collaborator. Must be a valid UUID format.", json_schema_extra={'format': 'uuid'})
-class DashboardsCollaboratorsCreateRequest(StrictModel):
-    """Grant a user access to a specific dashboard with a defined permission level. The user is identified by UUID and the access level determines their capabilities within the dashboard."""
-    path: DashboardsCollaboratorsCreateRequestPath
-    body: DashboardsCollaboratorsCreateRequestBody
 
 # Operation: remove_dashboard_collaborator
 class DashboardsCollaboratorsDestroyRequestPath(StrictModel):
@@ -1537,16 +1338,6 @@ class ErrorTrackingSymbolSetsListRequest(StrictModel):
     path: ErrorTrackingSymbolSetsListRequestPath
     query: ErrorTrackingSymbolSetsListRequestQuery | None = None
 
-# Operation: create_error_tracking_symbol_set
-class ErrorTrackingSymbolSetsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set will be created. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsCreateRequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier for the symbol set, typically used to associate the symbol set with a specific build, version, or release of your application.")
-class ErrorTrackingSymbolSetsCreateRequest(StrictModel):
-    """Create a new symbol set for error tracking in a project. Symbol sets are used to map obfuscated or minified code back to original source code for better error analysis."""
-    path: ErrorTrackingSymbolSetsCreateRequestPath
-    body: ErrorTrackingSymbolSetsCreateRequestBody
-
 # Operation: get_error_tracking_symbol_set
 class ErrorTrackingSymbolSetsRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the error tracking symbol set to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -1574,17 +1365,6 @@ class ErrorTrackingSymbolSetsDestroyRequest(StrictModel):
     """Permanently delete an error tracking symbol set from a project. This removes the symbol set and all associated symbol data used for error tracking."""
     path: ErrorTrackingSymbolSetsDestroyRequestPath
 
-# Operation: finish_symbol_set_upload
-class ErrorTrackingSymbolSetsFinishUploadUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the error tracking symbol set to finalize.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the symbol set. Retrieve available project IDs from the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsFinishUploadUpdateRequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier or token required to complete the upload operation.")
-class ErrorTrackingSymbolSetsFinishUploadUpdateRequest(StrictModel):
-    """Completes the upload process for an error tracking symbol set, finalizing the symbols for use in error tracking and analysis."""
-    path: ErrorTrackingSymbolSetsFinishUploadUpdateRequestPath
-    body: ErrorTrackingSymbolSetsFinishUploadUpdateRequestBody
-
 # Operation: finish_symbol_set_bulk_upload
 class ErrorTrackingSymbolSetsBulkFinishUploadCreateRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set upload is being finalized. Retrieve this ID from the /api/projects/ endpoint.")
@@ -1604,23 +1384,6 @@ class ErrorTrackingSymbolSetsBulkStartUploadCreateRequest(StrictModel):
     """Initiate a bulk upload process for error tracking symbol sets. This operation prepares the system to receive multiple symbol set files and returns upload credentials or a session reference for subsequent file uploads."""
     path: ErrorTrackingSymbolSetsBulkStartUploadCreateRequestPath
     body: ErrorTrackingSymbolSetsBulkStartUploadCreateRequestBody
-
-# Operation: start_symbol_set_upload
-class ErrorTrackingSymbolSetsStartUploadCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set will be uploaded. Retrieve this ID from the /api/projects/ endpoint if needed.")
-class ErrorTrackingSymbolSetsStartUploadCreateRequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier for the symbol set upload session, used to correlate and track the upload across multiple requests.")
-class ErrorTrackingSymbolSetsStartUploadCreateRequest(StrictModel):
-    """Initiates a symbol set upload for error tracking in a specified project. This operation prepares the system to receive symbol files and returns upload credentials or a session identifier for subsequent file transfers."""
-    path: ErrorTrackingSymbolSetsStartUploadCreateRequestPath
-    body: ErrorTrackingSymbolSetsStartUploadCreateRequestBody
-
-# Operation: create_evaluation_run
-class EvaluationRunsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project in which to create the evaluation run. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class EvaluationRunsCreateRequest(StrictModel):
-    """Create and enqueue a new evaluation run for a project. The request is validated and a Temporal workflow is asynchronously triggered to execute the evaluation."""
-    path: EvaluationRunsCreateRequestPath
 
 # Operation: list_evaluations
 class EvaluationsListRequestPath(StrictModel):
@@ -1698,24 +1461,6 @@ class EvaluationsPartialUpdateRequest(StrictModel):
     """Partially update an evaluation configuration within a project. Allows modification of evaluation settings such as type, enabled status, description, and associated configurations."""
     path: EvaluationsPartialUpdateRequestPath
     body: EvaluationsPartialUpdateRequestBody | None = None
-
-# Operation: test_hog_evaluation
-class EvaluationsTestHogCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the evaluation environment. Retrieve this ID from the /api/projects/ endpoint.")
-class EvaluationsTestHogCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A descriptive name for the evaluation. Must not exceed 400 characters.", max_length=400)
-    description: str | None = Field(default=None, description="An optional detailed explanation of what this evaluation measures or validates.")
-    enabled: bool | None = Field(default=None, description="Optional flag to indicate whether this evaluation should be active when saved.")
-    evaluation_type: Literal["llm_judge", "hog"] = Field(default=..., description="The type of evaluation logic to use. Must be either 'llm_judge' (LLM as a judge) or 'hog' (Hog code evaluation).")
-    evaluation_config: Any | None = Field(default=None, description="Optional configuration object specific to the chosen evaluation type, containing settings that control how the evaluation executes.")
-    output_type: Literal["boolean"] = Field(default=..., description="The format of the evaluation result. Currently supports 'boolean' for pass/fail outcomes.")
-    output_config: Any | None = Field(default=None, description="Optional configuration object that defines how the evaluation output should be structured or processed.")
-    conditions: Any | None = Field(default=None, description="Optional conditions or filters that determine when this evaluation should be applied to events.")
-    model_configuration: EvaluationsTestHogCreateBodyModelConfiguration | None = Field(default=None, description="Optional configuration for model-specific settings, applicable when using LLM-based evaluation types.")
-class EvaluationsTestHogCreateRequest(StrictModel):
-    """Validate Hog evaluation code against sample events to verify logic correctness before saving. This operation executes the evaluation without persisting it, allowing you to test and iterate on your evaluation rules."""
-    path: EvaluationsTestHogCreateRequestPath
-    body: EvaluationsTestHogCreateRequestBody
 
 # Operation: list_health_issues
 class HealthIssuesListRequestPath(StrictModel):
@@ -1883,18 +1628,6 @@ class LlmAnalyticsProviderKeysDestroyRequest(StrictModel):
     """Permanently delete an LLM provider API key from a project. This removes the stored credentials and disables any analytics collection using this key."""
     path: LlmAnalyticsProviderKeysDestroyRequestPath
 
-# Operation: assign_llm_provider_key_to_evaluations
-class LlmAnalyticsProviderKeysAssignCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the LLM provider key to assign.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the evaluations. Retrieve available project IDs from the /api/projects/ endpoint.")
-class LlmAnalyticsProviderKeysAssignCreateRequestBody(StrictModel):
-    provider: Literal["openai", "anthropic", "gemini", "openrouter", "fireworks"] = Field(default=..., description="The LLM provider associated with this key. Must be one of: openai, anthropic, gemini, openrouter, or fireworks.")
-    name: str = Field(default=..., description="A descriptive name for this key assignment. Maximum 255 characters.", max_length=255)
-class LlmAnalyticsProviderKeysAssignCreateRequest(StrictModel):
-    """Assign an LLM provider API key to evaluations within a project, optionally re-enabling them for use. This operation links a stored provider key to evaluation workflows."""
-    path: LlmAnalyticsProviderKeysAssignCreateRequestPath
-    body: LlmAnalyticsProviderKeysAssignCreateRequestBody
-
 # Operation: list_dependent_configs_for_provider_key
 class LlmAnalyticsProviderKeysDependentConfigsRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the LLM provider key to retrieve dependent configurations for.", json_schema_extra={'format': 'uuid'})
@@ -2057,17 +1790,6 @@ class LlmAnalyticsScoreDefinitionsPartialUpdateRequest(StrictModel):
     path: LlmAnalyticsScoreDefinitionsPartialUpdateRequestPath
     body: LlmAnalyticsScoreDefinitionsPartialUpdateRequestBody | None = None
 
-# Operation: create_score_definition_new_version
-class LlmAnalyticsScoreDefinitionsNewVersionCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the score definition to create a new version for.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The project ID that contains the score definition. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class LlmAnalyticsScoreDefinitionsNewVersionCreateRequestBody(StrictModel):
-    config: CategoricalScoreDefinitionConfig | NumericScoreDefinitionConfig | BooleanScoreDefinitionConfig = Field(default=..., description="The next immutable scorer configuration object that defines the scoring behavior for this new version.")
-class LlmAnalyticsScoreDefinitionsNewVersionCreateRequest(StrictModel):
-    """Create a new version of an existing LLM analytics score definition with an updated immutable scorer configuration. This allows you to evolve scoring logic while maintaining version history."""
-    path: LlmAnalyticsScoreDefinitionsNewVersionCreateRequestPath
-    body: LlmAnalyticsScoreDefinitionsNewVersionCreateRequestBody
-
 # Operation: analyze_sentiment_for_llm_outputs
 class LlmAnalyticsSentimentCreateRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the LLM outputs to analyze. Retrieve your project ID from the /api/projects/ endpoint.")
@@ -2078,18 +1800,6 @@ class LlmAnalyticsSentimentCreateRequest(StrictModel):
     """Analyze sentiment for one or more LLM outputs within a project. Performs sentiment analysis on the specified outputs at the requested analysis level (defaults to trace-level detail)."""
     path: LlmAnalyticsSentimentCreateRequestPath
     body: LlmAnalyticsSentimentCreateRequestBody
-
-# Operation: batch_check_cached_summaries
-class LlmAnalyticsSummarizationBatchCheckCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The project ID containing the traces. Find your project ID by calling the /api/projects/ endpoint.")
-class LlmAnalyticsSummarizationBatchCheckCreateRequestBody(StrictModel):
-    trace_ids: list[str] = Field(default=..., description="List of trace IDs to check for cached summaries. Up to 100 trace IDs can be checked in a single request.", max_length=100)
-    mode: Literal["minimal", "detailed"] | None = Field(default=None, description="The summary detail level to check for: either minimal (brief summaries) or detailed (comprehensive summaries). Defaults to minimal if not specified.")
-    model: str | None = Field(default=None, description="The LLM model identifier used to generate the cached summaries. Use this to filter results by a specific model if multiple models have generated summaries.")
-class LlmAnalyticsSummarizationBatchCheckCreateRequest(StrictModel):
-    """Check which traces have cached summaries available in batch. This endpoint validates multiple trace IDs against the summary cache, returning only those with existing summaries to avoid redundant LLM processing."""
-    path: LlmAnalyticsSummarizationBatchCheckCreateRequestPath
-    body: LlmAnalyticsSummarizationBatchCheckCreateRequestBody
 
 # Operation: list_trace_reviews
 class LlmAnalyticsTraceReviewsListRequestPath(StrictModel):
@@ -2175,17 +1885,6 @@ class LlmPromptsNameRetrieveRequestPath(StrictModel):
 class LlmPromptsNameRetrieveRequest(StrictModel):
     """Retrieve a specific LLM prompt configuration by its name within a project. Use this to fetch prompt details for execution or inspection."""
     path: LlmPromptsNameRetrieveRequestPath
-
-# Operation: update_llm_prompt_name
-class LlmPromptsNamePartialUpdateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the prompt. Retrieve available project IDs from the /api/projects/ endpoint.")
-    prompt_name: str = Field(default=..., description="The current name of the LLM prompt to update. Must not contain forward slashes.", pattern='^[^/]+$')
-class LlmPromptsNamePartialUpdateRequestBody(StrictModel):
-    base_version: int | None = Field(default=None, description="The latest version number of the prompt you are editing from, used to prevent concurrent modification conflicts. Must be at least 1.", ge=1)
-class LlmPromptsNamePartialUpdateRequest(StrictModel):
-    """Partially update the name of an LLM prompt within a project. Supports optimistic concurrency control via base version tracking."""
-    path: LlmPromptsNamePartialUpdateRequestPath
-    body: LlmPromptsNamePartialUpdateRequestBody | None = None
 
 # Operation: archive_llm_prompt_by_name
 class LlmPromptsNameArchiveCreateRequestPath(StrictModel):
@@ -2298,35 +1997,6 @@ class LogsViewsDestroyRequest(StrictModel):
     """Permanently delete a log view from a project. This operation removes the specified log view and cannot be undone."""
     path: LogsViewsDestroyRequestPath
 
-# Operation: create_and_query_insight
-class MaxToolsCreateAndQueryInsightCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the insight will be created and queried. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class MaxToolsCreateAndQueryInsightCreateRequest(StrictModel):
-    """Create a new insight and execute a query against it in a single operation. This combines insight creation with immediate querying to streamline analysis workflows."""
-    path: MaxToolsCreateAndQueryInsightCreateRequestPath
-
-# Operation: generate_session_summaries
-class CreateSessionSummariesRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the sessions to summarize. Retrieve this ID from the /api/projects/ endpoint if needed.")
-class CreateSessionSummariesRequestBody(StrictModel):
-    session_ids: list[str] = Field(default=..., description="An array of session IDs to include in the summary analysis. Provide between 1 and 300 session IDs; order is preserved for processing.", min_length=1, max_length=300)
-    focus_area: str | None = Field(default=None, description="An optional focus area to guide the summarization analysis, such as a specific user behavior, feature, or metric of interest. Limited to 500 characters.", max_length=500)
-class CreateSessionSummariesRequest(StrictModel):
-    """Generate an AI-powered summary across multiple session recordings to identify patterns and insights, producing a structured notebook of findings."""
-    path: CreateSessionSummariesRequestPath
-    body: CreateSessionSummariesRequestBody
-
-# Operation: generate_individual_session_summaries
-class CreateSessionSummariesIndividuallyRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the sessions. Retrieve this ID from the /api/projects/ endpoint if needed.")
-class CreateSessionSummariesIndividuallyRequestBody(StrictModel):
-    session_ids: list[str] = Field(default=..., description="Array of session IDs to summarize. Accepts between 1 and 300 session IDs per request. Order is preserved in processing.", min_length=1, max_length=300)
-    focus_area: str | None = Field(default=None, description="Optional thematic focus for the summarization analysis. When provided, summaries will emphasize this area. Limited to 500 characters.", max_length=500)
-class CreateSessionSummariesIndividuallyRequest(StrictModel):
-    """Generate AI-powered summaries for each session individually without grouping them together. Useful for analyzing session-specific insights with optional focus areas."""
-    path: CreateSessionSummariesIndividuallyRequestPath
-    body: CreateSessionSummariesIndividuallyRequestBody
-
 # Operation: list_user_interviews
 class UserInterviewsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the user interviews. Obtain this ID by calling the /api/projects/ endpoint.")
@@ -2337,18 +2007,6 @@ class UserInterviewsListRequest(StrictModel):
     """Retrieve a paginated list of user interviews for a specific project. Use limit and offset parameters to control pagination through the results."""
     path: UserInterviewsListRequestPath
     query: UserInterviewsListRequestQuery | None = None
-
-# Operation: create_user_interview
-class UserInterviewsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the interview will be created. Retrieve this ID by calling the /api/projects/ endpoint.")
-class UserInterviewsCreateRequestBody(StrictModel):
-    interviewee_emails: list[str] | None = Field(default=None, description="Optional list of email addresses for the interviewees participating in this interview. Provide as an array of valid email strings.")
-    summary: str | None = Field(default=None, description="Optional text summary or notes describing the interview content, purpose, or key takeaways.")
-    audio: str = Field(default=..., description="Required URI pointing to the audio file recording of the interview. Must be a valid URI format.", json_schema_extra={'format': 'uri'})
-class UserInterviewsCreateRequest(StrictModel):
-    """Create a new user interview record within a project environment. Requires an audio file URI and optionally accepts interviewee email addresses and a summary description."""
-    path: UserInterviewsCreateRequestPath
-    body: UserInterviewsCreateRequestBody
 
 # Operation: get_user_interview
 class UserInterviewsRetrieveRequestPath(StrictModel):
@@ -2490,29 +2148,6 @@ class BatchExportsListRequest(StrictModel):
     path: BatchExportsListRequestPath
     query: BatchExportsListRequestQuery | None = None
 
-# Operation: create_batch_export
-class BatchExportsCreateRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that will own this batch export.")
-class BatchExportsCreateRequestBodyDestination(StrictModel):
-    type_: Literal["S3", "Snowflake", "Postgres", "Redshift", "BigQuery", "Databricks", "AzureBlob", "Workflows", "HTTP", "NoOp"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The destination service where data will be exported. Supported destinations include cloud storage (S3, Azure Blob), data warehouses (Snowflake, BigQuery, Redshift, Databricks), databases (Postgres), HTTP endpoints, or internal workflows.")
-class BatchExportsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A human-readable name to identify this batch export job.")
-    model: Literal["events", "persons", "sessions"] | Literal[""] | None = Field(default=None, description="The type of data to export: events, persons, or sessions. If not specified, defaults to events.")
-    interval: Literal["hour", "day", "week", "every 5 minutes", "every 15 minutes"] = Field(default=..., description="How frequently the export should run: hourly, daily, weekly, every 5 minutes, or every 15 minutes.")
-    paused: bool | None = Field(default=None, description="Whether this batch export is currently paused. When paused, no new export runs will be triggered.")
-    start_at: str | None = Field(default=None, description="The earliest date and time (ISO 8601 format) when export runs can be triggered. Runs scheduled before this time will not execute.", json_schema_extra={'format': 'date-time'})
-    end_at: str | None = Field(default=None, description="The latest date and time (ISO 8601 format) when export runs can be triggered. Runs scheduled after this time will not execute.", json_schema_extra={'format': 'date-time'})
-    hogql_query: str | None = Field(default=None, description="An optional HogQL query to filter or transform the data being exported.")
-    filters: Any | None = Field(default=None, description="An optional set of filters to narrow down which data is included in the export.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone to use for scheduling export runs and interpreting start/end times.")
-    offset_day: int | None = Field(default=None, description="The number of days (0-6) to offset the export schedule. Useful for staggering exports across a week.", ge=0, le=6)
-    offset_hour: int | None = Field(default=None, description="The hour of the day (0-23) to offset the export schedule. Useful for running exports at specific times.", ge=0, le=23)
-    destination: BatchExportsCreateRequestBodyDestination
-class BatchExportsCreateRequest(StrictModel):
-    """Create a new batch export job to periodically export data (events, persons, or sessions) to a supported destination. The export will run on a specified interval until paused or the end date is reached."""
-    path: BatchExportsCreateRequestPath
-    body: BatchExportsCreateRequestBody
-
 # Operation: get_batch_export
 class BatchExportsRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the batch export to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -2575,14 +2210,6 @@ class BatchExportsDestroyRequestPath(StrictModel):
 class BatchExportsDestroyRequest(StrictModel):
     """Permanently delete a batch export job from an organization. This operation removes the batch export record and cannot be undone."""
     path: BatchExportsDestroyRequestPath
-
-# Operation: get_batch_export_logs
-class BatchExportsLogsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the batch export job whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the batch export job.")
-class BatchExportsLogsRetrieveRequest(StrictModel):
-    """Retrieve the logs for a specific batch export job, including processing details and any errors or warnings that occurred during execution."""
-    path: BatchExportsLogsRetrieveRequestPath
 
 # Operation: pause_batch_export
 class BatchExportsPauseCreateRequestPath(StrictModel):
@@ -2679,13 +2306,6 @@ class BatchExportsRunTestStepNewCreateRequest(StrictModel):
     path: BatchExportsRunTestStepNewCreateRequestPath
     body: BatchExportsRunTestStepNewCreateRequestBody
 
-# Operation: get_batch_exports_test
-class BatchExportsTestRetrieveRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization for which to retrieve batch export test information.")
-class BatchExportsTestRetrieveRequest(StrictModel):
-    """Retrieve test batch export configuration or status for an organization. This endpoint allows you to verify batch export settings and test connectivity before running production exports."""
-    path: BatchExportsTestRetrieveRequestPath
-
 # Operation: list_domains
 class DomainsListRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization whose domains should be retrieved.")
@@ -2763,31 +2383,6 @@ class DomainsDestroyRequest(StrictModel):
     """Permanently delete a domain from an organization. This operation removes the domain and all associated configuration."""
     path: DomainsDestroyRequestPath
 
-# Operation: list_scim_logs_for_domain
-class DomainsScimLogsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the domain for which to retrieve SCIM logs.", json_schema_extra={'format': 'uuid'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the domain.")
-class DomainsScimLogsRetrieveRequest(StrictModel):
-    """Retrieve SCIM (System for Cross-domain Identity Management) operation logs for a specific domain within an organization. This endpoint provides audit trail information for identity synchronization activities."""
-    path: DomainsScimLogsRetrieveRequestPath
-
-# Operation: verify_domain
-class DomainsVerifyCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the domain to verify.", json_schema_extra={'format': 'uuid'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the domain.")
-class DomainsVerifyCreateRequestBody(StrictModel):
-    domain: str = Field(default=..., description="The domain name to verify, up to 128 characters.", max_length=128)
-    jit_provisioning_enabled: bool | None = Field(default=None, description="Enable just-in-time user provisioning for this domain, allowing automatic user creation on first login.")
-    sso_enforcement: str | None = Field(default=None, description="SSO enforcement policy for the domain, up to 28 characters (e.g., 'optional', 'required').", max_length=28)
-    saml_entity_id: str | None = Field(default=None, description="SAML entity identifier for the identity provider, up to 512 characters.", max_length=512)
-    saml_acs_url: str | None = Field(default=None, description="SAML Assertion Consumer Service URL where the identity provider sends authentication responses, up to 512 characters.", max_length=512)
-    saml_x509_cert: str | None = Field(default=None, description="SAML X.509 certificate in PEM format for validating identity provider signatures.")
-    scim_enabled: bool | None = Field(default=None, description="Enable SCIM (System for Cross-domain Identity Management) for automated user and group provisioning.")
-class DomainsVerifyCreateRequest(StrictModel):
-    """Verify and configure a domain for an organization, enabling SSO and SCIM provisioning settings. This operation validates the domain and applies identity provider configuration."""
-    path: DomainsVerifyCreateRequestPath
-    body: DomainsVerifyCreateRequestBody
-
 # Operation: list_organization_integrations
 class IntegrationsListRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization whose integrations you want to retrieve.")
@@ -2806,14 +2401,6 @@ class IntegrationsRetrieveRequestPath(StrictModel):
 class IntegrationsRetrieveRequest(StrictModel):
     """Retrieve a specific organization-level integration by ID. Returns read-only details about integrations scoped to the entire organization, such as Vercel or AWS Marketplace integrations."""
     path: IntegrationsRetrieveRequestPath
-
-# Operation: update_integration_environment_mapping
-class IntegrationsEnvironmentMappingPartialUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the organization integration to update, provided as a UUID string.", json_schema_extra={'format': 'uuid'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the integration, provided as a UUID string.")
-class IntegrationsEnvironmentMappingPartialUpdateRequest(StrictModel):
-    """Partially update the environment mapping configuration for an organization-level integration. This allows you to modify how environments are mapped for integrations like Vercel or AWS Marketplace without replacing the entire configuration."""
-    path: IntegrationsEnvironmentMappingPartialUpdateRequestPath
 
 # Operation: list_organization_invites
 class InvitesListRequestPath(StrictModel):
@@ -2848,21 +2435,6 @@ class InvitesDestroyRequestPath(StrictModel):
 class InvitesDestroyRequest(StrictModel):
     """Revoke or delete a pending organization invite by its UUID. This removes the invitation and prevents the recipient from joining the organization using this invite."""
     path: InvitesDestroyRequestPath
-
-# Operation: send_bulk_invites
-class InvitesBulkCreateRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization to which users will be invited.")
-class InvitesBulkCreateRequestBody(StrictModel):
-    target_email: str = Field(default=..., description="The email address of the user to invite. Must be a valid email address with a maximum length of 254 characters.", max_length=254, json_schema_extra={'format': 'email'})
-    first_name: str | None = Field(default=None, description="The first name of the invited user. Maximum length is 30 characters.", max_length=30)
-    level: Literal[1, 8, 15] | None = Field(default=None, description="The permission level to grant the invited user within the organization. Must be a non-negative integer between 0 and 32767.", ge=0, le=32767)
-    message: str | None = Field(default=None, description="An optional custom message to include in the invitation sent to the user.")
-    private_project_access: Any | None = Field(default=None, description="A mapping of team IDs to access levels that grants the invited user access to specified private projects. Structure defines which private projects the user can access and at what permission level.")
-    combine_pending_invites: bool | None = Field(default=None, description="If true, consolidates any existing pending invitations for the target email address with this new invitation. Defaults to false.")
-class InvitesBulkCreateRequest(StrictModel):
-    """Send bulk invitations to users to join an organization, with optional access control to private projects and the ability to consolidate pending invites."""
-    path: InvitesBulkCreateRequestPath
-    body: InvitesBulkCreateRequestBody
 
 # Operation: list_organization_members
 class MembersListRequestPath(StrictModel):
@@ -2904,14 +2476,6 @@ class MembersDestroyRequestPath(StrictModel):
 class MembersDestroyRequest(StrictModel):
     """Remove a member from an organization by deleting their user account association. This operation permanently revokes the user's access to the organization."""
     path: MembersDestroyRequestPath
-
-# Operation: list_scoped_api_keys_for_member
-class MembersScopedApiKeysRetrieveRequestPath(StrictModel):
-    organization_id: str = Field(default=..., description="The unique identifier of the organization. This must be a valid UUID that identifies which organization's member to query.")
-    user__uuid: str = Field(default=..., description="The unique identifier of the member user. This must be a valid UUID format that specifies which member's scoped API keys to retrieve.", json_schema_extra={'format': 'uuid'})
-class MembersScopedApiKeysRetrieveRequest(StrictModel):
-    """Retrieve all scoped API keys associated with a specific member within an organization. Scoped API keys are restricted credentials that grant limited access to organization resources."""
-    path: MembersScopedApiKeysRetrieveRequestPath
 
 # Operation: list_oauth_applications
 class OauthApplicationsListRequestPath(StrictModel):
@@ -3067,295 +2631,6 @@ class Destroy2Request(StrictModel):
     """Permanently delete a project from the organization. This action cannot be undone and will remove all associated project data."""
     path: Destroy2RequestPath
 
-# Operation: get_project_activity
-class ActivityRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the project.")
-class ActivityRetrieveRequest(StrictModel):
-    """Retrieve the activity log for a specific project within an organization. This provides a historical record of changes and events associated with the project."""
-    path: ActivityRetrieveRequestPath
-
-# Operation: update_project_product_intent
-class AddProductIntentPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project to update. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The organization ID that owns the project. Required to scope the operation to the correct organization.")
-class AddProductIntentPartialUpdateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="Array of application URLs associated with this project. Used for domain-specific tracking and configuration.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for notifications and integrations. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="When enabled, anonymizes user IP addresses in tracking data for privacy compliance.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="When enabled, test account filters are checked by default in the UI.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone for the project, used for time-based reporting and scheduling. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user names in the UI.")
-    autocapture_opt_out: bool | None = Field(default=None, description="When enabled, disables automatic event capture on the web.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures Web Vitals metrics (LCP, FID, CLS).")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="When enabled, captures console log output for debugging purposes.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="When enabled, captures performance metrics and timing data.")
-    session_recording_opt_in: bool | None = Field(default=None, description="When enabled, enables session recording functionality for user behavior analysis.")
-    session_recording_sample_rate: str | None = Field(default=None, description="The sampling rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% of sessions). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When present, takes precedence over legacy trigger fields.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long session recordings are retained. Options: 30 days, 90 days, 1 year, or 5 years.")
-    access_control: bool | None = Field(default=None, description="When enabled, activates access control and permission management features.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="The day of the week that reports and analytics weeks start on (0-6, where 0 is Sunday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="The ID of the dashboard to set as the primary/default dashboard for this project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column configurations for the live events view.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domains where session recording is enabled.")
-    surveys_opt_in: bool | None = Field(default=None, description="When enabled, activates the surveys feature for collecting user feedback.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="When enabled, activates the heatmaps feature for visualizing user interactions.")
-    flags_persistence_default: bool | None = Field(default=None, description="When enabled, feature flags are persisted by default for users.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Indicates whether this project serves B2B (business-to-business) or B2C (business-to-consumer) customers. Used to optimize UI layout and features.")
-    conversations_enabled: bool | None = Field(default=None, description="When enabled, activates the conversations feature for user communication and support.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for the conversations feature.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="When enabled, activates proactive tasks and automated workflows.")
-class AddProductIntentPartialUpdateRequest(StrictModel):
-    """Partially update product intent settings for a project within an organization. Allows configuration of product metadata, tracking preferences, session recording, and feature flags."""
-    path: AddProductIntentPartialUpdateRequestPath
-    body: AddProductIntentPartialUpdateRequestBody | None = None
-
-# Operation: update_project_organization
-class ChangeOrganizationCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project to update. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The ID of the organization to move the project to.")
-class ChangeOrganizationCreateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product or service being tracked. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="List of application URLs where the tracking code is deployed. Order and format should match your deployment environment.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Webhook URL for Slack integration to receive notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="When enabled, anonymizes user IP addresses in tracked events for privacy compliance.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="When enabled, test account filters are checked by default in the analytics interface.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone for reporting and scheduling. Supports IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user names in the interface. Order determines display priority.")
-    autocapture_opt_out: bool | None = Field(default=None, description="When enabled, disables automatic event capture on web pages.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures Web Vitals metrics (LCP, FID, CLS) for performance monitoring.")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures browser console logs (log, warn, error) for debugging.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="When enabled, automatically captures performance metrics and timing data.")
-    session_recording_opt_in: bool | None = Field(default=None, description="When enabled, enables session recording functionality to capture user interactions.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Sampling rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% of sessions). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When present, takes precedence over legacy trigger fields.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long to retain session recordings. Options: 30 days, 90 days, 1 year, or 5 years.")
-    access_control: bool | None = Field(default=None, description="When enabled, enables role-based access control for team members and permissions management.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="The day of the week to use as the start of the week in reports and calendars (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="The ID of the dashboard to set as the primary/default dashboard for this project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events feed. Order determines column display sequence.")
-    recording_domains: list[str | None] | None = Field(default=None, description="List of domain names where session recording is enabled. Supports wildcard patterns for subdomains.")
-    surveys_opt_in: bool | None = Field(default=None, description="When enabled, enables survey and feedback collection features.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="When enabled, enables heatmap and click tracking features.")
-    flags_persistence_default: bool | None = Field(default=None, description="When enabled, feature flags are persisted in local storage by default.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Indicates whether this project serves B2B (business-to-business) or B2C (business-to-consumer) customers. Used to optimize the UI layout and features.")
-    conversations_enabled: bool | None = Field(default=None, description="When enabled, enables the conversations and messaging features for user communication.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for conversations feature including notification preferences and behavior.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="When enabled, enables proactive task management and automation features.")
-class ChangeOrganizationCreateRequest(StrictModel):
-    """Move a project to a different organization and update its configuration settings including product details, integrations, tracking preferences, and feature flags."""
-    path: ChangeOrganizationCreateRequestPath
-    body: ChangeOrganizationCreateRequestBody | None = None
-
-# Operation: update_project_onboarding_configuration
-class CompleteProductOnboardingPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project to update. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The organization ID that owns the project. Required to scope the operation to the correct organization.")
-class CompleteProductOnboardingPartialUpdateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="Array of application URLs associated with this project. Order is preserved.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Whether to anonymize user IP addresses in analytics.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Whether test account filters should be enabled by default in reports.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The project's primary timezone for reporting and scheduling. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user names in the UI. Order determines display priority.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Whether to disable automatic event capture on web pages.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Whether to capture JavaScript exceptions and errors automatically.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Whether to capture Core Web Vitals metrics (LCP, FID, CLS) automatically.")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Whether to capture browser console logs (log, warn, error) automatically.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Whether to capture performance timing data automatically.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Whether to enable session recording for this project.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Fraction of sessions to record, expressed as a decimal between 0 and 1 (e.g., 0.1 for 10%, 1 for 100%). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording begins. Range: 0 to 30000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When provided, takes precedence over legacy trigger fields.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long to retain session recordings. Options: 30 days, 90 days, 1 year, or 5 years.")
-    access_control: bool | None = Field(default=None, description="Whether to enable role-based access control for this project.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="The day of the week to use as the start of the week in reports and calendars (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="The ID of the dashboard to set as the primary/default dashboard for this project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events feed. Order determines column display sequence.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain patterns to allow session recording. Domains not in this list will not be recorded.")
-    surveys_opt_in: bool | None = Field(default=None, description="Whether to enable in-app surveys for this project.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Whether to enable heatmap tracking for this project.")
-    flags_persistence_default: bool | None = Field(default=None, description="Whether feature flags should persist across sessions by default.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model classification for UI optimization. Choose B2B for business-to-business, B2C for business-to-consumer, or Other.")
-    conversations_enabled: bool | None = Field(default=None, description="Whether to enable the conversations feature for this project.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for the conversations feature.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Whether to enable proactive tasks for this project.")
-class CompleteProductOnboardingPartialUpdateRequest(StrictModel):
-    """Partially update product onboarding settings for a project, including analytics configuration, session recording, feature flags, and UI preferences."""
-    path: CompleteProductOnboardingPartialUpdateRequestPath
-    body: CompleteProductOnboardingPartialUpdateRequestBody | None = None
-
-# Operation: update_project_settings_partial
-class DeleteSecretTokenBackupPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique numeric identifier of the project to update. Must be a valid 64-bit signed integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The organization identifier that owns the project.")
-class DeleteSecretTokenBackupPartialUpdateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="Array of URLs where the product is deployed or accessible.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for integration notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Enable automatic anonymization of user IP addresses in tracking data.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Whether test account filters should be enabled by default in analytics views.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="Project timezone for reporting and scheduling. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user identities throughout the application.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Disable automatic event capture across the application.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Enable capture of JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Enable collection of Web Vitals metrics (Core Web Vitals and performance data).")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Enable capture of browser console logs (log, warn, error messages).")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Enable collection of performance metrics and timing data.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Enable session recording functionality.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Sampling rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% sampling). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When provided, takes precedence over legacy trigger field settings.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="Data retention period for session recordings. Options: 30 days, 90 days, 1 year, or 5 years.")
-    access_control: bool | None = Field(default=None, description="Enable role-based access control for project members.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="Day of week to use as the start of reporting weeks (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="Dashboard ID to set as the primary/default dashboard for this project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column configurations for the live events view.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain patterns to include in session recording capture.")
-    surveys_opt_in: bool | None = Field(default=None, description="Enable surveys and feedback collection features.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Enable heatmap and click tracking features.")
-    flags_persistence_default: bool | None = Field(default=None, description="Enable persistent storage of feature flags across sessions.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model classification for UI optimization. Select B2B for business-to-business, B2C for business-to-consumer, or Other.")
-    conversations_enabled: bool | None = Field(default=None, description="Enable conversations and messaging features for user engagement.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for conversations functionality.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Enable proactive task management and automation features.")
-class DeleteSecretTokenBackupPartialUpdateRequest(StrictModel):
-    """Partially update project configuration settings for the specified organization and project. Allows selective modification of project properties including product details, integrations, tracking preferences, and feature flags without affecting unspecified fields."""
-    path: DeleteSecretTokenBackupPartialUpdateRequestPath
-    body: DeleteSecretTokenBackupPartialUpdateRequestBody | None = None
-
-# Operation: create_conversations_public_token
-class GenerateConversationsPublicTokenCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project (64-bit integer)", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The organization ID that owns the project")
-class GenerateConversationsPublicTokenCreateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product or service (up to 1000 characters)", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="List of application URLs where conversations will be enabled")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for sending conversation notifications (up to 500 characters)", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Whether to anonymize user IP addresses in conversation data")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Whether test account filters should be enabled by default")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone for conversation timestamps and scheduling (IANA timezone identifier)")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user names in conversations")
-    autocapture_opt_out: bool | None = Field(default=None, description="Whether to disable automatic event capture for conversations")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Whether to capture JavaScript exceptions in conversation sessions")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Whether to capture Web Vitals metrics during conversation sessions")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Whether to capture browser console logs during conversation sessions")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Whether to capture performance metrics during conversation sessions")
-    session_recording_opt_in: bool | None = Field(default=None, description="Whether to enable session recording for conversations")
-    session_recording_sample_rate: str | None = Field(default=None, description="Sample rate for session recording as a decimal between 0 and 1 (e.g., 0.5 for 50%)", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured (0-30000 ms)", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording; takes precedence over legacy trigger fields")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long to retain session recordings: 30 days, 90 days, 1 year, or 5 years")
-    access_control: bool | None = Field(default=None, description="Whether to enable access control for conversation data")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="The day of the week to use as the start of the week (0-6, where 0 is Sunday)", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="The ID of the primary dashboard for displaying conversation analytics")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events view")
-    recording_domains: list[str | None] | None = Field(default=None, description="List of domains where conversation recording is allowed")
-    surveys_opt_in: bool | None = Field(default=None, description="Whether to enable surveys in conversations")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Whether to enable heatmaps for conversation interactions")
-    flags_persistence_default: bool | None = Field(default=None, description="Whether feature flags should persist across conversation sessions by default")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model type to optimize UI layout: B2B, B2C, or other")
-    conversations_enabled: bool | None = Field(default=None, description="Whether conversations functionality is enabled for this project")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings specific to conversations behavior and features")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Whether proactive task automation is enabled for conversations")
-class GenerateConversationsPublicTokenCreateRequest(StrictModel):
-    """Generate a public token for conversations in a project, enabling secure access to conversation features with configurable settings for recording, analytics, and user tracking."""
-    path: GenerateConversationsPublicTokenCreateRequestPath
-    body: GenerateConversationsPublicTokenCreateRequestBody | None = None
-
-# Operation: get_project_demo_data_generation_status
-class IsGeneratingDemoDataRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project. Must be a valid 64-bit signed integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the project.")
-class IsGeneratingDemoDataRetrieveRequest(StrictModel):
-    """Check whether a project is currently generating demo data. Returns the generation status for the specified project within an organization."""
-    path: IsGeneratingDemoDataRetrieveRequestPath
-
-# Operation: update_project_reset_token
-class ResetTokenPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique numeric identifier of the project to update. Must be a valid 64-bit signed integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The organization identifier that owns the project. Required to scope the operation to the correct organization.")
-class ResetTokenPartialUpdateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product or service this project tracks. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="Array of application URLs associated with this project. Used for domain-based filtering and configuration.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for sending notifications and alerts. Maximum 500 characters. Must be a valid webhook endpoint.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Enable IP address anonymization for privacy compliance. When true, user IP addresses are masked in recordings and analytics.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Pre-check the test account filters option by default in the UI. Helps filter out internal testing traffic from analytics.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="Project timezone for scheduling and time-based reporting. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user identities throughout the application. Order determines display priority.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Disable automatic event capture globally. When true, only explicitly tracked events are recorded.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Enable automatic capture of JavaScript exceptions and errors. Provides visibility into application crashes and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Enable automatic capture of Web Vitals metrics (LCP, FID, CLS). Helps monitor core web performance indicators.")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Enable automatic capture of browser console logs. Useful for debugging and monitoring application behavior.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Enable automatic capture of performance metrics and timing data. Provides insights into application performance.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Enable session recording functionality. When true, user sessions are recorded for playback and analysis.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Sampling rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% of sessions). Helps manage storage and performance.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30000 milliseconds. Filters out very short sessions.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. Defines conditions that trigger automatic session recording. Takes precedence over legacy trigger fields if present.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="Data retention period for session recordings. Options: 30 days, 90 days, 1 year, or 5 years. Longer retention increases storage costs.")
-    access_control: bool | None = Field(default=None, description="Enable role-based access control for project members. When true, granular permission management is available.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="Day of week to use as the start of the week in reports and dashboards. Accepts numeric day values (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="Dashboard ID to set as the primary/default dashboard. Users see this dashboard first when accessing the project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events feed. Order determines column display sequence.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain patterns for which session recording is enabled. Restricts recording to specified domains only.")
-    surveys_opt_in: bool | None = Field(default=None, description="Enable surveys and feedback collection features. When true, survey tools are available for gathering user feedback.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Enable heatmaps and click tracking visualization. When true, visual heatmap analysis tools are available.")
-    flags_persistence_default: bool | None = Field(default=None, description="Enable persistent flag storage by default. When true, feature flags are retained across sessions.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model classification for UI optimization. Select 'b2b' for business-to-business, 'b2c' for business-to-consumer, or 'other' for alternative models.")
-    conversations_enabled: bool | None = Field(default=None, description="Enable conversations and user communication features. When true, in-app messaging and support tools are available.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for conversations feature. Defines behavior and options for user communication tools.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Enable proactive task management and automation. When true, automated task creation and workflow features are available.")
-class ResetTokenPartialUpdateRequest(StrictModel):
-    """Partially update project configuration and reset its authentication token. Allows modification of project settings such as product description, URLs, integrations, and feature flags while invalidating the current token."""
-    path: ResetTokenPartialUpdateRequestPath
-    body: ResetTokenPartialUpdateRequestBody | None = None
-
-# Operation: rotate_project_secret_token
-class RotateSecretTokenPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project to rotate the secret token for. Must be a valid 64-bit integer.", json_schema_extra={'format': 'int64'})
-    organization_id: str = Field(default=..., description="The unique identifier of the organization that owns the project.")
-class RotateSecretTokenPartialUpdateRequestBody(StrictModel):
-    product_description: str | None = Field(default=None, description="A brief description of the product. Maximum 1000 characters.", max_length=1000)
-    app_urls: list[str | None] | None = Field(default=None, description="List of URLs where the product is deployed or accessible.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for sending notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Whether to anonymize user IP addresses in analytics.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Whether test account filters should be enabled by default in the UI.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone for the project, used for time-based reporting and scheduling. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user names in the UI.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Whether to disable automatic event capture on the frontend.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Whether to enable capture of JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Whether to enable capture of Web Vitals metrics (Core Web Vitals).")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Whether to enable capture of browser console logs.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Whether to enable capture of performance metrics.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Whether to enable session recording.")
-    session_recording_sample_rate: str | None = Field(default=None, description="The sample rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% of sessions). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Must be between 0 and 30000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When provided, this takes precedence over legacy trigger field settings.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long to retain session recordings. Options: 30 days, 90 days, 1 year, or 5 years.")
-    access_control: bool | None = Field(default=None, description="Whether to enable access control and permission management for this project.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="The day of the week to use as the start of the week in reports and calendars (0-6, where 0 is Sunday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="The ID of the dashboard to set as the primary/default dashboard for this project.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events viewer.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain names where session recording is enabled.")
-    surveys_opt_in: bool | None = Field(default=None, description="Whether to enable surveys and feedback collection.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Whether to enable heatmaps and click tracking.")
-    flags_persistence_default: bool | None = Field(default=None, description="Whether feature flags should persist across sessions by default.")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="The business model for this project. Use 'b2b' for business-to-business, 'b2c' for business-to-consumer, or 'other' for different models. This optimizes the UI layout accordingly.")
-    conversations_enabled: bool | None = Field(default=None, description="Whether to enable conversations and user feedback features.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for conversations and feedback collection.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Whether to enable proactive task management and automation.")
-class RotateSecretTokenPartialUpdateRequest(StrictModel):
-    """Rotate the secret token for a project within an organization. This operation performs a partial update to project settings while rotating the authentication token used for API requests."""
-    path: RotateSecretTokenPartialUpdateRequestPath
-    body: RotateSecretTokenPartialUpdateRequestBody | None = None
-
 # Operation: list_proxy_records
 class ProxyRecordsListRequestPath(StrictModel):
     organization_id: str = Field(default=..., description="The unique identifier of the organization whose proxy records should be retrieved.")
@@ -3475,6 +2750,7 @@ class ActionsCreateRequestBody(StrictModel):
     slack_message_format: str | None = Field(default=None, description="Template string for customizing Slack notification content using event properties. Maximum 1200 characters.", max_length=1200)
     steps: list[ActionStepJson] | None = Field(default=None, description="Array of trigger conditions that define when the action executes. Each step matches events by name, properties, URL, or element attributes. Multiple steps are combined with OR logic, so the action triggers if any step matches.")
     pinned_at: str | None = Field(default=None, description="ISO 8601 formatted timestamp indicating when the action was pinned for visibility. Set a timestamp to pin the action, or null to unpin it.", json_schema_extra={'format': 'date-time'})
+    name: str | None = Field(default=None, description="Name of the action (must be unique within the project).", max_length=400)
 class ActionsCreateRequest(StrictModel):
     """Create a new action in a project that triggers automated workflows based on event matching. Actions can send Slack notifications and execute defined steps when specified conditions are met."""
     path: ActionsCreateRequestPath
@@ -3499,6 +2775,7 @@ class ActionsUpdateRequestBody(StrictModel):
     slack_message_format: str | None = Field(default=None, description="Custom message template for Slack notifications, supporting dynamic substitution of event properties. Limited to 1200 characters.", max_length=1200)
     steps: list[ActionStepJson] | None = Field(default=None, description="Array of trigger conditions that define when this action executes. Each step matches events by name, properties, URL, or element attributes. Multiple steps are combined with OR logic, so the action triggers if any step matches.")
     pinned_at: str | None = Field(default=None, description="ISO 8601 formatted timestamp indicating when the action was pinned for quick access. Set to any value to pin the action, or null to unpin it.", json_schema_extra={'format': 'date-time'})
+    name: str | None = Field(default=None, description="Name of the action (must be unique within the project).", max_length=400)
 class ActionsUpdateRequest(StrictModel):
     """Update an action's configuration, including its description, trigger steps, Slack notifications, and pinned status within a project."""
     path: ActionsUpdateRequestPath
@@ -3515,6 +2792,7 @@ class ActionsPartialUpdateRequestBody(StrictModel):
     slack_message_format: str | None = Field(default=None, description="Custom message template for Slack notifications, supporting dynamic event properties. Limited to 1200 characters.", max_length=1200)
     steps: list[ActionStepJson] | None = Field(default=None, description="An array of trigger steps that define when the action executes. Each step matches events by name, properties, URL, or element attributes. Multiple steps are combined with OR logic, so the action triggers if any step matches.")
     pinned_at: str | None = Field(default=None, description="ISO 8601 formatted timestamp indicating when the action was pinned, or null to unpin. Set any value to pin the action.", json_schema_extra={'format': 'date-time'})
+    name: str | None = Field(default=None, description="Name of the action (must be unique within the project).", max_length=400)
 class ActionsPartialUpdateRequest(StrictModel):
     """Partially update an action's configuration, including its description, trigger steps, Slack notifications, and pinned status within a specific project."""
     path: ActionsPartialUpdateRequestPath
@@ -3572,6 +2850,7 @@ class AlertsCreateRequestBody(StrictModel):
     calculation_interval: Literal["hourly", "daily", "weekly", "monthly"] | None = Field(default=None, description="The frequency at which the alert is evaluated: hourly, daily, weekly, or monthly. Determines how often the threshold is checked against current data.")
     snoozed_until: str | None = Field(default=None, description="Temporarily suppress alert notifications until the specified time. Accepts relative date strings (e.g., '2h' for 2 hours, '1d' for 1 day) or null to immediately unsnooze an active alert.")
     skip_weekend: bool | None = Field(default=None, description="Boolean flag to exclude weekends (Saturday and Sunday) from alert evaluation. Useful for business-focused metrics that are not relevant on non-working days.")
+    config: AlertsCreateBodyConfig | None = Field(default=None, description="Trends-specific alert configuration. Includes series_index (which series to monitor) and check_ongoing_interval (whether to check the current incomplete interval).")
 class AlertsCreateRequest(StrictModel):
     """Create a new alert for an insight that monitors a metric against a threshold and notifies subscribed users when the condition is met."""
     path: AlertsCreateRequestPath
@@ -3740,29 +3019,6 @@ class BatchExportsList2Request(StrictModel):
     path: BatchExportsList2RequestPath
     query: BatchExportsList2RequestQuery | None = None
 
-# Operation: create_batch_export_project
-class BatchExportsCreate2RequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the batch export will be created. Retrieve available project IDs from the /api/projects/ endpoint.")
-class BatchExportsCreate2RequestBodyDestination(StrictModel):
-    type_: Literal["S3", "Snowflake", "Postgres", "Redshift", "BigQuery", "Databricks", "AzureBlob", "Workflows", "HTTP", "NoOp"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The destination service where data will be exported. Supported destinations include cloud storage (S3, Azure Blob), data warehouses (Snowflake, BigQuery, Redshift, Databricks, Postgres), HTTP endpoints, or internal Workflows.")
-class BatchExportsCreate2RequestBody(StrictModel):
-    name: str = Field(default=..., description="A descriptive name for this batch export job to help identify it in your project.")
-    model: Literal["events", "persons", "sessions"] | Literal[""] | None = Field(default=None, description="The type of data model to export: events (raw event data), persons (user profiles), or sessions (user session data). Defaults to events if not specified.")
-    interval: Literal["hour", "day", "week", "every 5 minutes", "every 15 minutes"] = Field(default=..., description="The frequency at which the batch export runs: hourly, daily, weekly, every 5 minutes, or every 15 minutes.")
-    paused: bool | None = Field(default=None, description="Set to true to pause this batch export without deleting it. Paused exports will not trigger new runs until resumed.")
-    start_at: str | None = Field(default=None, description="The earliest date and time (ISO 8601 format) when batch export runs can be triggered. Runs scheduled before this time will not execute.", json_schema_extra={'format': 'date-time'})
-    end_at: str | None = Field(default=None, description="The latest date and time (ISO 8601 format) when batch export runs can be triggered. Runs scheduled after this time will not execute.", json_schema_extra={'format': 'date-time'})
-    hogql_query: str | None = Field(default=None, description="Optional HogQL query to filter or transform the data being exported. If provided, only data matching this query will be included in the export.")
-    filters: Any | None = Field(default=None, description="Optional filters to narrow the dataset being exported. Structure and format depend on the selected model type.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone to use for scheduling batch export runs. Affects when hourly, daily, and weekly intervals are triggered.")
-    offset_day: int | None = Field(default=None, description="Number of days (0-6) to offset the batch export schedule. Useful for staggering exports across a week.", ge=0, le=6)
-    offset_hour: int | None = Field(default=None, description="Hour of the day (0-23) to offset the batch export schedule in 24-hour format. Useful for scheduling exports at specific times.", ge=0, le=23)
-    destination: BatchExportsCreate2RequestBodyDestination
-class BatchExportsCreate2Request(StrictModel):
-    """Create a new batch export job to automatically export data (events, persons, or sessions) to a supported destination on a recurring schedule."""
-    path: BatchExportsCreate2RequestPath
-    body: BatchExportsCreate2RequestBody
-
 # Operation: list_backfills_for_batch_export
 class BatchExportsBackfillsListRequestPath(StrictModel):
     batch_export_id: str = Field(default=..., description="The unique identifier (UUID) of the batch export that contains the backfills you want to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -3847,15 +3103,6 @@ class BatchExportsRunsCancelCreateRequest(StrictModel):
     path: BatchExportsRunsCancelCreateRequestPath
     body: BatchExportsRunsCancelCreateRequestBody
 
-# Operation: get_batch_export_run_logs
-class BatchExportsRunsLogsRetrieveRequestPath(StrictModel):
-    batch_export_id: str = Field(default=..., description="The unique identifier (UUID) of the batch export that contains the run whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the specific batch export run whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class BatchExportsRunsLogsRetrieveRequest(StrictModel):
-    """Retrieve the logs for a specific batch export run. Logs provide detailed information about the execution and processing of the batch export job."""
-    path: BatchExportsRunsLogsRetrieveRequestPath
-
 # Operation: retry_batch_export_run
 class BatchExportsRunsRetryCreateRequestPath(StrictModel):
     batch_export_id: str = Field(default=..., description="The UUID of the batch export that contains the run to retry.", json_schema_extra={'format': 'uuid'})
@@ -3932,14 +3179,6 @@ class BatchExportsDestroy2Request(StrictModel):
     """Permanently delete a batch export job from a project. This operation removes the batch export record and cannot be undone."""
     path: BatchExportsDestroy2RequestPath
 
-# Operation: get_batch_export_logs_project
-class BatchExportsLogsRetrieve2RequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the batch export job whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the batch export. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class BatchExportsLogsRetrieve2Request(StrictModel):
-    """Retrieve the execution logs for a specific batch export job, including details about the export process and any errors or warnings that occurred."""
-    path: BatchExportsLogsRetrieve2RequestPath
-
 # Operation: pause_batch_export_project
 class BatchExportsPauseCreate2RequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the BatchExport to pause.", json_schema_extra={'format': 'uuid'})
@@ -3987,30 +3226,6 @@ class BatchExportsRunTestStepCreate2Request(StrictModel):
     """Execute a test run of a batch export configuration to validate the export settings and destination connectivity before scheduling production runs."""
     path: BatchExportsRunTestStepCreate2RequestPath
     body: BatchExportsRunTestStepCreate2RequestBody
-
-# Operation: unpause_batch_export_project
-class BatchExportsUnpauseCreate2RequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the batch export to unpause.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the batch export. Retrieve available project IDs from the /api/projects/ endpoint.")
-class BatchExportsUnpauseCreate2RequestBodyDestination(StrictModel):
-    type_: Literal["S3", "Snowflake", "Postgres", "Redshift", "BigQuery", "Databricks", "AzureBlob", "Workflows", "HTTP", "NoOp"] = Field(default=..., validation_alias="type", serialization_alias="type", description="The destination service where data will be exported: S3, Snowflake, Postgres, Redshift, BigQuery, Databricks, Azure Blob, Workflows, HTTP, or NoOp.")
-class BatchExportsUnpauseCreate2RequestBody(StrictModel):
-    name: str = Field(default=..., description="A human-readable name for the batch export.")
-    model: Literal["events", "persons", "sessions"] | Literal[""] | None = Field(default=None, description="The type of data being exported: events, persons, or sessions.")
-    interval: Literal["hour", "day", "week", "every 5 minutes", "every 15 minutes"] = Field(default=..., description="The frequency at which the batch export runs: hourly, daily, weekly, every 5 minutes, or every 15 minutes.")
-    paused: bool | None = Field(default=None, description="Whether the batch export is currently paused. Set to false to unpause.")
-    start_at: str | None = Field(default=None, description="The earliest time (ISO 8601 format) at which batch export runs can be triggered. Runs scheduled before this time will not execute.", json_schema_extra={'format': 'date-time'})
-    end_at: str | None = Field(default=None, description="The latest time (ISO 8601 format) at which batch export runs can be triggered. Runs scheduled after this time will not execute.", json_schema_extra={'format': 'date-time'})
-    hogql_query: str | None = Field(default=None, description="An optional HogQL query to filter the data being exported.")
-    filters: Any | None = Field(default=None, description="Optional filters to apply to the exported data.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="The timezone for scheduling batch export runs.")
-    offset_day: int | None = Field(default=None, description="Day offset for scheduling (0-6), where 0 represents the current day.", ge=0, le=6)
-    offset_hour: int | None = Field(default=None, description="Hour offset for scheduling (0-23), where 0 represents midnight.", ge=0, le=23)
-    destination: BatchExportsUnpauseCreate2RequestBodyDestination
-class BatchExportsUnpauseCreate2Request(StrictModel):
-    """Resume a paused batch export job, allowing it to continue exporting data on its configured schedule."""
-    path: BatchExportsUnpauseCreate2RequestPath
-    body: BatchExportsUnpauseCreate2RequestBody
 
 # Operation: list_cohorts
 class CohortsListRequestPath(StrictModel):
@@ -4201,14 +3416,6 @@ class ConversationsTicketsDestroyRequestPath(StrictModel):
 class ConversationsTicketsDestroyRequest(StrictModel):
     """Permanently delete a conversation ticket from a project. This action cannot be undone."""
     path: ConversationsTicketsDestroyRequestPath
-
-# Operation: suggest_reply_for_ticket
-class ConversationsTicketsSuggestReplyCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the ticket as a UUID string.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the ticket. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ConversationsTicketsSuggestReplyCreateRequest(StrictModel):
-    """Generate an AI-suggested reply for a specific conversation ticket. This operation uses the ticket context to produce a helpful response draft that can be reviewed before sending."""
-    path: ConversationsTicketsSuggestReplyCreateRequestPath
 
 # Operation: list_dashboard_templates
 class DashboardTemplatesListRequestPath(StrictModel):
@@ -4456,22 +3663,6 @@ class DashboardsReorderTilesCreateRequest(StrictModel):
     """Reorder the tiles displayed on a dashboard by specifying their desired sequence. Tiles are arranged top to bottom, left to right based on the provided order."""
     path: DashboardsReorderTilesCreateRequestPath
     body: DashboardsReorderTilesCreateRequestBody
-
-# Operation: create_dashboard_from_template_json
-class DashboardsCreateFromTemplateJsonCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the dashboard will be created. Retrieve this ID from the /api/projects/ endpoint.")
-class DashboardsCreateFromTemplateJsonCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional text description of the dashboard's purpose or content.")
-    pinned: bool | None = Field(default=None, description="Optional flag to pin the dashboard to the top of the dashboard list for quick access.")
-    breakdown_colors: Any | None = Field(default=None, description="Optional custom color mapping that defines how breakdown values are displayed in chart visualizations.")
-    data_color_theme_id: int | None = Field(default=None, description="Optional identifier for the color theme applied to all chart visualizations on the dashboard.")
-    tags: list[Any] | None = Field(default=None, description="Optional list of tags for organizing and categorizing the dashboard.")
-    restriction_level: Literal[21, 37] | None = Field(default=None, description="Optional access restriction level for the dashboard, ranging from 0 (least restrictive) to 32767 (most restrictive).", ge=0, le=32767)
-    quick_filter_ids: list[str] | None = Field(default=None, description="Optional list of quick filter IDs to be associated with and available on this dashboard for data filtering.")
-class DashboardsCreateFromTemplateJsonCreateRequest(StrictModel):
-    """Creates a new dashboard in a project by applying a JSON template configuration. Allows customization of appearance, filtering, and organization settings for the dashboard."""
-    path: DashboardsCreateFromTemplateJsonCreateRequestPath
-    body: DashboardsCreateFromTemplateJsonCreateRequestBody | None = None
 
 # Operation: list_data_color_themes
 class DataColorThemesListRequestPath(StrictModel):
@@ -4818,23 +4009,6 @@ class EndpointsListRequest(StrictModel):
     path: EndpointsListRequestPath
     query: EndpointsListRequestQuery | None = None
 
-# Operation: create_endpoint
-class EndpointsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the endpoint will be created. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class EndpointsCreateRequestBody(StrictModel):
-    query: Any | None = Field(default=None, description="The HogQL or insight query that this endpoint will execute. Modifying this query automatically creates a new endpoint version.")
-    description: str | None = Field(default=None, description="A human-readable explanation of what data or results this endpoint returns.")
-    cache_age_seconds: float | None = Field(default=None, description="How long (in seconds) to cache query results before refreshing. Must be between 60 and 86400 seconds.", json_schema_extra={'format': 'double'})
-    is_active: bool | None = Field(default=None, description="Set to true to make this endpoint available for API execution, or false to disable it.")
-    is_materialized: bool | None = Field(default=None, description="Set to true to persist query results to S3 for long-term storage and faster retrieval.")
-    sync_frequency: str | None = Field(default=None, description="How frequently materialized results should refresh, such as 'every_hour' or 'every_day'. Only applies when is_materialized is true.")
-    derived_from_insight: str | None = Field(default=None, description="The short ID of an existing insight to base this endpoint on. The endpoint will inherit the insight's query and configuration.")
-    bucket_overrides: dict[str, Any] | None = Field(default=None, description="A mapping of column names to bucket keys for customizing how range variables are materialized. Each key is a column name and each value specifies the bucketing strategy for that column.")
-class EndpointsCreateRequest(StrictModel):
-    """Create a new API endpoint that executes a HogQL or insight query. The endpoint can be configured with caching, materialization to S3, and refresh schedules."""
-    path: EndpointsCreateRequestPath
-    body: EndpointsCreateRequestBody | None = None
-
 # Operation: get_endpoint
 class EndpointsRetrieveRequestPath(StrictModel):
     name: str = Field(default=..., description="The URL-safe identifier for the endpoint. This name must match the endpoint's registered name in the project.")
@@ -4940,174 +4114,6 @@ class EndpointsVersionsListRequest(StrictModel):
     path: EndpointsVersionsListRequestPath
     query: EndpointsVersionsListRequestQuery | None = None
 
-# Operation: create_default_evaluation_contexts
-class DefaultEvaluationContextsCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="Unique integer identifier for the environment (team). Required to specify which team's evaluation contexts to configure.")
-    project_id: str = Field(default=..., description="Project ID string identifying the project being accessed. Retrieve from /api/projects/ if unknown.")
-class DefaultEvaluationContextsCreateRequestBodyRevenueAnalyticsConfig(StrictModel):
-    events: Any | None = Field(default=None, validation_alias="events", serialization_alias="events", description="Event configuration for tracking and analytics.")
-    goals: Any | None = Field(default=None, validation_alias="goals", serialization_alias="goals", description="Goals configuration for conversion tracking.")
-    filter_test_accounts: bool | None = Field(default=None, validation_alias="filter_test_accounts", serialization_alias="filter_test_accounts", description="Enable filtering of test accounts from analytics by default.")
-class DefaultEvaluationContextsCreateRequestBodyMarketingAnalyticsConfig(StrictModel):
-    sources_map: Any | None = Field(default=None, validation_alias="sources_map", serialization_alias="sources_map", description="Mapping of event sources for attribution and tracking.")
-    conversion_goals: Any | None = Field(default=None, validation_alias="conversion_goals", serialization_alias="conversion_goals", description="Conversion goals configuration for revenue and funnel analysis.")
-    attribution_window_days: int | None = Field(default=None, validation_alias="attribution_window_days", serialization_alias="attribution_window_days", description="Attribution window in days for crediting conversions to campaigns. Range: 1 to 90 days.", ge=1, le=90)
-    attribution_mode: Literal["first_touch", "last_touch"] | None = Field(default=None, validation_alias="attribution_mode", serialization_alias="attribution_mode", description="Attribution model for multi-touch attribution. Options: first_touch (credit first interaction) or last_touch (credit last interaction).")
-    campaign_name_mappings: Any | None = Field(default=None, validation_alias="campaign_name_mappings", serialization_alias="campaign_name_mappings", description="Custom mappings for campaign name parameters across different sources.")
-    custom_source_mappings: Any | None = Field(default=None, validation_alias="custom_source_mappings", serialization_alias="custom_source_mappings", description="Custom mappings for event sources and their properties.")
-    campaign_field_preferences: Any | None = Field(default=None, validation_alias="campaign_field_preferences", serialization_alias="campaign_field_preferences", description="User preferences for campaign field display and prioritization.")
-class DefaultEvaluationContextsCreateRequestBodyCustomerAnalyticsConfig(StrictModel):
-    activity_event: Any | None = Field(default=None, validation_alias="activity_event", serialization_alias="activity_event", description="Event configuration for tracking user activity and engagement.")
-    signup_pageview_event: Any | None = Field(default=None, validation_alias="signup_pageview_event", serialization_alias="signup_pageview_event", description="Event configuration for tracking signup pageview events.")
-    signup_event: Any | None = Field(default=None, validation_alias="signup_event", serialization_alias="signup_event", description="Event configuration for tracking signup completion events.")
-    subscription_event: Any | None = Field(default=None, validation_alias="subscription_event", serialization_alias="subscription_event", description="Event configuration for tracking subscription events.")
-    payment_event: Any | None = Field(default=None, validation_alias="payment_event", serialization_alias="payment_event", description="Event configuration for tracking payment and transaction events.")
-class DefaultEvaluationContextsCreateRequestBody(StrictModel):
-    access_control: bool | None = Field(default=None, description="Enable or disable access control for this environment.")
-    app_urls: list[str | None] | None = Field(default=None, description="Array of application URLs associated with this environment.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack incoming webhook URL for notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Anonymize IP addresses in analytics and session recordings.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Pre-check the test account filters option by default in the UI.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for this environment. Accepts IANA timezone identifiers (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user display names in the UI.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Disable automatic event capture for this environment.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Enable automatic capture of JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Enable automatic capture of Web Vitals metrics (LCP, FID, CLS).")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Enable automatic capture of browser console logs.")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Enable automatic capture of performance metrics.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Enable session recording for this environment.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Session recording sample rate as a decimal between 0 and 1 (e.g., 0.1 for 10% of sessions). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30,000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When present, takes precedence over legacy trigger fields.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="Session recording retention period. Options: 30 days, 90 days, 1 year, or 5 years.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="Day of week to start analytics weeks (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="ID of the dashboard to display as the primary dashboard for this environment.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column configurations for the live events view.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain patterns to include in session recording.")
-    cookieless_server_hash_mode: Literal[0, 1, 2] | None = Field(default=None, description="Cookieless server-side hash mode configuration.", ge=-32768, le=32767)
-    human_friendly_comparison_periods: bool | None = Field(default=None, description="Use human-friendly date range labels (e.g., 'Last 7 days') instead of exact date ranges in comparisons.")
-    surveys_opt_in: bool | None = Field(default=None, description="Enable surveys feature for this environment.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Enable heatmaps feature for this environment.")
-    flags_persistence_default: bool | None = Field(default=None, description="Persist feature flag values in local storage by default.")
-    feature_flag_confirmation_enabled: bool | None = Field(default=None, description="Require confirmation before deploying feature flag changes.")
-    feature_flag_confirmation_message: str | None = Field(default=None, description="Custom message to display when confirming feature flag changes.")
-    default_evaluation_contexts_enabled: bool | None = Field(default=None, description="Automatically apply default evaluation contexts to newly created feature flags.")
-    require_evaluation_contexts: bool | None = Field(default=None, description="Require at least one evaluation context tag when creating new feature flags.")
-    capture_dead_clicks: bool | None = Field(default=None, description="Enable automatic capture of dead clicks (clicks on non-interactive elements).")
-    default_data_theme: int | None = Field(default=None, description="ID of the default data visualization theme for this environment.", ge=-2147483648, le=2147483647)
-    base_currency: Literal["AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL", "BSD", "BTC", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY", "COP", "CRC", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LTL", "LVL", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MTL", "MUR", "MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SRD", "SSP", "STN", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF", "XPF", "YER", "ZAR", "ZMW"] | None = Field(default=None, description="Base currency for financial metrics and revenue tracking. Defaults to USD.")
-    onboarding_tasks: Any | None = Field(default=None, description="Onboarding tasks configuration for new users in this environment.")
-    experiment_recalculation_time: str | None = Field(default=None, description="Time of day in UTC (HH:MM format) when experiment metrics should be automatically recalculated. Uses default time if not specified.", json_schema_extra={'format': 'time'})
-    default_experiment_confidence_level: str | None = Field(default=None, description="Default statistical confidence level for new experiments in this environment. Valid values: 0.90 (90%), 0.95 (95%), or 0.99 (99%).", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    default_experiment_stats_method: Literal["bayesian", "frequentist"] | Literal[""] | None = Field(default=None, description="Default statistical method for analyzing new experiments. Options: bayesian (Bayesian inference) or frequentist (frequentist hypothesis testing).")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model classification for UI optimization. Options: b2b (business-to-business), b2c (business-to-consumer), or other.")
-    conversations_enabled: bool | None = Field(default=None, description="Enable conversations feature for team collaboration and feedback.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for conversations feature behavior and display.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Enable proactive task suggestions and recommendations for this environment.")
-    revenue_analytics_config: DefaultEvaluationContextsCreateRequestBodyRevenueAnalyticsConfig | None = None
-    marketing_analytics_config: DefaultEvaluationContextsCreateRequestBodyMarketingAnalyticsConfig | None = None
-    customer_analytics_config: DefaultEvaluationContextsCreateRequestBodyCustomerAnalyticsConfig | None = None
-class DefaultEvaluationContextsCreateRequest(StrictModel):
-    """Create default evaluation contexts for a team environment. These contexts are automatically applied to new feature flags and can be required when creating flags."""
-    path: DefaultEvaluationContextsCreateRequestPath
-    body: DefaultEvaluationContextsCreateRequestBody | None = None
-
-# Operation: delete_default_evaluation_context
-class DefaultEvaluationContextsDestroyRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the environment (team) whose default evaluation context should be deleted.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the environment. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class DefaultEvaluationContextsDestroyRequest(StrictModel):
-    """Remove a default evaluation context from an environment within a project. This operation deletes the specified evaluation context configuration for a team."""
-    path: DefaultEvaluationContextsDestroyRequestPath
-
-# Operation: get_environment_default_release_conditions
-class DefaultReleaseConditionsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the environment (team). This is a positive integer that uniquely identifies the environment within the project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the environment. Use the /api/projects/ endpoint to discover available project IDs.")
-class DefaultReleaseConditionsRetrieveRequest(StrictModel):
-    """Retrieve the default release conditions configured for new feature flags in a specific environment. These conditions define how new flags are rolled out to users by default."""
-    path: DefaultReleaseConditionsRetrieveRequestPath
-
-# Operation: update_environment_default_release_conditions
-class DefaultReleaseConditionsUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="Unique integer identifier for the environment (team). Required to specify which environment to update.")
-    project_id: str = Field(default=..., description="Project ID string identifying the project. Obtain from /api/projects/ endpoint. Required to access the correct project context.")
-class DefaultReleaseConditionsUpdateRequestBodyRevenueAnalyticsConfig(StrictModel):
-    events: Any | None = Field(default=None, validation_alias="events", serialization_alias="events", description="Event tracking configuration for analytics.")
-    goals: Any | None = Field(default=None, validation_alias="goals", serialization_alias="goals", description="Goals and conversion tracking configuration.")
-    filter_test_accounts: bool | None = Field(default=None, validation_alias="filter_test_accounts", serialization_alias="filter_test_accounts", description="Automatically filter out test account traffic from analytics by default.")
-class DefaultReleaseConditionsUpdateRequestBodyMarketingAnalyticsConfig(StrictModel):
-    sources_map: Any | None = Field(default=None, validation_alias="sources_map", serialization_alias="sources_map", description="Mapping of traffic sources to standardized source categories.")
-    conversion_goals: Any | None = Field(default=None, validation_alias="conversion_goals", serialization_alias="conversion_goals", description="Conversion goals configuration for funnel and attribution analysis.")
-    attribution_window_days: int | None = Field(default=None, validation_alias="attribution_window_days", serialization_alias="attribution_window_days", description="Attribution window in days for crediting conversions to campaigns. Range: 1 to 90 days.", ge=1, le=90)
-    attribution_mode: Literal["first_touch", "last_touch"] | None = Field(default=None, validation_alias="attribution_mode", serialization_alias="attribution_mode", description="Attribution model for multi-touch attribution: first_touch (credit first interaction) or last_touch (credit last interaction).")
-    campaign_name_mappings: Any | None = Field(default=None, validation_alias="campaign_name_mappings", serialization_alias="campaign_name_mappings", description="Custom mappings for campaign name parameters across different traffic sources.")
-    custom_source_mappings: Any | None = Field(default=None, validation_alias="custom_source_mappings", serialization_alias="custom_source_mappings", description="Custom mappings for non-standard source and medium parameters.")
-    campaign_field_preferences: Any | None = Field(default=None, validation_alias="campaign_field_preferences", serialization_alias="campaign_field_preferences", description="User preferences for which campaign fields to display and prioritize.")
-class DefaultReleaseConditionsUpdateRequestBodyCustomerAnalyticsConfig(StrictModel):
-    activity_event: Any | None = Field(default=None, validation_alias="activity_event", serialization_alias="activity_event", description="Event definition for tracking user activity and engagement.")
-    signup_pageview_event: Any | None = Field(default=None, validation_alias="signup_pageview_event", serialization_alias="signup_pageview_event", description="Event definition for tracking initial pageview during signup flow.")
-    signup_event: Any | None = Field(default=None, validation_alias="signup_event", serialization_alias="signup_event", description="Event definition for tracking user signup completion.")
-    subscription_event: Any | None = Field(default=None, validation_alias="subscription_event", serialization_alias="subscription_event", description="Event definition for tracking subscription or plan activation.")
-    payment_event: Any | None = Field(default=None, validation_alias="payment_event", serialization_alias="payment_event", description="Event definition for tracking payment transactions.")
-class DefaultReleaseConditionsUpdateRequestBody(StrictModel):
-    access_control: bool | None = Field(default=None, description="Enable or disable access control features for this environment.")
-    app_urls: list[str | None] | None = Field(default=None, description="Array of application URLs where feature flags and tracking should be active.")
-    slack_incoming_webhook: str | None = Field(default=None, description="Slack webhook URL for notifications. Maximum 500 characters.", max_length=500)
-    anonymize_ips: bool | None = Field(default=None, description="Automatically anonymize user IP addresses in analytics and session recordings.")
-    test_account_filters_default_checked: bool | None = Field(default=None, description="Pre-check the test account filter checkbox by default when creating new feature flags.")
-    timezone_: Literal["Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Asmera", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura", "Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala", "Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare", "Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville", "Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka", "Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane", "Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena", "Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo", "Africa/Sao_Tome", "Africa/Timbuktu", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek", "America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua", "America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/ComodRivadavia", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan", "America/Atka", "America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem", "America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota", "America/Boise", "America/Buenos_Aires", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun", "America/Caracas", "America/Catamarca", "America/Cayenne", "America/Cayman", "America/Chicago", "America/Chihuahua", "America/Ciudad_Juarez", "America/Coral_Harbour", "America/Cordoba", "America/Costa_Rica", "America/Creston", "America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson", "America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica", "America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Ensenada", "America/Fort_Nelson", "America/Fort_Wayne", "America/Fortaleza", "America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk", "America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil", "America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indianapolis", "America/Inuvik", "America/Iqaluit", "America/Jamaica", "America/Jujuy", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Knox_IN", "America/Kralendijk", "America/La_Paz", "America/Lima", "America/Los_Angeles", "America/Louisville", "America/Lower_Princes", "America/Maceio", "America/Managua", "America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros", "America/Mazatlan", "America/Mendoza", "America/Menominee", "America/Merida", "America/Metlakatla", "America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey", "America/Montevideo", "America/Montreal", "America/Montserrat", "America/Nassau", "America/New_York", "America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk", "America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo", "America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Acre", "America/Porto_Velho", "America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet", "America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco", "America/Rosario", "America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo", "America/Sao_Paulo", "America/Scoresbysund", "America/Shiprock", "America/Sitka", "America/St_Barthelemy", "America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas", "America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule", "America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola", "America/Vancouver", "America/Virgin", "America/Whitehorse", "America/Winnipeg", "America/Yakutat", "America/Yellowknife", "Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville", "Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole", "Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok", "Arctic/Longyearbyen", "Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Ashgabat", "Asia/Ashkhabad", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain", "Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek", "Asia/Brunei", "Asia/Calcutta", "Asia/Chita", "Asia/Choibalsan", "Asia/Chongqing", "Asia/Chungking", "Asia/Colombo", "Asia/Dacca", "Asia/Damascus", "Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta", "Asia/Gaza", "Asia/Harbin", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd", "Asia/Irkutsk", "Asia/Istanbul", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul", "Asia/Kamchatka", "Asia/Karachi", "Asia/Kashgar", "Asia/Kathmandu", "Asia/Katmandu", "Asia/Khandyga", "Asia/Kolkata", "Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait", "Asia/Macao", "Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat", "Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang", "Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Rangoon", "Asia/Riyadh", "Asia/Saigon", "Asia/Sakhalin", "Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk", "Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Tel_Aviv", "Asia/Thimbu", "Asia/Thimphu", "Asia/Tokyo", "Asia/Tomsk", "Asia/Ujung_Pandang", "Asia/Ulaanbaatar", "Asia/Ulan_Bator", "Asia/Urumqi", "Asia/Ust-Nera", "Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon", "Asia/Yekaterinburg", "Asia/Yerevan", "Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde", "Atlantic/Faeroe", "Atlantic/Faroe", "Atlantic/Jan_Mayen", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia", "Atlantic/St_Helena", "Atlantic/Stanley", "Australia/ACT", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Canberra", "Australia/Currie", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/LHI", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/NSW", "Australia/North", "Australia/Perth", "Australia/Queensland", "Australia/South", "Australia/Sydney", "Australia/Tasmania", "Australia/Victoria", "Australia/West", "Australia/Yancowinna", "Brazil/Acre", "Brazil/DeNoronha", "Brazil/East", "Brazil/West", "CET", "CST6CDT", "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific", "Canada/Saskatchewan", "Canada/Yukon", "Chile/Continental", "Chile/EasterIsland", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Etc/GMT", "Etc/GMT+0", "Etc/GMT+1", "Etc/GMT+10", "Etc/GMT+11", "Etc/GMT+12", "Etc/GMT+2", "Etc/GMT+3", "Etc/GMT+4", "Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7", "Etc/GMT+8", "Etc/GMT+9", "Etc/GMT-0", "Etc/GMT-1", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12", "Etc/GMT-13", "Etc/GMT-14", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT0", "Etc/Greenwich", "Etc/UCT", "Etc/UTC", "Etc/Universal", "Etc/Zulu", "Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens", "Europe/Belfast", "Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau", "Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey", "Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey", "Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv", "Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk", "Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo", "Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga", "Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo", "Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Tiraspol", "Europe/Ulyanovsk", "Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna", "Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb", "Europe/Zaporozhye", "Europe/Zurich", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos", "Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives", "Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "Mexico/BajaNorte", "Mexico/BajaSur", "Mexico/General", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham", "Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Enderbury", "Pacific/Fakaofo", "Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier", "Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Johnston", "Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro", "Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue", "Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau", "Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Ponape", "Pacific/Port_Moresby", "Pacific/Rarotonga", "Pacific/Saipan", "Pacific/Samoa", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu", "Pacific/Truk", "Pacific/Wake", "Pacific/Wallis", "Pacific/Yap", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "US/Alaska", "US/Aleutian", "US/Arizona", "US/Central", "US/East-Indiana", "US/Eastern", "US/Hawaii", "US/Indiana-Starke", "US/Michigan", "US/Mountain", "US/Pacific", "US/Samoa", "UTC", "Universal", "W-SU", "WET", "Zulu"] | None = Field(default=None, validation_alias="timezone", serialization_alias="timezone", description="Timezone for all time-based operations and reporting in this environment. Select from IANA timezone database (e.g., America/New_York, Europe/London, Asia/Tokyo).")
-    person_display_name_properties: list[str] | None = Field(default=None, description="Array of property names to use for displaying person/user identities throughout the interface.")
-    autocapture_opt_out: bool | None = Field(default=None, description="Disable automatic event capture for user interactions by default.")
-    autocapture_exceptions_opt_in: bool | None = Field(default=None, description="Enable automatic capture of JavaScript exceptions and errors.")
-    autocapture_web_vitals_opt_in: bool | None = Field(default=None, description="Enable automatic capture of Core Web Vitals metrics (LCP, FID, CLS).")
-    capture_console_log_opt_in: bool | None = Field(default=None, description="Enable automatic capture of browser console logs (errors, warnings, info).")
-    capture_performance_opt_in: bool | None = Field(default=None, description="Enable automatic capture of performance metrics and timing data.")
-    session_recording_opt_in: bool | None = Field(default=None, description="Enable session recording by default for new feature flags.")
-    session_recording_sample_rate: str | None = Field(default=None, description="Sample rate for session recordings as a decimal between 0 and 1 (e.g., 0.1 for 10% sampling). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    session_recording_minimum_duration_milliseconds: int | None = Field(default=None, description="Minimum session duration in milliseconds before recording is captured. Range: 0 to 30,000 milliseconds.", ge=0, le=30000)
-    session_recording_trigger_groups: Any | None = Field(default=None, description="V2 trigger groups configuration for session recording. When present, takes precedence over legacy trigger fields.")
-    session_recording_retention_period: Literal["30d", "90d", "1y", "5y"] | None = Field(default=None, description="How long to retain session recordings: 30 days, 90 days, 1 year, or 5 years.")
-    week_start_day: Literal[0, 1] | None = Field(default=None, description="Day of week when analytics weeks begin (0=Sunday through 6=Saturday).", ge=-32768, le=32767)
-    primary_dashboard: int | None = Field(default=None, description="Primary dashboard ID to display by default in this environment.")
-    live_events_columns: list[str] | None = Field(default=None, description="Array of column names to display in the live events feed.")
-    recording_domains: list[str | None] | None = Field(default=None, description="Array of domain names where session recording is permitted.")
-    cookieless_server_hash_mode: Literal[0, 1, 2] | None = Field(default=None, description="Hash mode for cookieless server-side tracking.", ge=-32768, le=32767)
-    human_friendly_comparison_periods: bool | None = Field(default=None, description="Use human-friendly date range labels (e.g., 'Last 7 days') instead of exact date ranges in comparisons.")
-    surveys_opt_in: bool | None = Field(default=None, description="Enable surveys and feedback collection features.")
-    heatmaps_opt_in: bool | None = Field(default=None, description="Enable heatmap and click tracking features.")
-    flags_persistence_default: bool | None = Field(default=None, description="Persist feature flag values across sessions by default for new flags.")
-    feature_flag_confirmation_enabled: bool | None = Field(default=None, description="Require confirmation dialog when releasing feature flags to production.")
-    feature_flag_confirmation_message: str | None = Field(default=None, description="Custom message to display in the feature flag release confirmation dialog.")
-    default_evaluation_contexts_enabled: bool | None = Field(default=None, description="Automatically apply default evaluation contexts to new feature flags for better targeting.")
-    require_evaluation_contexts: bool | None = Field(default=None, description="Require at least one evaluation context tag when creating new feature flags.")
-    capture_dead_clicks: bool | None = Field(default=None, description="Enable automatic detection and tracking of dead clicks (clicks on non-interactive elements).")
-    default_data_theme: int | None = Field(default=None, description="Default data visualization theme ID for charts and reports.", ge=-2147483648, le=2147483647)
-    base_currency: Literal["AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL", "BSD", "BTC", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY", "COP", "CRC", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LTL", "LVL", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MTL", "MUR", "MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SRD", "SSP", "STN", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF", "XPF", "YER", "ZAR", "ZMW"] | None = Field(default=None, description="Base currency for revenue and financial metrics. Defaults to USD.")
-    onboarding_tasks: Any | None = Field(default=None, description="Onboarding task configuration and progress tracking.")
-    experiment_recalculation_time: str | None = Field(default=None, description="Time of day in UTC (HH:MM format) when experiment metrics should be automatically recalculated. If not set, uses the system default.", json_schema_extra={'format': 'time'})
-    default_experiment_confidence_level: str | None = Field(default=None, description="Default statistical confidence level for new experiments: 0.90 (90%), 0.95 (95%), or 0.99 (99%). Supports up to 2 decimal places.", pattern='^-?\\d{0,1}(?:\\.\\d{0,2})?$', json_schema_extra={'format': 'decimal'})
-    default_experiment_stats_method: Literal["bayesian", "frequentist"] | Literal[""] | None = Field(default=None, description="Default statistical method for new experiments: bayesian (Bayesian inference) or frequentist (frequentist hypothesis testing).")
-    business_model: Literal["b2b", "b2c", "other"] | Literal[""] | None = Field(default=None, description="Business model classification: b2b (B2B SaaS), b2c (B2C consumer), or other. Used to optimize UI layout and defaults.")
-    conversations_enabled: bool | None = Field(default=None, description="Enable in-app conversations and messaging features for user engagement.")
-    conversations_settings: Any | None = Field(default=None, description="Configuration settings for in-app conversations and messaging behavior.")
-    proactive_tasks_enabled: bool | None = Field(default=None, description="Enable proactive task suggestions and recommendations based on usage patterns.")
-    revenue_analytics_config: DefaultReleaseConditionsUpdateRequestBodyRevenueAnalyticsConfig | None = None
-    marketing_analytics_config: DefaultReleaseConditionsUpdateRequestBodyMarketingAnalyticsConfig | None = None
-    customer_analytics_config: DefaultReleaseConditionsUpdateRequestBodyCustomerAnalyticsConfig | None = None
-class DefaultReleaseConditionsUpdateRequest(StrictModel):
-    """Configure default release conditions and feature flag settings for new feature flags created in this environment. This includes release behavior, data collection preferences, experiment defaults, and analytics configuration."""
-    path: DefaultReleaseConditionsUpdateRequestPath
-    body: DefaultReleaseConditionsUpdateRequestBody | None = None
-
-# Operation: get_environment_settings_at_timestamp
-class SettingsAsOfRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier for the environment (team) within the project.")
-    project_id: str = Field(default=..., description="The project identifier that contains the target environment. Use the /api/projects/ endpoint to discover available project IDs.")
-class SettingsAsOfRetrieveRequest(StrictModel):
-    """Retrieve team settings for a specific environment as they existed at a given point in time, with optional filtering by setting keys."""
-    path: SettingsAsOfRetrieveRequestPath
-
 # Operation: list_error_tracking_releases_project
 class ErrorTrackingReleasesList2RequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain this ID by calling the projects list endpoint.")
@@ -5194,16 +4200,6 @@ class ErrorTrackingSymbolSetsList2Request(StrictModel):
     path: ErrorTrackingSymbolSetsList2RequestPath
     query: ErrorTrackingSymbolSetsList2RequestQuery | None = None
 
-# Operation: create_error_tracking_symbol_set_project
-class ErrorTrackingSymbolSetsCreate2RequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set will be created. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsCreate2RequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier for the symbol set, typically used to associate the set with a specific build, version, or release of your application.")
-class ErrorTrackingSymbolSetsCreate2Request(StrictModel):
-    """Create a new symbol set for error tracking in a project. Symbol sets are used to map obfuscated or minified code back to original source for better error analysis."""
-    path: ErrorTrackingSymbolSetsCreate2RequestPath
-    body: ErrorTrackingSymbolSetsCreate2RequestBody
-
 # Operation: get_error_tracking_symbol_set_project
 class ErrorTrackingSymbolSetsRetrieve2RequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the error tracking symbol set to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -5211,17 +4207,6 @@ class ErrorTrackingSymbolSetsRetrieve2RequestPath(StrictModel):
 class ErrorTrackingSymbolSetsRetrieve2Request(StrictModel):
     """Retrieve a specific error tracking symbol set by its unique identifier. Symbol sets contain debug information used to map obfuscated stack traces back to original source code."""
     path: ErrorTrackingSymbolSetsRetrieve2RequestPath
-
-# Operation: update_error_tracking_symbol_set_project
-class ErrorTrackingSymbolSetsUpdate2RequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the error tracking symbol set to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the symbol set. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsUpdate2RequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier or version tag for the symbol set update, used to track or version the symbol set data.")
-class ErrorTrackingSymbolSetsUpdate2Request(StrictModel):
-    """Update an error tracking symbol set for a project. Symbol sets are used to map minified or obfuscated code back to original source for better error tracking and debugging."""
-    path: ErrorTrackingSymbolSetsUpdate2RequestPath
-    body: ErrorTrackingSymbolSetsUpdate2RequestBody
 
 # Operation: update_error_tracking_symbol_set_project_partial
 class ErrorTrackingSymbolSetsPartialUpdate2RequestPath(StrictModel):
@@ -5242,27 +4227,6 @@ class ErrorTrackingSymbolSetsDestroy2Request(StrictModel):
     """Permanently delete an error tracking symbol set from a project. This removes the symbol set and all associated symbol data used for error tracking."""
     path: ErrorTrackingSymbolSetsDestroy2RequestPath
 
-# Operation: finish_symbol_set_upload_project
-class ErrorTrackingSymbolSetsFinishUploadUpdate2RequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the error tracking symbol set to finalize.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the symbol set. Retrieve available project IDs from the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsFinishUploadUpdate2RequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier used to track or correlate this upload completion with the original upload session.")
-class ErrorTrackingSymbolSetsFinishUploadUpdate2Request(StrictModel):
-    """Completes the upload process for an error tracking symbol set, finalizing the symbols for use in error tracking and analysis."""
-    path: ErrorTrackingSymbolSetsFinishUploadUpdate2RequestPath
-    body: ErrorTrackingSymbolSetsFinishUploadUpdate2RequestBody
-
-# Operation: delete_error_tracking_symbol_sets
-class ErrorTrackingSymbolSetsBulkDeleteCreate2RequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the symbol sets to delete. Retrieve this ID from the /api/projects/ endpoint.")
-class ErrorTrackingSymbolSetsBulkDeleteCreate2RequestBody(StrictModel):
-    ref: str = Field(default=..., description="Reference identifier specifying which symbol sets to delete in the bulk operation.")
-class ErrorTrackingSymbolSetsBulkDeleteCreate2Request(StrictModel):
-    """Bulk delete error tracking symbol sets for a specified project. This operation removes multiple symbol sets used for error tracking and source map resolution."""
-    path: ErrorTrackingSymbolSetsBulkDeleteCreate2RequestPath
-    body: ErrorTrackingSymbolSetsBulkDeleteCreate2RequestBody
-
 # Operation: finish_symbol_set_bulk_upload_project
 class ErrorTrackingSymbolSetsBulkFinishUploadCreate2RequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set upload is being finalized. Retrieve this ID from the /api/projects/ endpoint.")
@@ -5282,16 +4246,6 @@ class ErrorTrackingSymbolSetsBulkStartUploadCreate2Request(StrictModel):
     """Initiate a bulk upload process for error tracking symbol sets in a project. This operation prepares the project to receive multiple symbol set files and returns upload credentials or session information."""
     path: ErrorTrackingSymbolSetsBulkStartUploadCreate2RequestPath
     body: ErrorTrackingSymbolSetsBulkStartUploadCreate2RequestBody
-
-# Operation: start_symbol_set_upload_project
-class ErrorTrackingSymbolSetsStartUploadCreate2RequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the symbol set will be uploaded. Retrieve this ID from the /api/projects/ endpoint if needed.")
-class ErrorTrackingSymbolSetsStartUploadCreate2RequestBody(StrictModel):
-    ref: str = Field(default=..., description="A reference identifier for the symbol set being uploaded, used to track and organize the upload session.")
-class ErrorTrackingSymbolSetsStartUploadCreate2Request(StrictModel):
-    """Initiates the upload process for a symbol set in error tracking. This operation prepares the server to receive symbol set data and returns upload credentials or a session identifier for subsequent upload requests."""
-    path: ErrorTrackingSymbolSetsStartUploadCreate2RequestPath
-    body: ErrorTrackingSymbolSetsStartUploadCreate2RequestBody
 
 # Operation: list_event_definitions
 class EventDefinitionsListRequestPath(StrictModel):
@@ -5466,18 +4420,6 @@ class ExperimentHoldoutsListRequest(StrictModel):
     """Retrieve a paginated list of experiment holdouts for a specific project. Holdouts are control groups or segments excluded from experiment treatment."""
     path: ExperimentHoldoutsListRequestPath
     query: ExperimentHoldoutsListRequestQuery | None = None
-
-# Operation: create_experiment_holdout
-class ExperimentHoldoutsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the holdout will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ExperimentHoldoutsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A descriptive name for the holdout group. Must be 400 characters or fewer.", max_length=400)
-    description: str | None = Field(default=None, description="An optional detailed description of the holdout's purpose or criteria. Must be 400 characters or fewer.", max_length=400)
-    filters: Any | None = Field(default=None, description="Optional filtering criteria to define which users or segments are included in this holdout. Specify the filter structure according to the API's filter syntax.")
-class ExperimentHoldoutsCreateRequest(StrictModel):
-    """Create a new experiment holdout group for a project. Holdouts are used to exclude specific users or segments from experiments for control or comparison purposes."""
-    path: ExperimentHoldoutsCreateRequestPath
-    body: ExperimentHoldoutsCreateRequestBody
 
 # Operation: get_experiment_holdout
 class ExperimentHoldoutsRetrieveRequestPath(StrictModel):
@@ -5884,20 +4826,6 @@ class ExternalDataSourcesListRequest(StrictModel):
     path: ExternalDataSourcesListRequestPath
     query: ExternalDataSourcesListRequestQuery | None = None
 
-# Operation: create_external_data_source
-class ExternalDataSourcesCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the external data source will be created. Retrieve this ID by calling the /api/projects/ endpoint.")
-class ExternalDataSourcesCreateRequestBody(StrictModel):
-    client_secret: str = Field(default=..., description="Secret credential required for authentication and authorization of the API request.")
-    account_id: str = Field(default=..., description="The account identifier associated with the external data source.")
-    prefix: str | None = Field(default=None, description="A short identifier or label for the external data source, up to 100 characters.", max_length=100)
-    description: str | None = Field(default=None, description="A detailed explanation of the external data source's purpose and contents, up to 400 characters.", max_length=400)
-    job_inputs: Any | None = Field(default=None, description="Configuration object specifying input parameters and settings for the external data source job.")
-class ExternalDataSourcesCreateRequest(StrictModel):
-    """Create a new external data source for a project. External data sources enable integration with external systems and data repositories."""
-    path: ExternalDataSourcesCreateRequestPath
-    body: ExternalDataSourcesCreateRequestBody
-
 # Operation: get_external_data_source
 class ExternalDataSourcesRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the external data source to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -6046,52 +4974,6 @@ class ExternalDataSourcesWebhookInfoRetrieveRequest(StrictModel):
     """Retrieve webhook configuration and status information for a specific external data source. This includes details about how the data source is connected via webhooks to your project."""
     path: ExternalDataSourcesWebhookInfoRetrieveRequestPath
 
-# Operation: list_external_data_source_connections
-class ExternalDataSourcesConnectionsListRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the external data source connections. Obtain this ID by calling the projects list endpoint.")
-class ExternalDataSourcesConnectionsListRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of connection records to return in a single response page. Omit or adjust to control result set size.")
-    offset: int | None = Field(default=None, description="Zero-based starting position for results, used with limit to implement pagination through large result sets.")
-class ExternalDataSourcesConnectionsListRequest(StrictModel):
-    """Retrieve a paginated list of external data source connections for a specific project. Use limit and offset parameters to control pagination."""
-    path: ExternalDataSourcesConnectionsListRequestPath
-    query: ExternalDataSourcesConnectionsListRequestQuery | None = None
-
-# Operation: create_external_data_source_database_schema
-class ExternalDataSourcesDatabaseSchemaCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the external data source will be created. Retrieve this ID by calling the /api/projects/ endpoint.")
-class ExternalDataSourcesDatabaseSchemaCreateRequestBody(StrictModel):
-    client_secret: str = Field(default=..., description="Secret credential used to authenticate the request with the external data source system.")
-    account_id: str = Field(default=..., description="The account identifier associated with the external data source connection.")
-    prefix: str | None = Field(default=None, description="Optional namespace or naming prefix for the database schema, up to 100 characters. Useful for organizing multiple schemas within the same project.", max_length=100)
-    description: str | None = Field(default=None, description="Optional human-readable description of the external data source, up to 400 characters. Helps document the purpose and contents of this data source.", max_length=400)
-    job_inputs: Any | None = Field(default=None, description="Optional configuration object containing input parameters for the database schema job, such as connection details, table mappings, or sync settings.")
-class ExternalDataSourcesDatabaseSchemaCreateRequest(StrictModel):
-    """Create a new external data source with database schema configuration for a project. This operation registers a database connection as an external data source that can be queried within the project."""
-    path: ExternalDataSourcesDatabaseSchemaCreateRequestPath
-    body: ExternalDataSourcesDatabaseSchemaCreateRequestBody
-
-# Operation: create_external_data_source_prefix
-class ExternalDataSourcesSourcePrefixCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the external data source prefix will be created. Retrieve this ID by calling the /api/projects/ endpoint.")
-class ExternalDataSourcesSourcePrefixCreateRequestBody(StrictModel):
-    client_secret: str = Field(default=..., description="Client secret credential required for authentication with the external data source.")
-    account_id: str = Field(default=..., description="Account identifier associated with the external data source configuration.")
-    prefix: str | None = Field(default=None, description="A human-readable name or identifier for the prefix. Maximum length is 100 characters.", max_length=100)
-    description: str | None = Field(default=None, description="Optional descriptive text explaining the purpose or usage of this prefix. Maximum length is 400 characters.", max_length=400)
-    job_inputs: Any | None = Field(default=None, description="Configuration object containing input parameters for the external data source job or processing pipeline.")
-class ExternalDataSourcesSourcePrefixCreateRequest(StrictModel):
-    """Create a new external data source prefix configuration for a project. This allows you to define a named prefix that can be used to organize and reference external data sources."""
-    path: ExternalDataSourcesSourcePrefixCreateRequestPath
-    body: ExternalDataSourcesSourcePrefixCreateRequestBody
-
-# Operation: get_external_data_sources_wizard
-class ExternalDataSourcesWizardRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")
-class ExternalDataSourcesWizardRetrieveRequest(StrictModel):
-    """Retrieve the external data sources wizard interface for a specific project, providing guidance and configuration options for managing external data source connections."""
-    path: ExternalDataSourcesWizardRetrieveRequestPath
-
 # Operation: list_feature_flags
 class FeatureFlagsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flags. Obtain this ID by calling the /api/projects/ endpoint.")
@@ -6176,46 +5058,6 @@ class FeatureFlagsActivityRetrieve2Request(StrictModel):
     path: FeatureFlagsActivityRetrieve2RequestPath
     query: FeatureFlagsActivityRetrieve2RequestQuery | None = None
 
-# Operation: create_static_cohort_for_feature_flag
-class FeatureFlagsCreateStaticCohortForFlagCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the feature flag to associate with the static cohort.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flag. Retrieve this from the /api/projects/ endpoint if needed.")
-class FeatureFlagsCreateStaticCohortForFlagCreateRequestBody(StrictModel):
-    key: str = Field(default=..., description="A unique key identifying the static cohort. Maximum length is 400 characters.", max_length=400)
-    filters: dict[str, Any] | None = Field(default=None, description="Targeting rules and conditions that define which users belong to this cohort. Specified as a JSON object with filter criteria.")
-    active: bool | None = Field(default=None, description="Whether this cohort is currently active and should be applied to the feature flag.")
-    ensure_experience_continuity: bool | None = Field(default=None, description="When enabled, ensures users maintain consistent feature flag experiences across sessions and devices.")
-    rollback_conditions: Any | None = Field(default=None, description="Conditions that trigger automatic rollback of the feature flag if specified thresholds are met.")
-    performed_rollback: bool | None = Field(default=None, description="Indicates whether a rollback has already been executed for this feature flag.")
-    tags: list[Any] | None = Field(default=None, description="Labels or tags for organizing and categorizing this cohort. Specified as an array of string values.")
-    analytics_dashboards: list[int] | None = Field(default=None, description="Analytics dashboards to associate with this cohort for tracking and monitoring. Specified as an array of dashboard identifiers.")
-    evaluation_runtime: Literal["server", "client", "all"] | Literal[""] | None = Field(default=None, description="Specifies where the feature flag should be evaluated: on the server, client-side, or both environments.")
-    bucketing_identifier: Literal["distinct_id", "device_id"] | Literal[""] | None = Field(default=None, description="The user identifier field used for bucketing users into cohort variants. Use 'distinct_id' for user IDs (default) or 'device_id' for device-based bucketing.")
-class FeatureFlagsCreateStaticCohortForFlagCreateRequest(StrictModel):
-    """Create a static cohort associated with a feature flag. This enables you to define a fixed group of users for targeting or analysis purposes within a feature flag's rollout strategy."""
-    path: FeatureFlagsCreateStaticCohortForFlagCreateRequestPath
-    body: FeatureFlagsCreateStaticCohortForFlagCreateRequestBody
-
-# Operation: create_feature_flag_dashboard
-class FeatureFlagsDashboardCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the feature flag to create a dashboard for.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flag. Retrieve available project IDs from the /api/projects/ endpoint.")
-class FeatureFlagsDashboardCreateRequestBody(StrictModel):
-    key: str = Field(default=..., description="A unique key identifier for the feature flag, up to 400 characters in length. Used to reference the flag in your application code.", max_length=400)
-    filters: dict[str, Any] | None = Field(default=None, description="Targeting rules and conditions that determine which users or segments see this feature flag. Defined as a structured object with filter criteria.")
-    active: bool | None = Field(default=None, description="Boolean flag indicating whether this feature flag is currently active and should be evaluated for users.")
-    ensure_experience_continuity: bool | None = Field(default=None, description="When enabled, ensures users see consistent flag values across sessions to maintain a continuous experience during rollouts.")
-    rollback_conditions: Any | None = Field(default=None, description="Conditions that trigger an automatic rollback of the feature flag if specified thresholds or metrics are breached.")
-    performed_rollback: bool | None = Field(default=None, description="Boolean flag indicating whether a rollback has been performed on this feature flag.")
-    tags: list[Any] | None = Field(default=None, description="Array of tags for organizing and categorizing the feature flag for easier management and filtering.")
-    analytics_dashboards: list[int] | None = Field(default=None, description="Array of analytics dashboard identifiers to associate with this feature flag for tracking and visualization purposes.")
-    evaluation_runtime: Literal["server", "client", "all"] | Literal[""] | None = Field(default=None, description="Specifies the evaluation context for this feature flag: 'server' for backend evaluation, 'client' for frontend evaluation, or 'all' for both contexts.")
-    bucketing_identifier: Literal["distinct_id", "device_id"] | Literal[""] | None = Field(default=None, description="The identifier used to bucket users into flag variants and rollout groups: 'distinct_id' for user IDs (default) or 'device_id' for device-based bucketing.")
-class FeatureFlagsDashboardCreateRequest(StrictModel):
-    """Create a dashboard configuration for a feature flag, enabling analytics tracking and visualization of flag performance across your project."""
-    path: FeatureFlagsDashboardCreateRequestPath
-    body: FeatureFlagsDashboardCreateRequestBody
-
 # Operation: list_dependent_flags
 class FeatureFlagsDependentFlagsListRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the feature flag to check for dependents.")
@@ -6223,26 +5065,6 @@ class FeatureFlagsDependentFlagsListRequestPath(StrictModel):
 class FeatureFlagsDependentFlagsListRequest(StrictModel):
     """Retrieve all active feature flags that depend on the specified flag. This helps identify downstream impacts when modifying or disabling a flag."""
     path: FeatureFlagsDependentFlagsListRequestPath
-
-# Operation: create_feature_flag_usage_dashboard
-class FeatureFlagsEnrichUsageDashboardCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the feature flag to create a usage dashboard for.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flag. Retrieve this from the /api/projects/ endpoint if needed.")
-class FeatureFlagsEnrichUsageDashboardCreateRequestBody(StrictModel):
-    key: str = Field(default=..., description="A unique key identifier for the feature flag, up to 400 characters in length.", max_length=400)
-    filters: dict[str, Any] | None = Field(default=None, description="Targeting rules and conditions that determine which users or groups see this feature flag variant.")
-    active: bool | None = Field(default=None, description="Whether the feature flag is currently active and should be evaluated for users.")
-    ensure_experience_continuity: bool | None = Field(default=None, description="When enabled, ensures users see consistent flag variants across sessions to maintain experience continuity.")
-    rollback_conditions: Any | None = Field(default=None, description="Conditions that trigger an automatic rollback of the feature flag if specified thresholds are met.")
-    performed_rollback: bool | None = Field(default=None, description="Indicates whether a rollback has been performed on this feature flag.")
-    tags: list[Any] | None = Field(default=None, description="Labels or tags for organizing and categorizing the feature flag for easier management and discovery.")
-    analytics_dashboards: list[int] | None = Field(default=None, description="Array of analytics dashboard identifiers to associate with this feature flag for usage tracking and visualization.")
-    evaluation_runtime: Literal["server", "client", "all"] | Literal[""] | None = Field(default=None, description="Specifies where the feature flag logic should be evaluated: on the server, client-side, or both. Defaults to server evaluation.")
-    bucketing_identifier: Literal["distinct_id", "device_id"] | Literal[""] | None = Field(default=None, description="The user identifier field used for bucketing users into rollout percentages and variants. Defaults to distinct_id (user ID); can also use device_id for device-based bucketing.")
-class FeatureFlagsEnrichUsageDashboardCreateRequest(StrictModel):
-    """Create a usage dashboard for a feature flag to track its performance and adoption metrics. This enriches the feature flag with analytics data visualization."""
-    path: FeatureFlagsEnrichUsageDashboardCreateRequestPath
-    body: FeatureFlagsEnrichUsageDashboardCreateRequestBody
 
 # Operation: get_feature_flag_remote_config
 class FeatureFlagsRemoteConfigRetrieveRequestPath(StrictModel):
@@ -6270,44 +5092,6 @@ class FeatureFlagsActivityRetrieveRequest(StrictModel):
     """Retrieve a paginated list of feature flag activity events for a project. Use this to audit changes and track the history of feature flag modifications."""
     path: FeatureFlagsActivityRetrieveRequestPath
     query: FeatureFlagsActivityRetrieveRequestQuery | None = None
-
-# Operation: delete_feature_flags_bulk
-class FeatureFlagsBulkDeleteCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flags to delete. Retrieve project IDs from the /api/projects/ endpoint.")
-class FeatureFlagsBulkDeleteCreateRequestBody(StrictModel):
-    key: str = Field(default=..., description="The feature flag key identifier to delete. Maximum length of 400 characters.", max_length=400)
-    filters: dict[str, Any] | None = Field(default=None, description="Filter object to match flags for deletion using the same filter parameters available on the list endpoint (e.g., search, active, type). Use this to delete flags matching specific criteria instead of providing explicit IDs.")
-    active: bool | None = Field(default=None, description="Filter flags by their active status. When true, only active flags are deleted; when false, only inactive flags are deleted.")
-    ensure_experience_continuity: bool | None = Field(default=None, description="When enabled, ensures user experience continuity during flag deletion by maintaining consistent flag state across sessions.")
-    rollback_conditions: Any | None = Field(default=None, description="Conditions that trigger automatic rollback of the flag deletion if specified criteria are met during or after the operation.")
-    performed_rollback: bool | None = Field(default=None, description="Indicates whether a rollback of the flag deletion has already been performed.")
-    tags: list[Any] | None = Field(default=None, description="Array of tag strings to filter flags for deletion. Only flags matching all specified tags will be deleted.")
-    analytics_dashboards: list[int] | None = Field(default=None, description="Array of analytics dashboard identifiers associated with the flags to be deleted.")
-    evaluation_runtime: Literal["server", "client", "all"] | Literal[""] | None = Field(default=None, description="Specifies the evaluation context for the feature flag: server-side evaluation, client-side evaluation, or both.")
-    bucketing_identifier: Literal["distinct_id", "device_id"] | Literal[""] | None = Field(default=None, description="Identifier used for user bucketing in rollouts and variants. Choose between distinct_id (user ID, default) or device_id (device identifier).")
-class FeatureFlagsBulkDeleteCreateRequest(StrictModel):
-    """Bulk delete multiple feature flags from a project using filter criteria or explicit flag IDs. Uses batched database operations for efficiency with a single cache invalidation at the end."""
-    path: FeatureFlagsBulkDeleteCreateRequestPath
-    body: FeatureFlagsBulkDeleteCreateRequestBody
-
-# Operation: create_feature_flags_bulk
-class FeatureFlagsBulkKeysCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where feature flags will be created. Retrieve your project ID by calling the /api/projects/ endpoint.")
-class FeatureFlagsBulkKeysCreateRequestBody(StrictModel):
-    key: str = Field(default=..., description="The unique identifier for the feature flag. Must not exceed 400 characters.", max_length=400)
-    filters: dict[str, Any] | None = Field(default=None, description="Optional filtering criteria to apply to the feature flags being created.")
-    active: bool | None = Field(default=None, description="Whether the feature flag should be active and available for evaluation upon creation.")
-    ensure_experience_continuity: bool | None = Field(default=None, description="When enabled, ensures that users maintain consistent feature flag experiences across sessions and devices.")
-    rollback_conditions: Any | None = Field(default=None, description="Conditions that trigger automatic rollback of the feature flag if specified thresholds are met.")
-    performed_rollback: bool | None = Field(default=None, description="Indicates whether a rollback has already been performed on this feature flag.")
-    tags: list[Any] | None = Field(default=None, description="An array of tags for organizing and categorizing the feature flag for easier management and discovery.")
-    analytics_dashboards: list[int] | None = Field(default=None, description="An array of analytics dashboard identifiers to connect this feature flag with specific dashboards for monitoring and reporting.")
-    evaluation_runtime: Literal["server", "client", "all"] | Literal[""] | None = Field(default=None, description="Specifies the evaluation context for this feature flag: 'server' for server-side evaluation, 'client' for client-side evaluation, or 'all' for both contexts.")
-    bucketing_identifier: Literal["distinct_id", "device_id"] | Literal[""] | None = Field(default=None, description="The identifier used to determine which variant a user receives. Use 'distinct_id' for user-based bucketing (default) or 'device_id' for device-based bucketing.")
-class FeatureFlagsBulkKeysCreateRequest(StrictModel):
-    """Create multiple feature flags in bulk by providing their keys and configuration. This operation accepts a list of feature flag definitions and returns the created flags with their assigned IDs and keys."""
-    path: FeatureFlagsBulkKeysCreateRequestPath
-    body: FeatureFlagsBulkKeysCreateRequestBody
 
 # Operation: get_feature_flag_evaluation_reasons
 class FeatureFlagsEvaluationReasonsRetrieveRequestPath(StrictModel):
@@ -6357,50 +5141,6 @@ class FeatureFlagsUserBlastRadiusCreateRequest(StrictModel):
     """Evaluate the blast radius (impact scope) of a feature flag for a specific user by testing a release condition. This determines which users would be affected by the flag's rollout."""
     path: FeatureFlagsUserBlastRadiusCreateRequestPath
     body: FeatureFlagsUserBlastRadiusCreateRequestBody
-
-# Operation: update_file_system
-class FileSystemPartialUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the file system resource to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the file system. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class FileSystemPartialUpdateRequestBody(StrictModel):
-    path: str | None = Field(default=None, description="The file system path or location identifier.")
-    ref: str | None = Field(default=None, description="A reference identifier for the file system, limited to 100 characters maximum.", max_length=100)
-    href: str | None = Field(default=None, description="A hyperlink reference or URL associated with the file system resource.")
-    meta: Any | None = Field(default=None, description="Additional metadata or properties associated with the file system as a structured object.")
-    shortcut: bool | None = Field(default=None, description="A boolean flag indicating whether this file system resource is a shortcut or alias to another resource.")
-class FileSystemPartialUpdateRequest(StrictModel):
-    """Partially update a file system resource within a project. Allows modification of specific file system properties such as path, reference, href, metadata, and shortcut status."""
-    path: FileSystemPartialUpdateRequestPath
-    body: FileSystemPartialUpdateRequestBody | None = None
-
-# Operation: delete_file_system
-class FileSystemDestroyRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the file system to delete.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the file system. Retrieve available project IDs by calling the projects list endpoint.")
-class FileSystemDestroyRequest(StrictModel):
-    """Permanently delete a file system from a project. This operation removes the file system resource identified by its UUID from the specified project."""
-    path: FileSystemDestroyRequestPath
-
-# Operation: create_file_system_log_view
-class FileSystemLogViewCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. Retrieve this ID by calling the projects list endpoint if you don't have it.")
-class FileSystemLogViewCreateRequestBody(StrictModel):
-    path: str = Field(default=..., description="The file system path for which to create the log view. This specifies the target location or resource being logged.")
-    ref: str | None = Field(default=None, description="An optional reference identifier or version tag for the log view, up to 100 characters in length.", max_length=100)
-    href: str | None = Field(default=None, description="An optional hyperlink reference or URI associated with the log view.")
-    meta: Any | None = Field(default=None, description="Optional metadata object to attach additional context or configuration details to the log view.")
-    shortcut: bool | None = Field(default=None, description="Optional boolean flag to indicate whether this log view should be created as a shortcut or quick-access reference.")
-class FileSystemLogViewCreateRequest(StrictModel):
-    """Create a new log view for a file system within a project. This operation allows you to configure and persist a customized view of file system logs with optional filtering and metadata."""
-    path: FileSystemLogViewCreateRequestPath
-    body: FileSystemLogViewCreateRequestBody
-
-# Operation: list_unfiled_files
-class FileSystemUnfiledRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")
-class FileSystemUnfiledRetrieveRequest(StrictModel):
-    """Retrieve all files that have not been organized into folders within a project. This operation returns unstructured files at the root level of the project's file system."""
-    path: FileSystemUnfiledRetrieveRequestPath
 
 # Operation: list_file_system_shortcuts
 class FileSystemShortcutListRequestPath(StrictModel):
@@ -6467,16 +5207,6 @@ class FileSystemShortcutDestroyRequest(StrictModel):
     """Permanently delete a file system shortcut from a project. This operation removes the shortcut configuration and cannot be undone."""
     path: FileSystemShortcutDestroyRequestPath
 
-# Operation: list_feature_flag_values
-class FlagValueValuesRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the feature flag. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class FlagValueValuesRetrieveRequestQuery(StrictModel):
-    key: str | None = Field(default=None, description="The unique identifier of the feature flag for which to retrieve possible values.")
-class FlagValueValuesRetrieveRequest(StrictModel):
-    """Retrieve all possible values that can be assigned to a specific feature flag within a project."""
-    path: FlagValueValuesRetrieveRequestPath
-    query: FlagValueValuesRetrieveRequestQuery | None = None
-
 # Operation: list_groups_by_type
 class GroupsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the groups. Retrieve available project IDs by calling the projects endpoint.")
@@ -6510,22 +5240,6 @@ class GroupsActivityRetrieveRequest(StrictModel):
     """Retrieve activity records for a specific user within a project group. Returns activity data filtered by the specified group type and user ID."""
     path: GroupsActivityRetrieveRequestPath
     query: GroupsActivityRetrieveRequestQuery
-
-# Operation: delete_group_property
-class GroupsDeletePropertyCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the group. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class GroupsDeletePropertyCreateRequestQuery(StrictModel):
-    group_key: str = Field(default=..., description="The unique key identifying the group from which to delete the property.")
-    group_type_index: int = Field(default=..., description="The numeric type index of the group, used to distinguish between different group type classifications.")
-class GroupsDeletePropertyCreateRequestBody(StrictModel):
-    group_key2: str = Field(default=..., description="The key of the group property to delete. Must not exceed 400 characters.", max_length=400)
-    group_type_index2: int = Field(default=..., description="The numeric type index corresponding to the group type. Must be a valid 32-bit signed integer.", ge=-2147483648, le=2147483647)
-    group_properties: Any | None = Field(default=None, description="Optional collection of group properties to be deleted or modified as part of this operation.")
-class GroupsDeletePropertyCreateRequest(StrictModel):
-    """Delete a property from a specific group within a project. Requires identifying the group by its key and type index."""
-    path: GroupsDeletePropertyCreateRequestPath
-    query: GroupsDeletePropertyCreateRequestQuery
-    body: GroupsDeletePropertyCreateRequestBody
 
 # Operation: get_group_by_key_and_type
 class GroupsFindRetrieveRequestPath(StrictModel):
@@ -6644,19 +5358,6 @@ class GroupsTypesMetricsDestroyRequest(StrictModel):
     """Delete a specific usage metric associated with a group type within a project. This removes the metric record permanently."""
     path: GroupsTypesMetricsDestroyRequestPath
 
-# Operation: update_group_type_metadata
-class GroupsTypesUpdateMetadataPartialUpdateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the group type to update. Retrieve available project IDs from the /api/projects/ endpoint.")
-class GroupsTypesUpdateMetadataPartialUpdateRequestBody(StrictModel):
-    name_singular: str | None = Field(default=None, description="The singular display name for the group type, up to 400 characters.", max_length=400)
-    name_plural: str | None = Field(default=None, description="The plural display name for the group type, up to 400 characters.", max_length=400)
-    detail_dashboard: int | None = Field(default=None, description="The numeric identifier for the detail dashboard configuration associated with this group type.")
-    default_columns: list[str] | None = Field(default=None, description="An array specifying which columns should be displayed by default for this group type. Order may determine column sequence in the UI.")
-class GroupsTypesUpdateMetadataPartialUpdateRequest(StrictModel):
-    """Partially update the metadata for a group type within a project, including display names, dashboard configuration, and column visibility settings."""
-    path: GroupsTypesUpdateMetadataPartialUpdateRequestPath
-    body: GroupsTypesUpdateMetadataPartialUpdateRequestBody | None = None
-
 # Operation: get_heatmap_screenshot_content
 class HeatmapScreenshotsContentRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the heatmap screenshot whose content you want to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -6755,170 +5456,6 @@ class HogFlowsDestroyRequestPath(StrictModel):
 class HogFlowsDestroyRequest(StrictModel):
     """Permanently delete a specific Hog flow from a project. This action cannot be undone."""
     path: HogFlowsDestroyRequestPath
-
-# Operation: list_batch_jobs_for_hog_flow
-class HogFlowsBatchJobsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the hog flow whose batch jobs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the hog flow. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFlowsBatchJobsRetrieveRequest(StrictModel):
-    """Retrieve all batch jobs associated with a specific hog flow within a project. This operation returns a collection of batch job records for the given hog flow."""
-    path: HogFlowsBatchJobsRetrieveRequestPath
-
-# Operation: create_batch_job_for_hog_flow
-class HogFlowsBatchJobsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog flow for which to create a batch job.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog flow. Retrieve available project IDs from the /api/projects/ endpoint.")
-class HogFlowsBatchJobsCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional human-readable description of the batch job for reference and documentation purposes.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="The operational status of the batch job: draft (not yet active), active (currently running), or archived (no longer in use).")
-    trigger: Any | None = Field(default=None, description="The trigger condition that initiates the batch job workflow for matching users or events.")
-    conversion: Any | None = Field(default=None, description="The conversion event or goal that the batch job aims to achieve or track.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Determines when users exit the batch job: on conversion completion, when trigger conditions are not met, on either condition, or only at the end of the workflow.")
-    edges: Any | None = Field(default=None, description="The connections and flow paths between workflow nodes, defining how users progress through the batch job steps.")
-    actions: list[HogFlowAction] = Field(default=..., description="An ordered list of actions to execute within the batch job workflow. Each action represents a step or operation performed on users matching the trigger conditions.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="Optional array of variables available for use throughout the batch job workflow, enabling dynamic configuration and personalization of actions.")
-class HogFlowsBatchJobsCreateRequest(StrictModel):
-    """Create a new batch job for a Hog flow, defining the workflow configuration including triggers, conversions, actions, and exit conditions to be executed across a set of users or events."""
-    path: HogFlowsBatchJobsCreateRequestPath
-    body: HogFlowsBatchJobsCreateRequestBody
-
-# Operation: create_hog_flow_invocation
-class HogFlowsInvocationsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog flow to create an invocation for.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog flow. Retrieve available project IDs from the /api/projects/ endpoint.")
-class HogFlowsInvocationsCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional human-readable description of the invocation's purpose or configuration.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="The operational status of the invocation: draft (not yet active), active (currently running), or archived (no longer in use).")
-    trigger: Any | None = Field(default=None, description="The trigger condition that initiates the flow invocation. Defines the event or condition that starts the workflow.")
-    conversion: Any | None = Field(default=None, description="The conversion event or goal to track when the flow completes successfully.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Determines when the invocation exits: on conversion completion, when trigger conditions aren't met, on either condition, or only at the natural end of the flow.")
-    edges: Any | None = Field(default=None, description="The connections between flow nodes, defining the execution path and dependencies. Order and structure determine flow logic.")
-    actions: list[HogFlowAction] = Field(default=..., description="Required array of actions to execute within the flow. Each action defines a specific operation or step in the workflow sequence.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="Optional array of variables available for use throughout the flow invocation, supporting dynamic configuration and data passing between actions.")
-class HogFlowsInvocationsCreateRequest(StrictModel):
-    """Create a new invocation for a Hog flow, defining its execution configuration including trigger conditions, conversion tracking, exit behavior, and associated actions."""
-    path: HogFlowsInvocationsCreateRequestPath
-    body: HogFlowsInvocationsCreateRequestBody
-
-# Operation: get_hog_flow_logs
-class HogFlowsLogsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the HOG flow whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the HOG flow. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFlowsLogsRetrieveRequest(StrictModel):
-    """Retrieve execution logs for a specific HOG flow within a project. Returns detailed log entries for debugging and monitoring flow execution."""
-    path: HogFlowsLogsRetrieveRequestPath
-
-# Operation: get_hog_flow_metrics
-class HogFlowsMetricsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the HOG flow whose metrics you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the HOG flow. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFlowsMetricsRetrieveRequest(StrictModel):
-    """Retrieve performance and execution metrics for a specific HOG flow within a project. Returns aggregated data about the flow's runs, performance characteristics, and usage patterns."""
-    path: HogFlowsMetricsRetrieveRequestPath
-
-# Operation: get_hog_flow_metrics_totals
-class HogFlowsMetricsTotalsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the hog flow for which to retrieve metrics totals.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the hog flow. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class HogFlowsMetricsTotalsRetrieveRequest(StrictModel):
-    """Retrieve aggregated metrics totals for a specific hog flow, including performance and execution statistics."""
-    path: HogFlowsMetricsTotalsRetrieveRequestPath
-
-# Operation: list_hog_flow_schedules
-class HogFlowsSchedulesListRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog Flow whose schedules you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog Flow. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFlowsSchedulesListRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of schedule records to return in a single response page. Use with offset for pagination.")
-    offset: int | None = Field(default=None, description="The starting position (zero-indexed) from which to return results. Use with limit to paginate through schedules.")
-class HogFlowsSchedulesListRequest(StrictModel):
-    """Retrieve all schedules associated with a specific Hog Flow. Returns a paginated list of schedules configured for the given Hog Flow within the specified project."""
-    path: HogFlowsSchedulesListRequestPath
-    query: HogFlowsSchedulesListRequestQuery | None = None
-
-# Operation: create_hog_flow_schedule
-class HogFlowsSchedulesCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The UUID identifier of the Hog Flow for which to create a schedule.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog Flow. Retrieve this from the /api/projects/ endpoint if needed.")
-class HogFlowsSchedulesCreateRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of results to return per page for paginated responses.")
-    offset: int | None = Field(default=None, description="Starting index for paginated results; use with limit to retrieve subsequent pages.")
-class HogFlowsSchedulesCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional text description of the schedule's purpose or details.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="The schedule's operational state: draft (not yet active), active (currently running), or archived (no longer in use).")
-    trigger: Any | None = Field(default=None, description="Trigger configuration that determines when the schedule activates; structure depends on trigger type.")
-    conversion: Any | None = Field(default=None, description="Conversion configuration that defines the goal or success condition for the schedule.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Determines when users exit the schedule: on conversion, when trigger conditions fail, on either event, or only at the scheduled end time.")
-    edges: Any | None = Field(default=None, description="Graph edges defining the flow path and connections between schedule steps; order and structure determine execution flow.")
-    actions: list[HogFlowAction] = Field(default=..., description="Array of actions to execute as part of the schedule; required and order-dependent for execution sequence.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="Optional array of variables available for use throughout the schedule's execution and actions.")
-class HogFlowsSchedulesCreateRequest(StrictModel):
-    """Create a new schedule for a Hog Flow, defining when and how the flow executes with specified triggers, conversions, and exit conditions."""
-    path: HogFlowsSchedulesCreateRequestPath
-    query: HogFlowsSchedulesCreateRequestQuery | None = None
-    body: HogFlowsSchedulesCreateRequestBody
-
-# Operation: update_hog_flow_schedule
-class HogFlowsSchedulesPartialUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog flow containing the schedule to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog flow. Retrieve available project IDs from the /api/projects/ endpoint.")
-    schedule_id: str = Field(default=..., description="The unique identifier of the schedule within the Hog flow to update.")
-class HogFlowsSchedulesPartialUpdateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="A human-readable description of the schedule's purpose or behavior.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="The operational status of the schedule: draft (not yet active), active (currently running), or archived (no longer in use).")
-    trigger: Any | None = Field(default=None, description="The trigger condition that initiates the schedule. Defines the event or user action that starts the flow execution.")
-    conversion: Any | None = Field(default=None, description="The conversion goal or success metric tracked by the schedule. Defines what constitutes a successful outcome.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Determines when users exit the schedule: on conversion, when trigger conditions aren't met, on either condition, or only at the scheduled end time.")
-    edges: Any | None = Field(default=None, description="The connections between nodes in the flow, defining the execution path and dependencies. Order may indicate sequence of evaluation.")
-    actions: list[HogFlowAction] | None = Field(default=None, description="An ordered list of actions to execute as part of the schedule. Each action represents a step in the flow execution.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="An ordered list of variables available for use throughout the schedule, such as user properties or computed values.")
-class HogFlowsSchedulesPartialUpdateRequest(StrictModel):
-    """Partially update a schedule configuration for a Hog flow, allowing you to modify trigger conditions, conversion rules, exit behaviors, and associated actions or variables."""
-    path: HogFlowsSchedulesPartialUpdateRequestPath
-    body: HogFlowsSchedulesPartialUpdateRequestBody | None = None
-
-# Operation: delete_hog_flow_schedule
-class HogFlowsSchedulesDestroyRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog Flow containing the schedule to delete.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog Flow. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-    schedule_id: str = Field(default=..., description="The unique identifier of the schedule to delete from the Hog Flow.")
-class HogFlowsSchedulesDestroyRequest(StrictModel):
-    """Delete a specific schedule associated with a Hog Flow. This removes the scheduled execution configuration for the given Hog Flow."""
-    path: HogFlowsSchedulesDestroyRequestPath
-
-# Operation: delete_hog_flows_bulk
-class HogFlowsBulkDeleteCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog flows to delete. Retrieve this ID from the /api/projects/ endpoint.")
-class HogFlowsBulkDeleteCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Filter flows by their description text to narrow the deletion scope.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="Filter flows by their current status: draft (unpublished), active (running), or archived (inactive).")
-    trigger: Any | None = Field(default=None, description="Filter flows by their trigger configuration to target specific flow types.")
-    conversion: Any | None = Field(default=None, description="Filter flows by their conversion event configuration to target flows with specific conversion goals.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Filter flows by their exit condition behavior: exit on conversion, trigger not matched, trigger not matched or conversion, or only at end of flow.")
-    edges: Any | None = Field(default=None, description="Filter flows by their edge connections and workflow structure to target flows with specific routing patterns.")
-    actions: list[HogFlowAction] = Field(default=..., description="Required array of action objects that define the operations to perform on matched flows during deletion.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="Optional array of variable definitions used within the flows being deleted, useful for filtering flows that use specific variables.")
-class HogFlowsBulkDeleteCreateRequest(StrictModel):
-    """Bulk delete multiple Hog flows from a project based on specified filter criteria. This operation removes flows matching the provided status, trigger, conversion, and exit condition parameters."""
-    path: HogFlowsBulkDeleteCreateRequestPath
-    body: HogFlowsBulkDeleteCreateRequestBody
-
-# Operation: create_user_blast_radius_flow
-class HogFlowsUserBlastRadiusCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the flow will be created. Retrieve available project IDs from the /api/projects/ endpoint.")
-class HogFlowsUserBlastRadiusCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional text description of the flow's purpose and behavior.")
-    status: Literal["draft", "active", "archived"] | None = Field(default=None, description="The operational status of the flow: draft (not yet active), active (currently running), or archived (no longer in use).")
-    trigger: Any | None = Field(default=None, description="The event or condition that initiates the flow for users. Defines which users enter the blast radius sequence.")
-    conversion: Any | None = Field(default=None, description="The desired outcome or goal event that users should achieve within the flow.")
-    exit_condition: Literal["exit_on_conversion", "exit_on_trigger_not_matched", "exit_on_trigger_not_matched_or_conversion", "exit_only_at_end"] | None = Field(default=None, description="Determines when users exit the flow: on conversion completion, when trigger conditions are no longer met, on either condition, or only at the flow's end.")
-    edges: Any | None = Field(default=None, description="The connections and transitions between flow steps, defining the sequence and branching logic of user progression.")
-    actions: list[HogFlowAction] = Field(default=..., description="Required array of actions to execute within the flow. Each action represents a step or operation performed on users in the sequence.")
-    variables: list[dict[str, str]] | None = Field(default=None, description="Optional array of variables used throughout the flow for dynamic personalization, segmentation, or conditional logic.")
-class HogFlowsUserBlastRadiusCreateRequest(StrictModel):
-    """Create a new user blast radius flow to define automated user engagement sequences with triggers, conversions, and exit conditions."""
-    path: HogFlowsUserBlastRadiusCreateRequestPath
-    body: HogFlowsUserBlastRadiusCreateRequestBody
 
 # Operation: list_hog_function_templates
 class HogFunctionTemplatesListRequestPath(StrictModel):
@@ -7019,26 +5556,6 @@ class HogFunctionsPartialUpdateRequest(StrictModel):
     path: HogFunctionsPartialUpdateRequestPath
     body: HogFunctionsPartialUpdateRequestBody | None = None
 
-# Operation: enable_hog_function_backfills
-class HogFunctionsEnableBackfillsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog function to enable backfills for.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog function. Retrieve available project IDs from the /api/projects/ endpoint.")
-class HogFunctionsEnableBackfillsCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="A human-readable explanation of the function's purpose and behavior.")
-    enabled: bool | None = Field(default=None, description="Whether the function is currently active and processing events.")
-    hog: str | None = Field(default=None, description="The function's source code, written in Hog language for most function types or TypeScript for site_destination and site_app types.")
-    inputs_schema: list[InputsSchemaItem] | None = Field(default=None, description="An array defining the structure and configuration options for input parameters that users can customize when using this function.")
-    inputs: dict[str, InputsItem] | None = Field(default=None, description="An object containing the actual values assigned to each input parameter defined in inputs_schema.")
-    filters: HogFunctionsEnableBackfillsCreateBodyFilters | None = Field(default=None, description="Event filtering rules that determine which events trigger execution of this function.")
-    masking: HogFunctionsEnableBackfillsCreateBodyMasking | None = Field(default=None, description="Configuration for personally identifiable information (PII) masking, including time-to-live settings, detection thresholds, and hash expressions.")
-    mappings: list[Mappings] | None = Field(default=None, description="An array of field mappings that connect event properties to destination fields. Used only for destination and site_destination function types.")
-    icon_url: str | None = Field(default=None, description="A URL pointing to an icon image displayed in the user interface to represent this function.")
-    execution_order: int | None = Field(default=None, description="The execution priority for transformation functions, where lower values execute first. Must be between 0 and 32767.", ge=0, le=32767)
-class HogFunctionsEnableBackfillsCreateRequest(StrictModel):
-    """Enable backfill processing for a Hog function, allowing it to retroactively process historical events. This operation updates the function configuration and activates backfill mode."""
-    path: HogFunctionsEnableBackfillsCreateRequestPath
-    body: HogFunctionsEnableBackfillsCreateRequestBody | None = None
-
 # Operation: test_hog_function_invocation
 class HogFunctionsInvocationsCreateRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog function to test.", json_schema_extra={'format': 'uuid'})
@@ -7053,44 +5570,6 @@ class HogFunctionsInvocationsCreateRequest(StrictModel):
     """Test a Hog function by executing it with mock data and configuration. This operation allows you to validate function behavior before deployment by simulating ClickHouse events and global variables."""
     path: HogFunctionsInvocationsCreateRequestPath
     body: HogFunctionsInvocationsCreateRequestBody
-
-# Operation: get_hog_function_logs
-class HogFunctionsLogsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the hog function whose logs you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the hog function. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFunctionsLogsRetrieveRequest(StrictModel):
-    """Retrieve execution logs for a specific hog function within a project. Logs provide detailed information about function invocations and their outcomes."""
-    path: HogFunctionsLogsRetrieveRequestPath
-
-# Operation: get_hog_function_metrics
-class HogFunctionsMetricsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog function whose metrics you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog function. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFunctionsMetricsRetrieveRequest(StrictModel):
-    """Retrieve performance and execution metrics for a specific Hog function within a project. Returns aggregated data about the function's invocations, performance, and behavior."""
-    path: HogFunctionsMetricsRetrieveRequestPath
-
-# Operation: get_hog_function_metrics_totals
-class HogFunctionsMetricsTotalsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the Hog function whose metrics you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog function. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFunctionsMetricsTotalsRetrieveRequest(StrictModel):
-    """Retrieve aggregated metrics totals for a specific Hog function, including execution counts and performance statistics."""
-    path: HogFunctionsMetricsTotalsRetrieveRequestPath
-
-# Operation: get_hog_function_icon
-class HogFunctionsIconRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the Hog function. You can retrieve available project IDs by calling the projects list endpoint.")
-class HogFunctionsIconRetrieveRequest(StrictModel):
-    """Retrieve the icon for a specific Hog function within a project. This endpoint returns the icon asset associated with the Hog function."""
-    path: HogFunctionsIconRetrieveRequestPath
-
-# Operation: list_hog_function_icons
-class HogFunctionsIconsRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class HogFunctionsIconsRetrieveRequest(StrictModel):
-    """Retrieve the available icons for Hog functions within a specific project. This returns a collection of icon assets that can be used to represent Hog functions in the UI."""
-    path: HogFunctionsIconsRetrieveRequestPath
 
 # Operation: update_hog_functions_execution_order
 class HogFunctionsRearrangePartialUpdateRequestPath(StrictModel):
@@ -7317,57 +5796,12 @@ class InsightsActivityRetrieve2Request(StrictModel):
     """Retrieve the activity history for a specific insight within a project. Returns cached activity data after verifying the requester has permission to access the insight."""
     path: InsightsActivityRetrieve2RequestPath
 
-# Operation: get_insight_analysis
-class InsightsAnalyzeRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the insight to analyze.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class InsightsAnalyzeRetrieveRequest(StrictModel):
-    """Retrieve analysis results for a specific insight within a project. This operation enforces permission checks before returning cached analysis data to ensure authorized access."""
-    path: InsightsAnalyzeRetrieveRequestPath
-
-# Operation: get_insight_suggestions
-class InsightsSuggestionsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the insight for which to retrieve suggestions.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the insight. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class InsightsSuggestionsRetrieveRequest(StrictModel):
-    """Retrieve suggestions for a specific insight within a project. The response is cached and gated behind permission checks to ensure the requesting user has access to the project and insight."""
-    path: InsightsSuggestionsRetrieveRequestPath
-
-# Operation: create_insight_suggestion
-class InsightsSuggestionsCreateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique integer identifier of the insight to add a suggestion to.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the insight. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class InsightsSuggestionsCreateRequestBody(StrictModel):
-    query: InsightVizNode | DataTableNode | DataVisualizationNode | HogQuery | None = Field(default=None, description="Optional query parameter for filtering or searching suggestions.")
-    order: int | None = Field(default=None, description="Optional integer value specifying the display order of the suggestion, ranging from -2,147,483,648 to 2,147,483,647.", ge=-2147483648, le=2147483647)
-    description: str | None = Field(default=None, description="Optional text description of the suggestion, up to 400 characters in length.", max_length=400)
-    tags: list[Any] | None = Field(default=None, description="Optional array of tags to categorize or label the suggestion. Specify the order and format of tag items as needed.")
-    favorited: bool | None = Field(default=None, description="Optional boolean flag indicating whether the suggestion should be marked as favorited.")
-class InsightsSuggestionsCreateRequest(StrictModel):
-    """Create a new suggestion for an insight within a project. The request is authorized before processing, ensuring proper access control even when using cached response data."""
-    path: InsightsSuggestionsCreateRequestPath
-    body: InsightsSuggestionsCreateRequestBody | None = None
-
 # Operation: get_project_activity_insights
 class InsightsActivityRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project for which to retrieve activity insights. You can obtain the project ID by calling the /api/projects/ endpoint.")
 class InsightsActivityRetrieveRequest(StrictModel):
     """Retrieve activity insights for a specific project. Returns cached coalesced response data after verifying the request is authorized through authentication, permissions, and throttling checks."""
     path: InsightsActivityRetrieveRequestPath
-
-# Operation: cancel_insight_creation
-class InsightsCancelCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the insight. Retrieve available project IDs by calling /api/projects/.")
-class InsightsCancelCreateRequestBody(StrictModel):
-    query: InsightVizNode | DataTableNode | DataVisualizationNode | HogQuery | None = Field(default=None, description="Optional query filter to identify the specific insight creation to cancel.")
-    order: int | None = Field(default=None, description="Optional ordering parameter for result sorting. Accepts 32-bit signed integer values.", ge=-2147483648, le=2147483647)
-    description: str | None = Field(default=None, description="Optional description text for the insight, up to 400 characters.", max_length=400)
-    tags: list[Any] | None = Field(default=None, description="Optional array of tags to categorize or label the insight.")
-    favorited: bool | None = Field(default=None, description="Optional boolean flag to indicate whether the insight should be marked as favorited.")
-class InsightsCancelCreateRequest(StrictModel):
-    """Cancel an in-progress insight creation for a project. This operation validates authorization before returning cached response data from coalesced requests."""
-    path: InsightsCancelCreateRequestPath
-    body: InsightsCancelCreateRequestBody | None = None
 
 # Operation: generate_insight_metadata
 class InsightsGenerateMetadataCreateRequestPath(StrictModel):
@@ -7382,20 +5816,6 @@ class InsightsGenerateMetadataCreateRequest(StrictModel):
     """Generate AI-suggested name and description for an insight based on its query configuration and metadata. Use this to automatically populate insight titles and descriptions from query parameters."""
     path: InsightsGenerateMetadataCreateRequestPath
     body: InsightsGenerateMetadataCreateRequestBody | None = None
-
-# Operation: list_insights_recently_viewed
-class InsightsMyLastViewedRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve available project IDs by calling the projects list endpoint.")
-class InsightsMyLastViewedRetrieveRequest(StrictModel):
-    """Retrieves the 5 most recently viewed insights for the authenticated user within a specific project, ordered from most to least recent."""
-    path: InsightsMyLastViewedRetrieveRequestPath
-
-# Operation: list_trending_insights
-class InsightsTrendingRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve available project IDs by calling the projects list endpoint.")
-class InsightsTrendingRetrieveRequest(StrictModel):
-    """Retrieves the most viewed insights for a project over a specified time period. Returns the top 10 trending insights by default, ranked by view count over the last 7 days."""
-    path: InsightsTrendingRetrieveRequestPath
 
 # Operation: list_integrations
 class IntegrationsList2RequestPath(StrictModel):
@@ -7424,49 +5844,6 @@ class IntegrationsDestroyRequest(StrictModel):
     """Permanently removes an integration from a project. This action cannot be undone and will disconnect the integration from all workflows."""
     path: IntegrationsDestroyRequestPath
 
-# Operation: get_integration_channels
-class IntegrationsChannelsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration whose channels you want to retrieve.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can obtain this ID by calling the /api/projects/ endpoint.")
-class IntegrationsChannelsRetrieveRequest(StrictModel):
-    """Retrieve the list of channels configured for a specific integration within a project. This allows you to view all communication or notification channels associated with the integration."""
-    path: IntegrationsChannelsRetrieveRequestPath
-
-# Operation: list_clickup_lists_for_integration
-class IntegrationsClickupListsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration instance. This must be a positive integer that corresponds to an existing integration within the specified project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsClickupListsRetrieveRequest(StrictModel):
-    """Retrieve all ClickUp lists associated with a specific integration within a project. This allows you to view the ClickUp workspace lists that have been synced or configured for the integration."""
-    path: IntegrationsClickupListsRetrieveRequestPath
-
-# Operation: list_clickup_spaces_for_integration
-class IntegrationsClickupSpacesRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the ClickUp integration. This must be a positive integer that corresponds to an existing integration within the project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsClickupSpacesRetrieveRequest(StrictModel):
-    """Retrieve all ClickUp spaces associated with a specific ClickUp integration within a project. This allows you to view the available ClickUp workspaces that have been synced through the integration."""
-    path: IntegrationsClickupSpacesRetrieveRequestPath
-
-# Operation: list_clickup_workspaces_for_integration
-class IntegrationsClickupWorkspacesRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration instance. This must be a positive integer that corresponds to an existing integration in your project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsClickupWorkspacesRetrieveRequest(StrictModel):
-    """Retrieve all ClickUp workspaces available through a specific integration. This allows you to see which ClickUp workspaces are connected and accessible via the integration."""
-    path: IntegrationsClickupWorkspacesRetrieveRequestPath
-
-# Operation: update_email_integration
-class IntegrationsEmailPartialUpdateRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration to update. This is a numeric ID specific to the integration record.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsEmailPartialUpdateRequestBody(StrictModel):
-    kind: Literal["slack", "slack-posthog-code", "salesforce", "hubspot", "google-pubsub", "google-cloud-storage", "google-ads", "google-sheets", "google-cloud-service-account", "snapchat", "linkedin-ads", "reddit-ads", "tiktok-ads", "bing-ads", "intercom", "email", "linear", "github", "gitlab", "meta-ads", "twilio", "clickup", "vercel", "databricks", "azure-blob", "firebase", "jira", "pinterest-ads", "stripe"] | None = Field(default=None, description="The type of integration service. For email integrations, use 'email'. Other valid types include Slack, Salesforce, HubSpot, Google services, social media ad platforms, and development tools.")
-class IntegrationsEmailPartialUpdateRequest(StrictModel):
-    """Partially update an email integration configuration for a project. Use this to modify specific fields of an existing email integration without replacing the entire configuration."""
-    path: IntegrationsEmailPartialUpdateRequestPath
-    body: IntegrationsEmailPartialUpdateRequestBody | None = None
-
 # Operation: list_github_branches
 class IntegrationsGithubBranchesRetrieveRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the GitHub integration within your project.")
@@ -7485,76 +5862,6 @@ class IntegrationsGithubReposRetrieveRequestPath(StrictModel):
 class IntegrationsGithubReposRetrieveRequest(StrictModel):
     """Retrieve the list of GitHub repositories available through a GitHub integration for a specific project. This allows you to see which repositories are connected and accessible via the integration."""
     path: IntegrationsGithubReposRetrieveRequestPath
-
-# Operation: list_google_accessible_accounts
-class IntegrationsGoogleAccessibleAccountsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Google integration. This must be a positive integer that corresponds to an existing integration in the project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsGoogleAccessibleAccountsRetrieveRequest(StrictModel):
-    """Retrieve the list of Google accounts accessible through a specific Google integration. This returns all Google accounts that have been authorized and are available for use with the integration."""
-    path: IntegrationsGoogleAccessibleAccountsRetrieveRequestPath
-
-# Operation: get_google_conversion_actions
-class IntegrationsGoogleConversionActionsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration. This must be a positive integer that corresponds to a valid Google Ads integration in your project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsGoogleConversionActionsRetrieveRequest(StrictModel):
-    """Retrieve the Google conversion actions configured for a specific integration. This returns the conversion tracking setup linked to your Google Ads account integration."""
-    path: IntegrationsGoogleConversionActionsRetrieveRequestPath
-
-# Operation: list_jira_projects_for_integration
-class IntegrationsJiraProjectsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration instance. This must be a positive integer that corresponds to an existing integration in your project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsJiraProjectsRetrieveRequest(StrictModel):
-    """Retrieve all Jira projects connected to a specific integration within your project. This allows you to view which Jira projects are available through the configured integration."""
-    path: IntegrationsJiraProjectsRetrieveRequestPath
-
-# Operation: get_linear_teams_for_integration
-class IntegrationsLinearTeamsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration whose Linear teams you want to retrieve.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can obtain this by calling the /api/projects/ endpoint.")
-class IntegrationsLinearTeamsRetrieveRequest(StrictModel):
-    """Retrieve the Linear teams associated with a specific integration within a project. This allows you to view which Linear teams are connected through this integration."""
-    path: IntegrationsLinearTeamsRetrieveRequestPath
-
-# Operation: list_linkedin_ads_accounts
-class IntegrationsLinkedinAdsAccountsRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the integration instance. This must be a positive integer that corresponds to an existing integration within the project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsLinkedinAdsAccountsRetrieveRequest(StrictModel):
-    """Retrieve all LinkedIn Ads accounts connected to a specific integration within a project. This returns the list of LinkedIn Ads accounts that have been configured for the integration."""
-    path: IntegrationsLinkedinAdsAccountsRetrieveRequestPath
-
-# Operation: list_linkedin_ads_conversion_rules
-class IntegrationsLinkedinAdsConversionRulesRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the LinkedIn Ads integration. This must be a positive integer that corresponds to an existing integration within the specified project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class IntegrationsLinkedinAdsConversionRulesRetrieveRequest(StrictModel):
-    """Retrieve all LinkedIn Ads conversion rules configured for a specific integration within a project. This allows you to view the conversion tracking rules that map LinkedIn campaign events to your project's conversion goals."""
-    path: IntegrationsLinkedinAdsConversionRulesRetrieveRequestPath
-
-# Operation: list_twilio_phone_numbers
-class IntegrationsTwilioPhoneNumbersRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the Twilio integration. This must be a positive integer that corresponds to an existing integration in your project.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the integration. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class IntegrationsTwilioPhoneNumbersRetrieveRequest(StrictModel):
-    """Retrieve all Twilio phone numbers associated with a specific integration. This allows you to view the phone numbers configured for a Twilio integration within your project."""
-    path: IntegrationsTwilioPhoneNumbersRetrieveRequestPath
-
-# Operation: get_js_snippet_version
-class JsSnippetVersionRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class JsSnippetVersionRetrieveRequest(StrictModel):
-    """Retrieve the current JavaScript snippet version pin and its resolved version for a project. This shows which version is actively configured and what it resolves to."""
-    path: JsSnippetVersionRetrieveRequestPath
-
-# Operation: update_js_snippet_version
-class JsSnippetVersionPartialUpdateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class JsSnippetVersionPartialUpdateRequest(StrictModel):
-    """Update the JavaScript snippet version pin for a project. This allows you to control which version of the snippet is deployed for your team."""
-    path: JsSnippetVersionPartialUpdateRequestPath
 
 # Operation: list_live_debugger_breakpoints
 class LiveDebuggerBreakpointsListRequestPath(StrictModel):
@@ -7653,91 +5960,6 @@ class LiveDebuggerBreakpointsBreakpointHitsRetrieveRequest(StrictModel):
     path: LiveDebuggerBreakpointsBreakpointHitsRetrieveRequestPath
     query: LiveDebuggerBreakpointsBreakpointHitsRetrieveRequestQuery | None = None
 
-# Operation: list_logs_alerts
-class LogsAlertsListRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class LogsAlertsListRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of alert records to return in a single response page. Controls pagination size.")
-    offset: int | None = Field(default=None, description="Zero-based index position from which to start returning results. Use with limit to paginate through large result sets.")
-class LogsAlertsListRequest(StrictModel):
-    """Retrieve a paginated list of log alerts for a specific project. Use limit and offset parameters to control pagination through the results."""
-    path: LogsAlertsListRequestPath
-    query: LogsAlertsListRequestQuery | None = None
-
-# Operation: create_logs_alert
-class LogsAlertsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the alert will be created. Retrieve available project IDs from the /api/projects/ endpoint.")
-class LogsAlertsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A human-readable name for the alert. Limited to 255 characters.", max_length=255)
-    enabled: bool | None = Field(default=None, description="Whether the alert is active and will trigger when conditions are met. Defaults to enabled if not specified.")
-    filters: Any = Field(default=..., description="Filter criteria that define which logs trigger the alert. Must include at least one of: a list of severity levels (e.g., ERROR, WARN), a list of service names, or a filter group object for property-based filtering.")
-    threshold_count: int = Field(default=..., description="The log count threshold that triggers the alert. Must be at least 1 and no more than 2,147,483,647.", ge=1, le=2147483647)
-    threshold_operator: Literal["above", "below"] | None = Field(default=None, description="Whether the alert fires when the log count goes above or below the threshold. Defaults to 'above' if not specified.")
-    window_minutes: int | None = Field(default=None, description="The time window in minutes over which logs are evaluated for the threshold. Can be 0 or greater.", ge=0, le=2147483647)
-    evaluation_periods: int | None = Field(default=None, description="The total number of evaluation periods in the sliding window (M in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    datapoints_to_alarm: int | None = Field(default=None, description="How many periods within the evaluation window must breach the threshold to trigger the alert (N in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    cooldown_minutes: int | None = Field(default=None, description="The cooldown period in minutes after the alert fires during which it will not fire again, even if conditions are met. Can be 0 or greater.", ge=0, le=2147483647)
-    snooze_until: str | None = Field(default=None, description="Temporarily suppress the alert until the specified date and time in ISO 8601 format. After this time, the alert will resume normal operation.", json_schema_extra={'format': 'date-time'})
-class LogsAlertsCreateRequest(StrictModel):
-    """Create a new alert for a project's logs that triggers when log events match specified filter criteria and breach a configured threshold. Alerts can be configured with evaluation windows and cooldown periods to reduce noise."""
-    path: LogsAlertsCreateRequestPath
-    body: LogsAlertsCreateRequestBody
-
-# Operation: get_logs_alert
-class LogsAlertsRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the logs alert configuration to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the logs alert. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class LogsAlertsRetrieveRequest(StrictModel):
-    """Retrieve a specific logs alert configuration by its unique identifier within a project."""
-    path: LogsAlertsRetrieveRequestPath
-
-# Operation: update_logs_alert
-class LogsAlertsUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the logs alert configuration to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The project ID containing the alert. Find your project ID by calling the /api/projects/ endpoint.")
-class LogsAlertsUpdateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A descriptive name for the alert configuration. Maximum 255 characters.", max_length=255)
-    enabled: bool | None = Field(default=None, description="Whether this alert is actively monitoring and firing. When disabled, the alert will not trigger notifications.")
-    filters: Any = Field(default=..., description="Filter criteria that define which logs trigger the alert. Must include at least one of: severityLevels (list of severity strings like 'error', 'warning'), serviceNames (list of service identifiers), or filterGroup (a property-based filter object).")
-    threshold_count: int = Field(default=..., description="The log count threshold that triggers the alert. Must be between 1 and 2,147,483,647.", ge=1, le=2147483647)
-    threshold_operator: Literal["above", "below"] | None = Field(default=None, description="Whether the alert fires when the log count goes above or below the threshold. Defaults to 'above'.")
-    window_minutes: int | None = Field(default=None, description="The time window in minutes over which logs are counted for threshold evaluation. Must be between 0 and 2,147,483,647 minutes.", ge=0, le=2147483647)
-    evaluation_periods: int | None = Field(default=None, description="Total number of evaluation periods in the sliding window (M in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    datapoints_to_alarm: int | None = Field(default=None, description="Number of periods within the evaluation window that must breach the threshold to fire the alert (N in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    cooldown_minutes: int | None = Field(default=None, description="Cooldown period in minutes after the alert fires before it can fire again. Must be between 0 and 2,147,483,647 minutes.", ge=0, le=2147483647)
-    snooze_until: str | None = Field(default=None, description="Timestamp (ISO 8601 format) until which the alert is snoozed and will not fire. After this time, normal alerting resumes.", json_schema_extra={'format': 'date-time'})
-class LogsAlertsUpdateRequest(StrictModel):
-    """Update an existing logs alert configuration for a project. Modify alert criteria, thresholds, evaluation windows, and notification settings."""
-    path: LogsAlertsUpdateRequestPath
-    body: LogsAlertsUpdateRequestBody
-
-# Operation: update_logs_alert_partial
-class LogsAlertsPartialUpdateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the logs alert configuration to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The project ID containing the alert. Find your project ID by calling the /api/projects/ endpoint.")
-class LogsAlertsPartialUpdateRequestBody(StrictModel):
-    enabled: bool | None = Field(default=None, description="Enable or disable this alert configuration.")
-    filters: Any | None = Field(default=None, description="Filter criteria to match logs for alerting. Must include at least one of: severityLevels (list of severity strings like 'error', 'warning'), serviceNames (list of service name strings), or filterGroup (a property filter group object).")
-    threshold_count: int | None = Field(default=None, description="The log count threshold that triggers the alert. Must be between 1 and 2,147,483,647.", ge=1, le=2147483647)
-    threshold_operator: Literal["above", "below"] | None = Field(default=None, description="Whether the alert fires when the log count is above or below the threshold. Valid values: 'above' or 'below'. Defaults to 'above'.")
-    window_minutes: int | None = Field(default=None, description="The time window in minutes over which logs are evaluated. Must be between 0 and 2,147,483,647 minutes.", ge=0, le=2147483647)
-    evaluation_periods: int | None = Field(default=None, description="Total number of check periods in the sliding evaluation window (M in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    datapoints_to_alarm: int | None = Field(default=None, description="Number of periods within the evaluation window that must breach the threshold to fire the alert (N in N-of-M alerting). Must be between 1 and 10. Defaults to 1.", ge=1, le=10)
-    cooldown_minutes: int | None = Field(default=None, description="Cooldown period in minutes after the alert fires before it can fire again. Must be between 0 and 2,147,483,647 minutes.", ge=0, le=2147483647)
-    snooze_until: str | None = Field(default=None, description="Temporarily snooze this alert until the specified date and time (ISO 8601 format). After this time passes, the alert will resume normal operation.", json_schema_extra={'format': 'date-time'})
-class LogsAlertsPartialUpdateRequest(StrictModel):
-    """Partially update a logs alert configuration for a project. Modify alert thresholds, filters, evaluation windows, and snooze settings to control when log-based alerts fire."""
-    path: LogsAlertsPartialUpdateRequestPath
-    body: LogsAlertsPartialUpdateRequestBody | None = None
-
-# Operation: delete_logs_alert
-class LogsAlertsDestroyRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the logs alert configuration to delete.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the logs alert. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class LogsAlertsDestroyRequest(StrictModel):
-    """Delete a specific logs alert configuration from a project. This operation permanently removes the alert rule and stops any associated notifications."""
-    path: LogsAlertsDestroyRequestPath
-
 # Operation: list_logs_attributes
 class LogsAttributesRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain the project ID by calling the /api/projects/ endpoint to list all accessible projects.")
@@ -7745,40 +5967,12 @@ class LogsAttributesRetrieveRequest(StrictModel):
     """Retrieve all available attributes for logs within a specific project. This operation returns the metadata about what attributes can be used to filter, search, or analyze logs in the project."""
     path: LogsAttributesRetrieveRequestPath
 
-# Operation: create_logs_export
-class LogsExportCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project for which to create the logs export. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class LogsExportCreateRequest(StrictModel):
-    """Create a new logs export for a specified project. This initiates an export process to retrieve and download logs data from the project."""
-    path: LogsExportCreateRequestPath
-
 # Operation: check_project_has_logs
 class LogsHasLogsRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project to check for logs. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
 class LogsHasLogsRetrieveRequest(StrictModel):
     """Check whether a project contains any logs. This operation determines if the specified project has log data available."""
     path: LogsHasLogsRetrieveRequestPath
-
-# Operation: create_logs_query
-class LogsQueryCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project for which you want to create a logs query. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class LogsQueryCreateRequest(StrictModel):
-    """Create a new logs query for a specific project. This operation allows you to define and execute a query against the project's logs."""
-    path: LogsQueryCreateRequestPath
-
-# Operation: create_logs_sparkline
-class LogsSparklineCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the logs. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class LogsSparklineCreateRequest(StrictModel):
-    """Generate a sparkline visualization for logs in a specific project. This creates a compact graphical representation of log data trends over time."""
-    path: LogsSparklineCreateRequestPath
-
-# Operation: list_log_values
-class LogsValuesRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain the project ID by calling the /api/projects/ endpoint to list all accessible projects.")
-class LogsValuesRetrieveRequest(StrictModel):
-    """Retrieve available log values for a specific project. This operation returns the distinct values that can be used for filtering or analyzing logs within the project."""
-    path: LogsValuesRetrieveRequestPath
 
 # Operation: list_notebooks
 class NotebooksListRequestPath(StrictModel):
@@ -7848,102 +6042,6 @@ class NotebooksActivityRetrieve2Request(StrictModel):
     """Retrieve the activity history for a specific notebook, including changes and interactions. This feature is in early access and the API may change without notice."""
     path: NotebooksActivityRetrieve2RequestPath
 
-# Operation: execute_notebook_hogql_query
-class NotebooksHogqlExecuteCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook in which to execute the HogQL query.")
-class NotebooksHogqlExecuteCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional title for the notebook. Must not exceed 256 characters.", max_length=256)
-class NotebooksHogqlExecuteCreateRequest(StrictModel):
-    """Execute a HogQL query within a notebook and retrieve results. This feature is in early access and the API may change without notice."""
-    path: NotebooksHogqlExecuteCreateRequestPath
-    body: NotebooksHogqlExecuteCreateRequestBody | None = None
-
-# Operation: get_notebook_kernel_dataframe
-class NotebooksKernelDataframeRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook within the specified project. This uniquely identifies which notebook kernel's dataframe to retrieve.")
-class NotebooksKernelDataframeRetrieveRequest(StrictModel):
-    """Retrieves the current dataframe state from a notebook kernel's execution environment. This allows you to access data that has been computed or loaded within the notebook's active kernel session."""
-    path: NotebooksKernelDataframeRetrieveRequestPath
-
-# Operation: execute_notebook_kernel
-class NotebooksKernelExecuteCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook to execute code in.")
-class NotebooksKernelExecuteCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional title for the notebook, up to 256 characters in length.", max_length=256)
-class NotebooksKernelExecuteCreateRequest(StrictModel):
-    """Execute code in a notebook kernel. This feature is in early access and the API may change without notice."""
-    path: NotebooksKernelExecuteCreateRequestPath
-    body: NotebooksKernelExecuteCreateRequestBody | None = None
-
-# Operation: execute_notebook_kernel_stream
-class NotebooksKernelExecuteStreamCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. Retrieve this ID by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook to execute code in.")
-class NotebooksKernelExecuteStreamCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional title for the notebook execution context. Must not exceed 256 characters.", max_length=256)
-class NotebooksKernelExecuteStreamCreateRequest(StrictModel):
-    """Execute code in a notebook kernel and stream the results. This operation supports real-time execution of notebook cells with streaming output."""
-    path: NotebooksKernelExecuteStreamCreateRequestPath
-    body: NotebooksKernelExecuteStreamCreateRequestBody | None = None
-
-# Operation: restart_notebook_kernel
-class NotebooksKernelRestartCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook whose kernel should be restarted.")
-class NotebooksKernelRestartCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional title to assign to the notebook. Must not exceed 256 characters.", max_length=256)
-class NotebooksKernelRestartCreateRequest(StrictModel):
-    """Restart the kernel of a notebook, clearing its execution state and memory. This operation is useful for resetting the notebook's computational environment."""
-    path: NotebooksKernelRestartCreateRequestPath
-    body: NotebooksKernelRestartCreateRequestBody | None = None
-
-# Operation: start_notebook_kernel
-class NotebooksKernelStartCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook for which to start the kernel.")
-class NotebooksKernelStartCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional display name for the notebook, up to 256 characters in length.", max_length=256)
-class NotebooksKernelStartCreateRequest(StrictModel):
-    """Start a kernel for a notebook in a project. This initializes the computational environment needed to execute notebook cells."""
-    path: NotebooksKernelStartCreateRequestPath
-    body: NotebooksKernelStartCreateRequestBody | None = None
-
-# Operation: get_notebook_kernel_status
-class NotebooksKernelStatusRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook whose kernel status you want to retrieve.")
-class NotebooksKernelStatusRetrieveRequest(StrictModel):
-    """Retrieve the current status of a notebook kernel. Returns kernel state information for the specified notebook within a project."""
-    path: NotebooksKernelStatusRetrieveRequestPath
-
-# Operation: stop_notebook_kernel
-class NotebooksKernelStopCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the notebook whose kernel should be stopped.")
-class NotebooksKernelStopCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="Optional title for the notebook. Must not exceed 256 characters.", max_length=256)
-class NotebooksKernelStopCreateRequest(StrictModel):
-    """Stops the kernel execution for a notebook in a project. This operation terminates any running computations in the notebook's kernel."""
-    path: NotebooksKernelStopCreateRequestPath
-    body: NotebooksKernelStopCreateRequestBody | None = None
-
-# Operation: list_notebook_activity
-class NotebooksActivityRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebooks. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class NotebooksActivityRetrieveRequest(StrictModel):
-    """Retrieve activity history for notebooks within a project. This endpoint provides access to notebook-related events and changes (early access feature subject to API changes)."""
-    path: NotebooksActivityRetrieveRequestPath
-
-# Operation: list_recording_comments
-class NotebooksRecordingCommentsRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the notebook recordings. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class NotebooksRecordingCommentsRetrieveRequest(StrictModel):
-    """Retrieve all comments associated with notebook recordings in a project. This feature is in early access and the API may change without notice."""
-    path: NotebooksRecordingCommentsRetrieveRequestPath
-
 # Operation: list_object_media_previews
 class ObjectMediaPreviewsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the media previews. Retrieve available project IDs by calling the projects list endpoint.")
@@ -7954,16 +6052,6 @@ class ObjectMediaPreviewsListRequest(StrictModel):
     """Retrieve a paginated list of media previews for objects within a specific project. Use pagination parameters to control the number of results and starting position."""
     path: ObjectMediaPreviewsListRequestPath
     query: ObjectMediaPreviewsListRequestQuery | None = None
-
-# Operation: create_object_media_preview
-class ObjectMediaPreviewsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the object. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ObjectMediaPreviewsCreateRequestBody(StrictModel):
-    metadata: Any | None = Field(default=None, description="Optional metadata object to attach to the media preview, such as tags, descriptions, or custom properties relevant to the preview.")
-class ObjectMediaPreviewsCreateRequest(StrictModel):
-    """Creates a media preview for an object within a specified project. This generates a preview representation of media content associated with a project object."""
-    path: ObjectMediaPreviewsCreateRequestPath
-    body: ObjectMediaPreviewsCreateRequestBody | None = None
 
 # Operation: get_object_media_preview
 class ObjectMediaPreviewsRetrieveRequestPath(StrictModel):
@@ -8002,13 +6090,6 @@ class ObjectMediaPreviewsDestroyRequestPath(StrictModel):
 class ObjectMediaPreviewsDestroyRequest(StrictModel):
     """Permanently delete a specific object media preview from a project. This operation removes the preview resource identified by its UUID."""
     path: ObjectMediaPreviewsDestroyRequestPath
-
-# Operation: get_preferred_media_preview_for_event
-class ObjectMediaPreviewsPreferredForEventRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the event. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ObjectMediaPreviewsPreferredForEventRetrieveRequest(StrictModel):
-    """Retrieve the preferred media preview for an event definition, prioritizing the most recent user-uploaded media, followed by the most recent exported asset. Requires an event_definition query parameter to specify which event to retrieve media for."""
-    path: ObjectMediaPreviewsPreferredForEventRetrieveRequestPath
 
 # Operation: list_persisted_folders
 class PersistedFolderListRequestPath(StrictModel):
@@ -8124,14 +6205,6 @@ class PersonsDeletePropertyCreateRequest(StrictModel):
     path: PersonsDeletePropertyCreateRequestPath
     body: PersonsDeletePropertyCreateRequestBody
 
-# Operation: get_person_properties_timeline
-class PersonsPropertiesTimelineRetrieveRequestPath(StrictModel):
-    id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the person whose property timeline you want to retrieve.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the person. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsPropertiesTimelineRetrieveRequest(StrictModel):
-    """Retrieve the timeline of property changes for a specific person, showing how their properties have evolved over time."""
-    path: PersonsPropertiesTimelineRetrieveRequestPath
-
 # Operation: split_person
 class PersonsSplitCreateRequestPath(StrictModel):
     id_: int = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the person record to split. Must be a positive integer.")
@@ -8162,38 +6235,6 @@ class PersonsActivityRetrieveRequest(StrictModel):
     """Retrieve activity records for persons in a project. This endpoint supports reading and filtering person activity data; for creating or updating person information, use the capture API, user properties ($set/$unset), or PostHog SDKs."""
     path: PersonsActivityRetrieveRequestPath
 
-# Operation: get_persons_by_distinct_ids
-class PersonsBatchByDistinctIdsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project you want to access. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsBatchByDistinctIdsCreateRequestBody(StrictModel):
-    properties: Any | None = Field(default=None, description="Optional key-value map of person properties to filter or set via $set and $set_once operations. Properties should be formatted as a JSON object with string keys and values of appropriate types.")
-class PersonsBatchByDistinctIdsCreateRequest(StrictModel):
-    """Retrieve person records by their distinct IDs. This endpoint is optimized for reading and deleting persons; for creating or updating persons, use the capture API, $set/$unset properties, or PostHog SDKs instead."""
-    path: PersonsBatchByDistinctIdsCreateRequestPath
-    body: PersonsBatchByDistinctIdsCreateRequestBody | None = None
-
-# Operation: get_persons_by_uuids
-class PersonsBatchByUuidsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project to query. Find your project ID by calling /api/projects/.")
-class PersonsBatchByUuidsCreateRequestBody(StrictModel):
-    properties: Any | None = Field(default=None, description="Optional key-value map of person properties to filter or set via $set and $set_once operations.")
-class PersonsBatchByUuidsCreateRequest(StrictModel):
-    """Retrieve multiple persons from a project by their UUIDs. This endpoint is optimized for reading and deleting persons; for creating or updating persons, use the capture API, $set/$unset properties, or SDKs instead."""
-    path: PersonsBatchByUuidsCreateRequestPath
-    body: PersonsBatchByUuidsCreateRequestBody | None = None
-
-# Operation: delete_persons_bulk
-class PersonsBulkDeleteCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the persons to delete. Retrieve your project ID from the /api/projects/ endpoint.")
-class PersonsBulkDeleteCreateRequestBody(StrictModel):
-    delete_events: bool | None = Field(default=None, description="When enabled, queues all events associated with the specified persons for deletion. Defaults to false, preserving event data.")
-    delete_recordings: bool | None = Field(default=None, description="When enabled, queues all session recordings associated with the specified persons for deletion. Defaults to false, preserving recording data.")
-    keep_person: bool | None = Field(default=None, description="When enabled, retains the person records themselves but deletes their associated events and recordings. Defaults to false, which deletes person records entirely.")
-class PersonsBulkDeleteCreateRequest(StrictModel):
-    """Permanently delete multiple persons from a project by their PostHog or distinct IDs, with options to also remove associated events and recordings. Supports up to 1000 IDs per request; only data captured before the request is deleted."""
-    path: PersonsBulkDeleteCreateRequestPath
-    body: PersonsBulkDeleteCreateRequestBody | None = None
-
 # Operation: list_cohorts_for_person
 class PersonsCohortsRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
@@ -8203,62 +6244,6 @@ class PersonsCohortsRetrieveRequest(StrictModel):
     """Retrieve all cohorts that a specific person belongs to within a project. This is a read-only operation; to modify person data, use the capture API or property operations."""
     path: PersonsCohortsRetrieveRequestPath
     query: PersonsCohortsRetrieveRequestQuery
-
-# Operation: get_persons_funnel
-class PersonsFunnelRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsFunnelRetrieveRequest(StrictModel):
-    """Retrieve persons funnel data for a specific project. This endpoint supports reading and filtering person records; for creating or updating persons, use the capture API, user properties ($set/$unset), or PostHog SDKs."""
-    path: PersonsFunnelRetrieveRequestPath
-
-# Operation: get_persons_funnel_correlation
-class PersonsFunnelCorrelationRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsFunnelCorrelationRetrieveRequest(StrictModel):
-    """Retrieve correlation analysis data for persons within a funnel. This endpoint analyzes how user properties and events correlate with funnel progression."""
-    path: PersonsFunnelCorrelationRetrieveRequestPath
-
-# Operation: get_persons_lifecycle
-class PersonsLifecycleRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project to access. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsLifecycleRetrieveRequest(StrictModel):
-    """Retrieve person lifecycle data for a project. This endpoint supports reading and deleting persons; for creating or updating persons, use the capture API, user properties ($set/$unset), or PostHog SDKs instead."""
-    path: PersonsLifecycleRetrieveRequestPath
-
-# Operation: get_person_properties_at_time
-class PersonsPropertiesAtTimeRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the person. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsPropertiesAtTimeRetrieveRequestQuery(StrictModel):
-    include_set_once: bool | None = Field(default=None, description="Whether to include properties set via $set_once operations in the reconstruction. When enabled, captures properties that were only set once and never updated.")
-    timestamp: str = Field(default=..., description="The point in time for which to reconstruct person properties, specified as an ISO 8601 datetime string in UTC (e.g., '2023-06-15T14:30:00Z'). Only events occurring on or before this timestamp are included.")
-class PersonsPropertiesAtTimeRetrieveRequest(StrictModel):
-    """Retrieve a person's properties as they existed at a specific point in time by reconstructing their state from historical $set and $set_once events in ClickHouse."""
-    path: PersonsPropertiesAtTimeRetrieveRequestPath
-    query: PersonsPropertiesAtTimeRetrieveRequestQuery
-
-# Operation: reset_person_distinct_id
-class PersonsResetPersonDistinctIdCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsResetPersonDistinctIdCreateRequestBody(StrictModel):
-    properties: Any | None = Field(default=None, description="Optional key-value map of person properties to set or update using $set and $set_once operations. Properties are applied during the reset operation.")
-class PersonsResetPersonDistinctIdCreateRequest(StrictModel):
-    """Reset a distinct_id for a deleted person, making the identifier available for reuse. This operation is useful when you need to reassign a previously used distinct_id to a new person record."""
-    path: PersonsResetPersonDistinctIdCreateRequestPath
-    body: PersonsResetPersonDistinctIdCreateRequestBody | None = None
-
-# Operation: get_persons_stickiness
-class PersonsStickinessRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsStickinessRetrieveRequest(StrictModel):
-    """Retrieve stickiness metrics for persons in a project, indicating how consistently users engage with your product over time."""
-    path: PersonsStickinessRetrieveRequestPath
-
-# Operation: list_persons_trends
-class PersonsTrendsRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class PersonsTrendsRetrieveRequest(StrictModel):
-    """Retrieve trend data for persons in a project. This endpoint provides analytics on person-related metrics and trends over time."""
-    path: PersonsTrendsRetrieveRequestPath
 
 # Operation: list_person_property_values
 class PersonsValuesRetrieveRequestPath(StrictModel):
@@ -8383,19 +6368,6 @@ class ProductToursDraftStatusRetrieveRequest(StrictModel):
     """Poll the draft status of a product tour to detect changes. This lightweight endpoint is designed for efficient change detection without retrieving the full tour data."""
     path: ProductToursDraftStatusRetrieveRequestPath
 
-# Operation: generate_product_tour_steps
-class ProductToursGenerateCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the product tour to generate steps for.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the product tour. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class ProductToursGenerateCreateRequestBody(StrictModel):
-    title: str | None = Field(default=None, description="The title or name of the product tour, used as context for AI-generated step content.")
-    goal: str | None = Field(default=None, description="The primary objective or goal of the product tour, used to guide the AI generation of step content and ensure alignment with tour purpose.")
-    steps: list[dict[str, Any]] | None = Field(default=None, description="An array of tour step objects to generate content for. Each step should include relevant metadata that the AI will use to create contextual descriptions and guidance.")
-class ProductToursGenerateCreateRequest(StrictModel):
-    """Generate AI-powered step content for a product tour within a specific project. Use this to automatically create tour step descriptions and guidance based on the tour's title, goal, and existing step structure."""
-    path: ProductToursGenerateCreateRequestPath
-    body: ProductToursGenerateCreateRequestBody | None = None
-
 # Operation: publish_product_tour_draft
 class ProductToursPublishDraftCreateRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The UUID identifier of the product tour to publish.", json_schema_extra={'format': 'uuid'})
@@ -8410,17 +6382,6 @@ class ProductToursPublishDraftCreateRequest(StrictModel):
     """Publish a product tour draft to live, applying full validation and triggering associated side effects. Optionally merge changes into the draft before publishing to save and publish in a single request."""
     path: ProductToursPublishDraftCreateRequestPath
     body: ProductToursPublishDraftCreateRequestBody
-
-# Operation: create_project_secret_api_key
-class ProjectSecretApiKeysCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the API key will be created. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class ProjectSecretApiKeysCreateRequestBody(StrictModel):
-    label: str = Field(default=..., description="A human-readable label for the API key to help identify its purpose. Must be 40 characters or fewer.", max_length=40)
-    scopes: list[str] = Field(default=..., description="An array of permission scopes that define what actions this API key is authorized to perform. Each scope grants specific access permissions to the key.")
-class ProjectSecretApiKeysCreateRequest(StrictModel):
-    """Create a new secret API key for a project with specified access scopes. The key can be used to authenticate API requests on behalf of the project."""
-    path: ProjectSecretApiKeysCreateRequestPath
-    body: ProjectSecretApiKeysCreateRequestBody
 
 # Operation: get_project_secret_api_key
 class ProjectSecretApiKeysRetrieveRequestPath(StrictModel):
@@ -8461,14 +6422,6 @@ class ProjectSecretApiKeysDestroyRequestPath(StrictModel):
 class ProjectSecretApiKeysDestroyRequest(StrictModel):
     """Permanently delete a secret API key from a project. This operation removes the specified API key and revokes any access it provided."""
     path: ProjectSecretApiKeysDestroyRequestPath
-
-# Operation: roll_project_secret_api_key
-class ProjectSecretApiKeysRollCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the project secret API key to rotate.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the API key. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class ProjectSecretApiKeysRollCreateRequest(StrictModel):
-    """Generate a new secret value for an existing project API key, invalidating the previous secret. Use this to rotate credentials for security purposes."""
-    path: ProjectSecretApiKeysRollCreateRequestPath
 
 # Operation: list_property_definitions
 class PropertyDefinitionsListRequestPath(StrictModel):
@@ -8537,13 +6490,6 @@ class PropertyDefinitionsDestroyRequest(StrictModel):
     """Permanently delete a property definition from a project. This removes the property definition and any associated metadata."""
     path: PropertyDefinitionsDestroyRequestPath
 
-# Operation: get_property_definitions_seen_together
-class PropertyDefinitionsSeenTogetherRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project to query. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class PropertyDefinitionsSeenTogetherRetrieveRequest(StrictModel):
-    """Retrieves a map indicating which properties have been observed together with specified events. Accepts a list of event names and returns a boolean for each event showing whether the given property has ever co-occurred with that event."""
-    path: PropertyDefinitionsSeenTogetherRetrieveRequestPath
-
 # Operation: query_create
 class QueryCreateRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project to query. Retrieve available project IDs from the /api/projects/ endpoint.")
@@ -8581,50 +6527,6 @@ class QueryDestroyRequestPath(StrictModel):
 class QueryDestroyRequest(StrictModel):
     """Permanently delete a saved query from a project. This operation removes the query and cannot be undone."""
     path: QueryDestroyRequestPath
-
-# Operation: get_query_log
-class QueryLogRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the query for which to retrieve log details. The query must have been issued within the last 24 hours.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the query. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class QueryLogRetrieveRequest(StrictModel):
-    """Retrieve detailed log information for a specific query that was executed within the last 24 hours. The query log data is sourced from the query_log_archive table."""
-    path: QueryLogRetrieveRequestPath
-
-# Operation: create_query
-class QueryCreate2RequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the query. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-    query_kind: str = Field(default=..., description="The type of query to execute, specified in PascalCase format (must start with an uppercase letter followed by zero or more letters).", pattern='^[A-Z][A-Za-z]*$')
-class QueryCreate2Request(StrictModel):
-    """Execute a query operation within a project with permission validation. The operation supports response caching through middleware, ensuring all cached responses are authorized before being returned to the requester."""
-    path: QueryCreate2RequestPath
-
-# Operation: get_draft_sql_query
-class QueryDraftSqlRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the draft SQL query. You can obtain the project ID by calling the /api/projects/ endpoint.")
-class QueryDraftSqlRetrieveRequest(StrictModel):
-    """Retrieve the draft SQL query for a specific project. This operation returns cached query data after verifying the requester has appropriate permissions to access the project."""
-    path: QueryDraftSqlRetrieveRequestPath
-
-# Operation: upgrade_query
-class QueryUpgradeCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the query. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class QueryUpgradeCreateRequestBody(StrictModel):
-    query: EventsNode | ActionsNode | PersonsNode | DataWarehouseNode | FunnelsDataWarehouseNode | LifecycleDataWarehouseNode | EventsQuery | SessionsQuery | ActorsQuery | GroupsQuery | InsightActorsQuery | InsightActorsQueryOptions | SessionsTimelineQuery | HogQuery | HogQlQuery | HogQlMetadata | HogQlAutocomplete | SessionAttributionExplorerQuery | RevenueExampleEventsQuery | RevenueExampleDataWarehouseTablesQuery | ErrorTrackingQuery | ErrorTrackingSimilarIssuesQuery | ErrorTrackingBreakdownsQuery | ErrorTrackingIssueCorrelationQuery | ExperimentFunnelsQuery | ExperimentTrendsQuery | ExperimentQuery | ExperimentExposureQuery | DocumentSimilarityQuery | WebOverviewQuery | WebStatsTableQuery | WebExternalClicksTableQuery | WebGoalsQuery | WebVitalsQuery | WebVitalsPathBreakdownQuery | WebPageUrlSearchQuery | WebAnalyticsExternalSummaryQuery | WebNotableChangesQuery | RevenueAnalyticsGrossRevenueQuery | RevenueAnalyticsMetricsQuery | RevenueAnalyticsMrrQuery | RevenueAnalyticsOverviewQuery | RevenueAnalyticsTopCustomersQuery | MarketingAnalyticsTableQuery | MarketingAnalyticsAggregatedQuery | NonIntegratedConversionsTableQuery | DataVisualizationNode | DataTableNode | SavedInsightNode | InsightVizNode | TrendsQuery | FunnelsQuery | RetentionQuery | PathsQuery | StickinessQuery | LifecycleQuery | FunnelCorrelationQuery | DatabaseSchemaQuery | LogsQuery | LogAttributesQuery | LogValuesQuery | TraceSpansQuery | SuggestedQuestionsQuery | TeamTaxonomyQuery | EventTaxonomyQuery | ActorsPropertyTaxonomyQuery | TracesQuery | TraceQuery | TraceNeighborsQuery | VectorSearchQuery | UsageMetricsQuery | EndpointsUsageOverviewQuery | EndpointsUsageTableQuery | EndpointsUsageTrendsQuery | PropertyValuesQuery = Field(default=..., description="The query object to be upgraded. This should contain the query structure with nodes that will be migrated to the latest version.")
-class QueryUpgradeCreateRequest(StrictModel):
-    """Upgrades a query to the latest version by migrating all nodes without executing it. Returns the upgraded query with all components updated to current specifications."""
-    path: QueryUpgradeCreateRequestPath
-    body: QueryUpgradeCreateRequestBody
-
-# Operation: list_sandbox_environments
-class SandboxListRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class SandboxListRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of sandbox environments to return in a single page of results. Use with offset for pagination.")
-    offset: int | None = Field(default=None, description="The starting position in the result set for pagination. Use with limit to retrieve subsequent pages of results.")
-class SandboxListRequest(StrictModel):
-    """Retrieve a paginated list of sandbox environments for a project. Sandbox environments control network access policies for task runs within the project."""
-    path: SandboxListRequestPath
-    query: SandboxListRequestQuery | None = None
 
 # Operation: get_sandbox_environment
 class SandboxRetrieveRequestPath(StrictModel):
@@ -8705,17 +6607,6 @@ class SavedDestroyRequest(StrictModel):
     """Soft-delete a saved query by marking it as deleted. Sends PATCH with {deleted: true} body — the underlying DELETE endpoint is not supported by the API."""
     path: SavedDestroyRequestPath
 
-# Operation: regenerate_saved_query
-class SavedRegenerateCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the saved query. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the saved query to regenerate.")
-class SavedRegenerateCreateRequestBody(StrictModel):
-    url: str = Field(default=..., description="The URL endpoint to execute the saved query against. Must be a valid URI and not exceed 2000 characters in length.", max_length=2000, json_schema_extra={'format': 'uri'})
-class SavedRegenerateCreateRequest(StrictModel):
-    """Regenerate a saved query by executing it against a new or updated URL. This operation re-runs a previously saved query configuration with the provided URL endpoint."""
-    path: SavedRegenerateCreateRequestPath
-    body: SavedRegenerateCreateRequestBody
-
 # Operation: list_schema_property_groups
 class SchemaPropertyGroupsListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project. You can retrieve available project IDs by calling the projects list endpoint.")
@@ -8791,13 +6682,6 @@ class SessionGroupSummariesListRequest(StrictModel):
     path: SessionGroupSummariesListRequestPath
     query: SessionGroupSummariesListRequestQuery | None = None
 
-# Operation: create_session_group_summary
-class SessionGroupSummariesCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the session group summary will be created. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class SessionGroupSummariesCreateRequest(StrictModel):
-    """Create a new group session summary for a project. This operation stores aggregated session data and insights for a group of sessions within the specified project."""
-    path: SessionGroupSummariesCreateRequestPath
-
 # Operation: get_session_group_summary
 class SessionGroupSummariesRetrieveRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the session group summary to retrieve.", json_schema_extra={'format': 'uuid'})
@@ -8842,18 +6726,6 @@ class SessionRecordingPlaylistsListRequest(StrictModel):
     path: SessionRecordingPlaylistsListRequestPath
     query: SessionRecordingPlaylistsListRequestQuery | None = None
 
-# Operation: create_session_recording_playlist
-class SessionRecordingPlaylistsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the playlist will be created. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-class SessionRecordingPlaylistsCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="A text description for the playlist to help identify its purpose and contents.")
-    pinned: bool | None = Field(default=None, description="Boolean flag to pin the playlist for prominent visibility and quick access within the project.")
-    filters: Any | None = Field(default=None, description="Filter criteria to automatically include session recordings in the playlist based on specified conditions. Structure and supported filter types depend on the API's filtering schema.")
-class SessionRecordingPlaylistsCreateRequest(StrictModel):
-    """Create a new session recording playlist within a project to organize and group related session recordings. Playlists can be pinned for quick access and filtered based on specific criteria."""
-    path: SessionRecordingPlaylistsCreateRequestPath
-    body: SessionRecordingPlaylistsCreateRequestBody | None = None
-
 # Operation: get_session_recording_playlist
 class SessionRecordingPlaylistsRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the session recording playlist. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
@@ -8888,14 +6760,6 @@ class SessionRecordingPlaylistsPartialUpdateRequest(StrictModel):
     path: SessionRecordingPlaylistsPartialUpdateRequestPath
     body: SessionRecordingPlaylistsPartialUpdateRequestBody | None = None
 
-# Operation: soft_delete_session_recording_playlist
-class SessionRecordingPlaylistsDestroyRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the playlist. Retrieve available project IDs by calling the /api/projects/ endpoint.")
-    short_id: str = Field(default=..., description="The short identifier of the session recording playlist to be soft deleted.")
-class SessionRecordingPlaylistsDestroyRequest(StrictModel):
-    """Soft-delete a session recording playlist by marking it as deleted. Sends PATCH with {deleted: true} body — the underlying DELETE endpoint is not supported by the API."""
-    path: SessionRecordingPlaylistsDestroyRequestPath
-
 # Operation: list_recordings_in_playlist
 class SessionRecordingPlaylistsRecordingsRetrieveRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the playlist. You can retrieve your project ID by calling the /api/projects/ endpoint.")
@@ -8903,29 +6767,6 @@ class SessionRecordingPlaylistsRecordingsRetrieveRequestPath(StrictModel):
 class SessionRecordingPlaylistsRecordingsRetrieveRequest(StrictModel):
     """Retrieve all recordings contained within a specific session recording playlist. This allows you to view the list of recordings that have been organized into a playlist for a given project."""
     path: SessionRecordingPlaylistsRecordingsRetrieveRequestPath
-
-# Operation: add_recording_to_playlist
-class SessionRecordingPlaylistsRecordingsCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing both the playlist and recording. Retrieve available project IDs from the /api/projects/ endpoint.")
-    session_recording_id: str = Field(default=..., description="The unique identifier of the session recording to add to the playlist.")
-    short_id: str = Field(default=..., description="The unique short identifier of the playlist to which the recording will be added.")
-class SessionRecordingPlaylistsRecordingsCreateRequestBody(StrictModel):
-    description: str | None = Field(default=None, description="Optional text description or notes for this recording within the playlist context.")
-    pinned: bool | None = Field(default=None, description="Optional boolean flag to pin this recording to the top of the playlist for prominence.")
-    filters: Any | None = Field(default=None, description="Optional filters object to apply additional criteria or conditions to the recording within the playlist.")
-class SessionRecordingPlaylistsRecordingsCreateRequest(StrictModel):
-    """Add a session recording to a playlist within a project. This operation allows you to include an existing recording in a curated playlist, optionally with metadata like descriptions and pinned status."""
-    path: SessionRecordingPlaylistsRecordingsCreateRequestPath
-    body: SessionRecordingPlaylistsRecordingsCreateRequestBody | None = None
-
-# Operation: remove_recording_from_playlist
-class SessionRecordingPlaylistsRecordingsDestroyRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the playlist. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-    session_recording_id: str = Field(default=..., description="The unique identifier of the session recording to remove from the playlist.")
-    short_id: str = Field(default=..., description="The short identifier of the session recording playlist from which the recording will be removed.")
-class SessionRecordingPlaylistsRecordingsDestroyRequest(StrictModel):
-    """Remove a specific session recording from a session recording playlist. This operation deletes the association between a recording and a playlist without affecting the recording itself."""
-    path: SessionRecordingPlaylistsRecordingsDestroyRequestPath
 
 # Operation: list_session_recordings
 class SessionRecordingsListRequestPath(StrictModel):
@@ -9001,15 +6842,6 @@ class SessionRecordingsSharingPasswordsCreateRequest(StrictModel):
     path: SessionRecordingsSharingPasswordsCreateRequestPath
     body: SessionRecordingsSharingPasswordsCreateRequestBody | None = None
 
-# Operation: delete_session_recording_sharing_password
-class SessionRecordingsSharingPasswordsDestroyRequestPath(StrictModel):
-    password_id: str = Field(default=..., description="The unique identifier of the password to be deleted from the sharing configuration.")
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the session recording. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-    recording_id: str = Field(default=..., description="The unique identifier of the session recording from which the password will be removed.")
-class SessionRecordingsSharingPasswordsDestroyRequest(StrictModel):
-    """Remove a password from a session recording's sharing configuration, preventing access via that specific password."""
-    path: SessionRecordingsSharingPasswordsDestroyRequestPath
-
 # Operation: refresh_session_recording_sharing
 class SessionRecordingsSharingRefreshCreateRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the session recording. Retrieve available project IDs by calling the /api/projects/ endpoint.")
@@ -9029,13 +6861,6 @@ class SessionsPropertyDefinitionsRetrieveRequestPath(StrictModel):
 class SessionsPropertyDefinitionsRetrieveRequest(StrictModel):
     """Retrieve all property definitions available for sessions within a specific project. Property definitions define the custom attributes and metadata that can be attached to session records."""
     path: SessionsPropertyDefinitionsRetrieveRequestPath
-
-# Operation: list_session_values
-class SessionsValuesRetrieveRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project. You can obtain this ID by calling the /api/projects/ endpoint to list available projects.")
-class SessionsValuesRetrieveRequest(StrictModel):
-    """Retrieve all session values for a specific project. This endpoint returns the collection of values associated with sessions in the given project."""
-    path: SessionsValuesRetrieveRequestPath
 
 # Operation: list_signal_source_configs
 class SignalSourceConfigsListRequestPath(StrictModel):
@@ -9101,17 +6926,6 @@ class SignalSourceConfigsDestroyRequestPath(StrictModel):
 class SignalSourceConfigsDestroyRequest(StrictModel):
     """Permanently delete a signal source configuration from a project. This operation removes the specified signal source config and cannot be undone."""
     path: SignalSourceConfigsDestroyRequestPath
-
-# Operation: list_subscriptions
-class SubscriptionsListRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the subscriptions. Obtain this ID by calling the projects list endpoint.")
-class SubscriptionsListRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of subscription records to return in a single response page. Omit or set to default for standard page size.")
-    offset: int | None = Field(default=None, description="Zero-based index position from which to start returning results, used for pagination alongside limit.")
-class SubscriptionsListRequest(StrictModel):
-    """Retrieve a paginated list of subscriptions for a specific project. Use limit and offset parameters to control pagination."""
-    path: SubscriptionsListRequestPath
-    query: SubscriptionsListRequestQuery | None = None
 
 # Operation: create_subscription
 class SubscriptionsCreateRequestPath(StrictModel):
@@ -9322,34 +7136,6 @@ class SurveysArchivedResponseUuidsRetrieveRequestPath(StrictModel):
 class SurveysArchivedResponseUuidsRetrieveRequest(StrictModel):
     """Retrieve a list of archived response UUIDs for a specific survey. Use these UUIDs to filter out archived responses when constructing HogQL queries on the frontend."""
     path: SurveysArchivedResponseUuidsRetrieveRequestPath
-
-# Operation: duplicate_survey_to_projects
-class SurveysDuplicateToProjectsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The UUID of the survey to duplicate.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The UUID of the source project containing the survey being duplicated.")
-class SurveysDuplicateToProjectsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="Display name for the duplicated survey. Maximum 400 characters.", max_length=400)
-    description: str | None = Field(default=None, description="Optional description or notes about the survey.")
-    type_: Literal["popover", "widget", "external_survey", "api"] = Field(default=..., validation_alias="type", serialization_alias="type", description="Survey delivery format: popover (embedded overlay), widget (embedded component), external_survey (standalone link), or api (programmatic access).")
-    schedule: str | None = Field(default=None, description="Optional schedule configuration for survey deployment timing.")
-    questions: Any | None = Field(default=None, description="Array of survey questions. Each question must be one of four types: open-ended (open), link-based (link), rating scale (rating), or choice-based (single_choice or multiple_choice). Questions support branching logic, translations, and optional descriptions.")
-    conditions: Any | None = Field(default=None, description="Optional conditional logic to control survey flow and visibility based on user attributes or responses.")
-    appearance: Any | None = Field(default=None, description="Optional styling and presentation settings including colors, fonts, and layout preferences.")
-    start_date: str | None = Field(default=None, description="Optional ISO 8601 datetime when the survey becomes active.", json_schema_extra={'format': 'date-time'})
-    end_date: str | None = Field(default=None, description="Optional ISO 8601 datetime when the survey stops accepting responses.", json_schema_extra={'format': 'date-time'})
-    responses_limit: int | None = Field(default=None, description="Optional maximum number of responses to collect before closing the survey. Must be a non-negative integer.", ge=0, le=2147483647)
-    iteration_count: int | None = Field(default=None, description="Optional number of times to repeat the survey. Must be between 0 and 500.", ge=0, le=500)
-    iteration_frequency_days: int | None = Field(default=None, description="Optional number of days between survey iterations when iteration_count is greater than 1.", ge=0, le=2147483647)
-    response_sampling_interval_type: Literal["day", "week", "month"] | Literal[""] | None = Field(default=None, description="Optional sampling strategy type for response collection (e.g., every nth response, random sampling).")
-    response_sampling_interval: int | None = Field(default=None, description="Optional interval value for response sampling based on the selected sampling strategy.", ge=0, le=2147483647)
-    response_sampling_limit: int | None = Field(default=None, description="Optional maximum number of responses to collect when using response sampling.", ge=0, le=2147483647)
-    enable_partial_responses: bool | None = Field(default=None, description="Optional flag to allow respondents to submit incomplete surveys before answering all questions.")
-    enable_iframe_embedding: bool | None = Field(default=None, description="Optional flag to enable embedding the survey in an iframe on external websites.")
-    translations: Any | None = Field(default=None, description="Optional object mapping language codes to translated survey content including questions, descriptions, and labels.")
-class SurveysDuplicateToProjectsCreateRequest(StrictModel):
-    """Duplicate a survey to multiple projects in a single atomic transaction. All target projects receive an identical copy of the survey, or if any duplication fails, all changes are rolled back with no partial results."""
-    path: SurveysDuplicateToProjectsCreateRequestPath
-    body: SurveysDuplicateToProjectsCreateRequestBody
 
 # Operation: archive_survey_response
 class SurveysResponsesArchiveCreateRequestPath(StrictModel):
@@ -9716,13 +7502,6 @@ class TasksRunsStreamRetrieveRequest(StrictModel):
     """Retrieve the execution stream for a specific task run, providing real-time or historical output data from the task's execution."""
     path: TasksRunsStreamRetrieveRequestPath
 
-# Operation: create_uploaded_media
-class UploadedMediaCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The unique identifier of the project where the media will be uploaded. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class UploadedMediaCreateRequest(StrictModel):
-    """Upload media files (images) to a project for use in dashboards and text cards. Uploaded files must be images (content type starting with 'image/') and not exceed 4MB in size."""
-    path: UploadedMediaCreateRequestPath
-
 # Operation: list_visual_review_repositories
 class VisualReviewReposListRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project containing the repositories. Obtain this ID by calling the projects list endpoint.")
@@ -9838,19 +7617,6 @@ class VisualReviewRunsCompleteCreateRequest(StrictModel):
     """Complete a visual review run by detecting removals, verifying uploads, and triggering diff processing for the specified project and run."""
     path: VisualReviewRunsCompleteCreateRequestPath
 
-# Operation: list_snapshot_history_for_visual_review_run
-class VisualReviewRunsSnapshotHistoryListRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the visual review run containing the snapshot history to retrieve.")
-    project_id: str = Field(default=..., description="The project ID that contains the visual review runs. You can retrieve available project IDs by calling the /api/projects/ endpoint.")
-class VisualReviewRunsSnapshotHistoryListRequestQuery(StrictModel):
-    identifier: str = Field(default=..., description="The snapshot identifier for which to retrieve the change history across runs.")
-    limit: int | None = Field(default=None, description="Maximum number of history records to return per page. Use with offset for pagination.")
-    offset: int | None = Field(default=None, description="The starting index for results, enabling pagination through the history records.")
-class VisualReviewRunsSnapshotHistoryListRequest(StrictModel):
-    """Retrieve the recent change history for a specific snapshot identifier across multiple visual review runs within a project."""
-    path: VisualReviewRunsSnapshotHistoryListRequestPath
-    query: VisualReviewRunsSnapshotHistoryListRequestQuery
-
 # Operation: list_visual_review_run_snapshots
 class VisualReviewRunsSnapshotsListRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the visual review run for which to retrieve snapshots.")
@@ -9910,6 +7676,7 @@ class WarehouseSavedQueriesUpdateRequestBody(StrictModel):
     query: Any | None = Field(default=None, description="The HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type (e.g., 'HogQLQuery').")
     folder_id: str | None = Field(default=None, description="Optional UUID of a folder to organize this saved query in the SQL editor sidebar.", json_schema_extra={'format': 'uuid'})
     is_test: bool | None = Field(default=None, description="Optional flag indicating whether this saved query is for testing purposes only and will automatically expire.")
+    edited_history_id: str | None = Field(default=None, description="Activity log ID from the last known edit. Used for conflict detection.")
 class WarehouseSavedQueriesUpdateRequest(StrictModel):
     """Update an existing warehouse saved query (view) with a new name, HogQL query definition, folder organization, or test status. The saved query can be referenced as a table in HogQL queries and as a node in data modeling."""
     path: WarehouseSavedQueriesUpdateRequestPath
@@ -9923,6 +7690,7 @@ class WarehouseSavedQueriesPartialUpdateRequestBody(StrictModel):
     query: Any | None = Field(default=None, description="HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type (e.g., 'HogQLQuery').")
     folder_id: str | None = Field(default=None, description="Optional UUID of a folder for organizing this saved query in the SQL editor sidebar.", json_schema_extra={'format': 'uuid'})
     is_test: bool | None = Field(default=None, description="Optional boolean flag indicating whether this is a temporary test query that will automatically expire.")
+    edited_history_id: str | None = Field(default=None, description="Activity log ID from the last known edit. Used for conflict detection.")
 class WarehouseSavedQueriesPartialUpdateRequest(StrictModel):
     """Partially update a warehouse saved query, allowing modifications to the HogQL query definition, folder organization, or test status."""
     path: WarehouseSavedQueriesPartialUpdateRequestPath
@@ -9943,56 +7711,6 @@ class WarehouseSavedQueriesActivityRetrieveRequestPath(StrictModel):
 class WarehouseSavedQueriesActivityRetrieveRequest(StrictModel):
     """Retrieve the activity history for a specific warehouse saved query, including creation, modification, and deletion events within a project."""
     path: WarehouseSavedQueriesActivityRetrieveRequestPath
-
-# Operation: list_saved_query_ancestors
-class WarehouseSavedQueriesAncestorsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The UUID identifier of the saved query whose ancestors you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The project ID containing the saved query. Find your project ID by calling the /api/projects/ endpoint.")
-class WarehouseSavedQueriesAncestorsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A unique name for the view (maximum 128 characters), used as the table name in HogQL queries and node name in data modeling.", max_length=128)
-    query: Any | None = Field(default=None, description="The HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type.")
-    folder_id: str | None = Field(default=None, description="Optional UUID identifier of a folder to organize this view in the SQL editor sidebar.", json_schema_extra={'format': 'uuid'})
-    is_test: bool | None = Field(default=None, description="Optional flag indicating whether this view is temporary for testing purposes and will automatically expire.")
-class WarehouseSavedQueriesAncestorsCreateRequest(StrictModel):
-    """Retrieve the ancestor lineage of a saved query in the data warehouse. By default returns immediate parents; use the level parameter to traverse further back in the ancestor tree."""
-    path: WarehouseSavedQueriesAncestorsCreateRequestPath
-    body: WarehouseSavedQueriesAncestorsCreateRequestBody
-
-# Operation: cancel_warehouse_saved_query
-class WarehouseSavedQueriesCancelCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the saved query to cancel.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The project ID containing the saved query. Find your project ID by calling the /api/projects/ endpoint.")
-class WarehouseSavedQueriesCancelCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="The unique name for this view, used as the table name in HogQL queries and node name in data modeling. Must be 128 characters or fewer.", max_length=128)
-    query: Any | None = Field(default=None, description="The HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type (e.g., 'HogQLQuery').")
-    folder_id: str | None = Field(default=None, description="Optional UUID of a folder to organize this view in the SQL editor sidebar.", json_schema_extra={'format': 'uuid'})
-    is_test: bool | None = Field(default=None, description="Optional flag indicating whether this view is temporary for testing purposes and will automatically expire.")
-class WarehouseSavedQueriesCancelCreateRequest(StrictModel):
-    """Cancel an in-progress saved query workflow execution in the data warehouse. This stops the running query and prevents further processing."""
-    path: WarehouseSavedQueriesCancelCreateRequestPath
-    body: WarehouseSavedQueriesCancelCreateRequestBody
-
-# Operation: get_saved_query_dependencies
-class WarehouseSavedQueriesDependenciesRetrieveRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the saved query whose dependencies you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the saved query. You can retrieve your project ID by calling the /api/projects/ endpoint.")
-class WarehouseSavedQueriesDependenciesRetrieveRequest(StrictModel):
-    """Retrieve the count of immediate upstream and downstream dependencies for a specific saved query in your data warehouse. This helps you understand the impact of changes to this query on other queries and workflows."""
-    path: WarehouseSavedQueriesDependenciesRetrieveRequestPath
-
-# Operation: list_saved_query_descendants
-class WarehouseSavedQueriesDescendantsCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The UUID identifier of the saved query whose descendants you want to retrieve.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the saved query. Retrieve project IDs from the /api/projects/ endpoint.")
-class WarehouseSavedQueriesDescendantsCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="A unique name for the view (maximum 128 characters). Used as the table name in HogQL queries and the node identifier in data modeling.", max_length=128)
-    query: Any | None = Field(default=None, description="The HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type (e.g., HogQLQuery).")
-    folder_id: str | None = Field(default=None, description="Optional UUID identifier for organizing this view within the SQL editor sidebar folder structure.", json_schema_extra={'format': 'uuid'})
-    is_test: bool | None = Field(default=None, description="Optional flag indicating whether this view is temporary for testing purposes and will automatically expire.")
-class WarehouseSavedQueriesDescendantsCreateRequest(StrictModel):
-    """Retrieve the descendant saved queries in the hierarchy tree for a specified saved query. By default returns immediate children; use the level parameter to traverse deeper into the tree."""
-    path: WarehouseSavedQueriesDescendantsCreateRequestPath
-    body: WarehouseSavedQueriesDescendantsCreateRequestBody
 
 # Operation: create_materialized_view
 class WarehouseSavedQueriesMaterializeCreateRequestPath(StrictModel):
@@ -10043,19 +7761,6 @@ class WarehouseSavedQueriesRunHistoryRetrieveRequestPath(StrictModel):
 class WarehouseSavedQueriesRunHistoryRetrieveRequest(StrictModel):
     """Retrieve the 5 most recent execution records for a materialized view saved query, including run status and timing information."""
     path: WarehouseSavedQueriesRunHistoryRetrieveRequestPath
-
-# Operation: resume_materialization_schedules
-class WarehouseSavedQueriesResumeSchedulesCreateRequestPath(StrictModel):
-    project_id: str = Field(default=..., description="The project ID containing the materialized views. Find your project ID by calling the /api/projects/ endpoint.")
-class WarehouseSavedQueriesResumeSchedulesCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="Unique identifier for the view, used as the table name in HogQL queries and node name in data modeling. Must be 128 characters or fewer.", max_length=128)
-    query: Any | None = Field(default=None, description="HogQL query definition as a JSON object containing a 'query' key with the SQL string and a 'kind' key specifying the query type.")
-    folder_id: str | None = Field(default=None, description="Optional UUID of a folder to organize this view in the SQL editor sidebar.", json_schema_extra={'format': 'uuid'})
-    is_test: bool | None = Field(default=None, description="Optional flag indicating whether this view is for testing purposes only and will auto-expire.")
-class WarehouseSavedQueriesResumeSchedulesCreateRequest(StrictModel):
-    """Resume paused materialization schedules for one or more materialized views. This operation is idempotent and safely handles already-running or non-existent schedules."""
-    path: WarehouseSavedQueriesResumeSchedulesCreateRequestPath
-    body: WarehouseSavedQueriesResumeSchedulesCreateRequestBody
 
 # Operation: list_warehouse_saved_query_folders
 class WarehouseSavedQueryFoldersListRequestPath(StrictModel):
@@ -10176,42 +7881,6 @@ class WarehouseTablesDestroyRequest(StrictModel):
     """Permanently delete a warehouse table from a project. This operation removes the specified data warehouse table and cannot be undone."""
     path: WarehouseTablesDestroyRequestPath
 
-# Operation: refresh_warehouse_table_schema
-class WarehouseTablesRefreshSchemaCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the warehouse table to refresh.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the warehouse table. Retrieve available project IDs from the /api/projects/ endpoint.")
-class WarehouseTablesRefreshSchemaCreateRequestBodyCredential(StrictModel):
-    access_key: str = Field(default=..., validation_alias="access_key", serialization_alias="access_key", description="The access key or username required to authenticate with the data source. Must not exceed 500 characters.", max_length=500)
-    access_secret: str = Field(default=..., validation_alias="access_secret", serialization_alias="access_secret", description="The access secret or password required to authenticate with the data source. Must not exceed 500 characters.", max_length=500)
-class WarehouseTablesRefreshSchemaCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the warehouse table. Must not exceed 128 characters.", max_length=128)
-    format_: Literal["CSV", "CSVWithNames", "Parquet", "JSONEachRow", "Delta", "DeltaS3Wrapper"] = Field(default=..., validation_alias="format", serialization_alias="format", description="The data format of the source file. Supported formats include CSV, CSV with header names, Parquet, JSON (one object per line), Delta Lake, and Delta Lake with S3 wrapper.")
-    url_pattern: str = Field(default=..., description="The URL pattern or path to the data source file(s). Supports wildcards for matching multiple files. Must not exceed 500 characters.", max_length=500)
-    options: dict[str, Any] | None = Field(default=None, description="Optional configuration object for additional data source settings or format-specific parameters.")
-    credential: WarehouseTablesRefreshSchemaCreateRequestBodyCredential
-class WarehouseTablesRefreshSchemaCreateRequest(StrictModel):
-    """Refresh the schema of a warehouse table by re-scanning its data source. This operation updates the table's column definitions and metadata based on the current state of the underlying data file or storage location."""
-    path: WarehouseTablesRefreshSchemaCreateRequestPath
-    body: WarehouseTablesRefreshSchemaCreateRequestBody
-
-# Operation: update_warehouse_table_schema
-class WarehouseTablesUpdateSchemaCreateRequestPath(StrictModel):
-    id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier (UUID) of the warehouse table to update.", json_schema_extra={'format': 'uuid'})
-    project_id: str = Field(default=..., description="The unique identifier of the project containing the warehouse table. Retrieve available project IDs from the /api/projects/ endpoint.")
-class WarehouseTablesUpdateSchemaCreateRequestBodyCredential(StrictModel):
-    access_key: str = Field(default=..., validation_alias="access_key", serialization_alias="access_key", description="The access key or username for authenticating with the external storage system. Must be 500 characters or fewer.", max_length=500)
-    access_secret: str = Field(default=..., validation_alias="access_secret", serialization_alias="access_secret", description="The access secret or password for authenticating with the external storage system. Must be 500 characters or fewer.", max_length=500)
-class WarehouseTablesUpdateSchemaCreateRequestBody(StrictModel):
-    name: str = Field(default=..., description="The name of the warehouse table. Must be 128 characters or fewer.", max_length=128)
-    format_: Literal["CSV", "CSVWithNames", "Parquet", "JSONEachRow", "Delta", "DeltaS3Wrapper"] = Field(default=..., validation_alias="format", serialization_alias="format", description="The data format of the table contents. Supported formats are CSV, CSVWithNames (CSV with header row), Parquet, JSONEachRow (newline-delimited JSON), Delta, and DeltaS3Wrapper.")
-    url_pattern: str = Field(default=..., description="The URL pattern or path to the table data in external storage. Must be 500 characters or fewer.", max_length=500)
-    options: dict[str, Any] | None = Field(default=None, description="Optional configuration object for additional table settings or format-specific parameters.")
-    credential: WarehouseTablesUpdateSchemaCreateRequestBodyCredential
-class WarehouseTablesUpdateSchemaCreateRequest(StrictModel):
-    """Update the schema configuration for a warehouse table, including its data format, storage location, and access credentials. This operation allows you to modify how a table reads and interprets data from external storage."""
-    path: WarehouseTablesUpdateSchemaCreateRequestPath
-    body: WarehouseTablesUpdateSchemaCreateRequestBody
-
 # Operation: create_warehouse_table_from_file
 class WarehouseTablesFileCreateRequestPath(StrictModel):
     project_id: str = Field(default=..., description="The unique identifier of the project where the warehouse table will be created. Retrieve available project IDs by calling the /api/projects/ endpoint.")
@@ -10308,183 +7977,6 @@ class UsersListRequest(StrictModel):
     """Retrieve a paginated list of users, optionally filtered by staff status. Use limit and offset parameters to control pagination."""
     query: UsersListRequestQuery | None = None
 
-# Operation: get_user
-class UsersRetrieveRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier (UUID) of the user to retrieve. Must be a valid UUID format.", json_schema_extra={'format': 'uuid'})
-class UsersRetrieveRequest(StrictModel):
-    """Retrieve a specific user by their unique identifier (UUID). Returns the complete user profile for the requested user."""
-    path: UsersRetrieveRequestPath
-
-# Operation: update_user
-class UsersUpdateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user to update, formatted as a UUID.", json_schema_extra={'format': 'uuid'})
-class UsersUpdateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    email: str = Field(default=..., description="The user's email address, up to 254 characters. Must be a valid email format.", max_length=254, json_schema_extra={'format': 'email'})
-    notification_settings: dict[str, Any] | None = Field(default=None, description="Configuration object for controlling user notification preferences and delivery channels.")
-    anonymize_data: bool | None = Field(default=None, description="When enabled, removes personally identifiable information from the user's account while preserving activity history.")
-    allow_impersonation: bool | None = Field(default=None, description="When enabled, allows administrators to log in as this user for support and troubleshooting purposes.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="Controls the display mode and behavior of the toolbar interface.")
-    is_staff: bool | None = Field(default=None, description="When enabled, grants this user administrative access to the site and admin panel.")
-    password: str = Field(default=..., description="The user's password for authentication, up to 128 characters. Should be a strong, secure password.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="Controls the visual theme preference for the user interface (e.g., light mode, dark mode).")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="Specifies the preferred location for displaying keyboard shortcuts and quick-access shortcuts.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's primary role or function within the organization. Choose from: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersUpdateRequest(StrictModel):
-    """Update a user's profile information, authentication credentials, preferences, and organizational role. Requires the user's UUID and email address."""
-    path: UsersUpdateRequestPath
-    body: UsersUpdateRequestBody
-
-# Operation: update_user_partial
-class UsersPartialUpdateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user to update, formatted as a UUID.", json_schema_extra={'format': 'uuid'})
-class UsersPartialUpdateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    notification_settings: dict[str, Any] | None = Field(default=None, description="User's notification preferences and settings as a structured object.")
-    anonymize_data: bool | None = Field(default=None, description="Whether to anonymize the user's personal data in the system.")
-    allow_impersonation: bool | None = Field(default=None, description="Whether to allow other users to impersonate this account for testing or support purposes.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="The user's preferred toolbar display mode or layout.")
-    is_staff: bool | None = Field(default=None, description="Whether the user has administrative privileges and can access the admin site.")
-    password: str | None = Field(default=None, description="The user's password for account authentication, up to 128 characters. Should be securely transmitted and stored.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="The user's preferred color theme or visual mode for the interface.")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="The user's preferred position or layout for shortcuts in the interface.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's role or function within their organization. Valid roles are: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersPartialUpdateRequest(StrictModel):
-    """Partially update a user's profile information, preferences, and account settings. Allows modification of personal details, notification preferences, UI customization, and organizational role."""
-    path: UsersPartialUpdateRequestPath
-    body: UsersPartialUpdateRequestBody | None = None
-
-# Operation: delete_user
-class UsersDestroyRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user to delete, formatted as a valid UUID (universally unique identifier).", json_schema_extra={'format': 'uuid'})
-class UsersDestroyRequest(StrictModel):
-    """Permanently delete a user account by its unique identifier. This operation removes the user and all associated data from the system."""
-    path: UsersDestroyRequestPath
-
-# Operation: create_user_scene_personalisation
-class UsersScenePersonalisationCreateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user as a UUID string.", json_schema_extra={'format': 'uuid'})
-class UsersScenePersonalisationCreateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    email: str = Field(default=..., description="The user's email address, must be a valid email format and up to 254 characters.", max_length=254, json_schema_extra={'format': 'email'})
-    notification_settings: dict[str, Any] | None = Field(default=None, description="Configuration object for notification preferences and alert settings.")
-    anonymize_data: bool | None = Field(default=None, description="Whether to anonymize the user's data in logs and analytics.")
-    allow_impersonation: bool | None = Field(default=None, description="Whether to allow other users to impersonate this account for testing or support purposes.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="Display mode for the toolbar interface (e.g., compact, expanded, hidden).")
-    is_staff: bool | None = Field(default=None, description="Whether this user has administrative access to the system.")
-    password: str = Field(default=..., description="The user's password, up to 128 characters. Should be securely hashed before storage.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="The visual theme preference for the user interface (e.g., light, dark, auto).")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="The preferred position for quick-access shortcuts in the interface (e.g., top, left, right, bottom).")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's role or function within their organization. Valid options are: engineering, data, product, founder, leadership, marketing, sales/success, or other.")
-class UsersScenePersonalisationCreateRequest(StrictModel):
-    """Create or configure personalization settings for a user, including display preferences, notification settings, and organizational role. This operation sets up the user's scene customization within the system."""
-    path: UsersScenePersonalisationCreateRequestPath
-    body: UsersScenePersonalisationCreateRequestBody
-
-# Operation: initiate_two_factor_authentication_setup
-class UsersStart2faSetupRetrieveRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user, formatted as a valid UUID.", json_schema_extra={'format': 'uuid'})
-class UsersStart2faSetupRetrieveRequest(StrictModel):
-    """Initiates the two-factor authentication setup process for a user. Returns the necessary information to begin configuring 2FA on their account."""
-    path: UsersStart2faSetupRetrieveRequestPath
-
-# Operation: regenerate_two_factor_backup_codes
-class UsersTwoFactorBackupCodesCreateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier (UUID) of the user for whom backup codes are being generated.", json_schema_extra={'format': 'uuid'})
-class UsersTwoFactorBackupCodesCreateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    email: str = Field(default=..., description="The user's email address, must be a valid email format and no longer than 254 characters.", max_length=254, json_schema_extra={'format': 'email'})
-    notification_settings: dict[str, Any] | None = Field(default=None, description="Configuration object for the user's notification preferences.")
-    anonymize_data: bool | None = Field(default=None, description="Whether to anonymize the user's personal data in logs and records.")
-    allow_impersonation: bool | None = Field(default=None, description="Whether to allow other administrators to impersonate this user account.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="The user's preferred toolbar display mode.")
-    is_staff: bool | None = Field(default=None, description="Whether this user has administrative access to the site.")
-    password: str = Field(default=..., description="The user's password, up to 128 characters. Must be provided for security verification.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="The user's preferred color theme mode (light, dark, or auto).")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="The user's preferred position for UI shortcuts.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's role or function within their organization. Valid options include: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersTwoFactorBackupCodesCreateRequest(StrictModel):
-    """Generate a new set of two-factor authentication backup codes for a user, automatically invalidating any previously issued codes. This operation also allows updating user profile information in the same request."""
-    path: UsersTwoFactorBackupCodesCreateRequestPath
-    body: UsersTwoFactorBackupCodesCreateRequestBody
-
-# Operation: get_two_factor_setup_initialization
-class UsersTwoFactorStartSetupRetrieveRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user, formatted as a valid UUID.", json_schema_extra={'format': 'uuid'})
-class UsersTwoFactorStartSetupRetrieveRequest(StrictModel):
-    """Retrieve two-factor authentication setup initialization data for a specific user. This endpoint prepares the user's account for enabling two-factor authentication by returning necessary setup information."""
-    path: UsersTwoFactorStartSetupRetrieveRequestPath
-
-# Operation: get_user_two_factor_status
-class UsersTwoFactorStatusRetrieveRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier of the user, formatted as a UUID.", json_schema_extra={'format': 'uuid'})
-class UsersTwoFactorStatusRetrieveRequest(StrictModel):
-    """Retrieve the current two-factor authentication status for a user, including backup codes if 2FA is enabled."""
-    path: UsersTwoFactorStatusRetrieveRequestPath
-
-# Operation: validate_user_two_factor
-class UsersTwoFactorValidateCreateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier (UUID) of the user account to validate and update.", json_schema_extra={'format': 'uuid'})
-class UsersTwoFactorValidateCreateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    email: str = Field(default=..., description="The user's email address, must be a valid email format and up to 254 characters.", max_length=254, json_schema_extra={'format': 'email'})
-    notification_settings: dict[str, Any] | None = Field(default=None, description="User notification preferences configuration object.")
-    anonymize_data: bool | None = Field(default=None, description="Whether to anonymize the user's personal data in logs and analytics.")
-    allow_impersonation: bool | None = Field(default=None, description="Whether to allow other administrators to impersonate this user account.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="Display mode preference for the application toolbar.")
-    is_staff: bool | None = Field(default=None, description="Whether this user has administrative access to the site.")
-    password: str = Field(default=..., description="The user's password, up to 128 characters. Should be securely hashed before storage.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="Visual theme preference for the user interface.")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="Preferred position for keyboard shortcuts display.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's role or function within their organization. Valid options are: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersTwoFactorValidateCreateRequest(StrictModel):
-    """Validate and update a user's two-factor authentication status while simultaneously updating their profile information including name, email, password, preferences, and organizational role."""
-    path: UsersTwoFactorValidateCreateRequestPath
-    body: UsersTwoFactorValidateCreateRequestBody
-
-# Operation: validate_and_update_user_2fa
-class UsersValidate2faCreateRequestPath(StrictModel):
-    uuid_: str = Field(default=..., validation_alias="uuid", serialization_alias="uuid", description="The unique identifier (UUID) of the user account to validate and update.", json_schema_extra={'format': 'uuid'})
-class UsersValidate2faCreateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="The user's first name, up to 150 characters.", max_length=150)
-    last_name: str | None = Field(default=None, description="The user's last name, up to 150 characters.", max_length=150)
-    email: str = Field(default=..., description="The user's email address, must be a valid email format and no longer than 254 characters.", max_length=254, json_schema_extra={'format': 'email'})
-    notification_settings: dict[str, Any] | None = Field(default=None, description="Configuration object for user notification preferences (e.g., email alerts, frequency settings).")
-    anonymize_data: bool | None = Field(default=None, description="When enabled, removes or masks personally identifiable information from user records.")
-    allow_impersonation: bool | None = Field(default=None, description="When enabled, allows administrators or authorized users to log in as this user for support or troubleshooting purposes.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="Controls the display mode or visibility of the user interface toolbar (e.g., compact, expanded, hidden).")
-    is_staff: bool | None = Field(default=None, description="When enabled, grants this user access to the administrative site and staff-level features.")
-    password: str = Field(default=..., description="The user's account password, up to 128 characters. Should be securely transmitted and stored.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="Sets the user's preferred visual theme (e.g., light mode, dark mode, auto).")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="Specifies the preferred location or alignment of keyboard shortcuts and quick-access elements in the interface.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="The user's role or function within the organization. Valid options are: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersValidate2faCreateRequest(StrictModel):
-    """Validate a user's two-factor authentication and update their profile settings. This operation confirms 2FA setup while allowing optional updates to user account details and preferences."""
-    path: UsersValidate2faCreateRequestPath
-    body: UsersValidate2faCreateRequestBody
-
-# Operation: update_user_profile
-class UsersCancelEmailChangeRequestPartialUpdateRequestBody(StrictModel):
-    first_name: str | None = Field(default=None, description="User's first name, up to 150 characters in length.", max_length=150)
-    last_name: str | None = Field(default=None, description="User's last name, up to 150 characters in length.", max_length=150)
-    notification_settings: dict[str, Any] | None = Field(default=None, description="User's notification preferences and settings as a structured object.")
-    anonymize_data: bool | None = Field(default=None, description="Whether to anonymize the user's personal data in the system.")
-    allow_impersonation: bool | None = Field(default=None, description="Whether to allow other users to impersonate this account for administrative or support purposes.")
-    toolbar_mode: Literal["disabled", "toolbar"] | Literal[""] | None = Field(default=None, description="Display mode preference for the toolbar interface.")
-    is_staff: bool | None = Field(default=None, description="Whether the user has administrative privileges and can access the admin site.")
-    password: str | None = Field(default=None, description="User's account password, up to 128 characters in length.", max_length=128)
-    theme_mode: Literal["light", "dark", "system"] | Literal[""] | None = Field(default=None, description="Visual theme preference for the user interface (e.g., light mode, dark mode).")
-    shortcut_position: Literal["above", "below", "hidden"] | Literal[""] | None = Field(default=None, description="Preferred position or layout for shortcuts in the user interface.")
-    role_at_organization: Literal["engineering", "data", "product", "founder", "leadership", "marketing", "sales", "other"] | None = Field(default=None, description="User's role or function within their organization. Valid options are: engineering, data, product management, founder, leadership, marketing, sales/success, or other.")
-class UsersCancelEmailChangeRequestPartialUpdateRequest(StrictModel):
-    """Partially update user profile information including personal details, preferences, and organizational role. This operation allows modification of user account settings and preferences without requiring a complete profile replacement."""
-    body: UsersCancelEmailChangeRequestPartialUpdateRequestBody | None = None
-
 # Operation: create_user_with_email_verification
 class UsersRequestEmailVerificationCreateRequestBody(StrictModel):
     first_name: str | None = Field(default=None, description="User's first name. Maximum 150 characters.", max_length=150)
@@ -10578,8 +8070,6 @@ class AlertsCreateBodyThresholdConfiguration(StrictModel):
 
 class AlertsCreateBodyThreshold(PermissiveModel):
     """Threshold configuration with bounds and type for evaluating the alert."""
-    id_: str = Field(..., validation_alias="id", serialization_alias="id", json_schema_extra={'format': 'uuid'})
-    created_at: str = Field(..., json_schema_extra={'format': 'date-time'})
     name: str | None = Field(None, description="Optional name for the threshold.")
     configuration: AlertsCreateBodyThresholdConfiguration = Field(..., description="Threshold bounds and type. Includes bounds (lower/upper floats) and type (absolute or percentage).")
 
@@ -10982,12 +8472,6 @@ class EvaluationsPartialUpdateBodyModelConfiguration(PermissiveModel):
     provider_key_id: str | None = Field(None, json_schema_extra={'format': 'uuid'})
     provider_key_name: str | None = Field(...)
 
-class EvaluationsTestHogCreateBodyModelConfiguration(PermissiveModel):
-    provider: Literal["openai", "anthropic", "gemini", "openrouter", "fireworks"] = Field(..., description="* `openai` - Openai\n* `anthropic` - Anthropic\n* `gemini` - Gemini\n* `openrouter` - Openrouter\n* `fireworks` - Fireworks")
-    model: str = Field(..., max_length=100)
-    provider_key_id: str | None = Field(None, json_schema_extra={'format': 'uuid'})
-    provider_key_name: str | None = Field(...)
-
 class EvaluationsUpdateBodyModelConfiguration(PermissiveModel):
     provider: Literal["openai", "anthropic", "gemini", "openrouter", "fireworks"] = Field(..., description="* `openai` - Openai\n* `anthropic` - Anthropic\n* `gemini` - Gemini\n* `openrouter` - Openrouter\n* `fireworks` - Fireworks")
     model: str = Field(..., max_length=100)
@@ -11319,25 +8803,6 @@ class HogFunctionsCreateBodyFilters(PermissiveModel):
     bytecode_error: str | None = None
 
 class HogFunctionsCreateBodyMasking(PermissiveModel):
-    """PII masking configuration with TTL, threshold, and hash expression."""
-    ttl: int = Field(..., description="Time-to-live in seconds for the masking cache (60–86400).", ge=60, le=86400)
-    threshold: int | None = Field(None, description="Optional threshold count before masking applies.")
-    hash_: str = Field(..., validation_alias="hash", serialization_alias="hash", description="Hog expression used to compute the masking hash.")
-    bytecode: Any | None = Field(None, description="Compiled bytecode for the hash expression. Auto-generated.")
-
-class HogFunctionsEnableBackfillsCreateBodyFilters(PermissiveModel):
-    """Event filters that control which events trigger this function."""
-    source: Literal["events", "person-updates", "data-warehouse-table"] | None = 'events'
-    actions: list[dict[str, Any]] | None = None
-    events: list[dict[str, Any]] | None = None
-    data_warehouse: list[dict[str, Any]] | None = None
-    properties: list[dict[str, Any]] | None = None
-    bytecode: Any | None = None
-    transpiled: Any | None = None
-    filter_test_accounts: bool | None = None
-    bytecode_error: str | None = None
-
-class HogFunctionsEnableBackfillsCreateBodyMasking(PermissiveModel):
     """PII masking configuration with TTL, threshold, and hash expression."""
     ttl: int = Field(..., description="Time-to-live in seconds for the masking cache (60–86400).", ge=60, le=86400)
     threshold: int | None = Field(None, description="Optional threshold count before masking applies.")
@@ -14395,6 +11860,12 @@ class ActorsQuery(StrictModel):
     tags: QueryLogTags | None = None
     version: float | None = Field(None, description="version of the node, used for schema migrations")
 
+class AlertsCreateBodyConfig(StrictModel):
+    """Trends-specific alert configuration. Includes series_index (which series to monitor) and check_ongoing_interval (whether to check the current incomplete interval)."""
+    check_ongoing_interval: bool | None = Field(None, description="When true, evaluate the current (still incomplete) time interval in addition to completed ones.")
+    series_index: int = Field(..., description="Zero-based index of the series in the insight's query to monitor.")
+    type_: Literal["TrendsAlertConfig"] | None = Field('TrendsAlertConfig', validation_alias="type", serialization_alias="type")
+
 class CalendarHeatmapQuery(StrictModel):
     aggregation_group_type_index: int | None = Field(None, description="Groups aggregation")
     calendar_heatmap_filter: CalendarHeatmapFilter | None = Field(None, validation_alias="calendarHeatmapFilter", serialization_alias="calendarHeatmapFilter", description="Properties specific to the trends insight")
@@ -15887,6 +13358,11 @@ class TracesQuery(StrictModel):
     tags: QueryLogTags | None = None
     version: float | None = Field(None, description="version of the node, used for schema migrations")
 
+class TrendsAlertConfig(StrictModel):
+    check_ongoing_interval: bool | None = Field(None, description="When true, evaluate the current (still incomplete) time interval in addition to completed ones.")
+    series_index: int = Field(..., description="Zero-based index of the series in the insight's query to monitor.")
+    type_: Literal["TrendsAlertConfig"] | None = Field('TrendsAlertConfig', validation_alias="type", serialization_alias="type")
+
 class TrendsQuery(StrictModel):
     aggregation_group_type_index: int | None = Field(None, description="Groups aggregation")
     breakdown_filter: BreakdownFilter | None = Field(None, validation_alias="breakdownFilter", serialization_alias="breakdownFilter", description="Breakdown of the events and actions")
@@ -16131,6 +13607,7 @@ ActorsPropertyTaxonomyResponse.model_rebuild()
 ActorsQuery.model_rebuild()
 ActorsQueryResponse.model_rebuild()
 AlertsCreateBodyCondition.model_rebuild()
+AlertsCreateBodyConfig.model_rebuild()
 AlertsCreateBodyThreshold.model_rebuild()
 AlertsCreateBodyThresholdConfiguration.model_rebuild()
 AlertsCreateBodyThresholdConfigurationBounds.model_rebuild()
@@ -16248,7 +13725,6 @@ ErrorTrackingSimilarIssuesQuery.model_rebuild()
 ErrorTrackingSimilarIssuesQueryResponse.model_rebuild()
 EvaluationsCreateBodyModelConfiguration.model_rebuild()
 EvaluationsPartialUpdateBodyModelConfiguration.model_rebuild()
-EvaluationsTestHogCreateBodyModelConfiguration.model_rebuild()
 EvaluationsUpdateBodyModelConfiguration.model_rebuild()
 EventDefinition.model_rebuild()
 EventMetadataPropertyFilter.model_rebuild()
@@ -16345,8 +13821,6 @@ HogFunctionMappingTemplate.model_rebuild()
 HogFunctionMasking.model_rebuild()
 HogFunctionsCreateBodyFilters.model_rebuild()
 HogFunctionsCreateBodyMasking.model_rebuild()
-HogFunctionsEnableBackfillsCreateBodyFilters.model_rebuild()
-HogFunctionsEnableBackfillsCreateBodyMasking.model_rebuild()
 HogFunctionsInvocationsCreateBodyConfiguration.model_rebuild()
 HogFunctionsInvocationsCreateBodyConfigurationCreatedBy.model_rebuild()
 HogFunctionsInvocationsCreateBodyConfigurationFilters.model_rebuild()
@@ -16589,6 +14063,7 @@ TraceSpansQueryResponse.model_rebuild()
 TracesQuery.model_rebuild()
 TracesQueryResponse.model_rebuild()
 TranscriptSegment.model_rebuild()
+TrendsAlertConfig.model_rebuild()
 TrendsFilter.model_rebuild()
 TrendsFormulaNode.model_rebuild()
 TrendsQuery.model_rebuild()
