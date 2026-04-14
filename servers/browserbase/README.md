@@ -1,6 +1,12 @@
 # Browserbase MCP Server
 
 Base URL: https://www.browserbase.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 18 |
+| **Auth** | API Key |
+
 ---
 
 ## Install

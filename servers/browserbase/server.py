@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Browserbase MCP Server
-Generated: 2026-04-09 17:16:41 UTC
+Generated: 2026-04-14 18:16:44 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
