@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: LaunchDarkly Technical Support Team <support@launchdarkly.com> (https://support.launchdarkly.com)
 
-Generated: 2026-04-09 17:25:42 UTC
+Generated: 2026-04-14 18:25:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -12521,7 +12521,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python launch_darkly_rest_api_server.py", file=sys.stderr)
+        print("  python launch_darkly_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

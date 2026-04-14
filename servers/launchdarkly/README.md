@@ -1,6 +1,12 @@
 # LaunchDarkly MCP Server
 
 Base URL: https://app.launchdarkly.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 274 |
+| **Auth** | API Key |
+
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 - **Contact:** LaunchDarkly Technical Support Team (support@launchdarkly.com) — [https://support.launchdarkly.com](https://support.launchdarkly.com)
