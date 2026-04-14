@@ -5,7 +5,7 @@ Apify MCP Server
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0.html)
 
-Generated: 2026-04-09 17:13:52 UTC
+Generated: 2026-04-14 18:14:06 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

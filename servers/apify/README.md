@@ -1,6 +1,12 @@
 # Apify MCP Server
 
 Base URL: https://api.apify.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 112 |
+| **Auth** | Bearer Token, API Key |
+
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0.html](https://www.apache.org/licenses/LICENSE-2.0.html)
 
