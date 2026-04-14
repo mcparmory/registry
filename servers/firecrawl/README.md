@@ -1,6 +1,12 @@
 # Firecrawl MCP Server
 
 Base URL: https://api.firecrawl.dev/v1
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 22 |
+| **Auth** | Bearer Token |
+
 ## API Info
 - **Contact:** Firecrawl Support (support@firecrawl.dev) — [https://firecrawl.dev/support](https://firecrawl.dev/support)
 

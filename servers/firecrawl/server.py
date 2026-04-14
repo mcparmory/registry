@@ -5,7 +5,7 @@ Firecrawl MCP Server
 API Info:
 - Contact: Firecrawl Support <support@firecrawl.dev> (https://firecrawl.dev/support)
 
-Generated: 2026-04-09 17:21:11 UTC
+Generated: 2026-04-14 18:21:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
