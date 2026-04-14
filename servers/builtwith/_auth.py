@@ -1,7 +1,7 @@
 """
 Authentication module for BuiltWith MCP server.
 
-Generated: 2026-04-09 17:16:41 UTC
+Generated: 2026-04-14 18:16:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -28,7 +28,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for BuiltWith.
+    API Key authentication for BuiltWith API.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
@@ -98,7 +98,7 @@ class APIKeyAuth:
 
 class BearerTokenAuth:
     """
-    Bearer token authentication for BuiltWith.
+    Bearer token authentication for BuiltWith API.
 
     Configuration:
         Provide the raw token in the environment variable.

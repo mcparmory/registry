@@ -1,6 +1,12 @@
 # BuiltWith MCP Server
 
 Base URL: https://api.builtwith.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 34 |
+| **Auth** | API Key, Bearer Token |
+
 ## API Info
 - **Contact:** BuiltWith Support (support@builtwith.com) — [https://builtwith.com/contact](https://builtwith.com/contact)
 - **Terms of Service:** [https://builtwith.com/terms](https://builtwith.com/terms)

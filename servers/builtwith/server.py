@@ -6,7 +6,7 @@ API Info:
 - Contact: BuiltWith Support <support@builtwith.com> (https://builtwith.com/contact)
 - Terms of Service: https://builtwith.com/terms
 
-Generated: 2026-04-09 17:16:41 UTC
+Generated: 2026-04-14 18:16:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -2561,7 +2561,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python built_with_api_server.py", file=sys.stderr)
+        print("  python built_with_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
