@@ -6,7 +6,7 @@ API Info:
 - API License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) (https://creativecommons.org/licenses/by-sa/4.0/)
 - Contact: Mailtrap Support <support@mailtrap.io> (https://docs.mailtrap.io)
 
-Generated: 2026-04-09 19:32:41 UTC
+Generated: 2026-04-14 18:25:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

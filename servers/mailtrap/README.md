@@ -1,6 +1,12 @@
 # Mailtrap MCP Server
 
 Base URL: https://mailtrap.io
+| | |
+|---|---|
+| **Category** | Communication |
+| **Tools** | 14 |
+| **Auth** | API Key, Bearer Token |
+
 ## API Info
 - **API License:** Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) — [https://creativecommons.org/licenses/by-sa/4.0/](https://creativecommons.org/licenses/by-sa/4.0/)
 - **Contact:** Mailtrap Support (support@mailtrap.io) — [https://docs.mailtrap.io](https://docs.mailtrap.io)
