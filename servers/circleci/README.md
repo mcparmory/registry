@@ -1,6 +1,12 @@
 # CircleCI MCP Server
 
 Base URL: https://circleci.com/api/v2
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 108 |
+| **Auth** | API Key, HTTP Basic |
+
 ## API Info
 - **API License:** MIT — [https://opensource.org/license/MIT](https://opensource.org/license/MIT)
 

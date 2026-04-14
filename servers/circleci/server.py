@@ -5,7 +5,7 @@ CircleCI MCP Server
 API Info:
 - API License: MIT (https://opensource.org/license/MIT)
 
-Generated: 2026-04-09 17:17:24 UTC
+Generated: 2026-04-14 18:17:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
