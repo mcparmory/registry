@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Polygon API MCP Server
-Generated: 2026-04-11 20:19:10 UTC
+Generated: 2026-04-14 18:30:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

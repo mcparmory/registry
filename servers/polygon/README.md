@@ -1,6 +1,12 @@
 # Polygon API MCP Server
 
 Base URL: https://api.massive.com
+| | |
+|---|---|
+| **Category** | Finance |
+| **Tools** | 131 |
+| **Auth** | API Key |
+
 ---
 
 ## Install

@@ -1,7 +1,7 @@
 """
 Authentication module for Polygon API MCP server.
 
-Generated: 2026-04-11 20:19:10 UTC
+Generated: 2026-04-14 18:30:55 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
