@@ -1,6 +1,12 @@
 # ClickUp MCP Server
 
 Base URL: https://api.clickup.com/api
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 134 |
+| **Auth** | API Key |
+
 ---
 
 ## Install
