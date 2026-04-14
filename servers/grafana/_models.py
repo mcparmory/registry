@@ -1,7 +1,7 @@
 """
 Grafana MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:24:44 UTC
+Generated: 2026-04-14 18:24:18 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -789,7 +789,7 @@ class AddDataSourceRequest(StrictModel):
 
 # Operation: list_correlations
 class GetCorrelationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of correlations to return per page, up to 1000. Defaults to 100 if not specified.", le=1000, json_schema_extra={'format': 'int64'})
+    limit: int | None = Field(default=None, description="Maximum number of correlations to return per page, up to 1000. Defaults to 100 if not specified.", json_schema_extra={'format': 'int64'})
     source_uid: list[str] | None = Field(default=None, validation_alias="sourceUID", serialization_alias="sourceUID", description="Filter correlations by one or more source datasource UIDs. Only correlations involving the specified sources will be returned.")
 class GetCorrelationsRequest(StrictModel):
     """Retrieves all correlations across datasources, with optional filtering and pagination. Use this to discover relationships between data sources."""

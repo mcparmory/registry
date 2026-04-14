@@ -1,6 +1,12 @@
 # Grafana MCP Server
 
 Base URL: /api
+| | |
+|---|---|
+| **Category** | Infrastructure |
+| **Tools** | 218 |
+| **Auth** | Bearer Token, HTTP Basic |
+
 ## API Info
 - **Contact:** Grafana Labs (hello@grafana.com) — [https://grafana.com](https://grafana.com)
 
