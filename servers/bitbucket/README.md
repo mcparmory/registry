@@ -1,6 +1,12 @@
 # Bitbucket MCP Server
 
 Base URL: https://api.bitbucket.org/2.0
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 261 |
+| **Auth** | OAuth2, HTTP Basic, API Key |
+
 ## API Info
 - **Contact:** Bitbucket Support (support@bitbucket.org) — [https://support.atlassian.com/bitbucket-cloud/](https://support.atlassian.com/bitbucket-cloud/)
 - **Terms of Service:** [https://www.atlassian.com/legal/customer-agreement](https://www.atlassian.com/legal/customer-agreement)

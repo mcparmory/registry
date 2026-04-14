@@ -6,7 +6,7 @@ API Info:
 - Contact: Bitbucket Support <support@bitbucket.org> (https://support.atlassian.com/bitbucket-cloud/)
 - Terms of Service: https://www.atlassian.com/legal/customer-agreement
 
-Generated: 2026-04-09 17:15:52 UTC
+Generated: 2026-04-14 18:16:06 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -4739,8 +4739,8 @@ async def list_pipelines(
     trigger_type: Literal["PUSH", "MANUAL", "SCHEDULED", "PARENT_STEP"] | None = Field(None, description="Filter pipelines by what triggered them. Must be one of PUSH, MANUAL, SCHEDULED, or PARENT_STEP."),
     status: Literal["PARSING", "PENDING", "PAUSED", "HALTED", "BUILDING", "ERROR", "PASSED", "FAILED", "STOPPED", "UNKNOWN"] | None = Field(None, description="Filter pipelines by their current execution status. Must be one of PARSING, PENDING, PAUSED, HALTED, BUILDING, ERROR, PASSED, FAILED, STOPPED, or UNKNOWN."),
     sort: Literal["creator.uuid", "created_on", "run_creation_date"] | None = Field(None, description="The field by which to sort the returned pipelines. Must be one of creator.uuid, created_on, or run_creation_date."),
-    page: str | None = Field(None, description="The page number to retrieve in the paginated result set, starting at 1.", ge=1),
-    pagelen: str | None = Field(None, description="The maximum number of pipeline results to return per page, between 1 and 100.", ge=1, le=100),
+    page: str | None = Field(None, description="The page number to retrieve in the paginated result set, starting at 1."),
+    pagelen: str | None = Field(None, description="The maximum number of pipeline results to return per page, between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieve a paginated list of pipelines for a specific repository, with support for filtering by branch, commit, status, trigger type, and more, as well as sorting of results."""
 
