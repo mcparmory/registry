@@ -1,7 +1,7 @@
 """
-Opencage Geocoding Api MCP Server - Validators
+Opencage Geocoding MCP Server - Validators
 
-Generated: 2026-04-10 07:11:56 UTC
+Generated: 2026-04-14 18:27:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

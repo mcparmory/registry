@@ -7,7 +7,7 @@ API Info:
 - Terms of Service: https://opencagedata.com/terms
 - Server: OpenCage geocoding API
 
-Generated: 2026-04-10 07:11:56 UTC
+Generated: 2026-04-14 18:27:49 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1264,7 +1264,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python open_cage_geocoding_api_server.py", file=sys.stderr)
+        print("  python open_cage_geocoding_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 

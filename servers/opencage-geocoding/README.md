@@ -1,6 +1,12 @@
 # OpenCage Geocoding MCP Server
 
 Base URL: https://api.opencagedata.com/geocode/v1
+| | |
+|---|---|
+| **Category** | Maps & Location |
+| **Tools** | 3 |
+| **Auth** | API Key |
+
 ## API Info
 - **Contact:** OpenCage GmbH (support@opencagedata.com) — [https://opencagedata.com/contact](https://opencagedata.com/contact)
 - **Terms of Service:** [https://opencagedata.com/terms](https://opencagedata.com/terms)
