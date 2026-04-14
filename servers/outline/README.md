@@ -1,6 +1,12 @@
 # Outline MCP Server
 
 Base URL: https://app.getoutline.com/api
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 104 |
+| **Auth** | OAuth2, Bearer Token |
+
 ## API Info
 - **API License:** BSD-3-Clause — [https://github.com/outline/openapi/blob/main/LICENSE](https://github.com/outline/openapi/blob/main/LICENSE)
 

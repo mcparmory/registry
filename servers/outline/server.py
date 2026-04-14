@@ -5,7 +5,7 @@ Outline MCP Server
 API Info:
 - API License: BSD-3-Clause (https://github.com/outline/openapi/blob/main/LICENSE)
 
-Generated: 2026-04-10 10:09:45 UTC
+Generated: 2026-04-14 18:27:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
