@@ -1,6 +1,12 @@
 # Atlassian Confluence MCP Server
 
 Base URL: //your-domain.atlassian.net
+| | |
+|---|---|
+| **Category** | Communication |
+| **Tools** | 104 |
+| **Auth** | OAuth2, HTTP Basic |
+
 ## API Info
 - **Terms of Service:** [https://atlassian.com/terms/](https://atlassian.com/terms/)
 

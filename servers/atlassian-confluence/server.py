@@ -5,7 +5,7 @@ Atlassian Confluence MCP Server
 API Info:
 - Terms of Service: https://atlassian.com/terms/
 
-Generated: 2026-04-09 17:46:05 UTC
+Generated: 2026-04-14 18:14:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1165,7 +1165,7 @@ async def list_audit_records(
     start_date: str | None = Field(None, alias="startDate", description="Filter results to records on or after this date. Specify as epoch time in milliseconds."),
     end_date: str | None = Field(None, alias="endDate", description="Filter results to records on or before this date. Specify as epoch time in milliseconds."),
     search_string: str | None = Field(None, alias="searchString", description="Filter results to records with string property values matching this search term."),
-    limit: str | None = Field(None, description="Maximum number of records to return per page. System limits may restrict the actual number returned.", ge=0),
+    limit: str | None = Field(None, description="Maximum number of records to return per page. System limits may restrict the actual number returned."),
 ) -> dict[str, Any]:
     """Retrieve audit log records for administrative events such as space exports, group membership changes, and app installations. Requires Confluence Administrator global permission."""
 
@@ -1354,7 +1354,7 @@ async def publish_blueprint_draft_shared(
 @mcp.tool()
 async def search_content(
     cql: str = Field(..., description="A CQL query string that specifies the search criteria. CQL supports filtering by content type, space, author, date, and other properties. Refer to Advanced searching using CQL documentation for syntax and available operators."),
-    limit: str | None = Field(None, description="The maximum number of content items to return in a single response page. When using expand with body.export_view or body.styled_view, this is restricted to a maximum of 25.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of content items to return in a single response page. When using expand with body.export_view or body.styled_view, this is restricted to a maximum of 25."),
     cqlcontext_space_key: str | None = Field(None, description="Key of the space to search against. Optional."),
     cqlcontext_content_id: str | None = Field(None, description="ID of the content to search against. Optional. Must be in the space specified by cqlcontext_space_key."),
     cqlcontext_content_statuses: list[str] | None = Field(None, description="Content statuses to search against. Optional. Array of status strings (e.g., ['current', 'archived'])."),
@@ -1912,7 +1912,7 @@ async def remove_label_from_content_by_path(
 @mcp.tool()
 async def list_page_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the page whose watches you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value."),
 ) -> dict[str, Any]:
     """Retrieves all watches for a specific page. Users who watch a page receive notifications when the page is updated."""
 
@@ -1956,7 +1956,7 @@ async def list_page_watches(
 @mcp.tool()
 async def list_space_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose parent space watches should be retrieved."),
-    limit: str | None = Field(None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value."),
 ) -> dict[str, Any]:
     """Retrieves all space watches for the space containing the specified content. Users who watch a space receive notifications when any content in that space is updated."""
 
@@ -2151,7 +2151,7 @@ async def verify_content_permission(
 @mcp.tool()
 async def list_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value."),
 ) -> dict[str, Any]:
     """Retrieves all access restrictions applied to a piece of content, including user and group-level permissions. Requires permission to view the content."""
 
@@ -2354,7 +2354,7 @@ async def list_content_restrictions_by_operation(id_: str = Field(..., alias="id
 async def get_content_restriction_for_operation(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to query for restrictions."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation for which to retrieve restrictions."),
-    limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value."),
 ) -> dict[str, Any]:
     """Retrieves access restrictions for a specific content item based on the operation type (read or update). Returns the users and groups with restrictions applied to that content."""
 
@@ -3125,7 +3125,7 @@ async def list_label_contents(
 # Tags: Group
 @mcp.tool()
 async def list_groups(
-    limit: str | None = Field(None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value.", ge=0),
+    limit: str | None = Field(None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value."),
     access_type: Literal["user", "admin", "site-admin"] | None = Field(None, alias="accessType", description="Filter results by group permission level within the Confluence site."),
 ) -> dict[str, Any]:
     """Retrieve all user groups from the Confluence site, ordered alphabetically by group name. Requires 'Can use' global permission to access the Confluence site."""
@@ -3283,7 +3283,7 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
 @mcp.tool()
 async def search_groups(
     query: str = Field(..., description="The search term used to find matching groups. Supports partial matching against group names and identifiers."),
-    limit: str | None = Field(None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request."),
 ) -> dict[str, Any]:
     """Search for groups using a partial query string. Returns matching groups up to the specified limit."""
 
@@ -3326,7 +3326,7 @@ async def search_groups(
 @mcp.tool()
 async def list_group_members(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group whose members you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value."),
 ) -> dict[str, Any]:
     """Retrieves all users that are members of a specified group. Requires permission to access the Confluence site."""
 
@@ -3494,7 +3494,7 @@ async def list_related_entities(
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The type of the source entity in the relationship."),
     source_key: str = Field(..., alias="sourceKey", description="The identifier for the source entity. For users, use 'current' for the logged-in user, an account ID, or a deprecated user key. For content, use the content ID. For spaces, use the space key."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The type of the target entity in the relationship."),
-    limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value."),
 ) -> dict[str, Any]:
     """Retrieves all target entities that have a specific relationship type with a source entity. Relationships are directional, so results depend on the relationship direction defined."""
 
@@ -3667,7 +3667,7 @@ async def list_related_sources(
     source_type: Literal["user", "content", "space"] = Field(..., alias="sourceType", description="The entity type of the sources to retrieve."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The entity type of the target entity."),
     target_key: str = Field(..., alias="targetKey", description="The identifier of the target entity. For users, provide 'current' for the logged-in user, a user key, or an account ID. For content, provide the content ID. For spaces, provide the space key."),
-    limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value."),
 ) -> dict[str, Any]:
     """Retrieve all source entities that have a specific relationship type to a target entity. Relationships are directional, so this finds sources pointing to the specified target."""
 
@@ -3711,7 +3711,7 @@ async def list_related_sources(
 @mcp.tool()
 async def search_content_global(
     cqlcontext: str | None = Field(None, description="CQL query string to filter search results. Specify the space key, content ID, and/or content statuses to narrow the search scope. Note: User-specific fields (user, user.fullname, user.accountid, user.userkey) are no longer supported."),
-    limit: str | None = Field(None, description="Maximum number of content objects to return per page. System limits may further restrict this value. When using body.export_view or body.styled_view expansion, the maximum is 25.", ge=0),
+    limit: str | None = Field(None, description="Maximum number of content objects to return per page. System limits may further restrict this value. When using body.export_view or body.styled_view expansion, the maximum is 25."),
     include_archived_spaces: bool | None = Field(None, alias="includeArchivedSpaces", description="Include content from archived spaces in the search results."),
     exclude_current_spaces: bool | None = Field(None, alias="excludeCurrentSpaces", description="Exclude current spaces from results and only return content from archived spaces."),
     excerpt: Literal["highlight", "indexed", "none", "highlight_unescaped", "indexed_unescaped"] | None = Field(None, description="Strategy for generating text excerpts in search results. Highlight shows matched terms in context, indexed uses pre-computed excerpts, and none omits excerpts entirely. Unescaped variants return HTML without entity encoding."),
@@ -3771,7 +3771,7 @@ async def search_content_global(
 @mcp.tool()
 async def search_users(
     cql: str = Field(..., description="CQL query string to filter users. Supports user-specific fields including user, user.fullname, user.accountid, and user.userkey. Use operators like IN, NOT IN, and != for advanced filtering."),
-    limit: str | None = Field(None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned.", ge=0),
+    limit: str | None = Field(None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned."),
     site_permission_type_filter: Literal["all", "externalCollaborator", "none"] | None = Field(None, alias="sitePermissionTypeFilter", description="Filter users by permission type. Use 'none' for licensed users, 'externalCollaborator' for external/guest users, or 'all' to include all permission types."),
 ) -> dict[str, Any]:
     """Search for Confluence users using Confluence Query Language (CQL) with support for user-specific fields like account ID, full name, and user key. Some user fields may be null depending on privacy settings."""
@@ -4105,7 +4105,7 @@ async def list_space_content_states(space_key: str = Field(..., alias="spaceKey"
 async def list_space_content_by_state(
     space_key: str = Field(..., alias="spaceKey", description="The key identifier of the space to query for content with the specified state."),
     state_id: str = Field(..., alias="state-id", description="The numeric identifier of the content state to filter results by."),
-    limit: str | None = Field(None, description="Maximum number of results to return in the response.", ge=0, le=100),
+    limit: str | None = Field(None, description="Maximum number of results to return in the response."),
 ) -> dict[str, Any]:
     """Retrieve all content in a space filtered by a specific content state. Requires 'View' permission for the space. Note: When using expand parameter with body.export_view and/or body.styled_view, the limit is restricted to a maximum of 25."""
 
@@ -4270,7 +4270,7 @@ async def list_space_watchers(
 @mcp.tool()
 async def list_space_labels(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space from which to retrieve labels."),
-    limit: str | None = Field(None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value."),
 ) -> dict[str, Any]:
     """Retrieves all labels associated with a Confluence space, with optional filtering and pagination support."""
 
@@ -4544,7 +4544,7 @@ async def update_template(
 @mcp.tool()
 async def list_blueprint_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to query for templates. Omit this parameter to retrieve global blueprint templates instead of space-specific ones."),
-    limit: str | None = Field(None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value."),
 ) -> dict[str, Any]:
     """Retrieve all blueprint templates available globally or within a specific space. Global templates are inherited by all spaces, while space-specific templates can be customized independently."""
 
@@ -4587,7 +4587,7 @@ async def list_blueprint_templates(
 @mcp.tool()
 async def list_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to retrieve templates from. Omit this parameter to retrieve global templates instead of space-specific templates."),
-    limit: str | None = Field(None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested."),
 ) -> dict[str, Any]:
     """Retrieve all content templates, either globally or within a specific space. Requires 'View' permission for space templates or 'Can use' global permission for global templates."""
 
@@ -4794,7 +4794,7 @@ async def get_current_user() -> dict[str, Any]:
 @mcp.tool()
 async def list_user_groups(
     account_id: str = Field(..., alias="accountId", description="The account ID that uniquely identifies the user across all Atlassian products."),
-    limit: str | None = Field(None, description="The maximum number of groups to return per page. This value may be restricted by system limits.", ge=0),
+    limit: str | None = Field(None, description="The maximum number of groups to return per page. This value may be restricted by system limits."),
 ) -> dict[str, Any]:
     """Retrieves all groups that a user is a member of. Requires permission to access the Confluence site."""
 
@@ -5384,7 +5384,7 @@ async def get_content_viewers(
 @mcp.tool()
 async def list_user_properties(
     user_id: str = Field(..., alias="userId", description="The account ID of the user whose properties you want to retrieve."),
-    limit: str | None = Field(None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum.", ge=0, le=25),
+    limit: str | None = Field(None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum."),
 ) -> dict[str, Any]:
     """Retrieves all properties associated with a user account on the Confluence site. User properties are stored at the site level and provide metadata about the user."""
 

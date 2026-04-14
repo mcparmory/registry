@@ -1,7 +1,7 @@
 """
 Atlassian Confluence MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:46:05 UTC
+Generated: 2026-04-14 18:14:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -141,7 +141,7 @@ class GetAuditRecordsRequestQuery(StrictModel):
     start_date: str | None = Field(default=None, validation_alias="startDate", serialization_alias="startDate", description="Filter results to records on or after this date. Specify as epoch time in milliseconds.")
     end_date: str | None = Field(default=None, validation_alias="endDate", serialization_alias="endDate", description="Filter results to records on or before this date. Specify as epoch time in milliseconds.")
     search_string: str | None = Field(default=None, validation_alias="searchString", serialization_alias="searchString", description="Filter results to records with string property values matching this search term.")
-    limit: int | None = Field(default=None, description="Maximum number of records to return per page. System limits may restrict the actual number returned.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of records to return per page. System limits may restrict the actual number returned.", json_schema_extra={'format': 'int32'})
 class GetAuditRecordsRequest(StrictModel):
     """Retrieve audit log records for administrative events such as space exports, group membership changes, and app installations. Requires Confluence Administrator global permission."""
     query: GetAuditRecordsRequestQuery | None = None
@@ -199,7 +199,7 @@ class PublishSharedDraftRequest(StrictModel):
 # Operation: search_content
 class SearchContentByCqlRequestQuery(StrictModel):
     cql: str = Field(default=..., description="A CQL query string that specifies the search criteria. CQL supports filtering by content type, space, author, date, and other properties. Refer to Advanced searching using CQL documentation for syntax and available operators.")
-    limit: int | None = Field(default=None, description="The maximum number of content items to return in a single response page. When using expand with body.export_view or body.styled_view, this is restricted to a maximum of 25.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of content items to return in a single response page. When using expand with body.export_view or body.styled_view, this is restricted to a maximum of 25.", json_schema_extra={'format': 'int32'})
     cqlcontext: dict | None = Field(default=None, description="The space, content, and content status to execute the search against.\nSpecify this as an object with the following properties:\n\n- `spaceKey` Key of the space to search against. Optional.\n- `contentId` ID of the content to search against. Optional. Must\nbe in the space spacified by `spaceKey`.\n- `contentStatuses` Content statuses to search against. Optional.")
 class SearchContentByCqlRequest(StrictModel):
     """Search Confluence content using CQL (Confluence Query Language) to find pages, blog posts, and other content matching your query criteria. Results are paginated and support cursor-based navigation for retrieving additional pages."""
@@ -332,7 +332,7 @@ class RemoveLabelFromContentRequest(StrictModel):
 class GetWatchesForPageRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the page whose watches you want to retrieve.")
 class GetWatchesForPageRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value.", json_schema_extra={'format': 'int32'})
 class GetWatchesForPageRequest(StrictModel):
     """Retrieves all watches for a specific page. Users who watch a page receive notifications when the page is updated."""
     path: GetWatchesForPageRequestPath
@@ -342,7 +342,7 @@ class GetWatchesForPageRequest(StrictModel):
 class GetWatchesForSpaceRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the content whose parent space watches should be retrieved.")
 class GetWatchesForSpaceRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value.", json_schema_extra={'format': 'int32'})
 class GetWatchesForSpaceRequest(StrictModel):
     """Retrieves all space watches for the space containing the specified content. Users who watch a space receive notifications when any content in that space is updated."""
     path: GetWatchesForSpaceRequestPath
@@ -414,7 +414,7 @@ class CheckContentPermissionRequest(StrictModel):
 class GetRestrictionsRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the content whose restrictions you want to retrieve.")
 class GetRestrictionsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", json_schema_extra={'format': 'int32'})
 class GetRestrictionsRequest(StrictModel):
     """Retrieves all access restrictions applied to a piece of content, including user and group-level permissions. Requires permission to view the content."""
     path: GetRestrictionsRequestPath
@@ -461,7 +461,7 @@ class GetRestrictionsForOperationRequestPath(StrictModel):
     id_: str = Field(default=..., validation_alias="id", serialization_alias="id", description="The unique identifier of the content item to query for restrictions.")
     operation_key: Literal["read", "update"] = Field(default=..., validation_alias="operationKey", serialization_alias="operationKey", description="The type of operation for which to retrieve restrictions.")
 class GetRestrictionsForOperationRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value.", json_schema_extra={'format': 'int32'})
 class GetRestrictionsForOperationRequest(StrictModel):
     """Retrieves access restrictions for a specific content item based on the operation type (read or update). Returns the users and groups with restrictions applied to that content."""
     path: GetRestrictionsForOperationRequestPath
@@ -638,7 +638,7 @@ class GetAllLabelContentRequest(StrictModel):
 
 # Operation: list_groups
 class GetGroupsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value.", json_schema_extra={'format': 'int32'})
     access_type: Literal["user", "admin", "site-admin"] | None = Field(default=None, validation_alias="accessType", serialization_alias="accessType", description="Filter results by group permission level within the Confluence site.")
 class GetGroupsRequest(StrictModel):
     """Retrieve all user groups from the Confluence site, ordered alphabetically by group name. Requires 'Can use' global permission to access the Confluence site."""
@@ -669,7 +669,7 @@ class RemoveGroupByIdRequest(StrictModel):
 # Operation: search_groups
 class SearchGroupsRequestQuery(StrictModel):
     query: str = Field(default=..., description="The search term used to find matching groups. Supports partial matching against group names and identifiers.")
-    limit: int | None = Field(default=None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request.", json_schema_extra={'format': 'int32'})
 class SearchGroupsRequest(StrictModel):
     """Search for groups using a partial query string. Returns matching groups up to the specified limit."""
     query: SearchGroupsRequestQuery
@@ -678,7 +678,7 @@ class SearchGroupsRequest(StrictModel):
 class GetGroupMembersByGroupIdRequestPath(StrictModel):
     group_id: str = Field(default=..., validation_alias="groupId", serialization_alias="groupId", description="The unique identifier of the group whose members you want to retrieve.")
 class GetGroupMembersByGroupIdRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value.", json_schema_extra={'format': 'int32'})
 class GetGroupMembersByGroupIdRequest(StrictModel):
     """Retrieves all users that are members of a specified group. Requires permission to access the Confluence site."""
     path: GetGroupMembersByGroupIdRequestPath
@@ -717,7 +717,7 @@ class FindTargetFromSourceRequestPath(StrictModel):
     source_key: str = Field(default=..., validation_alias="sourceKey", serialization_alias="sourceKey", description="The identifier for the source entity. For users, use 'current' for the logged-in user, an account ID, or a deprecated user key. For content, use the content ID. For spaces, use the space key.")
     target_type: Literal["user", "content", "space"] = Field(default=..., validation_alias="targetType", serialization_alias="targetType", description="The type of the target entity in the relationship.")
 class FindTargetFromSourceRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", json_schema_extra={'format': 'int32'})
 class FindTargetFromSourceRequest(StrictModel):
     """Retrieves all target entities that have a specific relationship type with a source entity. Relationships are directional, so results depend on the relationship direction defined."""
     path: FindTargetFromSourceRequestPath
@@ -763,7 +763,7 @@ class FindSourcesForTargetRequestPath(StrictModel):
     target_type: Literal["user", "content", "space"] = Field(default=..., validation_alias="targetType", serialization_alias="targetType", description="The entity type of the target entity.")
     target_key: str = Field(default=..., validation_alias="targetKey", serialization_alias="targetKey", description="The identifier of the target entity. For users, provide 'current' for the logged-in user, a user key, or an account ID. For content, provide the content ID. For spaces, provide the space key.")
 class FindSourcesForTargetRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value.", json_schema_extra={'format': 'int32'})
 class FindSourcesForTargetRequest(StrictModel):
     """Retrieve all source entities that have a specific relationship type to a target entity. Relationships are directional, so this finds sources pointing to the specified target."""
     path: FindSourcesForTargetRequestPath
@@ -772,7 +772,7 @@ class FindSourcesForTargetRequest(StrictModel):
 # Operation: search_content_global
 class SearchByCqlRequestQuery(StrictModel):
     cqlcontext: str | None = Field(default=None, description="CQL query string to filter search results. Specify the space key, content ID, and/or content statuses to narrow the search scope. Note: User-specific fields (user, user.fullname, user.accountid, user.userkey) are no longer supported.")
-    limit: int | None = Field(default=None, description="Maximum number of content objects to return per page. System limits may further restrict this value. When using body.export_view or body.styled_view expansion, the maximum is 25.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of content objects to return per page. System limits may further restrict this value. When using body.export_view or body.styled_view expansion, the maximum is 25.", json_schema_extra={'format': 'int32'})
     include_archived_spaces: bool | None = Field(default=None, validation_alias="includeArchivedSpaces", serialization_alias="includeArchivedSpaces", description="Include content from archived spaces in the search results.")
     exclude_current_spaces: bool | None = Field(default=None, validation_alias="excludeCurrentSpaces", serialization_alias="excludeCurrentSpaces", description="Exclude current spaces from results and only return content from archived spaces.")
     excerpt: Literal["highlight", "indexed", "none", "highlight_unescaped", "indexed_unescaped"] | None = Field(default=None, description="Strategy for generating text excerpts in search results. Highlight shows matched terms in context, indexed uses pre-computed excerpts, and none omits excerpts entirely. Unescaped variants return HTML without entity encoding.")
@@ -785,7 +785,7 @@ class SearchByCqlRequest(StrictModel):
 # Operation: search_users
 class SearchUserRequestQuery(StrictModel):
     cql: str = Field(default=..., description="CQL query string to filter users. Supports user-specific fields including user, user.fullname, user.accountid, and user.userkey. Use operators like IN, NOT IN, and != for advanced filtering.")
-    limit: int | None = Field(default=None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned.", json_schema_extra={'format': 'int32'})
     site_permission_type_filter: Literal["all", "externalCollaborator", "none"] | None = Field(default=None, validation_alias="sitePermissionTypeFilter", serialization_alias="sitePermissionTypeFilter", description="Filter users by permission type. Use 'none' for licensed users, 'externalCollaborator' for external/guest users, or 'all' to include all permission types.")
 class SearchUserRequest(StrictModel):
     """Search for Confluence users using Confluence Query Language (CQL) with support for user-specific fields like account ID, full name, and user key. Some user fields may be null depending on privacy settings."""
@@ -877,7 +877,7 @@ class GetContentsWithStateRequestPath(StrictModel):
     space_key: str = Field(default=..., validation_alias="spaceKey", serialization_alias="spaceKey", description="The key identifier of the space to query for content with the specified state.")
 class GetContentsWithStateRequestQuery(StrictModel):
     state_id: int = Field(default=..., validation_alias="state-id", serialization_alias="state-id", description="The numeric identifier of the content state to filter results by.", json_schema_extra={'format': 'int32'})
-    limit: int | None = Field(default=None, description="Maximum number of results to return in the response.", ge=0, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of results to return in the response.", json_schema_extra={'format': 'int32'})
 class GetContentsWithStateRequest(StrictModel):
     """Retrieve all content in a space filtered by a specific content state. Requires 'View' permission for the space. Note: When using expand parameter with body.export_view and/or body.styled_view, the limit is restricted to a maximum of 25."""
     path: GetContentsWithStateRequestPath
@@ -914,7 +914,7 @@ class GetWatchersForSpaceRequest(StrictModel):
 class GetLabelsForSpaceRequestPath(StrictModel):
     space_key: str = Field(default=..., validation_alias="spaceKey", serialization_alias="spaceKey", description="The unique identifier key of the space from which to retrieve labels.")
 class GetLabelsForSpaceRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value.", json_schema_extra={'format': 'int32'})
 class GetLabelsForSpaceRequest(StrictModel):
     """Retrieves all labels associated with a Confluence space, with optional filtering and pagination support."""
     path: GetLabelsForSpaceRequestPath
@@ -1046,7 +1046,7 @@ class UpdateContentTemplateRequest(StrictModel):
 # Operation: list_blueprint_templates
 class GetBlueprintTemplatesRequestQuery(StrictModel):
     space_key: str | None = Field(default=None, validation_alias="spaceKey", serialization_alias="spaceKey", description="The space key to query for templates. Omit this parameter to retrieve global blueprint templates instead of space-specific ones.")
-    limit: int | None = Field(default=None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value.", json_schema_extra={'format': 'int32'})
 class GetBlueprintTemplatesRequest(StrictModel):
     """Retrieve all blueprint templates available globally or within a specific space. Global templates are inherited by all spaces, while space-specific templates can be customized independently."""
     query: GetBlueprintTemplatesRequestQuery | None = None
@@ -1054,7 +1054,7 @@ class GetBlueprintTemplatesRequest(StrictModel):
 # Operation: list_templates
 class GetContentTemplatesRequestQuery(StrictModel):
     space_key: str | None = Field(default=None, validation_alias="spaceKey", serialization_alias="spaceKey", description="The space key to retrieve templates from. Omit this parameter to retrieve global templates instead of space-specific templates.")
-    limit: int | None = Field(default=None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested.", json_schema_extra={'format': 'int32'})
 class GetContentTemplatesRequest(StrictModel):
     """Retrieve all content templates, either globally or within a specific space. Requires 'View' permission for space templates or 'Can use' global permission for global templates."""
     query: GetContentTemplatesRequestQuery | None = None
@@ -1083,7 +1083,7 @@ class GetUserRequest(StrictModel):
 # Operation: list_user_groups
 class GetGroupMembershipsForUserRequestQuery(StrictModel):
     account_id: str = Field(default=..., validation_alias="accountId", serialization_alias="accountId", description="The account ID that uniquely identifies the user across all Atlassian products.")
-    limit: int | None = Field(default=None, description="The maximum number of groups to return per page. This value may be restricted by system limits.", ge=0, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of groups to return per page. This value may be restricted by system limits.", json_schema_extra={'format': 'int32'})
 class GetGroupMembershipsForUserRequest(StrictModel):
     """Retrieves all groups that a user is a member of. Requires permission to access the Confluence site."""
     query: GetGroupMembershipsForUserRequestQuery
@@ -1225,7 +1225,7 @@ class GetViewersRequest(StrictModel):
 class GetUserPropertiesRequestPath(StrictModel):
     user_id: str = Field(default=..., validation_alias="userId", serialization_alias="userId", description="The account ID of the user whose properties you want to retrieve.")
 class GetUserPropertiesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum.", ge=0, le=25, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum.", json_schema_extra={'format': 'int32'})
 class GetUserPropertiesRequest(StrictModel):
     """Retrieves all properties associated with a user account on the Confluence site. User properties are stored at the site level and provide metadata about the user."""
     path: GetUserPropertiesRequestPath
