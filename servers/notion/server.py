@@ -5,7 +5,7 @@ Notion MCP Server
 API Info:
 - Terms of Service: https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac
 
-Generated: 2026-04-10 06:18:21 UTC
+Generated: 2026-04-14 18:27:11 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

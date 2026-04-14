@@ -1,6 +1,12 @@
 # Notion MCP Server
 
 Base URL: https://api.notion.com
+| | |
+|---|---|
+| **Category** | Productivity |
+| **Tools** | 41 |
+| **Auth** | Bearer Token, HTTP Basic |
+
 ## API Info
 - **Terms of Service:** [https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac](https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac)
 

@@ -1,7 +1,7 @@
 """
 Notion MCP Server - Validators
 
-Generated: 2026-04-10 06:18:21 UTC
+Generated: 2026-04-14 18:27:11 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
