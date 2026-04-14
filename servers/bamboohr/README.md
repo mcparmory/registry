@@ -1,6 +1,12 @@
 # BambooHR MCP Server
 
 Base URL: https://companySubDomain.bamboohr.com
+| | |
+|---|---|
+| **Category** | HR & Recruiting |
+| **Tools** | 147 |
+| **Auth** | OAuth2, HTTP Basic, Bearer Token, API Key |
+
 ---
 
 ## Install
