@@ -1,6 +1,12 @@
 # ConvertAPI MCP Server
 
 Base URL: https://v2.convertapi.com
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 303 |
+| **Auth** | Bearer Token, JWTBearerAuth |
+
 ## API Info
 - **API License:** Apache 2.0 — [http://www.apache.org/licenses/LICENSE-2.0.html](http://www.apache.org/licenses/LICENSE-2.0.html)
 - **Terms of Service:** [https://www.convertapi.com/terms](https://www.convertapi.com/terms)
