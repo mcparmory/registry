@@ -1,7 +1,7 @@
 """
 Authentication module for IP2Location.io IP Geolocation MCP server.
 
-Generated: 2026-04-09 17:24:47 UTC
+Generated: 2026-04-14 18:24:27 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for IP2Location.io IP Geolocation.
+    API Key authentication for IP2Location.io IP Geolocation API.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.

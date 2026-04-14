@@ -5,7 +5,7 @@ IP2Location.io IP Geolocation MCP Server
 API Info:
 - Contact: IP2Location.io (https://github.com/ip2location/ip2location-io-openapi)
 
-Generated: 2026-04-09 17:24:47 UTC
+Generated: 2026-04-14 18:24:27 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1166,7 +1166,7 @@ def validate_environment() -> None:
             print(error, file=sys.stderr)
         print("\nServer startup aborted. Set required variables and restart.", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print("  python ip2_location_io_ip_geolocation_api_server.py", file=sys.stderr)
+        print("  python ip2_location_io_ip_geolocation_server.py", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
