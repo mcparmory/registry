@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Linkup MCP Server
-Generated: 2026-04-09 18:40:24 UTC
+Generated: 2026-04-14 18:25:32 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

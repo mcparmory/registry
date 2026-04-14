@@ -1,6 +1,12 @@
 # Linkup MCP Server
 
 Base URL: https://api.linkup.so
+| | |
+|---|---|
+| **Category** | AI & Machine Learning |
+| **Tools** | 6 |
+| **Auth** | Bearer Token |
+
 ---
 
 ## Install
