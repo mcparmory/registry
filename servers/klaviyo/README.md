@@ -1,6 +1,12 @@
 # Klaviyo MCP Server
 
 Base URL: https://a.klaviyo.com
+| | |
+|---|---|
+| **Category** | Marketing |
+| **Tools** | 295 |
+| **Auth** | API Key |
+
 ## API Info
 - **API License:** License — [https://www.klaviyo.com/legal](https://www.klaviyo.com/legal)
 - **Contact:** Klaviyo Developer Experience Team (developers@klaviyo.com) — [https://developers.klaviyo.com](https://developers.klaviyo.com)

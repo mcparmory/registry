@@ -1,7 +1,7 @@
 """
-Klaviyo Api MCP Server - Pydantic Models
+Klaviyo MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:25:38 UTC
+Generated: 2026-04-14 18:24:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

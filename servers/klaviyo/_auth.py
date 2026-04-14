@@ -1,7 +1,7 @@
 """
 Authentication module for Klaviyo MCP server.
 
-Generated: 2026-04-09 17:25:38 UTC
+Generated: 2026-04-14 18:24:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -27,7 +27,7 @@ __all__ = [
 
 class APIKeyAuth:
     """
-    API Key authentication for Klaviyo.
+    API Key authentication for Klaviyo API.
 
     Supports header, query parameter, cookie, and path-based API key injection.
     Configure location and parameter name via constructor arguments.
@@ -396,10 +396,10 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_webhook": [["Klaviyo-API-Key"]],
     "list_webhook_topics": [["Klaviyo-API-Key"]],
     "get_webhook_topic": [["Klaviyo-API-Key"]],
-    "list_client_review_values_reports": [],
-    "list_client_reviews": [],
-    "create_client_review": [],
-    "create_client_subscription": [],
-    "create_or_update_client_profile": [],
-    "subscribe_profile_to_back_in_stock_notifications": []
+    "list_client_review_values_reports": [["Klaviyo-API-Key"]],
+    "list_client_reviews": [["Klaviyo-API-Key"]],
+    "create_client_review": [["Klaviyo-API-Key"]],
+    "create_client_subscription": [["Klaviyo-API-Key"]],
+    "create_or_update_client_profile": [["Klaviyo-API-Key"]],
+    "subscribe_profile_to_back_in_stock_notifications": [["Klaviyo-API-Key"]]
 }
