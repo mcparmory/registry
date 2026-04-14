@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: Pinecone Support <support@pinecone.io> (https://support.pinecone.io)
 
-Generated: 2026-04-10 13:58:24 UTC
+Generated: 2026-04-14 18:30:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

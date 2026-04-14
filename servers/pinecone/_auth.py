@@ -1,7 +1,7 @@
 """
 Authentication module for Pinecone Control Plane API MCP server.
 
-Generated: 2026-04-10 13:58:24 UTC
+Generated: 2026-04-14 18:30:38 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

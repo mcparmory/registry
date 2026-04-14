@@ -1,6 +1,12 @@
 # Pinecone Control Plane API MCP Server
 
 Base URL: https://api.pinecone.io
+| | |
+|---|---|
+| **Category** | Data & Databases |
+| **Tools** | 18 |
+| **Auth** | API Key |
+
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 - **Contact:** Pinecone Support (support@pinecone.io) — [https://support.pinecone.io](https://support.pinecone.io)
