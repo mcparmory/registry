@@ -1,6 +1,12 @@
 # Codacy MCP Server
 
 Base URL: https://app.codacy.com/api/v3
+| | |
+|---|---|
+| **Category** | Developer Tools |
+| **Tools** | 236 |
+| **Auth** | API Key |
+
 ## API Info
 - **API License:** Codacy. All rights reserved — [https://www.codacy.com](https://www.codacy.com)
 - **Contact:** Codacy Team (code@codacy.com) — [https://www.codacy.com](https://www.codacy.com)

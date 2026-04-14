@@ -1,7 +1,7 @@
 """
 Codacy MCP Server - Pydantic Models
 
-Generated: 2026-04-09 17:17:58 UTC
+Generated: 2026-04-14 18:18:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -254,7 +254,7 @@ class ListOrganizationRepositoriesWithAnalysisRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider.")
 class ListOrganizationRepositoriesWithAnalysisRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned repositories to those whose names contain the provided string.")
     segments: str | None = Field(default=None, description="Restricts results to repositories belonging to the specified segments, provided as a comma-separated list of numeric segment identifiers.")
 class ListOrganizationRepositoriesWithAnalysisRequest(StrictModel):
@@ -267,7 +267,7 @@ class SearchOrganizationRepositoriesWithAnalysisRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used by the provider.")
 class SearchOrganizationRepositoriesWithAnalysisRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class SearchOrganizationRepositoriesWithAnalysisRequestBody(StrictModel):
     """Search query body"""
     names: list[str] | None = Field(default=None, description="Filter results to only the specified repository names. Each item should be a repository name string; order does not affect results.")
@@ -338,7 +338,7 @@ class ListRepositoryToolPatternsRequestQuery(StrictModel):
     recommended: bool | None = Field(default=None, description="When set to true, returns only recommended patterns; when set to false, returns only non-recommended patterns. Omit to return all patterns regardless of recommended status.")
     sort: str | None = Field(default=None, description="The field by which to sort the returned patterns. Valid values are category, recommended, and severity.")
     direction: str | None = Field(default=None, description="The direction in which to sort results, either ascending (asc) or descending (desc).")
-    limit: int | None = Field(default=None, description="Maximum number of patterns to return in a single response, between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of patterns to return in a single response, between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class ListRepositoryToolPatternsRequest(StrictModel):
     """Retrieves the code pattern configurations for a specific analysis tool applied to a repository. Returns standard organization-level settings if applied, otherwise falls back to repository-specific settings."""
     path: ListRepositoryToolPatternsRequestPath
@@ -423,7 +423,7 @@ class ListRepositoryPullRequestsRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository.")
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
 class ListRepositoryPullRequestsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of pull requests to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of pull requests to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned pull requests to those whose names or metadata contain the provided string.")
     include_not_analyzed: bool | None = Field(default=None, validation_alias="includeNotAnalyzed", serialization_alias="includeNotAnalyzed", description="When set to true, includes pull requests that have not yet been analyzed by Codacy alongside analyzed ones.")
 class ListRepositoryPullRequestsRequest(StrictModel):
@@ -478,7 +478,7 @@ class GetPullRequestCommitsRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
     pull_request_number: int = Field(default=..., validation_alias="pullRequestNumber", serialization_alias="pullRequestNumber", description="The unique number identifying the pull request within the repository, as assigned by the Git provider.", json_schema_extra={'format': 'int32'})
 class GetPullRequestCommitsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of commit results to return in a single response. Accepts values between 1 and 100; defaults to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of commit results to return in a single response. Accepts values between 1 and 100; defaults to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class GetPullRequestCommitsRequest(StrictModel):
     """Retrieves analysis results for all commits within a specified pull request, including code quality and issue data per commit. Results are paginated and scoped to a repository on a supported Git provider."""
     path: GetPullRequestCommitsRequestPath
@@ -523,7 +523,7 @@ class ListPullRequestIssuesRequestPath(StrictModel):
 class ListPullRequestIssuesRequestQuery(StrictModel):
     status: Literal["all", "new", "fixed"] | None = Field(default=None, description="Filters issues by their status relative to the pull request. Use 'new' for issues introduced, 'fixed' for issues resolved, or 'all' to return both.")
     only_potential: bool | None = Field(default=None, validation_alias="onlyPotential", serialization_alias="onlyPotential", description="When set to true, restricts results to potential issues only, which are lower-confidence findings that may require additional review.")
-    limit: int | None = Field(default=None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListPullRequestIssuesRequest(StrictModel):
     """Retrieves the list of issues found in a specific pull request for a given repository. Use the status filter to narrow results to new, fixed, or all issues, and optionally surface only potential issues."""
     path: ListPullRequestIssuesRequestPath
@@ -538,7 +538,7 @@ class ListPullRequestClonesRequestPath(StrictModel):
 class ListPullRequestClonesRequestQuery(StrictModel):
     status: Literal["all", "new", "fixed"] | None = Field(default=None, description="Filters returned clones by their status relative to the pull request: 'new' for clones introduced, 'fixed' for clones resolved, or 'all' for every detected clone regardless of status.")
     only_potential: bool | None = Field(default=None, validation_alias="onlyPotential", serialization_alias="onlyPotential", description="When set to true, restricts results to only potential (lower-confidence) duplicate code blocks rather than confirmed clones.")
-    limit: int | None = Field(default=None, description="Maximum number of clone results to return in a single response, between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of clone results to return in a single response, between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class ListPullRequestClonesRequest(StrictModel):
     """Retrieves duplicate code blocks (clones) detected in a specific pull request for a repository. Use the status filter to narrow results to new, fixed, or all duplicate occurrences."""
     path: ListPullRequestClonesRequestPath
@@ -553,7 +553,7 @@ class ListCommitClonesRequestPath(StrictModel):
 class ListCommitClonesRequestQuery(StrictModel):
     status: Literal["all", "new", "fixed"] | None = Field(default=None, description="Filters duplicate code blocks by their status relative to the commit: all returns every clone, new returns only newly introduced clones, and fixed returns only clones resolved in this commit.")
     only_potential: bool | None = Field(default=None, validation_alias="onlyPotential", serialization_alias="onlyPotential", description="When set to true, restricts results to only potential duplicate code issues, excluding confirmed clones.")
-    limit: int | None = Field(default=None, description="Maximum number of duplicate code block results to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of duplicate code block results to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListCommitClonesRequest(StrictModel):
     """Retrieves duplicate code blocks (clones) detected in a specific commit for a repository. Use the status parameter to filter results by new, fixed, or all duplicate occurrences."""
     path: ListCommitClonesRequestPath
@@ -588,7 +588,7 @@ class ListCommitFilesRequestPath(StrictModel):
 class ListCommitFilesRequestQuery(StrictModel):
     branch: str | None = Field(default=None, description="The branch to scope the analysis results to; must be a branch enabled on Codacy. Defaults to the repository's main branch if omitted.")
     filter_: Literal["withCoverageChanges"] | None = Field(default=None, validation_alias="filter", serialization_alias="filter", description="Narrows the returned files by type: omit to return all files changed in the commit or with coverage changes, or use 'withCoverageChanges' to return only files that have coverage changes.")
-    limit: int | None = Field(default=None, description="Maximum number of file results to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of file results to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the results to only include files whose relative path contains the specified string.")
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(default=None, validation_alias="sortColumn", serialization_alias="sortColumn", description="The field by which to sort the returned files: 'filename' (default) sorts alphabetically, 'deltaCoverage' sorts by coverage change, and 'totalCoverage' sorts by overall coverage value.")
     column_order: Literal["asc", "desc"] | None = Field(default=None, validation_alias="columnOrder", serialization_alias="columnOrder", description="The direction in which to sort results: 'asc' for ascending order (default) or 'desc' for descending order.")
@@ -604,7 +604,7 @@ class ListPullRequestFilesRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified organization on the Git provider.")
     pull_request_number: int = Field(default=..., validation_alias="pullRequestNumber", serialization_alias="pullRequestNumber", description="The unique numeric identifier of the pull request within the repository.", json_schema_extra={'format': 'int32'})
 class ListPullRequestFilesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of file results to return per request. Must be between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of file results to return per request. Must be between 1 and 100.", json_schema_extra={'format': 'int32'})
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(default=None, validation_alias="sortColumn", serialization_alias="sortColumn", description="The field by which to sort the returned files. Use `filename` to sort alphabetically by file path, `deltaCoverage` to sort by the change in coverage, or `totalCoverage` to sort by the overall coverage value.")
     column_order: Literal["asc", "desc"] | None = Field(default=None, validation_alias="columnOrder", serialization_alias="columnOrder", description="The direction in which to order the sorted results, either ascending or descending.")
 class ListPullRequestFilesRequest(StrictModel):
@@ -641,8 +641,8 @@ class UpdateRepositoryQualitySettingsRequestBody(StrictModel):
     max_duplicated_files_percentage: int | None = Field(default=None, validation_alias="maxDuplicatedFilesPercentage", serialization_alias="maxDuplicatedFilesPercentage", description="The maximum acceptable percentage of duplicated files; the repository is flagged as unhealthy if this threshold is exceeded. Must be a non-negative integer representing a percentage.", json_schema_extra={'format': 'int32'})
     min_coverage_percentage: int | None = Field(default=None, validation_alias="minCoveragePercentage", serialization_alias="minCoveragePercentage", description="The minimum required code coverage percentage; the repository is flagged as unhealthy if coverage falls below this threshold. Must be a non-negative integer representing a percentage.", json_schema_extra={'format': 'int32'})
     max_complex_files_percentage: int | None = Field(default=None, validation_alias="maxComplexFilesPercentage", serialization_alias="maxComplexFilesPercentage", description="The maximum acceptable percentage of complex files; the repository is flagged as unhealthy if this threshold is exceeded. Must be a non-negative integer representing a percentage.", json_schema_extra={'format': 'int32'})
-    file_duplication_block_threshold: int | None = Field(default=None, validation_alias="fileDuplicationBlockThreshold", serialization_alias="fileDuplicationBlockThreshold", description="The number of cloned blocks above which a file is considered duplicated within this repository. Must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
-    file_complexity_value_threshold: int | None = Field(default=None, validation_alias="fileComplexityValueThreshold", serialization_alias="fileComplexityValueThreshold", description="The complexity score above which a file is considered complex within this repository. Must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    file_duplication_block_threshold: int | None = Field(default=None, validation_alias="fileDuplicationBlockThreshold", serialization_alias="fileDuplicationBlockThreshold", description="The number of cloned blocks above which a file is considered duplicated within this repository. Must be zero or greater.", json_schema_extra={'format': 'int32'})
+    file_complexity_value_threshold: int | None = Field(default=None, validation_alias="fileComplexityValueThreshold", serialization_alias="fileComplexityValueThreshold", description="The complexity score above which a file is considered complex within this repository. Must be zero or greater.", json_schema_extra={'format': 'int32'})
 class UpdateRepositoryQualitySettingsRequest(StrictModel):
     """Updates the quality gate thresholds for a specific repository, defining the criteria under which the repository is considered healthy or unhealthy across issues, duplication, coverage, and complexity metrics."""
     path: UpdateRepositoryQualitySettingsRequestPath
@@ -746,7 +746,7 @@ class ListOrganizationPullRequestsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider.")
 class ListOrganizationPullRequestsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of pull requests to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of pull requests to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters pull requests by matching the provided string against repository names or other relevant fields.")
 class ListOrganizationPullRequestsRequest(StrictModel):
     """Retrieves pull requests across all repositories in an organization that the authenticated user has access to. Results can be sorted by last updated date (default), impact, or merged status."""
@@ -760,7 +760,7 @@ class ListCommitAnalysisStatsRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
 class ListCommitAnalysisStatsRequestQuery(StrictModel):
     branch: str | None = Field(default=None, description="The repository branch to retrieve commit statistics for, which must be a branch enabled in Codacy settings. Defaults to the main branch configured in the Codacy repository settings if omitted.")
-    days: int | None = Field(default=None, description="The number of days of commit statistics to return, ranging from 1 to 365. Returns the most recent days that have analysis data, defaulting to 31 if not specified.", ge=1, le=365, json_schema_extra={'format': 'int32'})
+    days: int | None = Field(default=None, description="The number of days of commit statistics to return, ranging from 1 to 365. Returns the most recent days that have analysis data, defaulting to 31 if not specified.", json_schema_extra={'format': 'int32'})
 class ListCommitAnalysisStatsRequest(StrictModel):
     """Retrieves daily commit analysis statistics for a repository over the last N days that have available analysis data. Note that returned days reflect days with actual data, which may not align with the last N consecutive calendar days."""
     path: ListCommitAnalysisStatsRequestPath
@@ -784,7 +784,7 @@ class SearchRepositoryIssuesRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider.")
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The repository name within the specified organization on the Git provider.")
 class SearchRepositoryIssuesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of issues to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of issues to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class SearchRepositoryIssuesRequest(StrictModel):
     """Searches and returns issues found by Codacy in a specific repository, equivalent to the Issues page view. Supports filtering via request body to narrow results by category, severity, or other criteria."""
     path: SearchRepositoryIssuesRequestPath
@@ -856,7 +856,7 @@ class SearchRepositoryIgnoredIssuesRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository.")
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified organization on the Git provider.")
 class SearchRepositoryIgnoredIssuesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of ignored issues to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of ignored issues to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class SearchRepositoryIgnoredIssuesRequest(StrictModel):
     """Retrieves a paginated list of issues that Codacy detected but were manually marked as ignored in the specified repository. Supports filtering via request body parameters."""
     path: SearchRepositoryIgnoredIssuesRequestPath
@@ -869,7 +869,7 @@ class ListRepositoryCommitsRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
 class ListRepositoryCommitsRequestQuery(StrictModel):
     branch: str | None = Field(default=None, description="The name of a branch enabled on Codacy for this repository, as returned by listRepositoryBranches. Defaults to the main branch configured in Codacy repository settings if omitted.")
-    limit: int | None = Field(default=None, description="Maximum number of commit results to return. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of commit results to return. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListRepositoryCommitsRequest(StrictModel):
     """Retrieves Codacy analysis results for commits in a specified branch of a repository. Defaults to the main branch if no branch is specified."""
     path: ListRepositoryCommitsRequestPath
@@ -905,7 +905,7 @@ class ListCommitDeltaIssuesRequestQuery(StrictModel):
     target_commit_uuid: str | None = Field(default=None, validation_alias="targetCommitUuid", serialization_alias="targetCommitUuid", description="The SHA or UUID of an optional target commit to use as the comparison baseline instead of the source commit's parent.")
     status: Literal["all", "new", "fixed"] | None = Field(default=None, description="Filters results by issue status: all returns every delta issue, new returns only introduced issues, and fixed returns only resolved issues.")
     only_potential: bool | None = Field(default=None, validation_alias="onlyPotential", serialization_alias="onlyPotential", description="When set to true, restricts results to potential issues only, excluding confirmed issues from the response.")
-    limit: int | None = Field(default=None, description="Maximum number of issues to return per request; must be between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of issues to return per request; must be between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListCommitDeltaIssuesRequest(StrictModel):
     """Retrieves issues introduced or fixed by a specific commit, calculated as a delta between the source commit and its parent (or an optional target commit). Use this to audit code quality changes at the commit level."""
     path: ListCommitDeltaIssuesRequestPath
@@ -921,7 +921,7 @@ class PatchUserRequest(StrictModel):
 
 # Operation: list_organizations
 class ListUserOrganizationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response, between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response, between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListUserOrganizationsRequest(StrictModel):
     """Retrieves all organizations that the currently authenticated user belongs to. Returns a paginated list up to the specified limit."""
     query: ListUserOrganizationsRequestQuery | None = None
@@ -930,7 +930,7 @@ class ListUserOrganizationsRequest(StrictModel):
 class ListOrganizationsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider to query for organizations. Use the short identifier code for the desired platform (e.g., GitHub, GitLab, Bitbucket).")
 class ListOrganizationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListOrganizationsRequest(StrictModel):
     """Retrieves all organizations associated with the authenticated user for a specified Git provider. Useful for discovering available organizations before performing organization-scoped operations."""
     path: ListOrganizationsRequestPath
@@ -946,7 +946,7 @@ class GetUserOrganizationRequest(StrictModel):
 
 # Operation: list_integrations
 class ListUserIntegrationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListUserIntegrationsRequest(StrictModel):
     """Retrieves all integrations connected to the authenticated user's account. Returns a paginated list of integration records up to the specified limit."""
     query: ListUserIntegrationsRequestQuery | None = None
@@ -1121,7 +1121,7 @@ class ListOrganizationRepositoriesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider.")
 class ListOrganizationRepositoriesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; note the API may return more results than specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; note the API may return more results than specified.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="A search string used to filter repositories by name. Only repositories whose names contain this string will be returned.")
     filter_: Literal["Synced", "NotSynced", "AllSynced"] | None = Field(default=None, validation_alias="filter", serialization_alias="filter", description="Controls which repositories are returned based on their sync status: `Synced` returns repositories the user has access to, `NotSynced` returns repositories fetched from the provider but not yet synced, and `AllSynced` returns all organization repositories (requires admin access).")
     languages: str | None = Field(default=None, description="Filters results to repositories that use the specified programming languages, provided as a comma-separated list of language names.")
@@ -1144,7 +1144,7 @@ class ListPeopleFromOrganizationRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider.")
 class ListPeopleFromOrganizationRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of people to return per request; must be between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of people to return per request; must be between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned people by matching the provided string against their name or related identifiers.")
     only_members: bool | None = Field(default=None, validation_alias="onlyMembers", serialization_alias="onlyMembers", description="When true, restricts results to only registered Codacy users; when false, also includes commit authors who have not joined Codacy.")
 class ListPeopleFromOrganizationRequest(StrictModel):
@@ -1193,7 +1193,7 @@ class PeopleSuggestionsForOrganizationRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider.")
 class PeopleSuggestionsForOrganizationRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of people suggestions to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of people suggestions to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned suggestions to those whose name or identifier contains the provided search string.")
 class PeopleSuggestionsForOrganizationRequest(StrictModel):
     """Retrieves suggested people (users) to add to an organization on a specified Git provider. Useful for discovering potential members based on activity or association with the organization."""
@@ -1238,7 +1238,7 @@ class PeopleSuggestionsForRepositoryRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider.")
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified organization on the Git provider.")
 class PeopleSuggestionsForRepositoryRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of people suggestions to return. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of people suggestions to return. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned suggestions to those whose names or identifiers match the provided search string.")
 class PeopleSuggestionsForRepositoryRequest(StrictModel):
     """Retrieves suggested people (collaborators or contributors) for a specific repository within an organization. Useful for discovering relevant users to add or assign within a given repository context."""
@@ -1252,7 +1252,7 @@ class ListRepositoryBranchesRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
 class ListRepositoryBranchesRequestQuery(StrictModel):
     enabled: bool | None = Field(default=None, description="Filters branches by their enabled status. When set to true, only enabled branches are returned; when set to false, only disabled branches are returned. Omit to return all branches regardless of status.")
-    limit: int | None = Field(default=None, description="The maximum number of branches to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of branches to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="A string used to filter branches by name, returning only branches whose names contain the provided value.")
     sort: str | None = Field(default=None, description="The field by which to sort the returned branches. Accepted values are 'name' to sort alphabetically or 'last-updated' to sort by most recent activity.")
     direction: str | None = Field(default=None, description="The direction in which to sort the results. Use 'asc' for ascending order or 'desc' for descending order.")
@@ -1327,7 +1327,7 @@ class ListOrganizationJoinRequestsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider.")
 class ListOrganizationJoinRequestsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of join requests to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of join requests to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned join requests to those matching the provided search string, such as a username or partial name.")
 class ListOrganizationJoinRequestsRequest(StrictModel):
     """Retrieves all pending requests from users asking to join a specified organization on a Git provider. Supports filtering by search term and pagination via a result limit."""
@@ -1398,7 +1398,7 @@ class AddEnterpriseTokenRequest(StrictModel):
 
 # Operation: list_api_tokens
 class GetUserApiTokensRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class GetUserApiTokensRequest(StrictModel):
     """Retrieves all API tokens associated with the authenticated user's account. Useful for auditing active tokens or managing programmatic access credentials."""
     query: GetUserApiTokensRequestQuery | None = None
@@ -1428,7 +1428,7 @@ class DeleteSubscriptionRequest(StrictModel):
 
 # Operation: list_provider_integrations
 class ListProviderIntegrationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListProviderIntegrationsRequest(StrictModel):
     """Retrieves a list of provider integrations configured on Codacy's platform. Use this to discover available third-party integrations such as version control, CI, or issue tracking providers."""
     query: ListProviderIntegrationsRequestQuery | None = None
@@ -1450,7 +1450,7 @@ class DeleteDormantAccountsRequest(StrictModel):
 
 # Operation: list_tools
 class ListToolsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListToolsRequest(StrictModel):
     """Retrieve a paginated list of available tools. Use the limit parameter to control how many tools are returned in a single response."""
     query: ListToolsRequestQuery | None = None
@@ -1459,7 +1459,7 @@ class ListToolsRequest(StrictModel):
 class ListPatternsRequestPath(StrictModel):
     tool_uuid: str = Field(default=..., validation_alias="toolUuid", serialization_alias="toolUuid", description="The unique UUID identifying the tool whose patterns should be retrieved.")
 class ListPatternsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     enabled: bool | None = Field(default=None, description="Filters patterns by their enabled status. Set to true to return only enabled patterns, or false to return only disabled patterns. Omit to return all patterns regardless of status.")
 class ListPatternsRequest(StrictModel):
     """Retrieves the list of patterns associated with a specific tool. Supports filtering by enabled status and limiting the number of results returned."""
@@ -1725,7 +1725,7 @@ class ListFilesRequestQuery(StrictModel):
     search: str | None = Field(default=None, description="Filters the returned files to those whose relative path contains this string, enabling partial-match searches.")
     sort: str | None = Field(default=None, description="Field by which to sort the file list. Accepted values are filename, issues, grade, duplication, complexity, and coverage.")
     direction: str | None = Field(default=None, description="Order in which to return sorted results — ascending (asc) or descending (desc).")
-    limit: int | None = Field(default=None, description="Maximum number of files to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of files to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListFilesRequest(StrictModel):
     """Retrieves the most recent analysis results for all tracked files in a repository, equivalent to the Codacy Files page view. Ignored files are excluded from results."""
     path: ListFilesRequestPath
@@ -1739,7 +1739,7 @@ class ListIgnoredFilesRequestPath(StrictModel):
 class ListIgnoredFilesRequestQuery(StrictModel):
     branch: str | None = Field(default=None, description="The name of a branch enabled on Codacy to scope the ignored files results; defaults to the main branch configured in Codacy repository settings if omitted.")
     search: str | None = Field(default=None, description="A string used to filter results, returning only files whose relative path contains this value anywhere within it.")
-    limit: int | None = Field(default=None, description="The maximum number of ignored files to return in a single response, between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="The maximum number of ignored files to return in a single response, between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class ListIgnoredFilesRequest(StrictModel):
     """Retrieves the most recently recorded list of ignored files for a repository on Codacy. When a Codacy configuration file is present, the ignored files list is read-only and reflects what was excluded during the last analysis."""
     path: ListIgnoredFilesRequestPath
@@ -1762,7 +1762,7 @@ class GetFileClonesRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
     file_id: int = Field(default=..., validation_alias="fileId", serialization_alias="fileId", description="The unique numeric identifier for a file tied to a specific commit. This ID is commit-scoped and can be obtained from file listing endpoints.", json_schema_extra={'format': 'int64'})
 class GetFileClonesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of duplicate code block results to return. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of duplicate code block results to return. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class GetFileClonesRequest(StrictModel):
     """Retrieves all duplicated code blocks (clones) detected within a specific file in a repository. Useful for identifying code duplication issues at the file level."""
     path: GetFileClonesRequestPath
@@ -1775,7 +1775,7 @@ class GetFileIssuesRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
     file_id: int = Field(default=..., validation_alias="fileId", serialization_alias="fileId", description="The unique identifier for a file tied to a specific commit. This ID is commit-scoped and may differ across commits for the same file path.", json_schema_extra={'format': 'int64'})
 class GetFileIssuesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class GetFileIssuesRequest(StrictModel):
     """Retrieves the list of code quality issues found in a specific file within a repository. Results are scoped to the file identified by its commit-specific file ID."""
     path: GetFileIssuesRequestPath
@@ -1832,11 +1832,11 @@ class CreateCodingStandardPresetRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform.")
 class CreateCodingStandardPresetRequestBodyPresets(StrictModel):
-    bug_risk: int = Field(default=..., validation_alias="bugRisk", serialization_alias="bugRisk", description="Preset level for bug risk rules, controlling how strictly potential bugs and error-prone patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4, json_schema_extra={'format': 'int32'})
-    security: int = Field(default=..., validation_alias="security", serialization_alias="security", description="Preset level for security rules, controlling how strictly security vulnerabilities and unsafe coding patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4, json_schema_extra={'format': 'int32'})
-    best_practices: int = Field(default=..., validation_alias="bestPractices", serialization_alias="bestPractices", description="Preset level for best practice rules, controlling how strictly deviations from recommended coding conventions are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4, json_schema_extra={'format': 'int32'})
-    code_style: int = Field(default=..., validation_alias="codeStyle", serialization_alias="codeStyle", description="Preset level for code style rules, controlling how strictly formatting and stylistic inconsistencies are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4, json_schema_extra={'format': 'int32'})
-    documentation: int = Field(default=..., validation_alias="documentation", serialization_alias="documentation", description="Preset level for documentation rules, controlling how strictly missing or inadequate code documentation is flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4, json_schema_extra={'format': 'int32'})
+    bug_risk: int = Field(default=..., validation_alias="bugRisk", serialization_alias="bugRisk", description="Preset level for bug risk rules, controlling how strictly potential bugs and error-prone patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", json_schema_extra={'format': 'int32'})
+    security: int = Field(default=..., validation_alias="security", serialization_alias="security", description="Preset level for security rules, controlling how strictly security vulnerabilities and unsafe coding patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", json_schema_extra={'format': 'int32'})
+    best_practices: int = Field(default=..., validation_alias="bestPractices", serialization_alias="bestPractices", description="Preset level for best practice rules, controlling how strictly deviations from recommended coding conventions are flagged. Accepts values from 1 (least strict) to 4 (most strict).", json_schema_extra={'format': 'int32'})
+    code_style: int = Field(default=..., validation_alias="codeStyle", serialization_alias="codeStyle", description="Preset level for code style rules, controlling how strictly formatting and stylistic inconsistencies are flagged. Accepts values from 1 (least strict) to 4 (most strict).", json_schema_extra={'format': 'int32'})
+    documentation: int = Field(default=..., validation_alias="documentation", serialization_alias="documentation", description="Preset level for documentation rules, controlling how strictly missing or inadequate code documentation is flagged. Accepts values from 1 (least strict) to 4 (most strict).", json_schema_extra={'format': 'int32'})
 class CreateCodingStandardPresetRequestBody(StrictModel):
     """Details of the coding standard to create"""
     name: str | None = Field(default=None, description="A human-readable label for the new coding standard to help identify it within the organization.")
@@ -1911,7 +1911,7 @@ class ListCodingStandardPatternsRequestQuery(StrictModel):
     recommended: bool | None = Field(default=None, description="When set to `true`, returns only recommended patterns; when set to `false`, returns only non-recommended patterns. Omit to return patterns regardless of recommended status.")
     sort: str | None = Field(default=None, description="The field by which to sort the returned patterns. Valid values are `category`, `recommended`, and `severity`.")
     direction: str | None = Field(default=None, description="The direction in which results are sorted — `asc` for ascending or `desc` for descending.")
-    limit: int | None = Field(default=None, description="Maximum number of patterns to return per request. Must be between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of patterns to return per request. Must be between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class ListCodingStandardPatternsRequest(StrictModel):
     """Retrieves the list of code patterns configured for a specific tool within a coding standard, supporting filtering by language, category, severity, tags, and enabled/recommended status."""
     path: ListCodingStandardPatternsRequestPath
@@ -1973,7 +1973,7 @@ class ListCodingStandardRepositoriesRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider.")
     coding_standard_id: int = Field(default=..., validation_alias="codingStandardId", serialization_alias="codingStandardId", description="The unique numeric identifier of the coding standard whose associated repositories should be listed.", json_schema_extra={'format': 'int64'})
 class ListCodingStandardRepositoriesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; defaults to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; defaults to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListCodingStandardRepositoriesRequest(StrictModel):
     """Retrieves the list of repositories currently using a specific coding standard within an organization. Useful for auditing which repositories are governed by a given set of coding rules."""
     path: ListCodingStandardRepositoriesRequestPath
@@ -2024,15 +2024,15 @@ class UpdateGatePolicyRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform.")
     gate_policy_id: int = Field(default=..., validation_alias="gatePolicyId", serialization_alias="gatePolicyId", description="The unique numeric identifier of the gate policy to update.", json_schema_extra={'format': 'int64'})
 class UpdateGatePolicyRequestBodySettingsIssueThreshold(StrictModel):
-    threshold: int = Field(default=..., validation_alias="threshold", serialization_alias="threshold", description="The maximum number of new issues allowed before the quality gate fails. Must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    threshold: int = Field(default=..., validation_alias="threshold", serialization_alias="threshold", description="The maximum number of new issues allowed before the quality gate fails. Must be zero or greater.", json_schema_extra={'format': 'int32'})
     minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(default=None, validation_alias="minimumSeverity", serialization_alias="minimumSeverity", description="The minimum severity level of issues that count toward the issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical.")
 class UpdateGatePolicyRequestBodySettings(StrictModel):
-    security_issue_threshold: int | None = Field(default=None, validation_alias="securityIssueThreshold", serialization_alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails. Must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    security_issue_threshold: int | None = Field(default=None, validation_alias="securityIssueThreshold", serialization_alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails. Must be zero or greater.", json_schema_extra={'format': 'int32'})
     security_issue_minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(default=None, validation_alias="securityIssueMinimumSeverity", serialization_alias="securityIssueMinimumSeverity", description="The minimum severity level of security issues that count toward the security issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical.")
     duplication_threshold: int | None = Field(default=None, validation_alias="duplicationThreshold", serialization_alias="duplicationThreshold", description="The maximum number of new duplicated code blocks allowed before the quality gate fails.", json_schema_extra={'format': 'int32'})
     coverage_threshold_with_decimals: float | None = Field(default=None, validation_alias="coverageThresholdWithDecimals", serialization_alias="coverageThresholdWithDecimals", description="The minimum required change in coverage percentage; the gate fails if coverage varies by less than this value. Accepts negative values to allow coverage decreases up to a specified amount, with a maximum value of 1.00 (representing 100%).", json_schema_extra={'format': 'double'})
-    diff_coverage_threshold: int | None = Field(default=None, validation_alias="diffCoverageThreshold", serialization_alias="diffCoverageThreshold", description="The minimum required diff coverage percentage; the gate fails if diff coverage falls below this value. Must be between 0 and 100 inclusive.", ge=0, le=100, json_schema_extra={'format': 'int32'})
-    complexity_threshold: int | None = Field(default=None, validation_alias="complexityThreshold", serialization_alias="complexityThreshold", description="The maximum allowed complexity value introduced by new code; the gate fails if this threshold is exceeded. Must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    diff_coverage_threshold: int | None = Field(default=None, validation_alias="diffCoverageThreshold", serialization_alias="diffCoverageThreshold", description="The minimum required diff coverage percentage; the gate fails if diff coverage falls below this value. Must be between 0 and 100 inclusive.", json_schema_extra={'format': 'int32'})
+    complexity_threshold: int | None = Field(default=None, validation_alias="complexityThreshold", serialization_alias="complexityThreshold", description="The maximum allowed complexity value introduced by new code; the gate fails if this threshold is exceeded. Must be zero or greater.", json_schema_extra={'format': 'int32'})
     issue_threshold: UpdateGatePolicyRequestBodySettingsIssueThreshold = Field(default=..., validation_alias="issueThreshold", serialization_alias="issueThreshold")
 class UpdateGatePolicyRequestBody(StrictModel):
     """The new values for the name, default status, or quality gates of the gate policy"""
@@ -2058,7 +2058,7 @@ class ListGatePoliciesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider.")
 class ListGatePoliciesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of gate policies to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of gate policies to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListGatePoliciesRequest(StrictModel):
     """Retrieves all gate policies configured for a specified organization on a Git provider. Gate policies define quality or security gates that govern code merging and deployment workflows."""
     path: ListGatePoliciesRequestPath
@@ -2069,15 +2069,15 @@ class CreateGatePolicyRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class CreateGatePolicyRequestBodySettingsIssueThreshold(StrictModel):
-    threshold: int = Field(default=..., validation_alias="threshold", serialization_alias="threshold", description="The maximum number of new issues allowed before the quality gate fails; must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    threshold: int = Field(default=..., validation_alias="threshold", serialization_alias="threshold", description="The maximum number of new issues allowed before the quality gate fails; must be zero or greater.", json_schema_extra={'format': 'int32'})
     minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(default=None, validation_alias="minimumSeverity", serialization_alias="minimumSeverity", description="The minimum severity level of issues counted toward the issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical.")
 class CreateGatePolicyRequestBodySettings(StrictModel):
-    security_issue_threshold: int | None = Field(default=None, validation_alias="securityIssueThreshold", serialization_alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails; must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    security_issue_threshold: int | None = Field(default=None, validation_alias="securityIssueThreshold", serialization_alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails; must be zero or greater.", json_schema_extra={'format': 'int32'})
     security_issue_minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(default=None, validation_alias="securityIssueMinimumSeverity", serialization_alias="securityIssueMinimumSeverity", description="The minimum severity level of security issues counted toward the security issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical.")
     duplication_threshold: int | None = Field(default=None, validation_alias="duplicationThreshold", serialization_alias="duplicationThreshold", description="The maximum number of new duplicated blocks allowed before the quality gate fails.", json_schema_extra={'format': 'int32'})
     coverage_threshold_with_decimals: float | None = Field(default=None, validation_alias="coverageThresholdWithDecimals", serialization_alias="coverageThresholdWithDecimals", description="The minimum change in coverage percentage required to pass the quality gate; use a negative value to allow coverage to decrease by that amount (e.g., -0.02 allows up to a 2% drop). Must be at most 1.00.", json_schema_extra={'format': 'double'})
-    diff_coverage_threshold: int | None = Field(default=None, validation_alias="diffCoverageThreshold", serialization_alias="diffCoverageThreshold", description="The minimum diff coverage percentage required to pass the quality gate; must be between 0 and 100 inclusive.", ge=0, le=100, json_schema_extra={'format': 'int32'})
-    complexity_threshold: int | None = Field(default=None, validation_alias="complexityThreshold", serialization_alias="complexityThreshold", description="The maximum cumulative complexity value allowed before the quality gate fails; must be zero or greater.", ge=0, json_schema_extra={'format': 'int32'})
+    diff_coverage_threshold: int | None = Field(default=None, validation_alias="diffCoverageThreshold", serialization_alias="diffCoverageThreshold", description="The minimum diff coverage percentage required to pass the quality gate; must be between 0 and 100 inclusive.", json_schema_extra={'format': 'int32'})
+    complexity_threshold: int | None = Field(default=None, validation_alias="complexityThreshold", serialization_alias="complexityThreshold", description="The maximum cumulative complexity value allowed before the quality gate fails; must be zero or greater.", json_schema_extra={'format': 'int32'})
     issue_threshold: CreateGatePolicyRequestBodySettingsIssueThreshold = Field(default=..., validation_alias="issueThreshold", serialization_alias="issueThreshold")
 class CreateGatePolicyRequestBody(StrictModel):
     """Details of the gate policy to create"""
@@ -2111,7 +2111,7 @@ class ListRepositoriesFollowingGatePolicyRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization name as it appears on the Git provider.")
     gate_policy_id: int = Field(default=..., validation_alias="gatePolicyId", serialization_alias="gatePolicyId", description="The unique numeric identifier of the gate policy whose associated repositories should be listed.", json_schema_extra={'format': 'int64'})
 class ListRepositoriesFollowingGatePolicyRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListRepositoriesFollowingGatePolicyRequest(StrictModel):
     """Retrieves all repositories that are following a specific gate policy within an organization. Useful for auditing which repositories are governed by a given quality gate configuration."""
     path: ListRepositoriesFollowingGatePolicyRequestPath
@@ -2173,7 +2173,7 @@ class ListCoverageReportsRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository.")
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The name of the repository within the specified Git provider organization.")
 class ListCoverageReportsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of coverage reports to return, between 1 and 100 inclusive. Defaults to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of coverage reports to return, between 1 and 100 inclusive. Defaults to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListCoverageReportsRequest(StrictModel):
     """Retrieves the most recent coverage reports and their statuses for a specified repository. Useful for monitoring code coverage trends and identifying the latest analysis results."""
     path: ListCoverageReportsRequestPath
@@ -2186,7 +2186,7 @@ class ListCommitCoverageReportsRequestPath(StrictModel):
     repository_name: str = Field(default=..., validation_alias="repositoryName", serialization_alias="repositoryName", description="The repository name within the specified organization on the Git provider.")
     commit_uuid: str = Field(default=..., validation_alias="commitUuid", serialization_alias="commitUuid", description="The full commit UUID or SHA hash that uniquely identifies the commit whose coverage reports should be listed.")
 class ListCommitCoverageReportsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of coverage reports to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of coverage reports to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListCommitCoverageReportsRequest(StrictModel):
     """Retrieves all code coverage reports associated with a specific commit in a repository. Useful for reviewing coverage data uploaded from multiple sources or tools for a given commit."""
     path: ListCommitCoverageReportsRequestPath
@@ -2278,7 +2278,7 @@ class SearchSecurityItemsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Identifies which platform to query.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class SearchSecurityItemsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of security items to return per request. Must be between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of security items to return per request. Must be between 1 and 100.", json_schema_extra={'format': 'int32'})
     sort: Literal["Status", "DetectedAt"] | None = Field(default=None, description="The field by which to sort the returned security items.")
     direction: str | None = Field(default=None, description="The direction in which to sort results, either ascending or descending.")
 class SearchSecurityItemsRequestBody(StrictModel):
@@ -2370,7 +2370,7 @@ class ListDastReportsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, used to identify the source control platform.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class ListDastReportsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of DAST reports to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of DAST reports to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListDastReportsRequest(StrictModel):
     """Retrieves a paginated list of uploaded DAST (Dynamic Application Security Testing) scan reports for an organization, including their current processing state. Results are sorted by submission date from latest to earliest."""
     path: ListDastReportsRequestPath
@@ -2381,7 +2381,7 @@ class ListSecurityManagersRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider.")
 class ListSecurityManagersRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of security managers to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of security managers to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListSecurityManagersRequest(StrictModel):
     """Retrieves the list of organization admins and security managers for a specified organization on a Git provider. Useful for auditing access control and identifying users with elevated security permissions."""
     path: ListSecurityManagersRequestPath
@@ -2413,7 +2413,7 @@ class ListSecurityRepositoriesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier for the target provider.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class ListSecurityRepositoriesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Must be between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Must be between 1 and 100.", json_schema_extra={'format': 'int32'})
     segments: str | None = Field(default=None, description="Narrows results to repositories belonging to the specified segments, provided as a comma-separated list of segment identifiers.")
 class ListSecurityRepositoriesRequest(StrictModel):
     """Retrieves a list of repositories within an organization that have active security issues. Supports pagination and optional filtering by segment identifiers."""
@@ -2425,7 +2425,7 @@ class ListSecurityCategoriesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Identifies which platform to query for security data.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used on the platform.")
 class ListSecurityCategoriesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of security categories to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of security categories to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListSecurityCategoriesRequest(StrictModel):
     """Retrieves a list of security subcategories that have active security issues for the specified organization. Useful for identifying which vulnerability categories require attention across the organization's repositories."""
     path: ListSecurityCategoriesRequestPath
@@ -2436,7 +2436,7 @@ class SearchSbomDependenciesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier for the target platform.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider.")
 class SearchSbomDependenciesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of dependency records to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of dependency records to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     sort_column: Literal["severity", "ossfScore"] | None = Field(default=None, validation_alias="sortColumn", serialization_alias="sortColumn", description="Field by which to sort the returned results. Use `severity` to order by the dependency's vulnerability severity, or `ossfScore` to order by the OpenSSF scorecard score.")
     column_order: Literal["asc", "desc"] | None = Field(default=None, validation_alias="columnOrder", serialization_alias="columnOrder", description="Direction in which to sort the results relative to the chosen sort column. Use `asc` for ascending or `desc` for descending order.")
 class SearchSbomDependenciesRequestBody(StrictModel):
@@ -2457,7 +2457,7 @@ class SearchRepositoriesOfSbomDependencyRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization. Use the short identifier for the target platform.")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization name as it appears on the Git provider.")
 class SearchRepositoriesOfSbomDependencyRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class SearchRepositoriesOfSbomDependencyRequestBody(StrictModel):
     """Request body with filters."""
     dependency_full_name: str = Field(default=..., validation_alias="dependencyFullName", serialization_alias="dependencyFullName", description="The fully qualified name of the SBOM dependency to search for across repositories.")
@@ -2473,7 +2473,7 @@ class SearchSbomRepositoriesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider.")
 class SearchSbomRepositoriesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class SearchSbomRepositoriesRequestBody(StrictModel):
     """Request body with filters."""
     body: dict[str, Any] | None = Field(default=None, description="Optional request body to filter repositories by specific dependencies. Each item should be a dependency identifier in the format 'ecosystem/package-name'.")
@@ -2531,7 +2531,7 @@ class ListOrganizationImagesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider.")
 class ListOrganizationImagesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of Docker images to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of Docker images to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListOrganizationImagesRequest(StrictModel):
     """Retrieves the list of Docker images available for a specified organization on a Git provider. Supports pagination to control the number of results returned."""
     path: ListOrganizationImagesRequestPath
@@ -2543,7 +2543,7 @@ class ListImageTagsRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider.")
     image_name: str = Field(default=..., validation_alias="imageName", serialization_alias="imageName", description="The name of the Docker image for which to list available tags.")
 class ListImageTagsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of image tags to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of image tags to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class ListImageTagsRequest(StrictModel):
     """Retrieves all Docker image tags associated with a specific image in an organization's SBOM registry. Results are paginated and scoped to the specified Git provider and organization."""
     path: ListImageTagsRequestPath
@@ -2615,7 +2615,7 @@ class GetAvailableJiraProjectsRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider.")
 class GetAvailableJiraProjectsRequestQuery(StrictModel):
     search: str | None = Field(default=None, description="Optional search string to filter returned Jira projects by name, returning only projects whose names contain the provided value.")
-    limit: int | None = Field(default=None, description="Maximum number of Jira projects to return in a single response, between 1 and 100 inclusive. Defaults to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of Jira projects to return in a single response, between 1 and 100 inclusive. Defaults to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class GetAvailableJiraProjectsRequest(StrictModel):
     """Retrieves the available Jira projects linked to a specific Git provider organization, enabling users to associate repositories with Jira for issue tracking. Supports filtering and pagination to narrow down results."""
     path: GetAvailableJiraProjectsRequestPath
@@ -2627,7 +2627,7 @@ class GetJiraProjectIssueTypesRequestPath(StrictModel):
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform.")
     jira_project_id: int = Field(default=..., validation_alias="jiraProjectId", serialization_alias="jiraProjectId", description="The unique numeric identifier of the Jira project whose issue types should be retrieved.", json_schema_extra={'format': 'int64'})
 class GetJiraProjectIssueTypesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of issue types to return per request. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of issue types to return per request. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class GetJiraProjectIssueTypesRequest(StrictModel):
     """Retrieves all available issue types (e.g., Bug, Story, Task) for a specific Jira project, enabling users to select valid types when creating or managing Jira issues linked to a Git organization."""
     path: GetJiraProjectIssueTypesRequestPath
@@ -2640,7 +2640,7 @@ class GetJiraProjectIssueFieldsRequestPath(StrictModel):
     jira_project_id: int = Field(default=..., validation_alias="jiraProjectId", serialization_alias="jiraProjectId", description="The numeric identifier of the Jira project whose issue type fields are being queried.", json_schema_extra={'format': 'int64'})
     jira_issue_type_id: str = Field(default=..., validation_alias="jiraIssueTypeId", serialization_alias="jiraIssueTypeId", description="The identifier of the Jira issue type within the project for which available fields are returned.")
 class GetJiraProjectIssueFieldsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of fields to return per response. Accepts values between 1 and 100, defaulting to 100 when omitted.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of fields to return per response. Accepts values between 1 and 100, defaulting to 100 when omitted.", json_schema_extra={'format': 'int32'})
 class GetJiraProjectIssueFieldsRequest(StrictModel):
     """Retrieves the available fields for a specific Jira issue type within a project, enabling dynamic form construction when creating or editing issues. Results are scoped to the organization identified by the Git provider and organization name."""
     path: GetJiraProjectIssueFieldsRequestPath
@@ -2777,7 +2777,7 @@ class GetSegmentsKeysRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider.")
 class GetSegmentsKeysRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of segment keys to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of segment keys to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Narrows results to segment keys whose names contain the provided string, enabling targeted lookups within large organizations.")
 class GetSegmentsKeysRequest(StrictModel):
     """Retrieves the available segment keys for a specified organization on a Git provider. Segment keys can be filtered by search term and support pagination via a configurable result limit."""
@@ -2789,7 +2789,7 @@ class GetSegmentsKeysWithIdsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider.")
 class GetSegmentsKeysWithIdsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of segment key records to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of segment key records to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Filters the returned segment keys to those matching the provided search string, useful for locating specific segments by name or partial name.")
 class GetSegmentsKeysWithIdsRequest(StrictModel):
     """Retrieves segment keys along with their associated IDs for a specified organization on a Git provider. Supports pagination and text-based filtering to narrow results."""
@@ -2803,7 +2803,7 @@ class GetSegmentsRequestPath(StrictModel):
     segment_key: str = Field(default=..., validation_alias="segmentKey", serialization_alias="segmentKey", description="The unique key identifying the segment whose values should be retrieved.")
 class GetSegmentsRequestQuery(StrictModel):
     search: str | None = Field(default=None, description="Optional search string to filter returned segment values by name or identifier, returning only items that match the provided text.")
-    limit: int | None = Field(default=None, description="Maximum number of segment values to return in a single response, accepting values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of segment values to return in a single response, accepting values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class GetSegmentsRequest(StrictModel):
     """Retrieves the list of values for a specific segment within an organization, identified by its segment key. Supports optional filtering by name and result count limiting."""
     path: GetSegmentsRequestPath
@@ -2814,7 +2814,7 @@ class GetDastTargetsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     remote_organization_name: str = Field(default=..., validation_alias="remoteOrganizationName", serialization_alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider.")
 class GetDastTargetsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of DAST targets to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of DAST targets to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
 class GetDastTargetsRequest(StrictModel):
     """Retrieves all configured Dynamic Application Security Testing (DAST) targets for the specified organization. Returns a paginated list of targets that have been set up for security scanning."""
     path: GetDastTargetsRequestPath
@@ -2856,7 +2856,7 @@ class ListEnterpriseOrganizationsRequestPath(StrictModel):
     enterprise_name: str = Field(default=..., validation_alias="enterpriseName", serialization_alias="enterpriseName", description="The unique slug identifier for the enterprise whose organizations you want to retrieve.")
     provider: str = Field(default=..., description="The Git provider hosting the enterprise, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
 class ListEnterpriseOrganizationsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", json_schema_extra={'format': 'int32'})
 class ListEnterpriseOrganizationsRequest(StrictModel):
     """Retrieves the list of organizations belonging to a specified enterprise on a given Git provider. Supports pagination via a configurable result limit."""
     path: ListEnterpriseOrganizationsRequestPath
@@ -2866,7 +2866,7 @@ class ListEnterpriseOrganizationsRequest(StrictModel):
 class ListEnterprisesRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider to query for enterprises, identified by its short code (e.g., GitHub, GitLab, Bitbucket).")
 class ListEnterprisesRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive.", json_schema_extra={'format': 'int32'})
 class ListEnterprisesRequest(StrictModel):
     """Retrieves all enterprises associated with the authenticated user for a specified Git provider. Returns a paginated list of enterprise accounts the user has access to."""
     path: ListEnterprisesRequestPath
@@ -2885,7 +2885,7 @@ class ListEnterpriseSeatsRequestPath(StrictModel):
     provider: str = Field(default=..., description="The Git provider hosting the enterprise, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket).")
     enterprise_name: str = Field(default=..., validation_alias="enterpriseName", serialization_alias="enterpriseName", description="The URL-friendly slug identifier of the enterprise whose seats are being listed.")
 class ListEnterpriseSeatsRequestQuery(StrictModel):
-    limit: int | None = Field(default=None, description="Maximum number of seat records to return in a single response. Accepts values between 1 and 100.", ge=1, le=100, json_schema_extra={'format': 'int32'})
+    limit: int | None = Field(default=None, description="Maximum number of seat records to return in a single response. Accepts values between 1 and 100.", json_schema_extra={'format': 'int32'})
     search: str | None = Field(default=None, description="Optional search string used to filter the returned seats, matching against relevant seat or user identifiers.")
 class ListEnterpriseSeatsRequest(StrictModel):
     """Retrieves a paginated list of seats allocated within a specified enterprise on a given Git provider. Supports filtering by search term to narrow results."""

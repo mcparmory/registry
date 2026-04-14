@@ -6,7 +6,7 @@ API Info:
 - API License: Codacy. All rights reserved (https://www.codacy.com)
 - Contact: Codacy Team <code@codacy.com> (https://www.codacy.com)
 
-Generated: 2026-04-09 17:17:58 UTC
+Generated: 2026-04-14 18:18:14 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -1139,7 +1139,7 @@ mcp = FastMCP("Codacy", middleware=[_JsonCoercionMiddleware()])
 async def list_organization_repositories_with_analysis(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned repositories to those whose names contain the provided string."),
     segments: str | None = Field(None, description="Restricts results to repositories belonging to the specified segments, provided as a comma-separated list of numeric segment identifiers."),
 ) -> dict[str, Any]:
@@ -1186,7 +1186,7 @@ async def list_organization_repositories_with_analysis(
 async def search_organization_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used by the provider."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100 inclusive."),
     names: list[str] | None = Field(None, description="Filter results to only the specified repository names. Each item should be a repository name string; order does not affect results."),
 ) -> dict[str, Any]:
     """Search repositories within an organization on a specified Git provider, returning results enriched with analysis information. Supports filtering by repository name and paginated results."""
@@ -1417,7 +1417,7 @@ async def list_repository_tool_patterns(
     recommended: bool | None = Field(None, description="When set to true, returns only recommended patterns; when set to false, returns only non-recommended patterns. Omit to return all patterns regardless of recommended status."),
     sort: str | None = Field(None, description="The field by which to sort the returned patterns. Valid values are category, recommended, and severity."),
     direction: str | None = Field(None, description="The direction in which to sort results, either ascending (asc) or descending (desc)."),
-    limit: str | None = Field(None, description="Maximum number of patterns to return in a single response, between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of patterns to return in a single response, between 1 and 100 inclusive."),
 ) -> dict[str, Any]:
     """Retrieves the code pattern configurations for a specific analysis tool applied to a repository. Returns standard organization-level settings if applied, otherwise falls back to repository-specific settings."""
 
@@ -1695,7 +1695,7 @@ async def list_pull_requests(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-    limit: str | None = Field(None, description="Maximum number of pull requests to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of pull requests to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned pull requests to those whose names or metadata contain the provided string."),
     include_not_analyzed: bool | None = Field(None, alias="includeNotAnalyzed", description="When set to true, includes pull requests that have not yet been analyzed by Codacy alongside analyzed ones."),
 ) -> dict[str, Any]:
@@ -1916,7 +1916,7 @@ async def list_pull_request_commits(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository, as assigned by the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of commit results to return in a single response. Accepts values between 1 and 100; defaults to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of commit results to return in a single response. Accepts values between 1 and 100; defaults to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves analysis results for all commits within a specified pull request, including code quality and issue data per commit. Results are paginated and scoped to a repository on a supported Git provider."""
 
@@ -2095,7 +2095,7 @@ async def list_pull_request_issues(
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository."),
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters issues by their status relative to the pull request. Use 'new' for issues introduced, 'fixed' for issues resolved, or 'all' to return both."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to potential issues only, which are lower-confidence findings that may require additional review."),
-    limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves the list of issues found in a specific pull request for a given repository. Use the status filter to narrow results to new, fixed, or all issues, and optionally surface only potential issues."""
 
@@ -2145,7 +2145,7 @@ async def list_pull_request_clones(
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request for which duplicate code blocks should be retrieved."),
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters returned clones by their status relative to the pull request: 'new' for clones introduced, 'fixed' for clones resolved, or 'all' for every detected clone regardless of status."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to only potential (lower-confidence) duplicate code blocks rather than confirmed clones."),
-    limit: str | None = Field(None, description="Maximum number of clone results to return in a single response, between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of clone results to return in a single response, between 1 and 100 inclusive."),
 ) -> dict[str, Any]:
     """Retrieves duplicate code blocks (clones) detected in a specific pull request for a repository. Use the status filter to narrow results to new, fixed, or all duplicate occurrences."""
 
@@ -2195,7 +2195,7 @@ async def list_commit_clones(
     commit_uuid: str = Field(..., alias="commitUuid", description="The UUID or full SHA hash identifying the specific commit to analyze for duplicate code blocks."),
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters duplicate code blocks by their status relative to the commit: all returns every clone, new returns only newly introduced clones, and fixed returns only clones resolved in this commit."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to only potential duplicate code issues, excluding confirmed clones."),
-    limit: str | None = Field(None, description="Maximum number of duplicate code block results to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of duplicate code block results to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves duplicate code blocks (clones) detected in a specific commit for a repository. Use the status parameter to filter results by new, fixed, or all duplicate occurrences."""
 
@@ -2328,7 +2328,7 @@ async def list_commit_files(
     commit_uuid: str = Field(..., alias="commitUuid", description="The unique identifier of the commit, provided as a UUID or full SHA hash string."),
     branch: str | None = Field(None, description="The branch to scope the analysis results to; must be a branch enabled on Codacy. Defaults to the repository's main branch if omitted."),
     filter_: Literal["withCoverageChanges"] | None = Field(None, alias="filter", description="Narrows the returned files by type: omit to return all files changed in the commit or with coverage changes, or use 'withCoverageChanges' to return only files that have coverage changes."),
-    limit: str | None = Field(None, description="Maximum number of file results to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of file results to return per request. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the results to only include files whose relative path contains the specified string."),
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(None, alias="sortColumn", description="The field by which to sort the returned files: 'filename' (default) sorts alphabetically, 'deltaCoverage' sorts by coverage change, and 'totalCoverage' sorts by overall coverage value."),
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="The direction in which to sort results: 'asc' for ascending order (default) or 'desc' for descending order."),
@@ -2378,7 +2378,7 @@ async def list_pull_request_files(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique numeric identifier of the pull request within the repository."),
-    limit: str | None = Field(None, description="Maximum number of file results to return per request. Must be between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of file results to return per request. Must be between 1 and 100."),
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(None, alias="sortColumn", description="The field by which to sort the returned files. Use `filename` to sort alphabetically by file path, `deltaCoverage` to sort by the change in coverage, or `totalCoverage` to sort by the overall coverage value."),
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="The direction in which to order the sorted results, either ascending or descending."),
 ) -> dict[str, Any]:
@@ -2511,8 +2511,8 @@ async def update_repository_quality_settings(
     max_duplicated_files_percentage: str | None = Field(None, alias="maxDuplicatedFilesPercentage", description="The maximum acceptable percentage of duplicated files; the repository is flagged as unhealthy if this threshold is exceeded. Must be a non-negative integer representing a percentage."),
     min_coverage_percentage: str | None = Field(None, alias="minCoveragePercentage", description="The minimum required code coverage percentage; the repository is flagged as unhealthy if coverage falls below this threshold. Must be a non-negative integer representing a percentage."),
     max_complex_files_percentage: str | None = Field(None, alias="maxComplexFilesPercentage", description="The maximum acceptable percentage of complex files; the repository is flagged as unhealthy if this threshold is exceeded. Must be a non-negative integer representing a percentage."),
-    file_duplication_block_threshold: str | None = Field(None, alias="fileDuplicationBlockThreshold", description="The number of cloned blocks above which a file is considered duplicated within this repository. Must be zero or greater.", ge=0),
-    file_complexity_value_threshold: str | None = Field(None, alias="fileComplexityValueThreshold", description="The complexity score above which a file is considered complex within this repository. Must be zero or greater.", ge=0),
+    file_duplication_block_threshold: str | None = Field(None, alias="fileDuplicationBlockThreshold", description="The number of cloned blocks above which a file is considered duplicated within this repository. Must be zero or greater."),
+    file_complexity_value_threshold: str | None = Field(None, alias="fileComplexityValueThreshold", description="The complexity score above which a file is considered complex within this repository. Must be zero or greater."),
 ) -> dict[str, Any]:
     """Updates the quality gate thresholds for a specific repository, defining the criteria under which the repository is considered healthy or unhealthy across issues, duplication, coverage, and complexity metrics."""
 
@@ -2966,7 +2966,7 @@ async def reset_repository_quality_settings(
 async def list_organization_pull_requests(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of pull requests to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of pull requests to return per request. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters pull requests by matching the provided string against repository names or other relevant fields."),
 ) -> dict[str, Any]:
     """Retrieves pull requests across all repositories in an organization that the authenticated user has access to. Results can be sorted by last updated date (default), impact, or merged status."""
@@ -3014,7 +3014,7 @@ async def list_commit_statistics(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="The repository branch to retrieve commit statistics for, which must be a branch enabled in Codacy settings. Defaults to the main branch configured in the Codacy repository settings if omitted."),
-    days: str | None = Field(None, description="The number of days of commit statistics to return, ranging from 1 to 365. Returns the most recent days that have analysis data, defaulting to 31 if not specified.", ge=1, le=365),
+    days: str | None = Field(None, description="The number of days of commit statistics to return, ranging from 1 to 365. Returns the most recent days that have analysis data, defaulting to 31 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves daily commit analysis statistics for a repository over the last N days that have available analysis data. Note that returned days reflect days with actual data, which may not align with the last N consecutive calendar days."""
 
@@ -3104,7 +3104,7 @@ async def search_repository_issues(
     provider: str = Field(..., description="Identifier for the Git provider hosting the repository, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of issues to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of issues to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Searches and returns issues found by Codacy in a specific repository, equivalent to the Issues page view. Supports filtering via request body to narrow results by category, severity, or other criteria."""
 
@@ -3367,7 +3367,7 @@ async def list_ignored_issues(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of ignored issues to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of ignored issues to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of issues that Codacy detected but were manually marked as ignored in the specified repository. Supports filtering via request body parameters."""
 
@@ -3414,7 +3414,7 @@ async def list_repository_commits(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="The name of a branch enabled on Codacy for this repository, as returned by listRepositoryBranches. Defaults to the main branch configured in Codacy repository settings if omitted."),
-    limit: str | None = Field(None, description="Maximum number of commit results to return. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of commit results to return. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves Codacy analysis results for commits in a specified branch of a repository. Defaults to the main branch if no branch is specified."""
 
@@ -3546,7 +3546,7 @@ async def list_commit_delta_issues(
     target_commit_uuid: str | None = Field(None, alias="targetCommitUuid", description="The SHA or UUID of an optional target commit to use as the comparison baseline instead of the source commit's parent."),
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters results by issue status: all returns every delta issue, new returns only introduced issues, and fixed returns only resolved issues."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to potential issues only, excluding confirmed issues from the response."),
-    limit: str | None = Field(None, description="Maximum number of issues to return per request; must be between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of issues to return per request; must be between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves issues introduced or fixed by a specific commit, calculated as a delta between the source commit and its parent (or an optional target commit). Use this to audit code quality changes at the commit level."""
 
@@ -3656,7 +3656,7 @@ async def update_current_user(
 
 # Tags: account
 @mcp.tool()
-async def list_organizations(limit: str | None = Field(None, description="Maximum number of organizations to return in a single response, between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_organizations(limit: str | None = Field(None, description="Maximum number of organizations to return in a single response, between 1 and 100.")) -> dict[str, Any]:
     """Retrieves all organizations that the currently authenticated user belongs to. Returns a paginated list up to the specified limit."""
 
     _limit = _parse_int(limit)
@@ -3698,7 +3698,7 @@ async def list_organizations(limit: str | None = Field(None, description="Maximu
 @mcp.tool()
 async def list_organizations_by_provider(
     provider: str = Field(..., description="The Git provider to query for organizations. Use the short identifier code for the desired platform (e.g., GitHub, GitLab, Bitbucket)."),
-    limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves all organizations associated with the authenticated user for a specified Git provider. Useful for discovering available organizations before performing organization-scoped operations."""
 
@@ -3860,7 +3860,7 @@ async def set_default_email() -> dict[str, Any]:
 
 # Tags: account
 @mcp.tool()
-async def list_integrations(limit: str | None = Field(None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_integrations(limit: str | None = Field(None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
     """Retrieves all integrations connected to the authenticated user's account. Returns a paginated list of integration records up to the specified limit."""
 
     _limit = _parse_int(limit)
@@ -4598,7 +4598,7 @@ async def refresh_repository_provider_integration(
 async def list_organization_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier code for the desired provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; note the API may return more results than specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; note the API may return more results than specified."),
     search: str | None = Field(None, description="A search string used to filter repositories by name. Only repositories whose names contain this string will be returned."),
     filter_: Literal["Synced", "NotSynced", "AllSynced"] | None = Field(None, alias="filter", description="Controls which repositories are returned based on their sync status: `Synced` returns repositories the user has access to, `NotSynced` returns repositories fetched from the provider but not yet synced, and `AllSynced` returns all organization repositories (requires admin access)."),
     languages: str | None = Field(None, description="Filters results to repositories that use the specified programming languages, provided as a comma-separated list of language names."),
@@ -4686,7 +4686,7 @@ async def get_organization_onboarding_progress(
 async def list_organization_people(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of people to return per request; must be between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of people to return per request; must be between 1 and 100 inclusive."),
     search: str | None = Field(None, description="Filters the returned people by matching the provided string against their name or related identifiers."),
     only_members: bool | None = Field(None, alias="onlyMembers", description="When true, restricts results to only registered Codacy users; when false, also includes commit authors who have not joined Codacy."),
 ) -> dict[str, Any]:
@@ -4893,7 +4893,7 @@ async def get_git_provider_app_permissions(
 async def list_organization_people_suggestions(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of people suggestions to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of people suggestions to return per request. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned suggestions to those whose name or identifier contains the provided search string."),
 ) -> dict[str, Any]:
     """Retrieves suggested people (users) to add to an organization on a specified Git provider. Useful for discovering potential members based on activity or association with the organization."""
@@ -5065,7 +5065,7 @@ async def list_repository_people_suggestions(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of people suggestions to return. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of people suggestions to return. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned suggestions to those whose names or identifiers match the provided search string."),
 ) -> dict[str, Any]:
     """Retrieves suggested people (collaborators or contributors) for a specific repository within an organization. Useful for discovering relevant users to add or assign within a given repository context."""
@@ -5113,7 +5113,7 @@ async def list_repository_branches(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     enabled: bool | None = Field(None, description="Filters branches by their enabled status. When set to true, only enabled branches are returned; when set to false, only disabled branches are returned. Omit to return all branches regardless of status."),
-    limit: str | None = Field(None, description="The maximum number of branches to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="The maximum number of branches to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="A string used to filter branches by name, returning only branches whose names contain the provided value."),
     sort: str | None = Field(None, description="The field by which to sort the returned branches. Accepted values are 'name' to sort alphabetically or 'last-updated' to sort by most recent activity."),
     direction: str | None = Field(None, description="The direction in which to sort the results. Use 'asc' for ascending order or 'desc' for descending order."),
@@ -5409,7 +5409,7 @@ async def check_organization_leave_eligibility(
 async def list_organization_join_requests(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of join requests to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of join requests to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned join requests to those matching the provided search string, such as a username or partial name."),
 ) -> dict[str, Any]:
     """Retrieves all pending requests from users asking to join a specified organization on a Git provider. Supports filtering by search term and pagination via a result limit."""
@@ -5761,7 +5761,7 @@ async def add_enterprise_token(
 
 # Tags: account
 @mcp.tool()
-async def list_api_tokens(limit: str | None = Field(None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_api_tokens(limit: str | None = Field(None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
     """Retrieves all API tokens associated with the authenticated user's account. Useful for auditing active tokens or managing programmatic access credentials."""
 
     _limit = _parse_int(limit)
@@ -5916,7 +5916,7 @@ async def delete_billing_subscription(
 
 # Tags: integrations
 @mcp.tool()
-async def list_provider_integrations(limit: str | None = Field(None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_provider_integrations(limit: str | None = Field(None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
     """Retrieves a list of provider integrations configured on Codacy's platform. Use this to discover available third-party integrations such as version control, CI, or issue tracking providers."""
 
     _limit = _parse_int(limit)
@@ -6060,7 +6060,7 @@ async def list_tool_supported_languages() -> dict[str, Any]:
 
 # Tags: tools
 @mcp.tool()
-async def list_tools(limit: str | None = Field(None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_tools(limit: str | None = Field(None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.")) -> dict[str, Any]:
     """Retrieve a paginated list of available tools. Use the limit parameter to control how many tools are returned in a single response."""
 
     _limit = _parse_int(limit)
@@ -6102,7 +6102,7 @@ async def list_tools(limit: str | None = Field(None, description="Maximum number
 @mcp.tool()
 async def list_tool_patterns(
     tool_uuid: str = Field(..., alias="toolUuid", description="The unique UUID identifying the tool whose patterns should be retrieved."),
-    limit: str | None = Field(None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100."),
     enabled: bool | None = Field(None, description="Filters patterns by their enabled status. Set to true to return only enabled patterns, or false to return only disabled patterns. Omit to return all patterns regardless of status."),
 ) -> dict[str, Any]:
     """Retrieves the list of patterns associated with a specific tool. Supports filtering by enabled status and limiting the number of results returned."""
@@ -6914,7 +6914,7 @@ async def list_repository_files(
     search: str | None = Field(None, description="Filters the returned files to those whose relative path contains this string, enabling partial-match searches."),
     sort: str | None = Field(None, description="Field by which to sort the file list. Accepted values are filename, issues, grade, duplication, complexity, and coverage."),
     direction: str | None = Field(None, description="Order in which to return sorted results — ascending (asc) or descending (desc)."),
-    limit: str | None = Field(None, description="Maximum number of files to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of files to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves the most recent analysis results for all tracked files in a repository, equivalent to the Codacy Files page view. Ignored files are excluded from results."""
 
@@ -6962,7 +6962,7 @@ async def list_ignored_files(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     branch: str | None = Field(None, description="The name of a branch enabled on Codacy to scope the ignored files results; defaults to the main branch configured in Codacy repository settings if omitted."),
     search: str | None = Field(None, description="A string used to filter results, returning only files whose relative path contains this value anywhere within it."),
-    limit: str | None = Field(None, description="The maximum number of ignored files to return in a single response, between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="The maximum number of ignored files to return in a single response, between 1 and 100 inclusive."),
 ) -> dict[str, Any]:
     """Retrieves the most recently recorded list of ignored files for a repository on Codacy. When a Codacy configuration file is present, the ignored files list is read-only and reflects what was excluded during the last analysis."""
 
@@ -7052,7 +7052,7 @@ async def list_file_clones(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     file_id: str = Field(..., alias="fileId", description="The unique numeric identifier for a file tied to a specific commit. This ID is commit-scoped and can be obtained from file listing endpoints."),
-    limit: str | None = Field(None, description="Maximum number of duplicate code block results to return. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of duplicate code block results to return. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves all duplicated code blocks (clones) detected within a specific file in a repository. Useful for identifying code duplication issues at the file level."""
 
@@ -7100,7 +7100,7 @@ async def list_file_issues(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     file_id: str = Field(..., alias="fileId", description="The unique identifier for a file tied to a specific commit. This ID is commit-scoped and may differ across commits for the same file path."),
-    limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the list of code quality issues found in a specific file within a repository. Results are scoped to the file identified by its commit-specific file ID."""
 
@@ -7320,11 +7320,11 @@ async def create_coding_standard_from_preset(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     is_default: bool = Field(..., alias="isDefault", description="When set to true, this coding standard will automatically become the default applied to all repositories in the organization."),
-    bug_risk: str = Field(..., alias="bugRisk", description="Preset level for bug risk rules, controlling how strictly potential bugs and error-prone patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4),
-    security: str = Field(..., description="Preset level for security rules, controlling how strictly security vulnerabilities and unsafe coding patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4),
-    best_practices: str = Field(..., alias="bestPractices", description="Preset level for best practice rules, controlling how strictly deviations from recommended coding conventions are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4),
-    code_style: str = Field(..., alias="codeStyle", description="Preset level for code style rules, controlling how strictly formatting and stylistic inconsistencies are flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4),
-    documentation: str = Field(..., description="Preset level for documentation rules, controlling how strictly missing or inadequate code documentation is flagged. Accepts values from 1 (least strict) to 4 (most strict).", ge=1, le=4),
+    bug_risk: str = Field(..., alias="bugRisk", description="Preset level for bug risk rules, controlling how strictly potential bugs and error-prone patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
+    security: str = Field(..., description="Preset level for security rules, controlling how strictly security vulnerabilities and unsafe coding patterns are flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
+    best_practices: str = Field(..., alias="bestPractices", description="Preset level for best practice rules, controlling how strictly deviations from recommended coding conventions are flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
+    code_style: str = Field(..., alias="codeStyle", description="Preset level for code style rules, controlling how strictly formatting and stylistic inconsistencies are flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
+    documentation: str = Field(..., description="Preset level for documentation rules, controlling how strictly missing or inadequate code documentation is flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
     name: str | None = Field(None, description="A human-readable label for the new coding standard to help identify it within the organization."),
 ) -> dict[str, Any]:
     """Creates a new coding standard for an organization by selecting preset severity levels across key code quality categories. Optionally sets the new standard as the organization's default."""
@@ -7600,7 +7600,7 @@ async def list_coding_standard_tool_patterns(
     recommended: bool | None = Field(None, description="When set to `true`, returns only recommended patterns; when set to `false`, returns only non-recommended patterns. Omit to return patterns regardless of recommended status."),
     sort: str | None = Field(None, description="The field by which to sort the returned patterns. Valid values are `category`, `recommended`, and `severity`."),
     direction: str | None = Field(None, description="The direction in which results are sorted — `asc` for ascending or `desc` for descending."),
-    limit: str | None = Field(None, description="Maximum number of patterns to return per request. Must be between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of patterns to return per request. Must be between 1 and 100 inclusive."),
 ) -> dict[str, Any]:
     """Retrieves the list of code patterns configured for a specific tool within a coding standard, supporting filtering by language, category, severity, tags, and enabled/recommended status."""
 
@@ -7799,7 +7799,7 @@ async def list_coding_standard_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard whose associated repositories should be listed."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; defaults to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; defaults to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the list of repositories currently using a specific coding standard within an organization. Useful for auditing which repositories are governed by a given set of coding rules."""
 
@@ -8016,16 +8016,16 @@ async def update_gate_policy(
     provider: str = Field(..., description="The short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy to update."),
-    threshold: str = Field(..., description="The maximum number of new issues allowed before the quality gate fails. Must be zero or greater.", ge=0),
+    threshold: str = Field(..., description="The maximum number of new issues allowed before the quality gate fails. Must be zero or greater."),
     gate_policy_name: str | None = Field(None, alias="gatePolicyName", description="The human-readable display name for the gate policy."),
     is_default: bool | None = Field(None, alias="isDefault", description="When true, this gate policy becomes the default applied to all repositories in the organization that do not have an explicitly assigned policy."),
     minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(None, alias="minimumSeverity", description="The minimum severity level of issues that count toward the issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical."),
-    security_issue_threshold: str | None = Field(None, alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails. Must be zero or greater.", ge=0),
+    security_issue_threshold: str | None = Field(None, alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails. Must be zero or greater."),
     security_issue_minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(None, alias="securityIssueMinimumSeverity", description="The minimum severity level of security issues that count toward the security issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical."),
     duplication_threshold: str | None = Field(None, alias="duplicationThreshold", description="The maximum number of new duplicated code blocks allowed before the quality gate fails."),
     coverage_threshold_with_decimals: float | None = Field(None, alias="coverageThresholdWithDecimals", description="The minimum required change in coverage percentage; the gate fails if coverage varies by less than this value. Accepts negative values to allow coverage decreases up to a specified amount, with a maximum value of 1.00 (representing 100%)."),
-    diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum required diff coverage percentage; the gate fails if diff coverage falls below this value. Must be between 0 and 100 inclusive.", ge=0, le=100),
-    complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum allowed complexity value introduced by new code; the gate fails if this threshold is exceeded. Must be zero or greater.", ge=0),
+    diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum required diff coverage percentage; the gate fails if diff coverage falls below this value. Must be between 0 and 100 inclusive."),
+    complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum allowed complexity value introduced by new code; the gate fails if this threshold is exceeded. Must be zero or greater."),
 ) -> dict[str, Any]:
     """Updates an existing quality gate policy for an organization, allowing modification of thresholds, severity filters, and default status. Quality gate policies define the criteria that must be met for a pull request or commit to pass code quality checks."""
 
@@ -8121,7 +8121,7 @@ async def delete_gate_policy(
 async def list_gate_policies(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of gate policies to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of gate policies to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves all gate policies configured for a specified organization on a Git provider. Gate policies define quality or security gates that govern code merging and deployment workflows."""
 
@@ -8167,15 +8167,15 @@ async def create_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     gate_policy_name: str = Field(..., alias="gatePolicyName", description="A unique, human-readable name to identify this gate policy within the organization."),
-    threshold: str = Field(..., description="The maximum number of new issues allowed before the quality gate fails; must be zero or greater.", ge=0),
+    threshold: str = Field(..., description="The maximum number of new issues allowed before the quality gate fails; must be zero or greater."),
     is_default: bool | None = Field(None, alias="isDefault", description="When true, this policy becomes the default gate policy applied to repositories in the organization that have no explicitly assigned policy."),
     minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(None, alias="minimumSeverity", description="The minimum severity level of issues counted toward the issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical."),
-    security_issue_threshold: str | None = Field(None, alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails; must be zero or greater.", ge=0),
+    security_issue_threshold: str | None = Field(None, alias="securityIssueThreshold", description="The maximum number of new security issues allowed before the quality gate fails; must be zero or greater."),
     security_issue_minimum_severity: Literal["Info", "Warning", "High", "Error"] | None = Field(None, alias="securityIssueMinimumSeverity", description="The minimum severity level of security issues counted toward the security issue threshold. Severity levels map to the UI as: Info → Minor, Warning → Medium, High → High, Error → Critical."),
     duplication_threshold: str | None = Field(None, alias="duplicationThreshold", description="The maximum number of new duplicated blocks allowed before the quality gate fails."),
     coverage_threshold_with_decimals: float | None = Field(None, alias="coverageThresholdWithDecimals", description="The minimum change in coverage percentage required to pass the quality gate; use a negative value to allow coverage to decrease by that amount (e.g., -0.02 allows up to a 2% drop). Must be at most 1.00."),
-    diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum diff coverage percentage required to pass the quality gate; must be between 0 and 100 inclusive.", ge=0, le=100),
-    complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum cumulative complexity value allowed before the quality gate fails; must be zero or greater.", ge=0),
+    diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum diff coverage percentage required to pass the quality gate; must be between 0 and 100 inclusive."),
+    complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum cumulative complexity value allowed before the quality gate fails; must be zero or greater."),
 ) -> dict[str, Any]:
     """Creates a new quality gate policy for an organization on a Git provider, defining thresholds for issues, duplication, coverage, and complexity that must be met for a gate to pass."""
 
@@ -8307,7 +8307,7 @@ async def list_gate_policy_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization name as it appears on the Git provider."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy whose associated repositories should be listed."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves all repositories that are following a specific gate policy within an organization. Useful for auditing which repositories are governed by a given quality gate configuration."""
 
@@ -8566,7 +8566,7 @@ async def list_coverage_reports(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-    limit: str | None = Field(None, description="Maximum number of coverage reports to return, between 1 and 100 inclusive. Defaults to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of coverage reports to return, between 1 and 100 inclusive. Defaults to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the most recent coverage reports and their statuses for a specified repository. Useful for monitoring code coverage trends and identifying the latest analysis results."""
 
@@ -8613,7 +8613,7 @@ async def list_commit_coverage_reports(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The full commit UUID or SHA hash that uniquely identifies the commit whose coverage reports should be listed."),
-    limit: str | None = Field(None, description="Maximum number of coverage reports to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of coverage reports to return in a single response. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves all code coverage reports associated with a specific commit in a repository. Useful for reviewing coverage data uploaded from multiple sources or tools for a given commit."""
 
@@ -8963,7 +8963,7 @@ async def get_security_item(
 async def search_security_items(
     provider: str = Field(..., description="The Git provider hosting the organization. Identifies which platform to query."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of security items to return per request. Must be between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of security items to return per request. Must be between 1 and 100."),
     sort: Literal["Status", "DetectedAt"] | None = Field(None, description="The field by which to sort the returned security items."),
     direction: str | None = Field(None, description="The direction in which to sort results, either ascending or descending."),
     repositories: list[str] | None = Field(None, description="List of repository names within the organization to restrict results to. Order is not significant."),
@@ -9246,7 +9246,7 @@ async def upload_dast_report(
 async def list_dast_reports(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify the source control platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of DAST reports to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of DAST reports to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of uploaded DAST (Dynamic Application Security Testing) scan reports for an organization, including their current processing state. Results are sorted by submission date from latest to earliest."""
 
@@ -9291,7 +9291,7 @@ async def list_dast_reports(
 async def list_security_managers(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of security managers to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of security managers to return in a single response. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves the list of organization admins and security managers for a specified organization on a Git provider. Useful for auditing access control and identifying users with elevated security permissions."""
 
@@ -9423,7 +9423,7 @@ async def revoke_security_manager(
 async def list_repositories_with_security_issues(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target provider."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Must be between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Must be between 1 and 100."),
     segments: str | None = Field(None, description="Narrows results to repositories belonging to the specified segments, provided as a comma-separated list of segment identifiers."),
 ) -> dict[str, Any]:
     """Retrieves a list of repositories within an organization that have active security issues. Supports pagination and optional filtering by segment identifiers."""
@@ -9469,7 +9469,7 @@ async def list_repositories_with_security_issues(
 async def list_security_categories(
     provider: str = Field(..., description="The Git provider hosting the organization. Identifies which platform to query for security data."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used on the platform."),
-    limit: str | None = Field(None, description="Maximum number of security categories to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of security categories to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves a list of security subcategories that have active security issues for the specified organization. Useful for identifying which vulnerability categories require attention across the organization's repositories."""
 
@@ -9514,7 +9514,7 @@ async def list_security_categories(
 async def search_sbom_dependencies(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
-    limit: str | None = Field(None, description="Maximum number of dependency records to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of dependency records to return per request. Accepts values between 1 and 100."),
     sort_column: Literal["severity", "ossfScore"] | None = Field(None, alias="sortColumn", description="Field by which to sort the returned results. Use `severity` to order by the dependency's vulnerability severity, or `ossfScore` to order by the OpenSSF scorecard score."),
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="Direction in which to sort the results relative to the chosen sort column. Use `asc` for ascending or `desc` for descending order."),
     text: str | None = Field(None, description="Free-text search string matched against SBOM component fields including package URL (purl) and full component name."),
@@ -9570,7 +9570,7 @@ async def search_dependency_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization name as it appears on the Git provider."),
     dependency_full_name: str = Field(..., alias="dependencyFullName", description="The fully qualified name of the SBOM dependency to search for across repositories."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100."),
     repositories_filter: list[str] | None = Field(None, alias="repositoriesFilter", description="An optional list of repository names to restrict the search to. Order is not significant; each item should be a repository name string."),
 ) -> dict[str, Any]:
     """Search for repositories within an organization that use a specific SBOM dependency, returning a paginated list of matches. Optionally filter results to a subset of repositories by name."""
@@ -9619,7 +9619,7 @@ async def search_dependency_repositories(
 async def search_sbom_repositories(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100."),
     body: dict[str, Any] | None = Field(None, description="Optional request body to filter repositories by specific dependencies. Each item should be a dependency identifier in the format 'ecosystem/package-name'."),
 ) -> dict[str, Any]:
     """Search and list repositories within an organization that contain SBOM (Software Bill of Materials) dependency information, optionally filtering by specific dependencies."""
@@ -9839,7 +9839,7 @@ async def delete_image_tag_sbom(
 async def list_organization_images(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of Docker images to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of Docker images to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the list of Docker images available for a specified organization on a Git provider. Supports pagination to control the number of results returned."""
 
@@ -9885,7 +9885,7 @@ async def list_image_tags(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
     image_name: str = Field(..., alias="imageName", description="The name of the Docker image for which to list available tags."),
-    limit: str | None = Field(None, description="Maximum number of image tags to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of image tags to return in a single response. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves all Docker image tags associated with a specific image in an organization's SBOM registry. Results are paginated and scoped to the specified Git provider and organization."""
 
@@ -10157,7 +10157,7 @@ async def list_jira_projects(
     provider: str = Field(..., description="The short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
     search: str | None = Field(None, description="Optional search string to filter returned Jira projects by name, returning only projects whose names contain the provided value."),
-    limit: str | None = Field(None, description="Maximum number of Jira projects to return in a single response, between 1 and 100 inclusive. Defaults to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of Jira projects to return in a single response, between 1 and 100 inclusive. Defaults to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the available Jira projects linked to a specific Git provider organization, enabling users to associate repositories with Jira for issue tracking. Supports filtering and pagination to narrow down results."""
 
@@ -10203,7 +10203,7 @@ async def list_jira_issue_types(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     jira_project_id: str = Field(..., alias="jiraProjectId", description="The unique numeric identifier of the Jira project whose issue types should be retrieved."),
-    limit: str | None = Field(None, description="Maximum number of issue types to return per request. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of issue types to return per request. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves all available issue types (e.g., Bug, Story, Task) for a specific Jira project, enabling users to select valid types when creating or managing Jira issues linked to a Git organization."""
 
@@ -10251,7 +10251,7 @@ async def list_jira_issue_type_fields(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     jira_project_id: str = Field(..., alias="jiraProjectId", description="The numeric identifier of the Jira project whose issue type fields are being queried."),
     jira_issue_type_id: str = Field(..., alias="jiraIssueTypeId", description="The identifier of the Jira issue type within the project for which available fields are returned."),
-    limit: str | None = Field(None, description="Maximum number of fields to return per response. Accepts values between 1 and 100, defaulting to 100 when omitted.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of fields to return per response. Accepts values between 1 and 100, defaulting to 100 when omitted."),
 ) -> dict[str, Any]:
     """Retrieves the available fields for a specific Jira issue type within a project, enabling dynamic form construction when creating or editing issues. Results are scoped to the organization identified by the Git provider and organization name."""
 
@@ -10805,7 +10805,7 @@ async def get_segment_sync_status(
 async def list_segment_keys(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of segment keys to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of segment keys to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
     search: str | None = Field(None, description="Narrows results to segment keys whose names contain the provided string, enabling targeted lookups within large organizations."),
 ) -> dict[str, Any]:
     """Retrieves the available segment keys for a specified organization on a Git provider. Segment keys can be filtered by search term and support pagination via a configurable result limit."""
@@ -10851,7 +10851,7 @@ async def list_segment_keys(
 async def list_segment_keys_with_ids(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of segment key records to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of segment key records to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned segment keys to those matching the provided search string, useful for locating specific segments by name or partial name."),
 ) -> dict[str, Any]:
     """Retrieves segment keys along with their associated IDs for a specified organization on a Git provider. Supports pagination and text-based filtering to narrow results."""
@@ -10899,7 +10899,7 @@ async def list_segment_values(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique key identifying the segment whose values should be retrieved."),
     search: str | None = Field(None, description="Optional search string to filter returned segment values by name or identifier, returning only items that match the provided text."),
-    limit: str | None = Field(None, description="Maximum number of segment values to return in a single response, accepting values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of segment values to return in a single response, accepting values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves the list of values for a specific segment within an organization, identified by its segment key. Supports optional filtering by name and result count limiting."""
 
@@ -10944,7 +10944,7 @@ async def list_segment_values(
 async def list_dast_targets(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-    limit: str | None = Field(None, description="Maximum number of DAST targets to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of DAST targets to return in a single response. Accepts values between 1 and 100."),
 ) -> dict[str, Any]:
     """Retrieves all configured Dynamic Application Security Testing (DAST) targets for the specified organization. Returns a paginated list of targets that have been set up for security scanning."""
 
@@ -11118,7 +11118,7 @@ async def trigger_dast_analysis(
 async def list_enterprise_organizations(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug identifier for the enterprise whose organizations you want to retrieve."),
     provider: str = Field(..., description="The Git provider hosting the enterprise, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
-    limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
 ) -> dict[str, Any]:
     """Retrieves the list of organizations belonging to a specified enterprise on a given Git provider. Supports pagination via a configurable result limit."""
 
@@ -11162,7 +11162,7 @@ async def list_enterprise_organizations(
 @mcp.tool()
 async def list_enterprises(
     provider: str = Field(..., description="The Git provider to query for enterprises, identified by its short code (e.g., GitHub, GitLab, Bitbucket)."),
-    limit: str | None = Field(None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive."),
 ) -> dict[str, Any]:
     """Retrieves all enterprises associated with the authenticated user for a specified Git provider. Returns a paginated list of enterprise accounts the user has access to."""
 
@@ -11246,7 +11246,7 @@ async def get_enterprise(
 async def list_enterprise_seats(
     provider: str = Field(..., description="The Git provider hosting the enterprise, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug identifier of the enterprise whose seats are being listed."),
-    limit: str | None = Field(None, description="Maximum number of seat records to return in a single response. Accepts values between 1 and 100.", ge=1, le=100),
+    limit: str | None = Field(None, description="Maximum number of seat records to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Optional search string used to filter the returned seats, matching against relevant seat or user identifiers."),
 ) -> dict[str, Any]:
     """Retrieves a paginated list of seats allocated within a specified enterprise on a given Git provider. Supports filtering by search term to narrow results."""
