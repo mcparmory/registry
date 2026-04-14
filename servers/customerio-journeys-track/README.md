@@ -1,6 +1,12 @@
 # Customer.io Journeys Track MCP Server
 
 Base URL: https://track.customer.io
+| | |
+|---|---|
+| **Category** | Marketing |
+| **Tools** | 17 |
+| **Auth** | HTTP Basic |
+
 ---
 
 ## Install
