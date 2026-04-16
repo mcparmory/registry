@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "postman": {
+      "command": "python",
+      "args": ["<SERVER_DIR>/server.py"]
+    }
+  }
+}
