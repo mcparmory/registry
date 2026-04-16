@@ -1,4 +1,5 @@
 # Algolia Search MCP Server
+<!-- mcp-name: com.mcparmory/algolia-search -->
 
 Base URL: https://ALGOLIA_APPLICATION_ID.algolia.net
 | | |

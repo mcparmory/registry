@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Algolia Search MCP Server
-Generated: 2026-04-14 18:13:37 UTC
+Generated: 2026-04-16 22:07:16 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -44,7 +45,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{appId}.algolia.net".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Algolia Search"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.0.1"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))
@@ -759,10 +760,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
