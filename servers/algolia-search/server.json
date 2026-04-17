@@ -1,32 +1,35 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-16/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.mcparmory/algolia-search",
   "description": "Search multiple indices, index data, and get personalized recommendations",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "repository": {
     "url": "https://github.com/mcparmory/registry",
     "source": "github"
   },
   "packages": [
     {
-      "registry_type": "pypi",
+      "registryType": "pypi",
       "identifier": "mcparmory-algolia-search",
-      "version": "1.0.7"
+      "version": "1.0.8",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
     },
     {
-      "registry_type": "oci",
-      "identifier": "ghcr.io/mcparmory/algolia-search",
-      "version": "1.0.7"
+      "registryType": "oci",
+      "identifier": "ghcr.io/mcparmory/algolia-search:1.0.8",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      }
     }
   ],
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://mcp.mcparmory.com/algolia-search",
-      "authentication": {
-        "type": "header",
-        "header": "Authorization"
-      }
+      "url": "https://mcp.mcparmory.com/algolia-search"
     }
   ]
 }
