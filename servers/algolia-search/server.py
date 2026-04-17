@@ -45,7 +45,7 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{appId}.algolia.net".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Algolia Search"
-SERVER_VERSION = "1.0.8"
+SERVER_VERSION = "1.0.9"
 
 CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("MAX_KEEPALIVE_CONNECTIONS", "20"))

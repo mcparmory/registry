@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcparmory-algolia-search"
-version = "1.0.8"
+version = "1.0.9"
 description = "Search multiple indices, index data, and get personalized recommendations"
 readme = "README.md"
 license = "MIT"
