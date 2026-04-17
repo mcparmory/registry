@@ -1,0 +1,79 @@
+# Build and push Docker images to GHCR when server Dockerfiles change.
+#
+# Packages are auto-linked to this (public) repo via the
+# org.opencontainers.image.source label in the Dockerfile, and inherit
+# the repo's public visibility — no manual visibility flip needed.
+
+name: Publish to GHCR
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "servers/*/Dockerfile"
+      - "servers/*/server.py"
+      - "servers/*/_auth.py"
+      - "servers/*/_models.py"
+      - "servers/*/_validators.py"
+      - "servers/*/requirements.txt"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      servers: ${{ steps.changed.outputs.servers }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: changed
+        run: |
+          # Find which server directories had changes
+          SERVERS=$(git diff --name-only HEAD~1 HEAD -- 'servers/' \
+            | cut -d/ -f2 | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "servers=$SERVERS" >> "$GITHUB_OUTPUT"
+          echo "Changed servers: $SERVERS"
+
+  build-push:
+    needs: detect
+    if: needs.detect.outputs.servers != '[]' && needs.detect.outputs.servers != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server: ${{ fromJson(needs.detect.outputs.servers) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          VER=$(grep -m1 '^version' "servers/${{ matrix.server }}/pyproject.toml" \
+            | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Version: $VER"
+
+      - name: Build and push
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ matrix.server }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          docker build \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:latest" \
+            "servers/${{ matrix.server }}"
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+          echo "Pushed $IMAGE:$VERSION (+ :latest)"
