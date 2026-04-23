@@ -6,7 +6,7 @@ API Info:
 - API License: CC BY-SA 4.0 (https://gitlab.com/gitlab-org/gitlab/-/blob/master/LICENSE)
 - Terms of Service: https://about.gitlab.com/terms/
 
-Generated: 2026-04-14 18:22:56 UTC
+Generated: 2026-04-23 21:19:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,9 +42,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "https://www.gitlab.com/api/v4")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "gitlab_host": os.getenv("SERVER_GITLAB_HOST", ""),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{gitlab_host}/api/v4".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "GitLab"
 SERVER_VERSION = "1.0.0"
 
@@ -471,12 +478,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +530,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +576,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -851,16 +969,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -874,6 +993,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -916,6 +1036,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -927,18 +1062,26 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
+    'OAuth2',
     'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["OAuth2"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: OAuth2")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
+    _auth_handlers["OAuth2"] = None
 try:
     _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Private-Token")
     logging.info("Authentication configured: ApiKeyAuth")
@@ -1071,7 +1214,7 @@ mcp = FastMCP("GitLab", middleware=[_JsonCoercionMiddleware()])
 async def get_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group owns the badge you want to retrieve."),
     badge_id: str = Field(..., description="The unique identifier of the badge within the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific badge belonging to a group. This allows you to fetch details about a badge that has been assigned to a group."""
 
     _badge_id = _parse_int(badge_id)
@@ -1115,7 +1258,7 @@ async def update_group_badge(
     link_url: str | None = Field(None, description="The URL where the badge link should direct users."),
     image_url: str | None = Field(None, description="The URL of the image to display as the badge."),
     name: str | None = Field(None, description="A descriptive name for the badge."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing badge for a group. Allows modification of the badge's name, image URL, and link URL."""
 
     _badge_id = _parse_int(badge_id)
@@ -1159,7 +1302,7 @@ async def update_group_badge(
 async def remove_group_badge(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group the badge should be removed from."),
     badge_id: str = Field(..., description="The unique identifier of the badge to remove from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a badge from a group. This allows administrators to delete badges that are no longer needed or relevant to the group."""
 
     _badge_id = _parse_int(badge_id)
@@ -1201,7 +1344,7 @@ async def list_group_badges(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's badges to retrieve."),
     per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
     name: str | None = Field(None, description="Filter badges by name. Returns only badges matching the specified name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of badges for a group that are viewable by the authenticated user. Introduced in GitLab 10.6."""
 
     _per_page = _parse_int(per_page)
@@ -1247,7 +1390,7 @@ async def add_group_badge(
     link_url: str = Field(..., description="The URL where the badge image links to when clicked. This should be a valid HTTP or HTTPS URL."),
     image_url: str = Field(..., description="The URL of the badge image to display. This should be a valid HTTP or HTTPS URL pointing to an image file."),
     name: str | None = Field(None, description="A descriptive name for the badge to help identify its purpose. This is displayed as alt text and in the group's badge management interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a badge to a group to display custom branding or status indicators. The badge will be visible on the group's profile page."""
 
     # Construct request model with validation
@@ -1289,7 +1432,7 @@ async def add_group_badge(
 async def deny_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access request should be denied."),
     user_id: str = Field(..., description="The user ID of the person whose access request is being denied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Denies an access request from a user to join a group. The access request is removed and the user is not granted group membership."""
 
     _user_id = _parse_int(user_id)
@@ -1331,7 +1474,7 @@ async def approve_group_access_request(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. Use the numeric group ID or the full URL-encoded path (e.g., 'my-group' or 'parent-group%2Fmy-group')."),
     user_id: str = Field(..., description="The numeric ID of the user whose access request is being approved."),
     access_level: str | None = Field(None, description="The access level to grant the user upon approval. Specifies the user's role and permissions within the group (e.g., Developer, Maintainer)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approves a pending access request for a user to join a group. The authenticated user must own the group to perform this action."""
 
     _user_id = _parse_int(user_id)
@@ -1376,7 +1519,7 @@ async def approve_group_access_request(
 async def list_group_access_requests(
     id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group. This identifies which group's access requests to retrieve."),
     per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of pending access requests for a group. This allows group owners to review and manage user requests to join the group."""
 
     _per_page = _parse_int(per_page)
@@ -1417,7 +1560,7 @@ async def list_group_access_requests(
 
 # Tags: access_requests
 @mcp.tool()
-async def request_group_access(id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group to request access for.")) -> dict[str, Any]:
+async def request_group_access(id_: str = Field(..., alias="id", description="The ID or URL-encoded path of the group to request access for.")) -> dict[str, Any] | ToolResult:
     """Submit an access request for the authenticated user to join a group. The group owner can then review and approve or deny the request."""
 
     # Construct request model with validation
@@ -1453,7 +1596,7 @@ async def request_group_access(id_: str = Field(..., alias="id", description="Th
 
 # Tags: branches
 @mcp.tool()
-async def delete_merged_branches(id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group%2Fproject-name).")) -> dict[str, Any]:
+async def delete_merged_branches(id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group%2Fproject-name).")) -> dict[str, Any] | ToolResult:
     """Delete all branches that have been merged into the project's default branch. This operation permanently removes merged branches to clean up the repository."""
 
     # Construct request model with validation
@@ -1492,7 +1635,7 @@ async def delete_merged_branches(id_: str = Field(..., alias="id", description="
 async def get_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     branch: str = Field(..., description="The name of the branch to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific branch in a repository. Returns branch information including commit details and protection status."""
 
     _branch = _parse_int(branch)
@@ -1533,7 +1676,7 @@ async def get_branch(
 async def delete_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path."),
     branch: str = Field(..., description="The name of the branch to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a branch from a project repository. This operation permanently removes the specified branch."""
 
     # Construct request model with validation
@@ -1572,7 +1715,7 @@ async def delete_branch(
 async def check_branch_exists(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded path of the project."),
     branch: str = Field(..., description="The name of the branch to check for existence in the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a specific branch exists in a project repository. Returns a successful response if the branch is found, otherwise returns a 404 error."""
 
     # Construct request model with validation
@@ -1612,7 +1755,7 @@ async def list_repository_branches(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., 'group%2Fproject')."),
     per_page: str | None = Field(None, description="Number of branches to return per page for pagination."),
     sort: Literal["name_asc", "updated_asc", "updated_desc"] | None = Field(None, description="Sort the returned branches by name in ascending order, or by last update time in ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of branches from a project's repository. Supports pagination and sorting by branch name or last update time."""
 
     _per_page = _parse_int(per_page)
@@ -1657,7 +1800,7 @@ async def create_branch(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     branch: str = Field(..., description="The name for the new branch to be created."),
     ref: str = Field(..., description="The commit SHA or existing branch name from which to create the new branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new branch in a project from a specified commit SHA or existing branch. The new branch will be created with the given name and point to the specified reference."""
 
     # Construct request model with validation
@@ -1699,7 +1842,7 @@ async def create_branch(
 async def unprotect_branch(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
     branch: str = Field(..., description="The name of the branch to unprotect."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove protection from a branch in a project, allowing it to be modified or deleted. This operation reverses any branch protection rules that were previously applied."""
 
     # Construct request model with validation
@@ -1740,7 +1883,7 @@ async def protect_branch(
     branch: str = Field(..., description="The name of the branch to protect."),
     developers_can_push: bool | None = Field(None, description="Allow developers to push commits to this branch."),
     developers_can_merge: bool | None = Field(None, description="Allow developers to merge pull requests into this branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Protect a branch by restricting push and merge permissions. Configure whether developers can push to or merge into the specified branch."""
 
     # Construct request model with validation
@@ -1782,7 +1925,7 @@ async def protect_branch(
 async def get_project_badge(
     id_: str = Field(..., alias="id", description="The project identifier, which can be either the numeric project ID or the URL-encoded project path (e.g., group/subgroup/project)."),
     badge_id: str = Field(..., description="The unique identifier of the badge to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific badge associated with a project. This allows you to fetch details about a project badge by its ID."""
 
     _badge_id = _parse_int(badge_id)
@@ -1826,7 +1969,7 @@ async def update_project_badge(
     link_url: str | None = Field(None, description="The URL that the badge links to when clicked."),
     image_url: str | None = Field(None, description="The URL of the image to display as the badge."),
     name: str | None = Field(None, description="A descriptive name for the badge."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing badge for a project. Allows modification of the badge's name, image URL, and link URL."""
 
     _badge_id = _parse_int(badge_id)
@@ -1870,7 +2013,7 @@ async def update_project_badge(
 async def delete_badge(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     badge_id: str = Field(..., description="The unique identifier of the badge to remove from the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a badge from a project. This operation permanently deletes the specified badge and its association with the project."""
 
     _badge_id = _parse_int(badge_id)
@@ -1912,7 +2055,7 @@ async def list_project_badges(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     per_page: str | None = Field(None, description="Number of badges to return per page for pagination."),
     name: str | None = Field(None, description="Filter badges by name. Returns only badges whose name matches the provided value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of badges for a project that are visible to the authenticated user. This endpoint was introduced in GitLab 10.6."""
 
     _per_page = _parse_int(per_page)
@@ -1958,7 +2101,7 @@ async def create_project_badge(
     link_url: str = Field(..., description="The URL that the badge links to when clicked."),
     image_url: str = Field(..., description="The URL of the badge image to display."),
     name: str | None = Field(None, description="A descriptive name for the badge to identify its purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new badge to a project. Badges are visual indicators that can link to external URLs and are displayed on the project page."""
 
     # Construct request model with validation
@@ -2000,7 +2143,7 @@ async def create_project_badge(
 async def deny_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     user_id: str = Field(..., description="The numeric ID of the user whose access request should be denied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Denies an access request from a user for the specified project. This removes the user's pending access request and prevents them from gaining project access through this request."""
 
     _user_id = _parse_int(user_id)
@@ -2042,7 +2185,7 @@ async def approve_access_request(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     user_id: str = Field(..., description="The user ID of the person whose access request is being approved."),
     access_level: str | None = Field(None, description="The access level to grant the user upon approval. Valid levels range from 10 (Guest) to 50 (Owner)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approves a pending access request for a user to join the project. Optionally specify the access level to grant; defaults to Developer role."""
 
     _user_id = _parse_int(user_id)
@@ -2087,7 +2230,7 @@ async def approve_access_request(
 async def list_access_requests(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject)."),
     per_page: str | None = Field(None, description="Number of access requests to return per page for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of access requests for a project. Access requests allow users to request membership in a project."""
 
     _per_page = _parse_int(per_page)
@@ -2128,7 +2271,7 @@ async def list_access_requests(
 
 # Tags: access_requests
 @mcp.tool()
-async def request_project_access(id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project).")) -> dict[str, Any]:
+async def request_project_access(id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project).")) -> dict[str, Any] | ToolResult:
     """Request access to a project as the authenticated user. This allows users to formally request membership or elevated permissions for a project they don't currently have access to."""
 
     # Construct request model with validation
@@ -2170,7 +2313,7 @@ async def update_alert_metric_image(
     metric_image_id: str = Field(..., description="The unique identifier of the metric image to update."),
     url: str | None = Field(None, description="The URL where the metric image or additional metric information can be viewed."),
     url_text: str | None = Field(None, description="A descriptive label or caption for the metric image or its associated URL."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the metric image associated with an alert, including its display URL and descriptive text for reference."""
 
     _alert_iid = _parse_int(alert_iid)
@@ -2217,7 +2360,7 @@ async def delete_alert_metric_image(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID (IID) of the alert from which to remove the metric image."),
     metric_image_id: str = Field(..., description="The numeric ID of the metric image to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a metric image associated with an alert in a project. This operation permanently deletes the specified metric image from the alert's collection."""
 
     _alert_iid = _parse_int(alert_iid)
@@ -2259,7 +2402,7 @@ async def delete_alert_metric_image(
 async def list_alert_metric_images(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path."),
     alert_iid: str = Field(..., description="The internal ID of the alert for which to retrieve associated metric images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metric images associated with a specific alert in a project. Metric images provide visual context for alert conditions and their impact."""
 
     _alert_iid = _parse_int(alert_iid)
@@ -2303,7 +2446,7 @@ async def upload_alert_metric_image(
     file_: str = Field(..., alias="file", description="The image file to upload. Supported formats are typically PNG, JPG, and GIF."),
     url: str | None = Field(None, description="Optional URL to view additional metric information or the source of the metric data."),
     url_text: str | None = Field(None, description="Optional descriptive text explaining the metric image content or the linked URL."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a metric image to an alert for visualization and documentation purposes. Optionally include a URL and description to provide context about the metric data."""
 
     _alert_iid = _parse_int(alert_iid)
@@ -2338,6 +2481,7 @@ async def upload_alert_metric_image(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -2348,7 +2492,7 @@ async def upload_alert_metric_image(
 async def pause_batched_background_migration(
     id_: str = Field(..., alias="id", description="The unique identifier of the batched background migration to pause."),
     database: Literal["main", "ci", "embedding", "geo"] | None = Field(None, description="The database instance where the batched background migration is running. Defaults to 'main' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Pause an active batched background migration by its ID. The migration can be resumed later from where it was paused."""
 
     _id_ = _parse_int(id_)
@@ -2389,7 +2533,7 @@ async def pause_batched_background_migration(
 
 # Tags: pipeline_composition
 @mcp.tool()
-async def get_admin_ci_variable(key: str = Field(..., description="The unique identifier key of the instance-level CI/CD variable to retrieve.")) -> dict[str, Any]:
+async def get_admin_ci_variable(key: str = Field(..., description="The unique identifier key of the instance-level CI/CD variable to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific instance-level CI/CD variable by its key. This operation returns the variable's configuration and metadata."""
 
     # Construct request model with validation
@@ -2425,7 +2569,7 @@ async def get_admin_ci_variable(key: str = Field(..., description="The unique id
 
 # Tags: pipeline_composition
 @mcp.tool()
-async def delete_instance_variable(key: str = Field(..., description="The unique identifier key of the instance-level variable to delete.")) -> dict[str, Any]:
+async def delete_instance_variable(key: str = Field(..., description="The unique identifier key of the instance-level variable to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an instance-level CI/CD variable by its key. This removes the variable from the GitLab instance configuration."""
 
     # Construct request model with validation
@@ -2461,7 +2605,7 @@ async def delete_instance_variable(key: str = Field(..., description="The unique
 
 # Tags: pipeline_composition
 @mcp.tool()
-async def list_instance_variables(per_page: str | None = Field(None, description="Maximum number of variables to return per page. Use this to control pagination when retrieving large result sets.")) -> dict[str, Any]:
+async def list_instance_variables(per_page: str | None = Field(None, description="Maximum number of variables to return per page. Use this to control pagination when retrieving large result sets.")) -> dict[str, Any] | ToolResult:
     """Retrieve all instance-level CI/CD variables available across the GitLab instance. These variables are accessible to all projects and groups."""
 
     _per_page = _parse_int(per_page)
@@ -2508,7 +2652,7 @@ async def create_instance_variable(
     masked: bool | None = Field(None, description="When enabled, the variable value is masked in job logs and API responses to prevent accidental exposure of sensitive data."),
     raw: bool | None = Field(None, description="When enabled, the variable value is treated as a literal string and not expanded. When disabled, variable references are expanded during job execution."),
     variable_type: Literal["env_var", "file"] | None = Field(None, description="Specifies whether the variable stores an environment value or a file path."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new instance-level CI/CD variable that is available to all projects. Instance variables are useful for storing secrets and configuration values needed across your entire GitLab instance."""
 
     # Construct request model with validation
@@ -2546,7 +2690,7 @@ async def create_instance_variable(
 
 # Tags: clusters
 @mcp.tool()
-async def get_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to retrieve.")) -> dict[str, Any]:
+async def get_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a single instance cluster by its ID. This operation requires GitLab 13.2 or later."""
 
     _cluster_id = _parse_int(cluster_id)
@@ -2593,7 +2737,7 @@ async def update_cluster(
     domain: str | None = Field(None, description="The base domain for the cluster, used for generating application URLs."),
     management_project_id: str | None = Field(None, description="The ID of the GitLab project that manages this cluster's resources and configurations."),
     managed: bool | None = Field(None, description="When enabled, GitLab automatically manages Kubernetes namespaces and service accounts for this cluster."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing instance cluster configuration. Modify cluster settings such as name, connectivity status, environment scope, and management preferences."""
 
     _cluster_id = _parse_int(cluster_id)
@@ -2635,7 +2779,7 @@ async def update_cluster(
 
 # Tags: clusters
 @mcp.tool()
-async def delete_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to delete.")) -> dict[str, Any]:
+async def delete_cluster(cluster_id: str = Field(..., description="The unique identifier of the cluster to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an instance cluster from GitLab. This removes the cluster configuration but does not delete any resources within the connected Kubernetes cluster itself."""
 
     _cluster_id = _parse_int(cluster_id)
@@ -2684,7 +2828,7 @@ async def add_kubernetes_cluster(
     management_project_id: str | None = Field(None, description="The GitLab project ID that will manage this cluster's namespaces and service accounts."),
     managed: bool | None = Field(None, description="Whether GitLab automatically manages Kubernetes namespaces and service accounts for this cluster."),
     platform_kubernetes_attributes_authorization_type: Literal["unknown_authorization", "rbac", "abac"] | None = Field(None, description="The authorization mechanism used by the Kubernetes cluster for access control."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register an existing Kubernetes cluster as an instance cluster in GitLab. This allows GitLab to deploy applications and manage resources on the cluster."""
 
     _management_project_id = _parse_int(management_project_id)
@@ -2724,7 +2868,7 @@ async def add_kubernetes_cluster(
 
 # Tags: clusters
 @mcp.tool()
-async def list_clusters() -> dict[str, Any]:
+async def list_clusters() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all instance clusters configured in GitLab. This operation provides an overview of cluster infrastructure available at the instance level."""
 
     # Extract parameters for API call
@@ -2751,7 +2895,7 @@ async def list_clusters() -> dict[str, Any]:
 
 # Tags: applications
 @mcp.tool()
-async def delete_application(id_: str = Field(..., alias="id", description="The unique identifier of the application to delete.")) -> dict[str, Any]:
+async def delete_application(id_: str = Field(..., alias="id", description="The unique identifier of the application to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific application by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -2792,7 +2936,7 @@ async def delete_application(id_: str = Field(..., alias="id", description="The 
 async def get_user_avatar(
     email: str = Field(..., description="The public email address of the user whose avatar should be retrieved."),
     size: str | None = Field(None, description="The width and height in pixels for the returned avatar image. Larger sizes provide higher resolution avatars."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the avatar URL for a user based on their email address. Optionally specify a custom image size for the avatar."""
 
     _size = _parse_int(size)
@@ -2832,7 +2976,7 @@ async def get_user_avatar(
 
 # Tags: broadcast_messages
 @mcp.tool()
-async def get_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to retrieve.")) -> dict[str, Any]:
+async def get_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific broadcast message by its ID. Broadcast messages are system-wide announcements visible to all users."""
 
     _id_ = _parse_int(id_)
@@ -2870,7 +3014,7 @@ async def get_broadcast_message(id_: str = Field(..., alias="id", description="T
 
 # Tags: broadcast_messages
 @mcp.tool()
-async def delete_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to delete.")) -> dict[str, Any]:
+async def delete_broadcast_message(id_: str = Field(..., alias="id", description="The unique identifier of the broadcast message to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a broadcast message by its ID. This operation permanently removes the specified broadcast message from the system."""
 
     _id_ = _parse_int(id_)
@@ -2911,7 +3055,7 @@ async def delete_broadcast_message(id_: str = Field(..., alias="id", description
 async def get_migration_entity(
     import_id: str = Field(..., description="The unique identifier of the GitLab Migration batch containing the entity you want to retrieve."),
     entity_id: str = Field(..., description="The unique identifier of the specific entity within the migration whose details you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific entity within a GitLab Migration. This allows you to inspect the status and properties of individual migrated items."""
 
     _import_id = _parse_int(import_id)
@@ -2954,7 +3098,7 @@ async def list_migration_entities(
     import_id: str = Field(..., description="The unique identifier of the GitLab Migration import job to retrieve entities from."),
     status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current processing status in the migration workflow."),
     per_page: str | None = Field(None, description="Number of entities to return per page for pagination. Defaults to 20 items per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of entities from a GitLab Migration import job. Filter by status and paginate through results to monitor migration progress."""
 
     _import_id = _parse_int(import_id)
@@ -2996,7 +3140,7 @@ async def list_migration_entities(
 
 # Tags: bulk_imports
 @mcp.tool()
-async def get_bulk_import(import_id: str = Field(..., description="The unique identifier of the bulk import migration to retrieve.")) -> dict[str, Any]:
+async def get_bulk_import(import_id: str = Field(..., description="The unique identifier of the bulk import migration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details about a GitLab Migration bulk import job, including its status and progress information."""
 
     _import_id = _parse_int(import_id)
@@ -3038,7 +3182,7 @@ async def list_migration_entities_all(
     per_page: str | None = Field(None, description="Maximum number of entities to return per page for pagination purposes."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Order in which to sort the returned entities by creation date."),
     status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter entities by their current migration status to view only those in a specific state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all entities from GitLab Migrations. This operation supports pagination, sorting, and filtering by migration status to help track the progress of bulk import operations."""
 
     _per_page = _parse_int(per_page)
@@ -3082,7 +3226,7 @@ async def list_migrations(
     per_page: str | None = Field(None, description="Number of migration records to return per page for pagination."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort migrations by creation date in ascending or descending order."),
     status: Literal["created", "started", "finished", "timeout", "failed"] | None = Field(None, description="Filter migrations by their current status in the migration lifecycle."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all GitLab Migrations with optional filtering and sorting. This feature was introduced in GitLab 14.1."""
 
     _per_page = _parse_int(per_page)
@@ -3130,7 +3274,7 @@ async def start_bulk_migration(
     entities_destination_namespace: list[str] = Field(..., description="Array of destination namespaces where entities will be imported. Each namespace corresponds to the entity at the same index. Specify the target group or namespace path on the destination instance"),
     entities_destination_slug: list[str] | None = Field(None, description="Array of optional destination slugs for imported entities. When provided, overrides the default slug derived from the source entity name. Each slug corresponds to the entity at the same index"),
     entities_migrate_projects: list[bool] | None = Field(None, description="Array of boolean flags indicating whether to include nested projects during group migration. Each flag corresponds to the group at the same index in entities_source_type"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a bulk migration of GitLab entities from a source instance to the destination. This operation supports migrating groups and projects with their nested resources between GitLab instances."""
 
     # Construct request model with validation
@@ -3172,7 +3316,7 @@ async def start_bulk_migration(
 async def list_jobs(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     scope: list[str] | None = Field(None, description="Filter results to include only jobs with the specified statuses. Provide as an array of status values; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all jobs for a specified project, with optional filtering by job status. Use this to monitor job execution, track pipeline progress, or retrieve job details."""
 
     # Construct request model with validation
@@ -3214,7 +3358,7 @@ async def list_jobs(
 async def get_job(
     id_: str = Field(..., alias="id", description="The project identifier, which can be a numeric ID or URL-encoded project path (e.g., group/subgroup/project)."),
     job_id: int = Field(..., description="The numeric identifier of the job to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific job within a project. Returns comprehensive job information including status, logs, and execution details."""
 
     # Construct request model with validation
@@ -3254,7 +3398,7 @@ async def execute_manual_job(
     id_: str = Field(..., alias="id", description="The project identifier, either as a numeric ID or URL-encoded path (e.g., group%2Fproject for group/project)."),
     job_id: int = Field(..., description="The numeric ID of the manual job to execute."),
     job_variables_attributes: list[str] | None = Field(None, description="Optional array of custom variables to make available to the job during execution. Variables are applied in the order provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a manual job for a project. Optionally provide custom variables to override job defaults during execution."""
 
     # Construct request model with validation
