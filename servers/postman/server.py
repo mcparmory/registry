@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Postman MCP Server
-Generated: 2026-04-16 12:34:16 UTC
+Generated: 2026-04-23 21:41:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
     from dotenv import load_dotenv
@@ -36,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.getpostman.com")
@@ -467,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -494,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -536,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -619,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -667,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -729,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -821,16 +940,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -844,6 +964,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -886,6 +1007,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -897,7 +1033,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1050,7 +1185,7 @@ async def list_apis(
     description: str | None = Field(None, description="Filter results to APIs whose description contains this value. Matching is case-insensitive."),
     sort: str | None = Field(None, description="Sort results by a specific field name from the response. Combine with direction parameter to control sort order."),
     direction: str | None = Field(None, description="Set sort order to ascending (asc) or descending (desc). Defaults to descending for timestamps and numeric fields, ascending otherwise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all APIs in a workspace with optional filtering by metadata, timestamps, privacy state, and text search. Results can be sorted by any response field in ascending or descending order."""
 
     # Construct request model with validation
@@ -1093,7 +1228,7 @@ async def create_api(
     description: str | None = Field(None, description="A detailed description of the API's purpose and functionality."),
     name: str | None = Field(None, description="The name of the API. This is a required field and must be provided in the request body."),
     summary: str | None = Field(None, description="A short summary of the API's purpose. Should be concise and suitable for display in API listings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new API with a default API Version. The request must include an `api` object with at least a `name` property, and returns the created API with full details including id, name, summary, and description."""
 
     # Construct request model with validation
@@ -1134,7 +1269,7 @@ async def create_api(
 
 # Tags: API
 @mcp.tool()
-async def get_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to retrieve.")) -> dict[str, Any]:
+async def get_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific API by its ID, including metadata such as name, summary, and description."""
 
     # Construct request model with validation
@@ -1176,7 +1311,7 @@ async def update_api(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to update."),
     description: str | None = Field(None, description="The updated description for the API. Provide a clear, concise explanation of what the API does."),
     name: str | None = Field(None, description="The updated name for the API. Use a descriptive title that identifies the API's purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing API by modifying its name, summary, or description. Returns the complete updated API object with all current details."""
 
     # Construct request model with validation
@@ -1217,7 +1352,7 @@ async def update_api(
 
 # Tags: API
 @mcp.tool()
-async def delete_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to delete.")) -> dict[str, Any]:
+async def delete_api(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an API by its ID. Returns the deleted API object with its ID for confirmation."""
 
     # Construct request model with validation
@@ -1255,7 +1390,7 @@ async def delete_api(api_id: str = Field(..., alias="apiId", description="The un
 
 # Tags: API, API Version
 @mcp.tool()
-async def list_api_versions(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve all versions.")) -> dict[str, Any]:
+async def list_api_versions(api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve all versions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a specified API, including detailed metadata for each version."""
 
     # Construct request model with validation
@@ -1300,7 +1435,7 @@ async def create_api_version(
     documentation: bool | None = Field(None, description="When true, copies the API schema (specification/definition) from the source API version to the new version."),
     mock: bool | None = Field(None, description="When true, copies mock server configurations from the source API version to the new version."),
     monitor: bool | None = Field(None, description="When true, copies monitoring configurations from the source API version to the new version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new API version within the specified API. Optionally copies schema and related resources (mocks, monitors, documentation, tests, etc.) from an existing API version."""
 
     # Construct request model with validation
@@ -1346,7 +1481,7 @@ async def create_api_version(
 async def get_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to retrieve."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version to fetch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific API version, including its configuration and metadata."""
 
     # Construct request model with validation
@@ -1388,7 +1523,7 @@ async def update_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to update."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to update."),
     name: str | None = Field(None, description="The new name for the API version (e.g., '2.0'). This is the only field that can be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the name of an existing API version. Provide the API ID and version ID, along with the new name in the request body."""
 
     # Construct request model with validation
@@ -1432,7 +1567,7 @@ async def update_api_version(
 async def delete_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the version to delete."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific API version. Returns the id of the deleted API version."""
 
     # Construct request model with validation
@@ -1473,7 +1608,7 @@ async def delete_api_version(
 async def list_contract_test_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch contract test relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version for which to fetch contract test relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all contract test relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1514,7 +1649,7 @@ async def list_contract_test_relations(
 async def get_documentation_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch documentation relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch documentation relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all documentation relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1555,7 +1690,7 @@ async def get_documentation_relations(
 async def get_environment_relations_for_api_version(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve environment relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version for which to retrieve environment relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all environment relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1596,7 +1731,7 @@ async def get_environment_relations_for_api_version(
 async def list_integration_test_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to fetch integration test relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch integration test relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all integration test relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1637,7 +1772,7 @@ async def list_integration_test_relations(
 async def list_monitor_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to fetch monitor relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all monitor relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1678,7 +1813,7 @@ async def list_monitor_relations(
 async def list_linked_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve linked relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to retrieve linked relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all relations linked to a specific API version, including detailed information about each relation type and its associated relations."""
 
     # Construct request model with validation
@@ -1723,7 +1858,7 @@ async def add_relations_to_api_version(
     documentation: list[str] | None = Field(None, description="Array of Collection UIDs to associate as documentation with this API version."),
     mock: list[str] | None = Field(None, description="Array of Mock IDs to associate with this API version."),
     testsuite: list[str] | None = Field(None, description="Array of Collection UIDs to associate as test suites with this API version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link existing Postman entities (collections, environments, mocks, monitors) to an API version as relations. Specify which entity types to associate by providing their corresponding UIDs or IDs in the request body."""
 
     # Construct request model with validation
@@ -1769,7 +1904,7 @@ async def create_schema(
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version under which the schema will be created."),
     language: str | None = Field(None, description="The schema language format. Use 'json' or 'yaml' for OpenAPI and RAML schemas; use 'graphql' exclusively for GraphQL schemas."),
     type_: str | None = Field(None, alias="type", description="The schema type specification. Supported types are 'openapi3', 'openapi2', 'openapi1', 'raml', and 'graphql'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new schema for an API version. The schema can be defined in OpenAPI (v1, v2, v3), RAML, or GraphQL format with corresponding language specification."""
 
     # Construct request model with validation
@@ -1812,7 +1947,7 @@ async def get_schema(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API containing the schema."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version containing the schema."),
     schema_id: str = Field(..., alias="schemaId", description="The unique identifier of the schema to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single schema by its ID. Returns a schema object containing metadata including id, language, type, and schema definition."""
 
     # Construct request model with validation
@@ -1856,7 +1991,7 @@ async def update_schema(
     schema_id: str = Field(..., alias="schemaId", description="The unique identifier of the schema to update."),
     language: str | None = Field(None, description="The schema language format. Use `json` or `yaml` for OpenAPI and RAML schemas; use `graphql` for GraphQL schemas."),
     type_: str | None = Field(None, alias="type", description="The schema type being updated. Allowed values are `openapi3`, `openapi2`, `openapi1`, `raml`, or `graphql`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing API schema by replacing its content and metadata. Supports OpenAPI (v1, v2, v3), RAML, and GraphQL schema types in their respective formats."""
 
     # Construct request model with validation
@@ -1904,7 +2039,7 @@ async def create_collection_from_schema(
     workspace: str | None = Field(None, description="The workspace ID where the collection will be created. Use the workspace identifier to scope the collection to a specific workspace context."),
     name: str | None = Field(None, description="The display name for the new collection. This is a human-readable identifier for organizing and referencing the collection."),
     relations: list[_models.CreateCollectionFromSchemaBodyRelationsItem] | None = Field(None, description="An array of relation types to associate with the collection. Valid relation types are: contracttest, integrationtest, testsuite, and documentation. At least one relation type should be specified to define the collection's purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new collection linked to an API schema with one or more relation types (contract test, integration test, test suite, or documentation). The collection serves as an organizational container for API-related artifacts."""
 
     # Construct request model with validation
@@ -1951,7 +2086,7 @@ async def create_collection_from_schema(
 async def list_test_suite_relations(
     api_id: str = Field(..., alias="apiId", description="The unique identifier of the API for which to retrieve test suite relations."),
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the API version for which to retrieve test suite relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all test suite relations linked to a specific API version, organized by relation type with complete details for each relation."""
 
     # Construct request model with validation
@@ -1994,7 +2129,7 @@ async def sync_relation_with_schema(
     api_version_id: str = Field(..., alias="apiVersionId", description="The unique identifier of the specific API version whose schema will be used for synchronization."),
     entity_type: str = Field(..., alias="entityType", description="The type of relation to sync, such as documentation, contracttest, integrationtest, testsuite, mock, or monitor."),
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the specific relation instance to synchronize with the schema."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronize a relation (such as documentation, contract test, or monitor) with the current API schema to ensure consistency and alignment with schema changes."""
 
     # Construct request model with validation
@@ -2032,7 +2167,7 @@ async def sync_relation_with_schema(
 
 # Tags: Collections
 @mcp.tool()
-async def list_collections() -> dict[str, Any]:
+async def list_collections() -> dict[str, Any] | ToolResult:
     """Retrieve all collections accessible to you, including your own collections and those you have subscribed to. Each collection includes its name, ID, owner, and UID."""
 
     # Extract parameters for API call
@@ -2064,7 +2199,7 @@ async def create_collection(
     name: str | None = Field(None, description="The name of the collection. Supports dynamic variables like {{$randomInt}} for generating unique names."),
     item: list[_models.CreateCollectionBodyCollectionItemItem] | None = Field(None, description="An array of request items to include in the collection. Items define the API requests and folder structure within the collection."),
     schema_: str | None = Field(None, alias="schema"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Postman collection in Postman Collection v2 format. Returns the created collection's name, ID, and UID. Optionally specify a workspace via query parameter to create the collection in a specific workspace."""
 
     # Construct request model with validation
@@ -2106,7 +2241,7 @@ async def create_collection(
 async def create_fork_of_collection(
     collection_uid: str = Field(..., description="The unique identifier of the collection to fork."),
     workspace: str | None = Field(None, description="The ID of the workspace where the forked collection should be created. If not specified, the fork will be created in the default workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a fork of an existing collection. The response includes the forked collection's name, ID, UID, and fork metadata. You can optionally specify a target workspace for the fork. Note: The fork is created with a default label 'Forked Collection' (Postman v10 API requires 'label', and the schema-declared 'name' field is rejected)."""
 
     # Construct request model with validation
@@ -2156,7 +2291,7 @@ async def merge_fork_to_collection(
     destination: str | None = Field(None, description="The UID of the destination collection where the fork will be merged into. Required for the merge operation."),
     source: str | None = Field(None, description="The UID of the forked collection to merge. This is the source collection that will be merged into the destination."),
     strategy: str | None = Field(None, description="The merge strategy to apply: `deleteSource` removes the forked collection after merging, or `updateSourceWithDestination` syncs the forked collection with any changes made to the destination. Defaults to standard merge behavior if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a forked collection back into its destination collection. Optionally specify a merge strategy to control whether the source fork is deleted or updated with destination changes after the merge."""
 
     # Construct request model with validation
@@ -2194,7 +2329,7 @@ async def merge_fork_to_collection(
 
 # Tags: Collections
 @mcp.tool()
-async def get_collection(collection_uid: str = Field(..., description="The unique identifier (uid) of the collection to retrieve. This is a required string value that uniquely identifies the collection within the system.")) -> dict[str, Any]:
+async def get_collection(collection_uid: str = Field(..., description="The unique identifier (uid) of the collection to retrieve. This is a required string value that uniquely identifies the collection within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full contents of a specific collection by its unique identifier. You must have access permissions to the collection to retrieve it."""
 
     # Construct request model with validation
@@ -2237,7 +2372,7 @@ async def update_collection(
     name: str | None = Field(None, description="The display name of the collection. Supports dynamic variables (e.g., {{$randomInt}}) for generating unique names."),
     item: list[_models.UpdateCollectionBodyCollectionItemItem] | None = Field(None, description="An array of request items and folders that comprise the collection. Items are processed in the order provided and define the collection's structure and endpoints."),
     schema_: str | None = Field(None, alias="schema"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace an existing collection with updated content in Postman Collection v2 format. Returns the updated collection's name, id, and uid. Requires API Key authentication."""
 
     # Construct request model with validation
@@ -2277,7 +2412,7 @@ async def update_collection(
 
 # Tags: Collections
 @mcp.tool()
-async def delete_collection(collection_uid: str = Field(..., description="The unique identifier of the collection to delete. This identifier is required to specify which collection should be removed.")) -> dict[str, Any]:
+async def delete_collection(collection_uid: str = Field(..., description="The unique identifier of the collection to delete. This identifier is required to specify which collection should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a collection by its unique identifier. Returns the deleted collection's id and uid upon successful deletion."""
 
     # Construct request model with validation
@@ -2313,7 +2448,7 @@ async def delete_collection(collection_uid: str = Field(..., description="The un
 
 # Tags: Environments
 @mcp.tool()
-async def list_environments() -> dict[str, Any]:
+async def list_environments() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all environments you own, including their names, IDs, owners, and UIDs. Requires API Key authentication."""
 
     # Extract parameters for API call
@@ -2343,7 +2478,7 @@ async def list_environments() -> dict[str, Any]:
 async def create_environment(
     name: str | None = Field(None, description="The name of the environment to create. Must be between 1 and 254 characters long."),
     values: list[_models.CreateEnvironmentBodyEnvironmentValuesItem] | None = Field(None, description="An array of environment variables to initialize with the environment. Each variable must have a key and value; the enabled flag is optional. Up to 100 variables can be specified per environment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new environment with configuration variables. Optionally specify a workspace context via query parameter. Returns the created environment's name and unique identifier."""
 
     # Construct request model with validation
@@ -2381,7 +2516,7 @@ async def create_environment(
 
 # Tags: Environments
 @mcp.tool()
-async def get_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to retrieve. This is a required string value that identifies which environment's contents to access.")) -> dict[str, Any]:
+async def get_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to retrieve. This is a required string value that identifies which environment's contents to access.")) -> dict[str, Any] | ToolResult:
     """Retrieve the full contents of a specific environment by its unique identifier. This operation requires authentication via API Key."""
 
     # Construct request model with validation
@@ -2421,7 +2556,7 @@ async def update_environment(
     environment_uid: str = Field(..., description="The unique identifier of the environment to update."),
     name: str | None = Field(None, description="The new name for the environment. Must be between 1 and 254 characters."),
     values: list[_models.UpdateEnvironmentBodyEnvironmentValuesItem] | None = Field(None, description="An array of environment variables (up to 100 items). Each variable must have a key and value (both 1-254 characters), and may optionally include a type and enabled status. Variables are applied in the order provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace an existing environment with updated configuration. Specify the environment to modify by its unique identifier and provide the new environment name and variable values."""
 
     # Construct request model with validation
@@ -2460,7 +2595,7 @@ async def update_environment(
 
 # Tags: Environments
 @mcp.tool()
-async def delete_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to delete. This is a required string value that uniquely identifies the environment within the system.")) -> dict[str, Any]:
+async def delete_environment(environment_uid: str = Field(..., description="The unique identifier of the environment to delete. This is a required string value that uniquely identifies the environment within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a single environment by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2496,7 +2631,7 @@ async def delete_environment(environment_uid: str = Field(..., description="The 
 
 # Tags: User
 @mcp.tool()
-async def get_authenticated_user() -> dict[str, Any]:
+async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the authenticated user, including username, full name, email address, and other profile data. Requires API Key authentication via X-Api-Key header or apikey query parameter."""
 
     # Extract parameters for API call
@@ -2523,7 +2658,7 @@ async def get_authenticated_user() -> dict[str, Any]:
 
 # Tags: Mocks
 @mcp.tool()
-async def list_mocks() -> dict[str, Any]:
+async def list_mocks() -> dict[str, Any] | ToolResult:
     """Retrieve all mocks you have created. Returns a complete list of your mock configurations for managing and testing API responses."""
 
     # Extract parameters for API call
@@ -2553,7 +2688,7 @@ async def list_mocks() -> dict[str, Any]:
 async def create_mock(
     collection: str | None = Field(None, description="The unique identifier of the collection for which to create the mock. Format is a UUID string."),
     environment: str | None = Field(None, description="The unique identifier of an environment to use for resolving variables within the collection. Format is a UUID string. If provided, environment variables will be substituted in the mock."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a mock server for a collection, optionally resolving environment variables. You can specify a workspace context via query parameter to determine where the mock is created."""
 
     # Construct request model with validation
@@ -2591,7 +2726,7 @@ async def create_mock(
 
 # Tags: Mocks
 @mcp.tool()
-async def get_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to retrieve. This is a required string value that uniquely identifies the mock resource.")) -> dict[str, Any]:
+async def get_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to retrieve. This is a required string value that uniquely identifies the mock resource.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific mock by its unique identifier. Requires API Key authentication via X-Api-Key header or apikey query parameter."""
 
     # Construct request model with validation
@@ -2634,7 +2769,7 @@ async def update_mock(
     name: str | None = Field(None, description="A human-readable name for the mock server."),
     private: bool | None = Field(None, description="Whether the mock server is private (true) or publicly accessible (false)."),
     version_tag: str | None = Field(None, alias="versionTag", description="The unique identifier of the version tag associated with this mock server."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing mock server by its unique identifier. Modify properties such as name, description, environment, privacy settings, and version tag."""
 
     # Construct request model with validation
@@ -2673,7 +2808,7 @@ async def update_mock(
 
 # Tags: Mocks
 @mcp.tool()
-async def delete_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to delete. This is a required string value that identifies which mock should be removed.")) -> dict[str, Any]:
+async def delete_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to delete. This is a required string value that identifies which mock should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing mock by its unique identifier. This operation removes the mock and all associated data."""
 
     # Construct request model with validation
@@ -2709,7 +2844,7 @@ async def delete_mock(mock_uid: str = Field(..., description="The unique identif
 
 # Tags: Mocks
 @mcp.tool()
-async def publish_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to publish. This is the uid assigned to the mock when it was created.")) -> dict[str, Any]:
+async def publish_mock(mock_uid: str = Field(..., description="The unique identifier of the mock to publish. This is the uid assigned to the mock when it was created.")) -> dict[str, Any] | ToolResult:
     """Publishes a mock that you have created, making it available for use. Requires the mock's unique identifier (uid) and API key authentication."""
 
     # Construct request model with validation
@@ -2745,7 +2880,7 @@ async def publish_mock(mock_uid: str = Field(..., description="The unique identi
 
 # Tags: Mocks
 @mcp.tool()
-async def delete_mock_publication(mock_uid: str = Field(..., description="The unique identifier of the mock to unpublish. This is a required string value that identifies which mock should be removed from published state.")) -> dict[str, Any]:
+async def delete_mock_publication(mock_uid: str = Field(..., description="The unique identifier of the mock to unpublish. This is a required string value that identifies which mock should be removed from published state.")) -> dict[str, Any] | ToolResult:
     """Unpublish a mock by its unique identifier. This removes the mock from published state, making it unavailable for use."""
 
     # Construct request model with validation
@@ -2781,7 +2916,7 @@ async def delete_mock_publication(mock_uid: str = Field(..., description="The un
 
 # Tags: Monitors
 @mcp.tool()
-async def list_monitors() -> dict[str, Any]:
+async def list_monitors() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all monitors accessible to you, including their name, ID, owner, and unique identifier. Requires API Key authentication."""
 
     # Extract parameters for API call
@@ -2814,7 +2949,7 @@ async def create_monitor(
     name: str | None = Field(None, description="A descriptive name for the monitor to help identify it in your workspace."),
     cron: str | None = Field(None, description="A cron expression defining the monitor's execution schedule (e.g., '*/5 * * * *' for every 5 minutes, '0 17 * * *' for daily at 5pm). Only limited schedules are supported; check Postman Monitors for allowed values."),
     timezone_: str | None = Field(None, alias="timezone", description="The timezone for interpreting the cron schedule (e.g., 'Asia/Kolkata', 'America/New_York'). Use IANA timezone database format. Defaults to UTC if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new monitor that runs API tests on a specified schedule. The monitor will execute a Postman collection in a given environment at intervals defined by a cron expression and timezone."""
 
     # Construct request model with validation
@@ -2853,7 +2988,7 @@ async def create_monitor(
 
 # Tags: Monitors
 @mcp.tool()
-async def get_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to retrieve. This is a required string value that uniquely identifies the monitor in the system.")) -> dict[str, Any]:
+async def get_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to retrieve. This is a required string value that uniquely identifies the monitor in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific monitor using its unique identifier. This operation requires authentication via API key."""
 
     # Construct request model with validation
@@ -2894,7 +3029,7 @@ async def update_monitor(
     name: str | None = Field(None, description="The new display name for the monitor. Use this to give the monitor a more descriptive or updated label."),
     cron: str | None = Field(None, description="A cron expression defining the monitor's execution schedule (e.g., `*/5 * * * *` for every 5 minutes, `0 17 * * *` for daily at 5pm). Only certain predefined schedules are supported—verify your desired frequency is available in Postman Monitors before use."),
     timezone_: str | None = Field(None, alias="timezone", description="The timezone for interpreting the cron schedule (e.g., `America/Chicago`). Use IANA timezone database identifiers to ensure the monitor runs at the intended local time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing monitor's name and execution schedule. Modify the monitor identified by its unique identifier to change its display name and/or cron-based execution frequency and timezone."""
 
     # Construct request model with validation
@@ -2934,7 +3069,7 @@ async def update_monitor(
 
 # Tags: Monitors
 @mcp.tool()
-async def delete_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to delete. This is a required string value that identifies which monitor to remove.")) -> dict[str, Any]:
+async def delete_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to delete. This is a required string value that identifies which monitor to remove.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing monitor by its unique identifier. This operation removes the monitor and all associated data."""
 
     # Construct request model with validation
@@ -2970,7 +3105,7 @@ async def delete_monitor(monitor_uid: str = Field(..., description="The unique i
 
 # Tags: Monitors
 @mcp.tool()
-async def run_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to execute.")) -> dict[str, Any]:
+async def run_monitor(monitor_uid: str = Field(..., description="The unique identifier of the monitor to execute.")) -> dict[str, Any] | ToolResult:
     """Executes a monitor immediately and waits for completion, returning the run results. This is a synchronous operation that blocks until the monitor finishes executing."""
 
     # Construct request model with validation
@@ -3010,7 +3145,7 @@ async def create_webhook(
     workspace: str | None = Field(None, description="The workspace ID where the webhook will be created. Required to scope the webhook to the correct workspace context."),
     collection: str | None = Field(None, description="The ID of the collection that will be triggered when this webhook is invoked. This determines which collection executes when the webhook URL is called."),
     name: str | None = Field(None, description="A descriptive name for the webhook to help identify its purpose and distinguish it from other webhooks in your workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a webhook that automatically triggers a specified collection when the webhook URL is called. The webhook URL is returned in the response for use in external systems."""
 
     # Construct request model with validation
@@ -3051,7 +3186,7 @@ async def create_webhook(
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspaces() -> dict[str, Any]:
+async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all workspaces accessible to you, including your own workspaces and those shared with you. Each workspace entry includes its name, ID, and type."""
 
     # Extract parameters for API call
@@ -3086,7 +3221,7 @@ async def create_workspace(
     monitors: list[_models.CreateWorkspaceBodyWorkspaceMonitorsItem] | None = Field(None, description="Array of monitor UIDs to include in the workspace. Order is preserved as provided."),
     name: str | None = Field(None, description="The display name for the workspace. Use a descriptive name that identifies the workspace purpose or project."),
     type_: str | None = Field(None, alias="type", description="The workspace type, such as 'personal' for individual workspaces or other organizational types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new workspace and optionally populate it with collections, environments, mocks, and monitors by their unique identifiers. Returns the created workspace name and ID."""
 
     # Construct request model with validation
@@ -3124,7 +3259,7 @@ async def create_workspace(
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to retrieve. Must be a valid workspace ID that you have access to.")) -> dict[str, Any]:
+async def get_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to retrieve. Must be a valid workspace ID that you have access to.")) -> dict[str, Any] | ToolResult:
     """Retrieve a workspace by its ID, including all associated collections, environments, mocks, and monitors that you have access to."""
 
     # Construct request model with validation
@@ -3168,7 +3303,7 @@ async def update_workspace(
     mocks: list[_models.UpdateWorkspaceBodyWorkspaceMocksItem] | None = Field(None, description="Array of mock UIDs to associate with this workspace. Replaces all existing mocks—only specified mocks will remain associated after the update."),
     monitors: list[_models.UpdateWorkspaceBodyWorkspaceMonitorsItem] | None = Field(None, description="Array of monitor UIDs to associate with this workspace. Replaces all existing monitors—only specified monitors will remain associated after the update."),
     name: str | None = Field(None, description="The display name for the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a workspace's properties and manage its associations with collections, environments, mocks, and monitors. The endpoint replaces all associated entities with those specified in the request, so omitted entities will be removed from the workspace."""
 
     # Construct request model with validation
@@ -3207,7 +3342,7 @@ async def update_workspace(
 
 # Tags: Workspaces
 @mcp.tool()
-async def delete_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to delete. This ID is required to specify which workspace should be removed.")) -> dict[str, Any]:
+async def delete_workspace(workspace_id: str = Field(..., description="The unique identifier of the workspace to delete. This ID is required to specify which workspace should be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing workspace by its ID. Returns the ID of the deleted workspace upon successful completion."""
 
     # Construct request model with validation
