@@ -5,7 +5,7 @@ Outline MCP Server
 API Info:
 - API License: BSD-3-Clause (https://github.com/outline/openapi/blob/main/LICENSE)
 
-Generated: 2026-04-14 18:27:58 UTC
+Generated: 2026-04-23 21:33:28 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.getoutline.com/api")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -826,16 +944,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -849,6 +968,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -891,6 +1011,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -902,7 +1037,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1057,7 +1191,7 @@ async def create_attachment(
     content_type: str = Field(..., alias="contentType", description="The MIME type of the file being attached (e.g., image/png, application/pdf, text/plain). Must match the actual file format."),
     size: float = Field(..., description="The size of the file in bytes. Must be a positive number representing the exact file size before upload."),
     document_id: str | None = Field(None, alias="documentId", description="Optional UUID identifier of the document this attachment is associated with. Omit if the attachment is not linked to a specific document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an attachment record in the database and obtain the necessary credentials to upload the file to cloud storage from the client. Returns upload configuration details for completing the file transfer."""
 
     # Construct request model with validation
@@ -1095,7 +1229,7 @@ async def create_attachment(
 
 # Tags: Attachments
 @mcp.tool()
-async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment, formatted as a UUID.")) -> dict[str, Any]:
+async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve an attachment by its unique identifier. For private attachments, a temporary signed URL with embedded credentials is generated automatically."""
 
     # Construct request model with validation
@@ -1133,7 +1267,7 @@ async def get_attachment(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: Attachments
 @mcp.tool()
-async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the attachment to delete.")) -> dict[str, Any]:
+async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an attachment by its unique identifier. Note that this action does not remove any references or links to the attachment that may exist in documents."""
 
     # Construct request model with validation
@@ -1171,7 +1305,7 @@ async def delete_attachment(id_: str = Field(..., alias="id", description="The u
 
 # Tags: Auth
 @mcp.tool()
-async def get_auth_info() -> dict[str, Any]:
+async def get_auth_info() -> dict[str, Any] | ToolResult:
     """Retrieve authentication details and metadata for the current API key, including permissions and account information."""
 
     # Extract parameters for API call
@@ -1198,7 +1332,7 @@ async def get_auth_info() -> dict[str, Any]:
 
 # Tags: Collections
 @mcp.tool()
-async def get_collection(id_: str = Field(..., alias="id", description="The UUID that uniquely identifies the collection to retrieve.")) -> dict[str, Any]:
+async def get_collection(id_: str = Field(..., alias="id", description="The UUID that uniquely identifies the collection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific collection using its unique identifier."""
 
     # Construct request model with validation
@@ -1236,7 +1370,7 @@ async def get_collection(id_: str = Field(..., alias="id", description="The UUID
 
 # Tags: Collections
 @mcp.tool()
-async def get_collection_document_structure(id_: str = Field(..., alias="id", description="The unique identifier of the collection, formatted as a UUID.")) -> dict[str, Any]:
+async def get_collection_document_structure(id_: str = Field(..., alias="id", description="The unique identifier of the collection, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the document structure of a collection as a hierarchical tree of navigation nodes, showing how documents are organized within the collection."""
 
     # Construct request model with validation
@@ -1274,7 +1408,7 @@ async def get_collection_document_structure(id_: str = Field(..., alias="id", de
 
 # Tags: Collections
 @mcp.tool()
-async def list_collections(body: _models.CollectionsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any]:
+async def list_collections(body: _models.CollectionsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve all collections that the authenticated user has access to. Returns a list of collections with their metadata and details."""
 
     # Construct request model with validation
@@ -1319,7 +1453,7 @@ async def create_collection(
     permission: Literal["read", "read_write"] | None = Field(None, description="The access level for the collection. Choose 'read' for view-only access or 'read_write' for full editing permissions."),
     color: str | None = Field(None, description="A hex color code (e.g., '#123123') to customize the visual appearance of the collection icon."),
     sharing: bool | None = Field(None, description="Whether documents in this collection can be shared publicly. Set to true to enable public sharing, false to restrict sharing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new collection to organize and manage documents. Specify the collection's name, description, visual styling, and access permissions."""
 
     # Construct request model with validation
@@ -1364,7 +1498,7 @@ async def update_collection(
     permission: Literal["read", "read_write"] | None = Field(None, description="The access level for users who can access this collection. Choose 'read' for view-only access or 'read_write' to allow modifications."),
     color: str | None = Field(None, description="A hex color code (e.g., #123456) to customize the collection's icon color for visual organization and identification."),
     sharing: bool | None = Field(None, description="Whether to allow public sharing of documents within this collection. Set to true to enable sharing, false to restrict to authenticated users only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing collection's properties including name, description, icon color, sharing settings, and access permissions. Changes apply immediately to the collection and affect how it appears and behaves for all users with access."""
 
     # Construct request model with validation
@@ -1406,7 +1540,7 @@ async def add_user_to_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to which the user will be added."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to add as a member to the collection."),
     permission: Literal["read", "read_write"] | None = Field(None, description="The access permission level for the user in this collection. Choose 'read' for view-only access or 'read_write' for full read and write access. Defaults to 'read' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user as a member to a collection with specified access permissions. The user will gain access to the collection based on the permission level assigned."""
 
     # Construct request model with validation
@@ -1447,7 +1581,7 @@ async def add_user_to_collection(
 async def remove_user_from_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection from which the user will be removed."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to remove from the collection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a collection. This operation revokes the specified user's access to the collection."""
 
     # Construct request model with validation
@@ -1485,7 +1619,7 @@ async def remove_user_from_collection(
 
 # Tags: Collections
 @mcp.tool()
-async def list_collection_memberships(body: _models.CollectionsMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the membership query.")) -> dict[str, Any]:
+async def list_collection_memberships(body: _models.CollectionsMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the membership query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all individual memberships for a specific collection. Note that this endpoint returns only direct memberships and does not include group-based memberships."""
 
     # Construct request model with validation
@@ -1528,7 +1662,7 @@ async def add_group_to_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to which the group will be granted access."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID) of the group whose members will receive access to the collection."),
     permission: Literal["read", "read_write"] | None = Field(None, description="The access level to grant the group members. Choose 'read' for view-only access or 'read_write' for full read and write permissions. Defaults to 'read' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant all members of a group access to a collection with a specified permission level. This enables group-based access control for collaborative collection management."""
 
     # Construct request model with validation
@@ -1569,7 +1703,7 @@ async def add_group_to_collection(
 async def remove_group_from_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection from which the group will be removed."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID) of the group whose members will lose access to the collection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke all members of a group from accessing a collection. Note that group members may retain access through other group memberships or individual collection access."""
 
     # Construct request model with validation
@@ -1607,7 +1741,7 @@ async def remove_group_from_collection(
 
 # Tags: Collections
 @mcp.tool()
-async def list_collection_group_memberships(body: _models.CollectionsGroupMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the group memberships query.")) -> dict[str, Any]:
+async def list_collection_group_memberships(body: _models.CollectionsGroupMembershipsBody | None = Field(None, description="Request body containing the collection identifier and optional filtering criteria for the group memberships query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all groups that have been granted access to a specific collection. This lists the group memberships associated with the collection."""
 
     # Construct request model with validation
@@ -1646,7 +1780,7 @@ async def list_collection_group_memberships(body: _models.CollectionsGroupMember
 
 # Tags: Collections
 @mcp.tool()
-async def delete_collection(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to delete.")) -> dict[str, Any]:
+async def delete_collection(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a collection and all of its documents. This action cannot be undone, so exercise caution before proceeding."""
 
     # Construct request model with validation
@@ -1687,7 +1821,7 @@ async def delete_collection(id_: str = Field(..., alias="id", description="The u
 async def export_collection(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the collection to export. Required to specify which collection should be exported."),
     format_: Literal["outline-markdown", "json", "html"] | None = Field(None, alias="format", description="Export format for the collection. Choose from outline-markdown (default), json, or html. Determines the structure and format of exported documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers a bulk export of a collection in your preferred format (markdown, JSON, or HTML) along with all attachments. Nested documents are preserved as folders in the resulting zip file. Returns a FileOperation object to track export progress and retrieve the download URL."""
 
     # Construct request model with validation
@@ -1729,7 +1863,7 @@ async def export_all_collections(
     format_: Literal["outline-markdown", "json", "html"] | None = Field(None, alias="format", description="Output format for the exported collections. Choose from outline-markdown for structured text, json for machine-readable data, or html for web-viewable content."),
     include_attachments: bool | None = Field(None, alias="includeAttachments", description="Whether to include file attachments and media in the export. Enabled by default."),
     include_private: bool | None = Field(None, alias="includePrivate", description="Whether to include private collections in the export. Enabled by default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a bulk export of all collections and their documents in your specified format. Returns a FileOperation object that you can poll to track export progress and retrieve the download URL when complete."""
 
     # Construct request model with validation
@@ -1772,7 +1906,7 @@ async def create_comment_on_document(
     parent_comment_id: str | None = Field(None, alias="parentCommentId", description="The unique identifier (UUID format) of the parent comment if this is a reply; omit to create a top-level comment."),
     data: dict[str, Any] | None = Field(None, description="The body of the comment."),
     text: str | None = Field(None, description="The body of the comment in markdown."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new comment or reply to a document. Use parentCommentId to create a reply to an existing comment, or omit it to create a top-level comment."""
 
     # Construct request model with validation
@@ -1813,7 +1947,7 @@ async def create_comment_on_document(
 async def get_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to retrieve, formatted as a UUID."),
     include_anchor_text: bool | None = Field(None, alias="includeAnchorText", description="When enabled, includes the document text that the comment is anchored to in the response, if available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific comment by its unique identifier, with optional inclusion of the anchored document text."""
 
     # Construct request model with validation
@@ -1854,7 +1988,7 @@ async def get_comment(
 async def update_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to update, formatted as a UUID."),
     data: dict[str, Any] = Field(..., description="An object containing the comment fields to update. Specify the properties you want to modify in this object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing comment by its unique identifier. Modify comment content and properties using the provided data object."""
 
     # Construct request model with validation
@@ -1892,7 +2026,7 @@ async def update_comment(
 
 # Tags: Comments
 @mcp.tool()
-async def delete_comment(id_: str = Field(..., alias="id", description="The unique identifier of the comment to delete, formatted as a UUID.")) -> dict[str, Any]:
+async def delete_comment(id_: str = Field(..., alias="id", description="The unique identifier of the comment to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Deletes a comment by its unique identifier. If the comment is a top-level comment, all of its child replies will be automatically deleted as well."""
 
     # Construct request model with validation
@@ -1930,7 +2064,7 @@ async def delete_comment(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: Comments
 @mcp.tool()
-async def list_comments(body: _models.CommentsListBody | None = Field(None, description="Request body containing filter properties to match comments against. Structure and supported fields depend on the API's comment schema and filtering capabilities.")) -> dict[str, Any]:
+async def list_comments(body: _models.CommentsListBody | None = Field(None, description="Request body containing filter properties to match comments against. Structure and supported fields depend on the API's comment schema and filtering capabilities.")) -> dict[str, Any] | ToolResult:
     """Retrieve all comments matching the specified filter criteria. Use the request body to define which comments to return based on properties like author, date range, or associated resources."""
 
     # Construct request model with validation
@@ -1969,7 +2103,7 @@ async def list_comments(body: _models.CommentsListBody | None = Field(None, desc
 
 # Tags: DataAttributes
 @mcp.tool()
-async def get_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the data attribute to retrieve.")) -> dict[str, Any]:
+async def get_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the data attribute to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific data attribute by its unique identifier. Use this operation to fetch detailed information about a single data attribute."""
 
     # Construct request model with validation
@@ -2007,7 +2141,7 @@ async def get_data_attribute(id_: str = Field(..., alias="id", description="The 
 
 # Tags: DataAttributes
 @mcp.tool()
-async def list_data_attributes(body: _models.DataAttributesListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any]:
+async def list_data_attributes(body: _models.DataAttributesListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Consult API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all available data attributes in the system. Use this operation to discover and enumerate data attributes for reference or integration purposes."""
 
     # Construct request model with validation
@@ -2052,7 +2186,7 @@ async def update_data_attribute(
     description: str | None = Field(None, description="An optional description providing additional context or details about the data attribute's purpose."),
     options: list[_models.DataAttributesUpdateBodyOptionsOptionsItem] | None = Field(None, description="An optional list of valid options for list-type data attributes. Each item represents a selectable value for this attribute."),
     pinned: bool | None = Field(None, description="An optional boolean flag indicating whether this data attribute should be pinned to the top of documents for quick access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing data attribute with new metadata. Only administrators can perform this operation. Note that the data type cannot be changed after the attribute is created."""
 
     # Construct request model with validation
@@ -2091,7 +2225,7 @@ async def update_data_attribute(
 
 # Tags: DataAttributes
 @mcp.tool()
-async def delete_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the data attribute to delete.")) -> dict[str, Any]:
+async def delete_data_attribute(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the data attribute to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a data attribute from the system. Only administrators have permission to perform this operation."""
 
     # Construct request model with validation
@@ -2129,7 +2263,7 @@ async def delete_data_attribute(id_: str = Field(..., alias="id", description="T
 
 # Tags: Documents
 @mcp.tool()
-async def get_document(share_id: str | None = Field(None, alias="shareId", description="The unique identifier for a shared document, formatted as a UUID. This shareId allows access to documents shared with you without requiring the original document UUID.")) -> dict[str, Any]:
+async def get_document(share_id: str | None = Field(None, alias="shareId", description="The unique identifier for a shared document, formatted as a UUID. This shareId allows access to documents shared with you without requiring the original document UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a document by its share identifier. Use this operation to access a document that has been shared with you via a shareId."""
 
     # Construct request model with validation
@@ -2170,7 +2304,7 @@ async def get_document(share_id: str | None = Field(None, alias="shareId", descr
 async def create_document_from_file(
     file_: dict[str, Any] = Field(..., alias="file", description="The file to import as a document. Supported formats include plain text, markdown, docx, csv, tsv, and html."),
     publish: bool | None = Field(None, description="Whether to automatically publish the imported document upon creation. Defaults to unpublished if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new document by importing a file. The document is placed at the collection root by default, or as a child document if a parent document ID is specified."""
 
     # Construct request model with validation
@@ -2214,7 +2348,7 @@ async def export_document(
     paper_size: str | None = Field(None, alias="paperSize", description="Paper size for PDF exports, such as A4 or Letter. Only applicable when exporting to PDF format."),
     signed_urls: float | None = Field(None, alias="signedUrls", description="Duration in seconds that signed URLs for attachment links should remain valid. Determines how long generated attachment links can be accessed."),
     include_child_documents: bool | None = Field(None, alias="includeChildDocuments", description="Include all child documents in the export. When enabled, the response will always be returned as a zip file regardless of other parameters. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export a document in Markdown, HTML, or PDF format, with optional inclusion of child documents as a zip file. The response format is determined by the Accept header."""
 
     # Construct request model with validation
@@ -2252,7 +2386,7 @@ async def export_document(
 
 # Tags: Documents
 @mcp.tool()
-async def list_documents(body: _models.DocumentsListBody | None = Field(None, description="Optional request body for filtering or configuring the document list retrieval.")) -> dict[str, Any]:
+async def list_documents(body: _models.DocumentsListBody | None = Field(None, description="Optional request body for filtering or configuring the document list retrieval.")) -> dict[str, Any] | ToolResult:
     """Retrieve all documents accessible to the current user, including both published and draft documents."""
 
     # Construct request model with validation
@@ -2291,7 +2425,7 @@ async def list_documents(body: _models.DocumentsListBody | None = Field(None, de
 
 # Tags: Documents
 @mcp.tool()
-async def get_document_children(id_: str = Field(..., alias="id", description="The unique identifier for the document, provided as either a UUID or URL-friendly ID.")) -> dict[str, Any]:
+async def get_document_children(id_: str = Field(..., alias="id", description="The unique identifier for the document, provided as either a UUID or URL-friendly ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the nested child structure (tree) of a document. Returns all immediate children and their hierarchical relationships for the specified document."""
 
     # Construct request model with validation
@@ -2329,7 +2463,7 @@ async def get_document_children(id_: str = Field(..., alias="id", description="T
 
 # Tags: Documents
 @mcp.tool()
-async def list_draft_documents(body: _models.DocumentsDraftsBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any]:
+async def list_draft_documents(body: _models.DocumentsDraftsBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all draft documents belonging to the current user. Returns a collection of documents that have not yet been finalized or published."""
 
     # Construct request model with validation
@@ -2368,7 +2502,7 @@ async def list_draft_documents(body: _models.DocumentsDraftsBody | None = Field(
 
 # Tags: Documents
 @mcp.tool()
-async def list_viewed_documents(body: _models.DocumentsViewedBody | None = Field(None, description="Optional request body for filtering or pagination options. If provided, structure should follow the API's standard filtering conventions.")) -> dict[str, Any]:
+async def list_viewed_documents(body: _models.DocumentsViewedBody | None = Field(None, description="Optional request body for filtering or pagination options. If provided, structure should follow the API's standard filtering conventions.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all documents recently viewed by the current user, ordered by most recent view first."""
 
     # Construct request model with validation
@@ -2407,7 +2541,7 @@ async def list_viewed_documents(body: _models.DocumentsViewedBody | None = Field
 
 # Tags: Documents
 @mcp.tool()
-async def search_documents_with_question(body: _models.DocumentsAnswerQuestionBody | None = Field(None, description="Request payload containing the question and optional search parameters to query against your documents.")) -> dict[str, Any]:
+async def search_documents_with_question(body: _models.DocumentsAnswerQuestionBody | None = Field(None, description="Request payload containing the question and optional search parameters to query against your documents.")) -> dict[str, Any] | ToolResult:
     """Query documents using natural language questions to retrieve direct answers. Results are filtered to documents accessible by your current credentials, and requires AI answers to be enabled in your workspace."""
 
     # Construct request model with validation
@@ -2446,7 +2580,7 @@ async def search_documents_with_question(body: _models.DocumentsAnswerQuestionBo
 
 # Tags: Documents
 @mcp.tool()
-async def search_document_titles(body: _models.DocumentsSearchTitlesBody | None = Field(None, description="Request body containing search parameters such as keywords and optional filters for refining title search results.")) -> dict[str, Any]:
+async def search_document_titles(body: _models.DocumentsSearchTitlesBody | None = Field(None, description="Request body containing search parameters such as keywords and optional filters for refining title search results.")) -> dict[str, Any] | ToolResult:
     """Search document titles using keywords for fast, title-only matching. This operation is optimized for title searches and returns results faster than the full documents.search method."""
 
     # Construct request model with validation
@@ -2485,7 +2619,7 @@ async def search_document_titles(body: _models.DocumentsSearchTitlesBody | None 
 
 # Tags: Documents
 @mcp.tool()
-async def search_documents(body: _models.DocumentsSearchBody | None = Field(None, description="Request body containing search parameters such as keywords, filters, and pagination options. Refer to the API documentation for the expected structure and available search filters.")) -> dict[str, Any]:
+async def search_documents(body: _models.DocumentsSearchBody | None = Field(None, description="Request body containing search parameters such as keywords, filters, and pagination options. Refer to the API documentation for the expected structure and available search filters.")) -> dict[str, Any] | ToolResult:
     """Search across all documents in your workspace using keywords. Results are automatically filtered to only include documents accessible with your current credentials."""
 
     # Construct request model with validation
@@ -2534,7 +2668,7 @@ async def create_document(
     collection_id: str | None = Field(None, alias="collectionId", description="Identifier for the collection. Required to publish unless parentDocumentId is provided"),
     parent_document_id: str | None = Field(None, alias="parentDocumentId", description="Identifier for the parent document. Required to publish unless collectionId is provided"),
     text: str | None = Field(None, description="The body of the document in markdown"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new document in the workspace, optionally as a child of an existing document. The document can be immediately published and configured with display preferences."""
 
     # Construct request model with validation
@@ -2584,7 +2718,7 @@ async def update_document(
     data_attributes: list[_models.DocumentsUpdateBodyDataAttributesItem] | None = Field(None, alias="dataAttributes", description="An array of data attributes to update on the document. Any attributes not included in this array will be removed from the document. Specify as an array of attribute objects."),
     text: str | None = Field(None, description="The body of the document in markdown."),
     collection_id: str | None = Field(None, alias="collectionId", description="Identifier for the collection to move the document to"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing document's properties, including metadata, display settings, and content attributes. Accepts either the document's UUID or URL ID for identification."""
 
     # Construct request model with validation
@@ -2625,7 +2759,7 @@ async def update_document(
 async def create_template_from_document(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the document to use as the template basis."),
     publish: bool = Field(..., description="Whether to publish the newly created template immediately. If true, the template becomes available for use; if false, it remains in draft state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new template based on an existing document. The document content and structure become the foundation for the template, which can optionally be published immediately upon creation."""
 
     # Construct request model with validation
@@ -2666,7 +2800,7 @@ async def create_template_from_document(
 async def unpublish_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (urlId)."),
     detach_: bool | None = Field(None, alias="detach", description="Whether to detach the document from its collection when unpublishing. Defaults to false, keeping the document in the collection as a draft."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unpublish a document to revert it from published status back to draft, optionally removing it from its collection."""
 
     # Construct request model with validation
@@ -2709,7 +2843,7 @@ async def move_document(
     index: float | None = Field(None, description="The position index where the document should be placed within its new parent collection. Lower indices position the document earlier in the collection structure."),
     collection_id: str | None = Field(None, alias="collectionId"),
     parent_document_id: str | None = Field(None, alias="parentDocumentId"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a document to a new location within the collection hierarchy. If no parent document is specified, the document will be relocated to the collection root."""
 
     # Construct request model with validation
@@ -2747,7 +2881,7 @@ async def move_document(
 
 # Tags: Documents
 @mcp.tool()
-async def archive_document(id_: str = Field(..., alias="id", description="The document identifier, which can be either the UUID or the URL-friendly ID (urlId). Both formats are accepted interchangeably.")) -> dict[str, Any]:
+async def archive_document(id_: str = Field(..., alias="id", description="The document identifier, which can be either the UUID or the URL-friendly ID (urlId). Both formats are accepted interchangeably.")) -> dict[str, Any] | ToolResult:
     """Move a document to archived status, removing it from active view while preserving it for future search and restoration. Archived documents remain accessible but are hidden from standard document listings."""
 
     # Construct request model with validation
@@ -2788,7 +2922,7 @@ async def archive_document(id_: str = Field(..., alias="id", description="The do
 async def restore_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     revision_id: str | None = Field(None, alias="revisionId", description="Optional UUID of a specific revision to restore the document to. If not provided, the document is restored to its most recent state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a previously archived or deleted document. Optionally restore to a specific revision to recover the document at a previous point in time."""
 
     # Construct request model with validation
@@ -2829,7 +2963,7 @@ async def restore_document(
 async def delete_document(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     permanent: bool | None = Field(None, description="When true, permanently destroys the document with no recovery option instead of moving it to trash. Defaults to false (moves to trash)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a document by moving it to trash, where it remains recoverable for 30 days before permanent deletion. Optionally bypass trash and permanently destroy the document immediately."""
 
     # Construct request model with validation
@@ -2871,7 +3005,7 @@ async def list_document_users(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     query: str | None = Field(None, description="Optional filter to search users by name. When provided, results are filtered to users matching this query string."),
     user_id: str | None = Field(None, alias="userId", description="Optional filter to retrieve a specific user by their UUID. When provided, results are limited to this single user if they have access to the document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all users with access to a document, including both direct members and inherited access. Use `list_document_memberships` to filter for only direct document members."""
 
     # Construct request model with validation
@@ -2913,7 +3047,7 @@ async def list_document_memberships(
     id_: str = Field(..., alias="id", description="The document identifier, either as a UUID or URL-friendly ID (e.g., 'hDYep1TPAM')."),
     query: str | None = Field(None, description="Optional filter to search memberships by user name. When provided, results are filtered to users matching this query."),
     permission: Literal["read", "read_write"] | None = Field(None, description="Optional filter to return only memberships with a specific permission level: 'read' for view-only access or 'read_write' for edit access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve users with direct membership to a document. This lists only users explicitly granted access to the document; use `documents.users` to see all users with any level of access."""
 
     # Construct request model with validation
@@ -2955,7 +3089,7 @@ async def add_user_to_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or a URL-friendly ID (urlId)."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID format) of the user to add to the document."),
     permission: Literal["read", "read_write"] | None = Field(None, description="The access level for the user: 'read' for view-only access or 'read_write' for editing permissions. Defaults to 'read' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant a user access to a document by adding them as a member with specified permissions. The user will be able to interact with the document according to their assigned permission level."""
 
     # Construct request model with validation
@@ -2996,7 +3130,7 @@ async def add_user_to_document(
 async def remove_user_from_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or a URL-friendly ID (urlId)."),
     user_id: str = Field(..., alias="userId", description="The UUID of the user to remove from the document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user's membership and access from a specified document. The user will no longer be able to view or interact with the document."""
 
     # Construct request model with validation
@@ -3034,7 +3168,7 @@ async def remove_user_from_document(
 
 # Tags: Documents
 @mcp.tool()
-async def list_archived_documents(body: _models.DocumentsArchivedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported filter and pagination parameters.")) -> dict[str, Any]:
+async def list_archived_documents(body: _models.DocumentsArchivedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported filter and pagination parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all archived documents in the workspace that the current user has access to. Returns a list of archived document records with their metadata."""
 
     # Construct request model with validation
@@ -3073,7 +3207,7 @@ async def list_archived_documents(body: _models.DocumentsArchivedBody | None = F
 
 # Tags: Documents
 @mcp.tool()
-async def list_deleted_documents(body: _models.DocumentsDeletedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any]:
+async def list_deleted_documents(body: _models.DocumentsDeletedBody | None = Field(None, description="Optional request body for filtering or pagination options. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all deleted documents in the workspace that the current user has access to. This allows users to view and potentially recover deleted documents."""
 
     # Construct request model with validation
@@ -3117,7 +3251,7 @@ async def duplicate_document(
     title: str | None = Field(None, description="Optional custom title for the duplicated document. If not provided, the original title will be used."),
     recursive: bool | None = Field(None, description="When enabled, all child documents nested under the original document will also be duplicated, preserving the document hierarchy."),
     publish: bool | None = Field(None, description="When enabled, the newly created document will be published immediately. If disabled, it will be created in draft state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing document with an optional new title, and optionally duplicates all child documents in the hierarchy."""
 
     # Construct request model with validation
@@ -3159,7 +3293,7 @@ async def add_group_to_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID format) of the group to grant access to the document."),
     permission: Literal["read", "read_write"] | None = Field(None, description="The access level for group members: 'read' for view-only access or 'read_write' for editing permissions. Defaults to 'read' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant all members of a group access to a document by adding the group and specifying their permission level."""
 
     # Construct request model with validation
@@ -3200,7 +3334,7 @@ async def add_group_to_document(
 async def remove_group_from_document(
     id_: str = Field(..., alias="id", description="The document identifier, which can be either a UUID or URL-friendly ID (urlId)."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier (UUID format) of the group whose access should be revoked from the document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke all members of a group from accessing a document. This operation removes the group's collective access permissions to the specified document."""
 
     # Construct request model with validation
@@ -3238,7 +3372,7 @@ async def remove_group_from_document(
 
 # Tags: Documents
 @mcp.tool()
-async def list_document_group_memberships(body: _models.DocumentsGroupMembershipsBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for group memberships.")) -> dict[str, Any]:
+async def list_document_group_memberships(body: _models.DocumentsGroupMembershipsBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for group memberships.")) -> dict[str, Any] | ToolResult:
     """Retrieve all group memberships associated with a specific document. This allows you to see which groups have access to or are linked with the document."""
 
     # Construct request model with validation
@@ -3277,7 +3411,7 @@ async def list_document_group_memberships(body: _models.DocumentsGroupMembership
 
 # Tags: Documents
 @mcp.tool()
-async def delete_all_trash() -> dict[str, Any]:
+async def delete_all_trash() -> dict[str, Any] | ToolResult:
     """Permanently delete all documents currently in the trash. This action is irreversible and can only be performed by admin users."""
 
     # Extract parameters for API call
@@ -3304,7 +3438,7 @@ async def delete_all_trash() -> dict[str, Any]:
 
 # Tags: Events
 @mcp.tool()
-async def list_events(body: _models.EventsListBody | None = Field(None, description="Optional request body for filtering or configuring the events list query. Specify any desired filters or parameters to narrow down the results.")) -> dict[str, Any]:
+async def list_events(body: _models.EventsListBody | None = Field(None, description="Optional request body for filtering or configuring the events list query. Specify any desired filters or parameters to narrow down the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all events from the knowledge base audit trail. Events represent important activities and changes that have occurred within the system."""
 
     # Construct request model with validation
@@ -3343,7 +3477,7 @@ async def list_events(body: _models.EventsListBody | None = Field(None, descript
 
 # Tags: FileOperations
 @mcp.tool()
-async def get_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to retrieve.")) -> dict[str, Any]:
+async def get_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details and current status of a file operation by its unique identifier. Use this to monitor long-running import or export tasks."""
 
     # Construct request model with validation
@@ -3381,7 +3515,7 @@ async def get_file_operation(id_: str = Field(..., alias="id", description="The 
 
 # Tags: FileOperations
 @mcp.tool()
-async def delete_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to delete.")) -> dict[str, Any]:
+async def delete_file_operation(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the file operation to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a file operation and permanently remove its associated files. Use this to clean up completed, failed, or unwanted import/export operations."""
 
     # Construct request model with validation
@@ -3419,7 +3553,7 @@ async def delete_file_operation(id_: str = Field(..., alias="id", description="T
 
 # Tags: FileOperations
 @mcp.tool()
-async def get_file_redirect(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the file operation to retrieve.")) -> dict[str, Any]:
+async def get_file_redirect(id_: str = Field(..., alias="id", description="The unique identifier (UUID format) of the file operation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a file by generating a temporary, signed URL with embedded credentials that redirects to the file's storage location."""
 
     # Construct request model with validation
@@ -3457,7 +3591,7 @@ async def get_file_redirect(id_: str = Field(..., alias="id", description="The u
 
 # Tags: FileOperations
 @mcp.tool()
-async def list_file_operations(body: _models.FileOperationsListBody | None = Field(None, description="Request body containing optional filter criteria such as operation type (import or export) to narrow results. Omit to retrieve all file operations.")) -> dict[str, Any]:
+async def list_file_operations(body: _models.FileOperationsListBody | None = Field(None, description="Request body containing optional filter criteria such as operation type (import or export) to narrow results. Omit to retrieve all file operations.")) -> dict[str, Any] | ToolResult:
     """Retrieve all file operations (imports and exports) for the current workspace. Results can be filtered by operation type to show only imports, exports, or all operations."""
 
     # Construct request model with validation
@@ -3496,7 +3630,7 @@ async def list_file_operations(body: _models.FileOperationsListBody | None = Fie
 
 # Tags: Groups
 @mcp.tool()
-async def get_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to retrieve.")) -> dict[str, Any]:
+async def get_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific group, including its name and member count, using its unique identifier."""
 
     # Construct request model with validation
@@ -3534,7 +3668,7 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique id
 
 # Tags: Groups
 @mcp.tool()
-async def list_groups(body: _models.GroupsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Refer to API documentation for supported query parameters.")) -> dict[str, Any]:
+async def list_groups(body: _models.GroupsListBody | None = Field(None, description="Optional request body for filtering or configuring the list operation. Refer to API documentation for supported query parameters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all groups in the workspace. Groups organize users and control access permissions for collections."""
 
     # Construct request model with validation
@@ -3573,7 +3707,7 @@ async def list_groups(body: _models.GroupsListBody | None = Field(None, descript
 
 # Tags: Groups
 @mcp.tool()
-async def create_group(name: str = Field(..., description="The name of the group (e.g., 'Designers'). Used to identify and reference the group in permission assignments and user management.")) -> dict[str, Any]:
+async def create_group(name: str = Field(..., description="The name of the group (e.g., 'Designers'). Used to identify and reference the group in permission assignments and user management.")) -> dict[str, Any] | ToolResult:
     """Create a new group with a specified name. Groups organize users and enable efficient permission management by allowing collection access to be assigned to multiple users simultaneously."""
 
     # Construct request model with validation
@@ -3614,7 +3748,7 @@ async def create_group(name: str = Field(..., description="The name of the group
 async def update_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group to update, formatted as a UUID."),
     name: str = Field(..., description="The new name for the group. Use a descriptive name that reflects the group's purpose or membership."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing group's name by providing its unique identifier and the new name."""
 
     # Construct request model with validation
@@ -3652,7 +3786,7 @@ async def update_group(
 
 # Tags: Groups
 @mcp.tool()
-async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to delete.")) -> dict[str, Any]:
+async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a group and revoke all member access to collections the group was added to. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3690,7 +3824,7 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Groups
 @mcp.tool()
-async def list_group_memberships(body: _models.GroupsMembershipsBody | None = Field(None, description="Request body containing filter criteria, sorting options, and pagination parameters to customize the membership list results.")) -> dict[str, Any]:
+async def list_group_memberships(body: _models.GroupsMembershipsBody | None = Field(None, description="Request body containing filter criteria, sorting options, and pagination parameters to customize the membership list results.")) -> dict[str, Any] | ToolResult:
     """Retrieve and filter all members belonging to a specific group. Use the request body to specify filtering criteria and pagination options."""
 
     # Construct request model with validation
@@ -3732,7 +3866,7 @@ async def list_group_memberships(body: _models.GroupsMembershipsBody | None = Fi
 async def add_user_to_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group to which the user will be added. Must be a valid UUID."),
     user_id: str = Field(..., alias="userId", description="The unique identifier of the user to add to the group. Must be a valid UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to a group. The user will become a member of the specified group and gain access to group resources."""
 
     # Construct request model with validation
@@ -3773,7 +3907,7 @@ async def add_user_to_group(
 async def remove_user_from_group(
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the group from which the user will be removed."),
     user_id: str = Field(..., alias="userId", description="The unique identifier (UUID) of the user to remove from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a group. This operation deletes the membership relationship between the specified user and group."""
 
     # Construct request model with validation
@@ -3811,7 +3945,7 @@ async def remove_user_from_group(
 
 # Tags: OAuthClients
 @mcp.tool()
-async def get_oauth_client() -> dict[str, Any]:
+async def get_oauth_client() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific OAuth client by providing either its unique identifier or client ID."""
 
     # Extract parameters for API call
@@ -3841,7 +3975,7 @@ async def get_oauth_client() -> dict[str, Any]:
 async def list_oauth_clients(
     offset: float | None = Field(None, description="The number of results to skip before returning items, used for pagination. Defaults to 0 to start from the beginning."),
     limit: float | None = Field(None, description="The maximum number of OAuth clients to return in a single response, used for pagination. Defaults to 25 items per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of OAuth clients accessible to the authenticated user, including both user-created clients and published clients available to the workspace."""
 
     # Construct request model with validation
@@ -3888,7 +4022,7 @@ async def update_oauth_client(
     avatar_url: str | None = Field(None, alias="avatarUrl", description="A URL pointing to an image that represents the OAuth client visually."),
     redirect_uris: list[str] | None = Field(None, alias="redirectUris", description="A list of valid redirect URIs where the OAuth client can redirect users after authentication. Each URI should be a complete, valid URL."),
     published: bool | None = Field(None, description="Whether this OAuth client is published and available for use by other workspaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing OAuth client's configuration, including its name, description, developer information, redirect URIs, and publication status."""
 
     # Construct request model with validation
@@ -3926,7 +4060,7 @@ async def update_oauth_client(
 
 # Tags: OAuthClients
 @mcp.tool()
-async def rotate_oauth_client_secret(id_: str = Field(..., alias="id", description="The unique identifier of the OAuth client, provided as a UUID.")) -> dict[str, Any]:
+async def rotate_oauth_client_secret(id_: str = Field(..., alias="id", description="The unique identifier of the OAuth client, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Generate a new client secret for an OAuth client, immediately invalidating the previous secret. Update your application to use the new secret before the old one expires to avoid authentication failures."""
 
     # Construct request model with validation
@@ -3964,7 +4098,7 @@ async def rotate_oauth_client_secret(id_: str = Field(..., alias="id", descripti
 
 # Tags: OAuthClients
 @mcp.tool()
-async def delete_oauth_client(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the OAuth client to delete.")) -> dict[str, Any]:
+async def delete_oauth_client(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the OAuth client to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an OAuth client and revoke all associated access tokens. This action cannot be undone and will immediately invalidate all active sessions using this client."""
 
     # Construct request model with validation
@@ -4005,7 +4139,7 @@ async def delete_oauth_client(id_: str = Field(..., alias="id", description="The
 async def list_oauth_authentications(
     offset: float | None = Field(None, description="The number of results to skip before returning items, used for pagination. Defaults to 0 to start from the beginning."),
     limit: float | None = Field(None, description="The maximum number of OAuth authentications to return in a single response, used for pagination. Defaults to 25 items per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all OAuth authentications accessible to the current user, representing third-party applications that have been authorized to access their account."""
 
     # Construct request model with validation
@@ -4046,7 +4180,7 @@ async def list_oauth_authentications(
 async def revoke_oauth_authentication(
     oauth_client_id: str = Field(..., alias="oauthClientId", description="The unique identifier (UUID format) of the OAuth client application whose access should be revoked."),
     scope: list[str] | None = Field(None, description="Optional list of specific permission scopes to revoke. If omitted, all scopes for the OAuth client will be revoked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke an OAuth authentication to remove a third-party application's access to the user's account. This operation permanently disconnects the authorized application."""
 
     # Construct request model with validation
@@ -4084,7 +4218,7 @@ async def revoke_oauth_authentication(
 
 # Tags: Revisions
 @mcp.tool()
-async def get_revision(id_: str = Field(..., alias="id", description="The unique identifier of the revision to retrieve, formatted as a UUID.")) -> dict[str, Any]:
+async def get_revision(id_: str = Field(..., alias="id", description="The unique identifier of the revision to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific revision of a document by its unique identifier. A revision represents a snapshot of the document at a particular point in time."""
 
     # Construct request model with validation
@@ -4122,7 +4256,7 @@ async def get_revision(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Revisions
 @mcp.tool()
-async def list_revisions(body: _models.RevisionsListBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for revisions to retrieve.")) -> dict[str, Any]:
+async def list_revisions(body: _models.RevisionsListBody | None = Field(None, description="Request body containing the document identifier and optional filtering criteria for revisions to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all revisions for a specific document. Revisions represent historical snapshots of document content and enable tracking of changes over time."""
 
     # Construct request model with validation
@@ -4161,7 +4295,7 @@ async def list_revisions(body: _models.RevisionsListBody | None = Field(None, de
 
 # Tags: Shares
 @mcp.tool()
-async def get_share_by_document(document_id: str | None = Field(None, alias="documentId", description="The unique identifier of the document whose share information should be retrieved. Must be a valid UUID format.")) -> dict[str, Any]:
+async def get_share_by_document(document_id: str | None = Field(None, alias="documentId", description="The unique identifier of the document whose share information should be retrieved. Must be a valid UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a share link using its associated document ID. This operation returns the share object containing access permissions and sharing configuration for the specified document."""
 
     # Construct request model with validation
@@ -4199,7 +4333,7 @@ async def get_share_by_document(document_id: str | None = Field(None, alias="doc
 
 # Tags: Shares
 @mcp.tool()
-async def list_shares(body: _models.SharesListBody | None = Field(None, description="Optional request body for filtering or configuring the share list retrieval. Consult the API documentation for supported query parameters or filter options.")) -> dict[str, Any]:
+async def list_shares(body: _models.SharesListBody | None = Field(None, description="Optional request body for filtering or configuring the share list retrieval. Consult the API documentation for supported query parameters or filter options.")) -> dict[str, Any] | ToolResult:
     """Retrieve all share links available in the workspace. This operation returns a complete list of shares that have been created for collaborative access."""
 
     # Construct request model with validation
@@ -4238,7 +4372,7 @@ async def list_shares(body: _models.SharesListBody | None = Field(None, descript
 
 # Tags: Shares
 @mcp.tool()
-async def create_share(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document to create a share link for.")) -> dict[str, Any]:
+async def create_share(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document to create a share link for.")) -> dict[str, Any] | ToolResult:
     """Creates a new share link for accessing a document. If multiple shares are requested for the same document using the same API key, the existing share object is returned. Shares are unpublished by default."""
 
     # Construct request model with validation
@@ -4279,7 +4413,7 @@ async def create_share(document_id: str = Field(..., alias="documentId", descrip
 async def update_share_published_status(
     id_: str = Field(..., alias="id", description="The unique identifier of the share to update, formatted as a UUID."),
     published: bool = Field(..., description="Whether the share should be published (true) and publicly accessible, or unpublished (false) and require authentication."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a share's published status to control access. When published is set to true, the share becomes publicly accessible via its link without requiring authentication."""
 
     # Construct request model with validation
@@ -4317,7 +4451,7 @@ async def update_share_published_status(
 
 # Tags: Shares
 @mcp.tool()
-async def revoke_share(id_: str = Field(..., alias="id", description="The unique identifier of the share to revoke, formatted as a UUID.")) -> dict[str, Any]:
+async def revoke_share(id_: str = Field(..., alias="id", description="The unique identifier of the share to revoke, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Deactivate a share link to prevent further access to the shared document. Once revoked, the share link becomes inactive and can no longer be used."""
 
     # Construct request model with validation
@@ -4358,7 +4492,7 @@ async def revoke_share(id_: str = Field(..., alias="id", description="The unique
 async def add_star(
     document_id: str | None = Field(None, alias="documentId", description="The UUID of the document to star. Either this or collectionId must be provided."),
     index: str | None = Field(None, description="The position in the starred items list where this star should appear. If not specified, the star will be added at the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a document or collection to the user's starred items, making it appear in their sidebar for quick access. Either a document ID or collection ID must be provided."""
 
     # Construct request model with validation
@@ -4399,7 +4533,7 @@ async def add_star(
 async def list_starred_documents(
     offset: float | None = Field(None, description="Number of documents to skip from the beginning of the list, useful for pagination. Defaults to 0 to start from the first document."),
     limit: float | None = Field(None, description="Maximum number of documents to return per request, useful for controlling response size and pagination. Defaults to 25 documents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all starred documents for the authenticated user. Stars serve as bookmarks for quick access to important documents in the sidebar."""
 
     # Construct request model with validation
@@ -4440,7 +4574,7 @@ async def list_starred_documents(
 async def update_star(
     id_: str = Field(..., alias="id", description="The unique identifier of the starred document to update, formatted as a UUID."),
     index: str = Field(..., description="The new display position for this starred document in the sidebar order. Lower indices appear higher in the list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder a starred document in the sidebar by updating its display position relative to other starred items."""
 
     # Construct request model with validation
@@ -4478,7 +4612,7 @@ async def update_star(
 
 # Tags: Stars
 @mcp.tool()
-async def remove_star(id_: str = Field(..., alias="id", description="The unique identifier of the starred document to remove, formatted as a UUID.")) -> dict[str, Any]:
+async def remove_star(id_: str = Field(..., alias="id", description="The unique identifier of the starred document to remove, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Remove a star from a document, deleting it from the user's starred documents list in the sidebar."""
 
     # Construct request model with validation
@@ -4516,7 +4650,7 @@ async def remove_star(id_: str = Field(..., alias="id", description="The unique 
 
 # Tags: Users
 @mcp.tool()
-async def send_user_invites(invites: list[_models.Invite] = Field(..., description="Array of user invitations to send. Each invitation specifies the recipient and any relevant details for account creation. Order is preserved as submitted.")) -> dict[str, Any]:
+async def send_user_invites(invites: list[_models.Invite] = Field(..., description="Array of user invitations to send. Each invitation specifies the recipient and any relevant details for account creation. Order is preserved as submitted.")) -> dict[str, Any] | ToolResult:
     """Send email invitations to one or more users to join the workspace. Each invitation includes a personalized link that allows recipients to create an account and access the workspace."""
 
     # Construct request model with validation
@@ -4554,7 +4688,7 @@ async def send_user_invites(invites: list[_models.Invite] = Field(..., descripti
 
 # Tags: Users
 @mcp.tool()
-async def get_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to retrieve.")) -> dict[str, Any]:
+async def get_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific user, including their name, email, avatar, and workspace role."""
 
     # Construct request model with validation
@@ -4592,7 +4726,7 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
 
 # Tags: Users
 @mcp.tool()
-async def list_users(body: _models.UsersListBody | None = Field(None, description="Optional request body containing filter criteria and pagination options to customize the user list results.")) -> dict[str, Any]:
+async def list_users(body: _models.UsersListBody | None = Field(None, description="Optional request body containing filter criteria and pagination options to customize the user list results.")) -> dict[str, Any] | ToolResult:
     """Retrieve and filter all users in the workspace. Supports optional filtering and pagination parameters to narrow results."""
 
     # Construct request model with validation
@@ -4635,7 +4769,7 @@ async def update_user(
     name: str | None = Field(None, description="The user's display name. Can be any string value."),
     language: str | None = Field(None, description="The user's preferred language, specified as a BCP 47 language tag (e.g., en, en-US, fr-CA)."),
     avatar_url: str | None = Field(None, alias="avatarUrl", description="A URI pointing to the user's avatar image. Must be a valid URL format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the authenticated user's profile information, including their display name and avatar. Optionally specify a user ID to update a different user's profile."""
 
     # Construct request model with validation
@@ -4676,7 +4810,7 @@ async def update_user(
 async def update_user_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the user whose role should be updated, formatted as a UUID."),
     role: Literal["admin", "member", "viewer", "guest"] = Field(..., description="The new role to assign to the user. Must be one of: admin, member, viewer, or guest."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's role within the system. This operation requires admin authorization and allows changing a user's access level to one of the predefined role types."""
 
     # Construct request model with validation
@@ -4714,7 +4848,7 @@ async def update_user_role(
 
 # Tags: Users
 @mcp.tool()
-async def suspend_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to suspend.")) -> dict[str, Any]:
+async def suspend_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to suspend.")) -> dict[str, Any] | ToolResult:
     """Suspend a user account to prevent sign-in and exclude them from billing calculations. Suspended users retain their data but cannot access the system."""
 
     # Construct request model with validation
@@ -4752,7 +4886,7 @@ async def suspend_user(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Users
 @mcp.tool()
-async def activate_user(id_: str = Field(..., alias="id", description="The UUID of the user to activate.")) -> dict[str, Any]:
+async def activate_user(id_: str = Field(..., alias="id", description="The UUID of the user to activate.")) -> dict[str, Any] | ToolResult:
     """Reactivate a suspended user to restore their signin access. Activation triggers billing recalculation in hosted environments."""
 
     # Construct request model with validation
@@ -4790,7 +4924,7 @@ async def activate_user(id_: str = Field(..., alias="id", description="The UUID 
 
 # Tags: Users
 @mcp.tool()
-async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to delete.")) -> dict[str, Any]:
+async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the user to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account. Note: Deleted users can be recreated if they sign in via SSO again. Consider suspending the user instead in most cases to preserve data integrity."""
 
     # Construct request model with validation
@@ -4831,7 +4965,7 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
 async def list_document_views(
     document_id: str = Field(..., alias="documentId", description="The unique identifier of the document to retrieve views for, formatted as a UUID."),
     include_suspended: bool | None = Field(None, alias="includeSuspended", description="Whether to include view records from users with suspended accounts. Defaults to false, excluding suspended user views."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users who have viewed a specific document along with the total view count. Optionally include views from suspended users."""
 
     # Construct request model with validation
@@ -4869,7 +5003,7 @@ async def list_document_views(
 
 # Tags: Views
 @mcp.tool()
-async def create_view_for_document(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document for which to create the view.")) -> dict[str, Any]:
+async def create_view_for_document(document_id: str = Field(..., alias="documentId", description="The unique identifier (UUID) of the document for which to create the view.")) -> dict[str, Any] | ToolResult:
     """Creates a new view for a document. Note: This operation is provided for completeness, but it is recommended to create views through the Outline UI instead of programmatically."""
 
     # Construct request model with validation
@@ -4911,7 +5045,7 @@ async def create_template(
     title: str = Field(..., description="The display name for the template. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     data: dict[str, Any] = Field(..., description="The template content structured as a ProseMirror document object, defining the default body and formatting for documents created from this template."),
     color: str | None = Field(None, description="Optional hex color code for the template icon (e.g., #FF5733). Must be a valid 6-digit hexadecimal color.", pattern="^#[0-9A-Fa-f]{6}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new template that serves as a reusable starting point for documents. Templates can be customized with content and styling, and optionally scoped to a specific collection."""
 
     # Construct request model with validation
@@ -4949,7 +5083,7 @@ async def create_template(
 
 # Tags: Templates
 @mcp.tool()
-async def list_templates(body: _models.TemplatesListBody | None = Field(None, description="Optional request body to filter templates by collection or apply other query criteria.")) -> dict[str, Any]:
+async def list_templates(body: _models.TemplatesListBody | None = Field(None, description="Optional request body to filter templates by collection or apply other query criteria.")) -> dict[str, Any] | ToolResult:
     """Retrieve all templates available to the current user, with optional filtering by collection. Templates without an associated collection are accessible workspace-wide."""
 
     # Construct request model with validation
@@ -4988,7 +5122,7 @@ async def list_templates(body: _models.TemplatesListBody | None = Field(None, de
 
 # Tags: Templates
 @mcp.tool()
-async def get_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, provided as either a UUID or a URL-friendly ID string.")) -> dict[str, Any]:
+async def get_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, provided as either a UUID or a URL-friendly ID string.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific template by its unique identifier. Accepts either the UUID or URL-friendly ID format."""
 
     # Construct request model with validation
@@ -5031,7 +5165,7 @@ async def update_template(
     title: str | None = Field(None, description="The display name for the template."),
     color: str | None = Field(None, description="The color of the template icon specified in hexadecimal format (e.g., #FF5733).", pattern="^#[0-9A-Fa-f]{6}$"),
     full_width: bool | None = Field(None, alias="fullWidth", description="Whether the template should render at full width in the user interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing template's properties such as title, icon color, and display width by providing its unique identifier."""
 
     # Construct request model with validation
@@ -5069,7 +5203,7 @@ async def update_template(
 
 # Tags: Templates
 @mcp.tool()
-async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, accepting either the UUID or the URL-friendly ID.")) -> dict[str, Any]:
+async def delete_template(id_: str = Field(..., alias="id", description="The unique identifier for the template, accepting either the UUID or the URL-friendly ID.")) -> dict[str, Any] | ToolResult:
     """Soft-delete a template by its unique identifier. The template can be restored later if needed."""
 
     # Construct request model with validation
@@ -5107,7 +5241,7 @@ async def delete_template(id_: str = Field(..., alias="id", description="The uni
 
 # Tags: Templates
 @mcp.tool()
-async def restore_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to restore. Accept either the UUID or the URL-friendly ID (urlId) format.")) -> dict[str, Any]:
+async def restore_template(id_: str = Field(..., alias="id", description="The unique identifier of the template to restore. Accept either the UUID or the URL-friendly ID (urlId) format.")) -> dict[str, Any] | ToolResult:
     """Restore a previously deleted template using its unique identifier. This operation recovers a soft-deleted template and makes it available for use again."""
 
     # Construct request model with validation
@@ -5148,7 +5282,7 @@ async def restore_template(id_: str = Field(..., alias="id", description="The un
 async def duplicate_template(
     id_: str = Field(..., alias="id", description="The unique identifier of the template to duplicate. Accepts either the UUID or the URL-friendly ID (urlId) of the template."),
     title: str | None = Field(None, description="Optional custom title for the duplicated template. If not provided, the original template's title will be used for the copy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a copy of an existing template with optional customization. You can override the duplicated template's title and specify the target collection for the copy."""
 
     # Construct request model with validation
