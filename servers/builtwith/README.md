@@ -1,11 +1,12 @@
 # BuiltWith MCP Server
+<!-- mcp-name: com.mcparmory/builtwith -->
 
 Base URL: https://api.builtwith.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
 | **Tools** | 34 |
-| **Auth** | API Key, Bearer Token |
+| **Auth** | API Key |
 
 ## API Info
 - **Contact:** BuiltWith Support (support@builtwith.com) — [https://builtwith.com/contact](https://builtwith.com/contact)
@@ -18,9 +19,7 @@ Base URL: https://api.builtwith.com
 ### Quick Start (recommended)
 
 ```bash
-API_KEY_QUERY=YOUR_API_KEY_QUERY \
-API_KEY_HEADER=YOUR_API_KEY_HEADER \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
+API_KEY=YOUR_API_KEY \
 uvx mcparmory-builtwith
 ```
 
@@ -28,9 +27,7 @@ uvx mcparmory-builtwith
 
 ```bash
 pip install mcparmory-builtwith
-API_KEY_QUERY=YOUR_API_KEY_QUERY \
-API_KEY_HEADER=YOUR_API_KEY_HEADER \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
+API_KEY=YOUR_API_KEY \
 mcparmory-builtwith
 ```
 
@@ -45,9 +42,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-builtwith"],
       "env": {
-        "API_KEY_QUERY": "YOUR_API_KEY_QUERY",
-        "API_KEY_HEADER": "YOUR_API_KEY_HEADER",
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
+        "API_KEY": "YOUR_API_KEY"
       }
     }
   }
@@ -60,9 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY_QUERY` — API Key Authentication (KEY)
-- `API_KEY_HEADER` — API Key Authentication (Authorization)
-- `BEARER_TOKEN` — Bearer token
+- `API_KEY` — API Key Authentication (KEY)
 Do not commit credentials to version control.
 
 ---
@@ -96,6 +89,16 @@ Example (if server is at `/home/user/mcp-servers/builtwith`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/builtwith:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -103,7 +106,9 @@ docker build -t builtwith .
 docker run -p 8000:8000 --env-file .env builtwith
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

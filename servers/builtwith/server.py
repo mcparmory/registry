@@ -6,7 +6,7 @@ API Info:
 - Contact: BuiltWith Support <support@builtwith.com> (https://builtwith.com/contact)
 - Terms of Service: https://builtwith.com/terms
 
-Generated: 2026-04-14 18:16:52 UTC
+Generated: 2026-04-23 21:05:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.builtwith.com")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -827,16 +940,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -850,6 +964,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -892,6 +1007,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -903,44 +1033,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'bearerAuth',
     'apiKeyQuery',
-    'apiKeyHeader',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["bearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
-    logging.info("Authentication configured: bearerAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for bearerAuth not configured: {error_msg}")
-    _auth_handlers["bearerAuth"] = None
-try:
-    _auth_handlers["apiKeyQuery"] = _auth.APIKeyAuth(env_var="API_KEY_QUERY", location="query", param_name="KEY")
+    _auth_handlers["apiKeyQuery"] = _auth.APIKeyAuth(env_var="API_KEY", location="query", param_name="KEY")
     logging.info("Authentication configured: apiKeyQuery")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for apiKeyQuery not configured: {error_msg}")
     _auth_handlers["apiKeyQuery"] = None
-try:
-    _auth_handlers["apiKeyHeader"] = _auth.APIKeyAuth(env_var="API_KEY_HEADER", location="header", param_name="Authorization")
-    logging.info("Authentication configured: apiKeyHeader")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for apiKeyHeader not configured: {error_msg}")
-    _auth_handlers["apiKeyHeader"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1071,7 +1182,7 @@ async def detect_technologies(
     fdrange: str | None = Field(None, alias="FDRANGE", description="Filter technologies by first detection date range using ISO 8601 format (start_date|end_date, e.g., 2022-01-01|2023-01-01)."),
     ldrange: str | None = Field(None, alias="LDRANGE", description="Filter technologies by last detection date range using ISO 8601 format (start_date|end_date, e.g., 2022-01-01|2023-01-01)."),
     noattr: Literal["yes"] | None = Field(None, alias="NOATTR", description="Exclude technology attributes data to reduce response size and improve performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Detect and retrieve technology stack information for one or more websites. Returns comprehensive details about installed technologies, metadata, and detection attributes in JSON format."""
 
     # Construct request model with validation
@@ -1086,11 +1197,9 @@ async def detect_technologies(
     # Extract parameters for API call
     _http_path = "/v22/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("detect_technologies")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1103,7 +1212,6 @@ async def detect_technologies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1119,7 +1227,7 @@ async def get_domain_technologies(
     fdrange: str | None = Field(None, alias="FDRANGE", description="Filters technologies to include only those first detected within a specified date range. Use ISO 8601 format for date specification."),
     ldrange: str | None = Field(None, alias="LDRANGE", description="Filters technologies to include only those last detected within a specified date range. Use ISO 8601 format for date specification."),
     noattr: Literal["yes"] | None = Field(None, alias="NOATTR", description="When enabled, excludes technology attributes from the response to reduce payload size and improve response performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detected technologies and metadata for one or more domains in XML format. Supports filtering by detection dates, trust data inclusion, and optional data exclusion for performance optimization."""
 
     # Construct request model with validation
@@ -1134,11 +1242,9 @@ async def get_domain_technologies(
     # Extract parameters for API call
     _http_path = "/v22/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_technologies")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1151,7 +1257,6 @@ async def get_domain_technologies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1164,7 +1269,7 @@ async def get_domain_technologies_csv(
     nometa: Literal["yes"] | None = Field(None, alias="NOMETA", description="When set to 'yes', excludes metadata fields from the response to reduce payload size."),
     nopii: Literal["yes"] | None = Field(None, alias="NOPII", description="When set to 'yes', removes personally identifiable information such as people names and email addresses from the results."),
     noattr: Literal["yes"] | None = Field(None, alias="NOATTR", description="When set to 'yes', excludes attribute data from the response to reduce payload size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve technology stack information for one or more websites in CSV format. Supports batch lookups of up to 16 domains with optional filtering and data reduction."""
 
     # Construct request model with validation
@@ -1179,11 +1284,9 @@ async def get_domain_technologies_csv(
     # Extract parameters for API call
     _http_path = "/v22/api.csv"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_technologies_csv")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1196,7 +1299,6 @@ async def get_domain_technologies_csv(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1208,7 +1310,7 @@ async def bulk_lookup_domains(
     no_meta: bool | None = Field(None, alias="noMeta", description="Exclude metadata from the response to reduce payload size and improve performance."),
     no_pii: bool | None = Field(None, alias="noPii", description="Strip personally identifiable information from results to ensure privacy compliance."),
     live_only: bool | None = Field(None, alias="liveOnly", description="Return only technologies that are currently active or deployed on the domains, filtering out historical or inactive detections."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit multiple root domains for technology stack analysis. Small batches return results immediately, while large batches are processed asynchronously and return a job ID for tracking."""
 
     # Construct request model with validation
@@ -1225,11 +1327,9 @@ async def bulk_lookup_domains(
     _http_path = "/v22/domain/bulk"
     _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("bulk_lookup_domains")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1243,14 +1343,13 @@ async def bulk_lookup_domains(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Domain API
 @mcp.tool()
-async def get_bulk_domain_job_status(job_id: str = Field(..., description="The unique identifier of the bulk job, provided as a UUID.")) -> dict[str, Any]:
+async def get_bulk_domain_job_status(job_id: str = Field(..., description="The unique identifier of the bulk job, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of a bulk domain lookup job. Use this to check progress and retrieve completed domain information."""
 
     # Construct request model with validation
@@ -1265,11 +1364,9 @@ async def get_bulk_domain_job_status(job_id: str = Field(..., description="The u
     # Extract parameters for API call
     _http_path = _build_path("/v22/domain/bulk/{job_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v22/domain/bulk/{job_id}"
     _http_query = {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_bulk_domain_job_status")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1282,14 +1379,13 @@ async def get_bulk_domain_job_status(job_id: str = Field(..., description="The u
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Domain API
 @mcp.tool()
-async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="The unique identifier of the bulk job, formatted as a UUID.")) -> dict[str, Any]:
+async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="The unique identifier of the bulk job, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the results of a completed bulk domain lookup job. Note that results are automatically deleted after the first access, so this is a one-time download operation."""
 
     # Construct request model with validation
@@ -1304,11 +1400,9 @@ async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="
     # Extract parameters for API call
     _http_path = _build_path("/v22/domain/bulk/{job_id}/result", _request.path.model_dump(by_alias=True)) if _request.path else "/v22/domain/bulk/{job_id}/result"
     _http_query = {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("retrieve_bulk_domain_job_result")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1321,14 +1415,13 @@ async def retrieve_bulk_domain_job_result(job_id: str = Field(..., description="
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Free API
 @mcp.tool()
-async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Provide only the root domain (e.g., hotelscombined.com); subdomains will automatically resolve to their root domain.")) -> dict[str, Any]:
+async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Provide only the root domain (e.g., hotelscombined.com); subdomains will automatically resolve to their root domain.")) -> dict[str, Any] | ToolResult:
     """Retrieve technology stack metadata for a domain, including last updated timestamp and counts of active and inactive technologies organized by group and category."""
 
     # Construct request model with validation
@@ -1343,11 +1436,9 @@ async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP",
     # Extract parameters for API call
     _http_path = "/free1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_technology_summary")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1360,14 +1451,13 @@ async def get_domain_technology_summary(lookup: str = Field(..., alias="LOOKUP",
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Free API
 @mcp.tool()
-async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Only root domain results are returned; subdomains are automatically resolved to their root domain.")) -> dict[str, Any]:
+async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOKUP", description="The domain to analyze. Only root domain results are returned; subdomains are automatically resolved to their root domain.")) -> dict[str, Any] | ToolResult:
     """Retrieve technology group and category metadata for a domain, including last updated timestamp and counts of active and inactive technologies."""
 
     # Construct request model with validation
@@ -1382,11 +1472,9 @@ async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOK
     # Extract parameters for API call
     _http_path = "/free1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_technology_summary_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1399,7 +1487,6 @@ async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOK
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1409,7 +1496,7 @@ async def get_domain_technology_summary_xml(lookup: str = Field(..., alias="LOOK
 async def list_website_relationships(
     lookup: str = Field(..., alias="LOOKUP", description="One or more domains to analyze for relationships. Accepts individual domains, subdomains, or up to 16 domains as comma-separated values for batch lookups."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include website IP address data in the results, which significantly expands the relationship data returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the network of relationships between websites, showing which sites are linked together. Results are returned in JSON format and consume 1 API credit per 500 relationships."""
 
     # Construct request model with validation
@@ -1424,11 +1511,9 @@ async def list_website_relationships(
     # Extract parameters for API call
     _http_path = "/rv4/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_website_relationships")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1441,7 +1526,6 @@ async def list_website_relationships(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1451,7 +1535,7 @@ async def list_website_relationships(
 async def list_website_relationships_xml(
     lookup: str = Field(..., alias="LOOKUP", description="One or more domains to analyze for relationships. Accepts individual domains, subdomains, or up to 16 domains as comma-separated values for batch lookups."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address data for the websites in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve relationships between websites showing which sites are linked together in XML format. Each request consumes 1 API credit per 500 relationships returned."""
 
     # Construct request model with validation
@@ -1466,11 +1550,9 @@ async def list_website_relationships_xml(
     # Extract parameters for API call
     _http_path = "/rv4/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_website_relationships_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1483,7 +1565,6 @@ async def list_website_relationships_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1493,7 +1574,7 @@ async def list_website_relationships_xml(
 async def list_website_relationships_csv(
     lookup: str = Field(..., alias="LOOKUP", description="The domain name to lookup and analyze for relationships. Specify a single domain (e.g., builtwith.com) to retrieve all linked websites."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address data for the websites in the results. Set to 'yes' to enable IP data retrieval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve relationships between websites showing which sites are linked together in CSV format. Each request consumes 1 API credit per 500 relationships returned."""
 
     # Construct request model with validation
@@ -1508,11 +1589,9 @@ async def list_website_relationships_csv(
     # Extract parameters for API call
     _http_path = "/rv4/api.csv"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_website_relationships_csv")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1525,7 +1604,6 @@ async def list_website_relationships_csv(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1535,7 +1613,7 @@ async def list_website_relationships_csv(
 async def list_website_relationships_tsv(
     lookup: str = Field(..., alias="LOOKUP", description="The domain or domains to analyze for relationship data. Specify one or more domains to discover their linking relationships with other websites."),
     ip: Literal["yes"] | None = Field(None, alias="IP", description="Optional flag to include IP address information for the websites in the results. Set to 'yes' to retrieve IP data alongside relationship data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve relationships between websites showing which sites link to each other in TSV format. Each API credit covers up to 500 relationships."""
 
     # Construct request model with validation
@@ -1550,11 +1628,9 @@ async def list_website_relationships_tsv(
     # Extract parameters for API call
     _http_path = "/rv4/api.Tsv"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_website_relationships_tsv")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1567,7 +1643,6 @@ async def list_website_relationships_tsv(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1578,7 +1653,7 @@ async def list_websites_by_technology(
     tech: str = Field(..., alias="TECH", description="The name of the web technology to search for, with spaces replaced by dashes (e.g., 'Shopify' becomes 'Shopify'). This is the core search parameter."),
     meta: Literal["yes"] | None = Field(None, alias="META", description="Include enriched metadata with results such as company names, titles, social media links, addresses, email addresses, phone numbers, and traffic rankings."),
     country: str | None = Field(None, alias="COUNTRY", description="Filter results to websites with specific country domains and/or country addresses. Specify one or more countries using ISO 3166-1 alpha-2 format (e.g., 'br' for Brazil), separated by commas for multiple countries. Use 'UK' instead of 'GB' for the United Kingdom."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of websites currently using a specified web technology. Optionally filter by country and include detailed metadata such as company names, contact information, and traffic rankings."""
 
     # Construct request model with validation
@@ -1593,11 +1668,9 @@ async def list_websites_by_technology(
     # Extract parameters for API call
     _http_path = "/lists12/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_websites_by_technology")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1610,7 +1683,6 @@ async def list_websites_by_technology(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1621,7 +1693,7 @@ async def list_websites_by_technology_xml(
     tech: str = Field(..., alias="TECH", description="The name of the web technology to search for. Replace spaces with dashes in the technology name (e.g., 'Magento' or 'Google-Analytics')."),
     meta: Literal["yes"] | None = Field(None, alias="META", description="Include detailed metadata with results such as company names, titles, social media links, addresses, email addresses, phone numbers, and traffic rankings."),
     country: str | None = Field(None, alias="COUNTRY", description="Filter results by country using ISO 3166-1 alpha-2 country codes (e.g., 'br' for Brazil, 'uk' for United Kingdom). Specify multiple countries as comma-separated values (e.g., 'au,nz')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of websites currently using a specified web technology. Optionally filter by country and include detailed metadata such as company names, contact information, and traffic rankings."""
 
     # Construct request model with validation
@@ -1636,11 +1708,9 @@ async def list_websites_by_technology_xml(
     # Extract parameters for API call
     _http_path = "/lists12/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_websites_by_technology_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1653,14 +1723,13 @@ async def list_websites_by_technology_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Company to URL API
 @mcp.tool()
-async def lookup_company_domains(company: str = Field(..., alias="COMPANY", description="One or more company names to look up, provided as a single name or as a comma-separated list of names (URL encoded).")) -> dict[str, Any]:
+async def lookup_company_domains(company: str = Field(..., alias="COMPANY", description="One or more company names to look up, provided as a single name or as a comma-separated list of names (URL encoded).")) -> dict[str, Any] | ToolResult:
     """Retrieve domain names and websites associated with one or more company names, ordered by relevance to help identify official web presences."""
 
     # Construct request model with validation
@@ -1675,11 +1744,9 @@ async def lookup_company_domains(company: str = Field(..., alias="COMPANY", desc
     # Extract parameters for API call
     _http_path = "/ctu3/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("lookup_company_domains")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1692,14 +1759,13 @@ async def lookup_company_domains(company: str = Field(..., alias="COMPANY", desc
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Company to URL API
 @mcp.tool()
-async def resolve_company_domains(company: str = Field(..., alias="COMPANY", description="A single company name or comma-separated list of company names to look up. Each company name should be URL encoded if containing special characters.")) -> dict[str, Any]:
+async def resolve_company_domains(company: str = Field(..., alias="COMPANY", description="A single company name or comma-separated list of company names to look up. Each company name should be URL encoded if containing special characters.")) -> dict[str, Any] | ToolResult:
     """Resolve domain names and websites for one or more company names. Supply a single company name or a comma-separated list of company names to retrieve associated domain information in XML format."""
 
     # Construct request model with validation
@@ -1714,11 +1780,9 @@ async def resolve_company_domains(company: str = Field(..., alias="COMPANY", des
     # Extract parameters for API call
     _http_path = "/ctu3/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("resolve_company_domains")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1731,7 +1795,6 @@ async def resolve_company_domains(company: str = Field(..., alias="COMPANY", des
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1741,7 +1804,7 @@ async def resolve_company_domains(company: str = Field(..., alias="COMPANY", des
 async def list_domains_by_attribute(
     lookup: str = Field(..., alias="LOOKUP", description="The attribute to search for, specified in ATTRIBUTE-TYPE-CODE format (e.g., IP-98.158.194.127 or CA-PUB-1894893914772263). You can provide up to 16 comma-separated values to lookup multiple attributes in a single request."),
     types: bool | None = Field(None, alias="TYPES", description="Set to true to retrieve the list of available attribute types that can be used in lookups instead of searching for domains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of domains that share a common attribute such as an IP address, Google Analytics tag, or other identifier. Optionally retrieve available attribute types for lookup."""
 
     # Construct request model with validation
@@ -1756,11 +1819,9 @@ async def list_domains_by_attribute(
     # Extract parameters for API call
     _http_path = "/tag1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_domains_by_attribute")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1773,7 +1834,6 @@ async def list_domains_by_attribute(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1783,7 +1843,7 @@ async def list_domains_by_attribute(
 async def list_domains_by_attribute_xml(
     lookup: str = Field(..., alias="LOOKUP", description="The attribute to search for, specified in ATTRIBUTE-TYPE-CODE format (e.g., IP-98.158.194.127 for IP addresses or CA-PUB-1894893914772263 for Google Analytics tags). You can provide up to 16 comma-separated values to search for multiple attributes at once."),
     types: bool | None = Field(None, alias="TYPES", description="Set to true to retrieve the list of available attribute types that can be used for lookups instead of searching for domains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of domains that share a specific attribute such as an IP address, Google Analytics tag, or other identifier in XML format."""
 
     # Construct request model with validation
@@ -1798,11 +1858,9 @@ async def list_domains_by_attribute_xml(
     # Extract parameters for API call
     _http_path = "/tag1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_domains_by_attribute_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1815,14 +1873,13 @@ async def list_domains_by_attribute_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Recommendations API
 @mcp.tool()
-async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any]:
+async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any] | ToolResult:
     """Retrieve technology recommendations for websites based on analysis of similar technology profiles. Accepts one or more domains to identify recommended technologies used by comparable sites."""
 
     # Construct request model with validation
@@ -1837,11 +1894,9 @@ async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP"
     # Extract parameters for API call
     _http_path = "/rec1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_technology_recommendations")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1854,14 +1909,13 @@ async def get_technology_recommendations(lookup: str = Field(..., alias="LOOKUP"
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Recommendations API
 @mcp.tool()
-async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any]:
+async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze, provided as a single domain or comma-separated list of up to 16 domains. Only alphanumeric characters, dots, hyphens, and commas are allowed.", pattern="^[a-zA-Z0-9.,-]+$")) -> dict[str, Any] | ToolResult:
     """Retrieve technology stack recommendations for websites based on analysis of similar technology profiles. Returns results in XML format."""
 
     # Construct request model with validation
@@ -1876,11 +1930,9 @@ async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOO
     # Extract parameters for API call
     _http_path = "/rec1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_technology_recommendations_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1893,14 +1945,13 @@ async def get_technology_recommendations_xml(lookup: str = Field(..., alias="LOO
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Redirects API
 @mcp.tool()
-async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up (e.g., hotelscombined.com). Only root domains are supported; internal pages and subdomains are not valid.")) -> dict[str, Any]:
+async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up (e.g., hotelscombined.com). Only root domains are supported; internal pages and subdomains are not valid.")) -> dict[str, Any] | ToolResult:
     """Retrieve live and historical redirect information for a domain, including both inbound and outbound redirects in JSON format."""
 
     # Construct request model with validation
@@ -1915,11 +1966,9 @@ async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", descript
     # Extract parameters for API call
     _http_path = "/redirect1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_redirects")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1932,14 +1981,13 @@ async def get_domain_redirects(lookup: str = Field(..., alias="LOOKUP", descript
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Redirects API
 @mcp.tool()
-async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up redirects for. Only root domains are supported (e.g., builtwith.com); internal pages and subdomains are not accepted.")) -> dict[str, Any]:
+async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", description="The root domain to look up redirects for. Only root domains are supported (e.g., builtwith.com); internal pages and subdomains are not accepted.")) -> dict[str, Any] | ToolResult:
     """Retrieve live and historical redirect information for a domain in XML format. Returns both inbound and outbound redirects that point to or from the specified domain."""
 
     # Construct request model with validation
@@ -1954,11 +2002,9 @@ async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", desc
     # Extract parameters for API call
     _http_path = "/redirect1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_domain_redirects_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -1971,14 +2017,13 @@ async def get_domain_redirects_xml(lookup: str = Field(..., alias="LOOKUP", desc
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Keywords API
 @mcp.tool()
-async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze (e.g., cnn.com). Use comma-separated values to look up multiple domains at once, up to 16 domains maximum. Only root domains are supported; subdomains and internal page URLs will not work.")) -> dict[str, Any]:
+async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze (e.g., cnn.com). Use comma-separated values to look up multiple domains at once, up to 16 domains maximum. Only root domains are supported; subdomains and internal page URLs will not work.")) -> dict[str, Any] | ToolResult:
     """Retrieve keywords found on one or more domains. Useful for understanding the primary topics and content focus of websites."""
 
     # Construct request model with validation
@@ -1993,11 +2038,9 @@ async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descript
     # Extract parameters for API call
     _http_path = "/kw2/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_domain_keywords")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2010,14 +2053,13 @@ async def list_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descript
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: Keywords API
 @mcp.tool()
-async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze for keywords. Provide a single domain (e.g., hotelscombined.com) or multiple domains in comma-separated format for batch lookup of up to 16 domains. Subdomains and internal page URLs are not supported.")) -> dict[str, Any]:
+async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", description="One or more root domains to analyze for keywords. Provide a single domain (e.g., hotelscombined.com) or multiple domains in comma-separated format for batch lookup of up to 16 domains. Subdomains and internal page URLs are not supported.")) -> dict[str, Any] | ToolResult:
     """Extract keywords found on one or more domains and return the results in XML format. Useful for SEO analysis and understanding domain content focus."""
 
     # Construct request model with validation
@@ -2032,11 +2074,9 @@ async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descr
     # Extract parameters for API call
     _http_path = "/kw2/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("extract_domain_keywords")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2049,7 +2089,6 @@ async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descr
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2059,7 +2098,7 @@ async def extract_domain_keywords(lookup: str = Field(..., alias="LOOKUP", descr
 async def search_websites_by_keyword(
     keyword: str = Field(..., alias="KEYWORD", description="The keyword to search for. Must be at least 4 letters long, contain only alphabetical characters, and cannot be a common stop word (e.g., 'the', 'and').", min_length=4),
     limit: int | None = Field(None, alias="LIMIT", description="Number of results to return, ranging from 16 to 1000 domains. Defaults to 100 results if not specified.", ge=16, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for websites containing specific keywords. Returns a list of domain names that match your search criteria, useful for market research, competitor analysis, or finding relevant web properties."""
 
     # Construct request model with validation
@@ -2074,11 +2113,9 @@ async def search_websites_by_keyword(
     # Extract parameters for API call
     _http_path = "/kws1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_websites_by_keyword")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2091,7 +2128,6 @@ async def search_websites_by_keyword(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2101,7 +2137,7 @@ async def search_websites_by_keyword(
 async def search_websites_by_keyword_csv(
     keyword: str = Field(..., alias="KEYWORD", description="The keyword to search for. Must be at least 4 characters long, contain only alphabetical characters, and cannot be a common stop word.", min_length=4),
     limit: int | None = Field(None, alias="LIMIT", description="The number of results to return, ranging from 16 to 1000 results. Defaults to 100 if not specified.", ge=16, le=1000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for websites containing a specific keyword and retrieve results in CSV format. Useful for finding web properties associated with particular topics or terms."""
 
     # Construct request model with validation
@@ -2116,11 +2152,9 @@ async def search_websites_by_keyword_csv(
     # Extract parameters for API call
     _http_path = "/kws1/api.csv"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_websites_by_keyword_csv")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2133,7 +2167,6 @@ async def search_websites_by_keyword_csv(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2143,7 +2176,7 @@ async def search_websites_by_keyword_csv(
 async def search_technologies(
     query: str = Field(..., alias="QUERY", description="The search query describing the technologies or categories you want to find (e.g., 'react framework'). Use natural language to describe what you're looking for."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return in the response. Must be between 1 and 100 results; defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for technologies and categories using natural language queries powered by vector similarity matching. Discover relevant tools and categories by describing what you're looking for."""
 
     # Construct request model with validation
@@ -2158,11 +2191,9 @@ async def search_technologies(
     # Extract parameters for API call
     _http_path = "/vector/v1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_technologies")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2175,7 +2206,6 @@ async def search_technologies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2185,7 +2215,7 @@ async def search_technologies(
 async def search_technologies_xml(
     query: str = Field(..., alias="QUERY", description="The search query describing the technology or category you want to find (e.g., 'google analytics', 'web tracking', 'analytics platform')"),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return, between 1 and 100 (defaults to 10 if not specified)", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for technologies and categories using natural language queries powered by vector similarity matching. Describe what you're looking for to discover relevant technologies and their categories."""
 
     # Construct request model with validation
@@ -2200,11 +2230,9 @@ async def search_technologies_xml(
     # Extract parameters for API call
     _http_path = "/vector/v1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_technologies_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2217,7 +2245,6 @@ async def search_technologies_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2227,7 +2254,7 @@ async def search_technologies_xml(
 async def search_technologies_csv(
     query: str = Field(..., alias="QUERY", description="The search query describing the technologies or categories you want to find (e.g., 'ecommerce platform'). Use natural language to describe what you're looking for."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of results to return in the response. Must be between 1 and 100 results; defaults to 10 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for technologies and categories using natural language queries powered by vector similarity matching. Returns matching results in CSV format for easy integration and analysis."""
 
     # Construct request model with validation
@@ -2242,11 +2269,9 @@ async def search_technologies_csv(
     # Extract parameters for API call
     _http_path = "/vector/v1/api.csv"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_technologies_csv")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2259,7 +2284,6 @@ async def search_technologies_csv(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2269,7 +2293,7 @@ async def search_technologies_csv(
 async def get_technology_trends(
     tech: str = Field(..., alias="TECH", description="The name of the technology to retrieve trends for. Use hyphens (-) instead of spaces in multi-word technology names (e.g., 'Magento')."),
     date: str | None = Field(None, alias="DATE", description="Optional date to retrieve historical trend totals. When provided, returns the trend data closest to the specified date in ISO 8601 format (YYYY-MM-DD)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve technology trend data in JSON format for a specified technology, optionally filtered to a specific date."""
 
     # Construct request model with validation
@@ -2284,11 +2308,9 @@ async def get_technology_trends(
     # Extract parameters for API call
     _http_path = "/trends/v6/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_technology_trends")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2301,7 +2323,6 @@ async def get_technology_trends(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2311,7 +2332,7 @@ async def get_technology_trends(
 async def get_technology_trends_xml(
     tech: str = Field(..., alias="TECH", description="The name of the technology to retrieve trends for. Use hyphens to replace spaces in multi-word technology names (e.g., 'Shopify' or 'Node-js')."),
     date: str | None = Field(None, alias="DATE", description="Optional date to retrieve historical trend data. When provided, returns trend totals closest to the specified date in ISO 8601 format (YYYY-MM-DD)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve technology trend data in XML format for a specified technology, optionally filtered to a specific date."""
 
     # Construct request model with validation
@@ -2326,11 +2347,9 @@ async def get_technology_trends_xml(
     # Extract parameters for API call
     _http_path = "/trends/v6/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_technology_trends_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2343,7 +2362,6 @@ async def get_technology_trends_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2354,7 +2372,7 @@ async def search_product_listings(
     query: str = Field(..., alias="QUERY", description="Search query for products or specific domains. Use 'dom:domain.com' format to find all products available at a particular website, or enter a product name or description to search across all shops."),
     limit: int | None = Field(None, alias="LIMIT", description="Maximum number of shops to return in the results, ranging from 1 to 500. Defaults to 50 shops per request.", ge=1, le=500),
     page: int | None = Field(None, alias="PAGE", description="Zero-indexed page number for pagination through results. Use 0 for the first page, 1 for the second, and so on. Defaults to the first page.", ge=0),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for eCommerce products across the internet and discover which shops are selling them. Results are organized by domain/shop and support pagination for browsing large result sets."""
 
     # Construct request model with validation
@@ -2369,11 +2387,9 @@ async def search_product_listings(
     # Extract parameters for API call
     _http_path = "/productv1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_product_listings")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2386,7 +2402,6 @@ async def search_product_listings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2397,7 +2412,7 @@ async def assess_domain_trust(
     lookup: str = Field(..., alias="LOOKUP", description="The domain, subdomain, or specific page URL to evaluate for trustworthiness. Supports both root domains and internal page paths."),
     live: Literal["yes", "no"] | None = Field(None, alias="LIVE", description="Enable real-time website verification for more accurate results. Live lookups take longer to complete but are required when the initial assessment indicates the site needs further investigation."),
     words: str | None = Field(None, alias="WORDS", description="Optional keywords to cross-reference against website content and metadata, provided as a comma-separated list. Helps identify relevance and potential keyword stuffing or mismatch indicators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Evaluate the trustworthiness of a website to support fraud detection and risk assessment. Analyzes trust signals including technology investment, domain history, relationships, response patterns, and keyword relevance."""
 
     # Construct request model with validation
@@ -2412,11 +2427,9 @@ async def assess_domain_trust(
     # Extract parameters for API call
     _http_path = "/trustv1/api.json"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("assess_domain_trust")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2429,7 +2442,6 @@ async def assess_domain_trust(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -2440,7 +2452,7 @@ async def assess_domain_trust_xml(
     lookup: str = Field(..., alias="LOOKUP", description="The domain, subdomain, or internal page URL to evaluate. Supports subdomains and internal pages when using the live lookup feature."),
     live: Literal["yes", "no"] | None = Field(None, alias="LIVE", description="Enable live website lookup for real-time verification. Live lookups take longer to complete but are required when the initial assessment returns a 'needLive' status to determine if the website is genuinely suspect."),
     words: str | None = Field(None, alias="WORDS", description="Optional keywords to match against the website content and metadata. Provide as a comma-separated list to help identify relevant trust signals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Evaluate the trustworthiness of a website for fraud detection purposes. Returns trust status and analysis based on technology spend, time, relationships, response, keywords, and other attributes in XML format."""
 
     # Construct request model with validation
@@ -2455,11 +2467,9 @@ async def assess_domain_trust_xml(
     # Extract parameters for API call
     _http_path = "/trustv1/api.xml"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("assess_domain_trust_xml")
-    _http_headers.update(_auth.get("headers", {}))
     _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
@@ -2472,7 +2482,6 @@ async def assess_domain_trust_xml(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data

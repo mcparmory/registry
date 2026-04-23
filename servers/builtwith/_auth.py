@@ -1,7 +1,7 @@
 """
 Authentication module for BuiltWith MCP server.
 
-Generated: 2026-04-14 18:16:52 UTC
+Generated: 2026-04-23 21:05:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "APIKeyAuth",
-    "BearerTokenAuth",
     "OPERATION_AUTH_MAP",
 ]
 
@@ -96,48 +95,6 @@ class APIKeyAuth:
             return {}
         return {self.param_name: self.api_key}
 
-class BearerTokenAuth:
-    """
-    Bearer token authentication for BuiltWith API.
-
-    Configuration:
-        Provide the raw token in the environment variable.
-        The authorization scheme prefix is automatically inserted.
-    """
-
-    def __init__(self, env_var: str = "BEARER_TOKEN", token_format: str = "Bearer"):
-        """Initialize bearer token authentication from environment variable.
-
-        Args:
-            env_var: Environment variable name containing the bearer token.
-            token_format: Authorization scheme prefix (e.g., 'Bearer').
-        """
-        self.token_format = token_format
-        self.token = os.getenv(env_var, "").strip()
-
-        # Check for empty token
-        if not self.token:
-            raise ValueError(
-                f"{env_var} environment variable not set. "
-                "Leave empty in .env to disable Bearer Token auth."
-            )
-
-        # Detect common placeholder patterns
-        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "sk_test_placeholder"]
-        token_lower = self.token.lower()
-
-        if any(p in token_lower for p in placeholders):
-            raise ValueError(
-                f"Bearer token appears to be a placeholder ({self.token[:20]}...). "
-                "Please set a real token or leave empty to disable Bearer Token auth."
-            )
-
-    def get_auth_headers(self) -> dict[str, str]:
-        """Get authentication headers for API requests."""
-        return {
-            'Authorization': f'{self.token_format} {self.token}'
-        }
-
 
 # ============================================================================
 # Operation Auth Requirements Map
@@ -150,38 +107,38 @@ This dictionary defines which authentication schemes are required for each opera
 using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
-    "detect_technologies": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_domain_technologies": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_domain_technologies_csv": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "bulk_lookup_domains": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_bulk_domain_job_status": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "retrieve_bulk_domain_job_result": [["apiKeyQuery"], ["apiKeyHeader"]],
+    "detect_technologies": [["apiKeyQuery"]],
+    "get_domain_technologies": [["apiKeyQuery"]],
+    "get_domain_technologies_csv": [["apiKeyQuery"]],
+    "bulk_lookup_domains": [["apiKeyQuery"]],
+    "get_bulk_domain_job_status": [["apiKeyQuery"]],
+    "retrieve_bulk_domain_job_result": [["apiKeyQuery"]],
     "get_domain_technology_summary": [["apiKeyQuery"]],
     "get_domain_technology_summary_xml": [["apiKeyQuery"]],
-    "list_website_relationships": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_website_relationships_xml": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_website_relationships_csv": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_website_relationships_tsv": [["apiKeyQuery"], ["apiKeyHeader"]],
+    "list_website_relationships": [["apiKeyQuery"]],
+    "list_website_relationships_xml": [["apiKeyQuery"]],
+    "list_website_relationships_csv": [["apiKeyQuery"]],
+    "list_website_relationships_tsv": [["apiKeyQuery"]],
     "list_websites_by_technology": [["apiKeyQuery"]],
     "list_websites_by_technology_xml": [["apiKeyQuery"]],
-    "lookup_company_domains": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "resolve_company_domains": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_domains_by_attribute": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_domains_by_attribute_xml": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_technology_recommendations": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_technology_recommendations_xml": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_domain_redirects": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_domain_redirects_xml": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "list_domain_keywords": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "extract_domain_keywords": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "search_websites_by_keyword": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "search_websites_by_keyword_csv": [["apiKeyQuery"], ["apiKeyHeader"]],
+    "lookup_company_domains": [["apiKeyQuery"]],
+    "resolve_company_domains": [["apiKeyQuery"]],
+    "list_domains_by_attribute": [["apiKeyQuery"]],
+    "list_domains_by_attribute_xml": [["apiKeyQuery"]],
+    "get_technology_recommendations": [["apiKeyQuery"]],
+    "get_technology_recommendations_xml": [["apiKeyQuery"]],
+    "get_domain_redirects": [["apiKeyQuery"]],
+    "get_domain_redirects_xml": [["apiKeyQuery"]],
+    "list_domain_keywords": [["apiKeyQuery"]],
+    "extract_domain_keywords": [["apiKeyQuery"]],
+    "search_websites_by_keyword": [["apiKeyQuery"]],
+    "search_websites_by_keyword_csv": [["apiKeyQuery"]],
     "search_technologies": [["apiKeyQuery"]],
     "search_technologies_xml": [["apiKeyQuery"]],
     "search_technologies_csv": [["apiKeyQuery"]],
-    "get_technology_trends": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "get_technology_trends_xml": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "search_product_listings": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "assess_domain_trust": [["apiKeyQuery"], ["apiKeyHeader"]],
-    "assess_domain_trust_xml": [["apiKeyQuery"], ["apiKeyHeader"]]
+    "get_technology_trends": [["apiKeyQuery"]],
+    "get_technology_trends_xml": [["apiKeyQuery"]],
+    "search_product_listings": [["apiKeyQuery"]],
+    "assess_domain_trust": [["apiKeyQuery"]],
+    "assess_domain_trust_xml": [["apiKeyQuery"]]
 }
