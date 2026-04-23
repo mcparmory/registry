@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-14 18:24:02 UTC
+Generated: 2026-04-23 21:22:43 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +42,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://sheets.googleapis.com")
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +724,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +780,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +846,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +880,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -852,16 +970,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -875,6 +994,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -917,6 +1037,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -928,7 +1063,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -936,6 +1070,7 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'OAuth2',
+    'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -948,6 +1083,14 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
     _auth_handlers["OAuth2"] = None
+try:
+    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="query", param_name="key")
+    logging.info("Authentication configured: ApiKeyAuth")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
+    _auth_handlers["ApiKeyAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1074,7 +1217,7 @@ async def apply_spreadsheet_updates(
     include_spreadsheet_in_response: bool | None = Field(None, alias="includeSpreadsheetInResponse", description="When true, includes the complete spreadsheet resource in the response after updates are applied."),
     requests: list[_models.Request] | None = Field(None, description="An ordered list of update requests to apply to the spreadsheet. Requests are processed sequentially in the order specified. If any request fails validation, no updates will be applied."),
     response_ranges: list[str] | None = Field(None, alias="responseRanges", description="Restricts which ranges are included in the response spreadsheet. Only meaningful when the spreadsheet is included in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies one or more updates to a spreadsheet atomically. All requests are validated before being applied; if any request is invalid, the entire batch fails and no changes are made. Responses mirror the structure of requests, with replies provided only for updates that generate them."""
 
     # Construct request model with validation
@@ -1089,12 +1232,14 @@ async def apply_spreadsheet_updates(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}:batchUpdate", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}:batchUpdate"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("apply_spreadsheet_updates")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("apply_spreadsheet_updates", "POST", _http_path, _request_id)
@@ -1105,6 +1250,7 @@ async def apply_spreadsheet_updates(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1154,7 +1300,7 @@ async def create_spreadsheet(
     time_zone: str | None = Field(None, alias="timeZone", description="Spreadsheet time zone in CLDR format (e.g., 'America/New_York'). Custom time zones like 'GMT-07:00' are supported if the standard zone isn't recognized."),
     title: str | None = Field(None, description="Title or name of the spreadsheet."),
     sheets: list[_models.Sheet] | None = Field(None, description="Array of sheet objects that define the individual sheets within the spreadsheet."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new spreadsheet with optional configuration for sheets, properties, formatting defaults, and external data sources. Returns the newly created spreadsheet object."""
 
     _padding_bottom = _parse_int(padding_bottom)
@@ -1186,12 +1332,14 @@ async def create_spreadsheet(
 
     # Extract parameters for API call
     _http_path = "/v4/spreadsheets"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_spreadsheet")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_spreadsheet", "POST", _http_path, _request_id)
@@ -1202,6 +1350,7 @@ async def create_spreadsheet(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1213,7 +1362,7 @@ async def create_spreadsheet(
 async def get_spreadsheet(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve. This ID is required to access the correct spreadsheet."),
     ranges: list[str] | None = Field(None, description="Optional cell ranges to retrieve from the spreadsheet, specified using A1 notation (e.g., A1, A1:D5, or Sheet2!A1:C4). Multiple ranges can be specified to retrieve data from different areas or sheets. When specified, only data intersecting these ranges is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a spreadsheet by its ID with optional support for specific cell ranges and grid data. By default, grid data is excluded; use field masks or the includeGridData parameter to include it."""
 
     # Construct request model with validation
@@ -1234,6 +1383,7 @@ async def get_spreadsheet(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_spreadsheet")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_spreadsheet", "GET", _http_path, _request_id)
@@ -1255,7 +1405,7 @@ async def get_spreadsheet(
 async def retrieve_spreadsheet_by_data_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to retrieve."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that specify which ranges to return from the spreadsheet. When multiple filters are provided, the response includes data from all matching ranges. If omitted, only spreadsheet metadata is returned without grid data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a spreadsheet by ID with the ability to filter which data ranges are returned. Use data filters to selectively fetch specific portions of the spreadsheet, optionally including grid data."""
 
     # Construct request model with validation
@@ -1270,12 +1420,14 @@ async def retrieve_spreadsheet_by_data_filter(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}:getByDataFilter", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}:getByDataFilter"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("retrieve_spreadsheet_by_data_filter")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("retrieve_spreadsheet_by_data_filter", "POST", _http_path, _request_id)
@@ -1286,6 +1438,7 @@ async def retrieve_spreadsheet_by_data_filter(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1297,7 +1450,7 @@ async def retrieve_spreadsheet_by_data_filter(
 async def get_developer_metadata(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet containing the developer metadata you want to retrieve."),
     metadata_id: int = Field(..., alias="metadataId", description="The unique identifier of the developer metadata entry to retrieve. This is a numeric ID assigned when the metadata was created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific developer metadata entry from a spreadsheet by its unique metadata ID. Use this to access custom metadata properties attached to spreadsheet resources."""
 
     # Construct request model with validation
@@ -1311,11 +1464,13 @@ async def get_developer_metadata(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/developerMetadata/{metadataId}", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/developerMetadata/{metadataId}"
+    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_developer_metadata")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_developer_metadata", "GET", _http_path, _request_id)
@@ -1326,6 +1481,7 @@ async def get_developer_metadata(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1336,7 +1492,7 @@ async def get_developer_metadata(
 async def search_developer_metadata(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to search for developer metadata."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that define the search criteria. Metadata matching any of the specified filters will be included in the results. Filters can target specific metadata lookups or location regions within the spreadsheet."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for developer metadata entries in a spreadsheet that match specified criteria. Returns all metadata matching the provided data filters, which can target specific metadata lookups or location-based regions."""
 
     # Construct request model with validation
@@ -1351,12 +1507,14 @@ async def search_developer_metadata(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/developerMetadata:search", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/developerMetadata:search"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_developer_metadata")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_developer_metadata", "POST", _http_path, _request_id)
@@ -1367,6 +1525,7 @@ async def search_developer_metadata(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1379,7 +1538,7 @@ async def copy_sheet(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet that contains the sheet you want to copy."),
     sheet_id: int = Field(..., alias="sheetId", description="The unique identifier of the sheet to copy. This must be a valid sheet ID within the source spreadsheet."),
     destination_spreadsheet_id: str | None = Field(None, alias="destinationSpreadsheetId", description="The unique identifier of the spreadsheet where the sheet should be copied to. If omitted, the sheet will be copied within the same spreadsheet."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copies a sheet from one spreadsheet to another and returns the properties of the newly created sheet. If no destination spreadsheet is specified, the sheet is copied within the same spreadsheet."""
 
     # Construct request model with validation
@@ -1394,12 +1553,14 @@ async def copy_sheet(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/sheets/{sheetId}:copyTo", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/sheets/{sheetId}:copyTo"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("copy_sheet")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("copy_sheet", "POST", _http_path, _request_id)
@@ -1410,6 +1571,7 @@ async def copy_sheet(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1426,7 +1588,7 @@ async def append_sheet_values(
     value_input_option: Literal["INPUT_VALUE_OPTION_UNSPECIFIED", "RAW", "USER_ENTERED"] | None = Field(None, alias="valueInputOption", description="Specifies how the input data should be interpreted: RAW treats values as-is, while USER_ENTERED applies the same parsing as if entered through the Sheets UI (e.g., formulas, dates)."),
     major_dimension: Literal["DIMENSION_UNSPECIFIED", "ROWS", "COLUMNS"] | None = Field(None, alias="majorDimension", description="Specifies whether the input array is organized by rows or columns. Defaults to ROWS, where each inner array represents a single row. Use COLUMNS if each inner array represents a single column."),
     values: list[list[Any]] | None = Field(None, description="A two-dimensional array of values to append, where each inner array represents either a row or column depending on majorDimension. Supported types are boolean, string, and number. Null values are ignored; use empty strings to set cells to empty values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Appends values to the next row of a detected data table in a spreadsheet. The operation automatically locates the table within the specified range and adds new rows starting from the first column of that table."""
 
     # Construct request model with validation
@@ -1449,6 +1611,7 @@ async def append_sheet_values(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("append_sheet_values")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("append_sheet_values", "POST", _http_path, _request_id)
@@ -1471,7 +1634,7 @@ async def append_sheet_values(
 async def clear_spreadsheet_values(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID can be found in the spreadsheet URL."),
     ranges: list[str] | None = Field(None, description="One or more cell ranges to clear, specified using A1 notation (e.g., Sheet1!A1:B2) or R1C1 notation. If omitted, no ranges will be cleared. Order of ranges does not affect the operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Clears all values from one or more specified ranges in a spreadsheet while preserving cell formatting, data validation, and other properties. Useful for resetting data while maintaining spreadsheet structure."""
 
     # Construct request model with validation
@@ -1486,12 +1649,14 @@ async def clear_spreadsheet_values(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values:batchClear", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values:batchClear"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("clear_spreadsheet_values")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("clear_spreadsheet_values", "POST", _http_path, _request_id)
@@ -1502,6 +1667,7 @@ async def clear_spreadsheet_values(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1513,7 +1679,7 @@ async def clear_spreadsheet_values(
 async def clear_spreadsheet_values_by_filter(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID is typically found in the spreadsheet's URL."),
     data_filters: list[_models.DataFilter] | None = Field(None, alias="dataFilters", description="One or more data filters that define which ranges to clear. Each filter is evaluated independently, and all ranges matching any filter will have their values cleared. If not specified, no ranges will be cleared."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Clears cell values from a spreadsheet based on one or more data filters, while preserving all formatting, validation rules, and other cell properties. Use this to selectively remove data from ranges matching your specified filter criteria."""
 
     # Construct request model with validation
@@ -1528,12 +1694,14 @@ async def clear_spreadsheet_values_by_filter(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values:batchClearByDataFilter", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values:batchClearByDataFilter"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("clear_spreadsheet_values_by_filter")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("clear_spreadsheet_values_by_filter", "POST", _http_path, _request_id)
@@ -1544,6 +1712,7 @@ async def clear_spreadsheet_values_by_filter(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1558,7 +1727,7 @@ async def get_spreadsheet_values_batch(
     major_dimension: Literal["DIMENSION_UNSPECIFIED", "ROWS", "COLUMNS"] | None = Field(None, alias="majorDimension", description="Determines the orientation of returned data. Use ROWS to return data organized by rows (each inner array is a row), COLUMNS to return data organized by columns (each inner array is a column), or DIMENSION_UNSPECIFIED for default behavior. Defaults to ROWS."),
     ranges: list[str] | None = Field(None, description="The cell ranges to retrieve, specified in A1 notation or R1C1 notation. Provide as an array of range strings (e.g., ['A1:B10', 'D5:E20']). If omitted, the entire sheet is retrieved."),
     value_render_option: Literal["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"] | None = Field(None, alias="valueRenderOption", description="Controls how cell values are represented in the output. Choose FORMATTED_VALUE to return values as displayed in the spreadsheet, UNFORMATTED_VALUE for raw values, or FORMULA to return formulas as text. Defaults to formatted value mode."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves one or more ranges of values from a spreadsheet. Specify the spreadsheet ID and one or more ranges to fetch, with options to control how values and dates are formatted in the response."""
 
     # Construct request model with validation
@@ -1579,6 +1748,7 @@ async def get_spreadsheet_values_batch(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_spreadsheet_values_batch")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_spreadsheet_values_batch", "GET", _http_path, _request_id)
@@ -1603,7 +1773,7 @@ async def get_spreadsheet_values_by_filter(
     date_time_render_option: Literal["SERIAL_NUMBER", "FORMATTED_STRING"] | None = Field(None, alias="dateTimeRenderOption", description="Controls how dates, times, and durations are formatted in the output. Choose SERIAL_NUMBER for numeric representation or FORMATTED_STRING for human-readable text. This setting is ignored when valueRenderOption is set to FORMATTED_VALUE. Defaults to SERIAL_NUMBER."),
     major_dimension: Literal["DIMENSION_UNSPECIFIED", "ROWS", "COLUMNS"] | None = Field(None, alias="majorDimension", description="Specifies whether results should be organized by rows or columns. ROWS returns data as nested arrays where each inner array is a row; COLUMNS returns data where each inner array is a column. Defaults to ROWS."),
     value_render_option: Literal["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"] | None = Field(None, alias="valueRenderOption", description="Controls how cell values are represented in the output. FORMATTED_VALUE shows values as displayed in the spreadsheet, UNFORMATTED_VALUE shows raw values, and FORMULA shows the actual formulas. Defaults to FORMATTED_VALUE."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves one or more ranges of values from a spreadsheet that match specified data filters. Multiple ranges matching any of the provided filters are returned in a single response."""
 
     # Construct request model with validation
@@ -1618,12 +1788,14 @@ async def get_spreadsheet_values_by_filter(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values:batchGetByDataFilter", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values:batchGetByDataFilter"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_spreadsheet_values_by_filter")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_spreadsheet_values_by_filter", "POST", _http_path, _request_id)
@@ -1634,6 +1806,7 @@ async def get_spreadsheet_values_by_filter(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1647,7 +1820,7 @@ async def update_sheet_values_batch(
     data: list[_models.ValueRange] | None = Field(None, description="An array of value ranges to update, where each range specifies the target cells and the values to write. Order matters as ranges are processed sequentially."),
     include_values_in_response: bool | None = Field(None, alias="includeValuesInResponse", description="When enabled, the response includes the actual values written to the cells, including all values in the requested range (excluding trailing empty rows and columns). Disabled by default."),
     value_input_option: Literal["INPUT_VALUE_OPTION_UNSPECIFIED", "RAW", "USER_ENTERED"] | None = Field(None, alias="valueInputOption", description="Specifies how the input data should be interpreted: RAW treats values as-is without formula parsing, USER_ENTERED parses formulas and formats like a user entering data manually, or UNSPECIFIED uses the default behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates multiple ranges of cells in a spreadsheet with new values. Specify which ranges to update, how to interpret the input data, and optionally request the updated values in the response."""
 
     # Construct request model with validation
@@ -1662,12 +1835,14 @@ async def update_sheet_values_batch(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values:batchUpdate", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values:batchUpdate"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_sheet_values_batch")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_sheet_values_batch", "POST", _http_path, _request_id)
@@ -1678,6 +1853,7 @@ async def update_sheet_values_batch(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1691,7 +1867,7 @@ async def update_spreadsheet_values_by_filter(
     data: list[_models.DataFilterValueRange] | None = Field(None, description="Array of data filter value ranges specifying which cells to update and what values to apply. When multiple ranges match a filter, the same values are applied to all matched ranges."),
     include_values_in_response: bool | None = Field(None, alias="includeValuesInResponse", description="If true, the response will include the actual values that were written to the cells. By default, responses omit updated values. When enabled, the response includes all values in the requested range, excluding trailing empty rows and columns."),
     value_input_option: Literal["INPUT_VALUE_OPTION_UNSPECIFIED", "RAW", "USER_ENTERED"] | None = Field(None, alias="valueInputOption", description="Specifies how the input data should be interpreted: RAW treats values as-is without parsing, USER_ENTERED applies the same parsing as if entered through the Sheets UI (formulas, dates, etc.), or INPUT_VALUE_OPTION_UNSPECIFIED uses the default behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates cell values in one or more ranges of a spreadsheet using data filters to target specific cells. Allows you to set values across multiple matched ranges simultaneously and optionally retrieve the updated values in the response."""
 
     # Construct request model with validation
@@ -1706,12 +1882,14 @@ async def update_spreadsheet_values_by_filter(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values:batchUpdateByDataFilter", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values:batchUpdateByDataFilter"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_spreadsheet_values_by_filter")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_spreadsheet_values_by_filter", "POST", _http_path, _request_id)
@@ -1722,6 +1900,7 @@ async def update_spreadsheet_values_by_filter(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1733,7 +1912,7 @@ async def update_spreadsheet_values_by_filter(
 async def clear_spreadsheet_values_range(
     spreadsheet_id: str = Field(..., alias="spreadsheetId", description="The unique identifier of the spreadsheet to update. This ID is typically found in the spreadsheet's URL."),
     range_: str = Field(..., alias="range", description="The cells to clear, specified using A1 notation (e.g., Sheet1!A1:B10) or R1C1 notation. Supports single cells, ranges, and multiple ranges."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Clears all values from specified cells in a spreadsheet while preserving formatting, data validation, and other cell properties. Specify the spreadsheet and target range using A1 or R1C1 notation."""
 
     # Construct request model with validation
@@ -1747,11 +1926,13 @@ async def clear_spreadsheet_values_range(
 
     # Extract parameters for API call
     _http_path = _build_path("/v4/spreadsheets/{spreadsheetId}/values/{range}:clear", _request.path.model_dump(by_alias=True)) if _request.path else "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear"
+    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("clear_spreadsheet_values_range")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("clear_spreadsheet_values_range", "POST", _http_path, _request_id)
@@ -1762,6 +1943,7 @@ async def clear_spreadsheet_values_range(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1775,7 +1957,7 @@ async def read_spreadsheet_range(
     date_time_render_option: Literal["SERIAL_NUMBER", "FORMATTED_STRING"] | None = Field(None, alias="dateTimeRenderOption", description="Controls how dates, times, and durations are formatted in the response. Choose SERIAL_NUMBER for numeric representation or FORMATTED_STRING for human-readable text. Ignored when valueRenderOption is set to FORMATTED_VALUE. Defaults to SERIAL_NUMBER."),
     major_dimension: Literal["DIMENSION_UNSPECIFIED", "ROWS", "COLUMNS"] | None = Field(None, alias="majorDimension", description="Determines the structure of the returned data. ROWS returns data organized by rows (default behavior), COLUMNS returns data organized by columns. This affects how nested arrays are structured in the response."),
     value_render_option: Literal["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"] | None = Field(None, alias="valueRenderOption", description="Specifies how cell values should be represented. FORMATTED_VALUE returns values as displayed in the spreadsheet, UNFORMATTED_VALUE returns raw values, and FORMULA returns the actual formulas. Defaults to FORMATTED_VALUE."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves cell values from a specified range in a spreadsheet. Supports flexible formatting options for dates, times, and formulas, with configurable output structure."""
 
     # Construct request model with validation
@@ -1796,6 +1978,7 @@ async def read_spreadsheet_range(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("read_spreadsheet_range")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("read_spreadsheet_range", "GET", _http_path, _request_id)
@@ -1821,7 +2004,7 @@ async def update_sheet_values(
     value_input_option: Literal["INPUT_VALUE_OPTION_UNSPECIFIED", "RAW", "USER_ENTERED"] | None = Field(None, alias="valueInputOption", description="Specifies how input data should be interpreted: RAW treats values as-is, USER_ENTERED evaluates formulas and formats. Defaults to RAW if unspecified."),
     major_dimension: Literal["DIMENSION_UNSPECIFIED", "ROWS", "COLUMNS"] | None = Field(None, alias="majorDimension", description="Determines how the values array is organized: ROWS means each inner array represents a row, COLUMNS means each inner array represents a column. Defaults to ROWS if unspecified."),
     values: list[list[Any]] | None = Field(None, description="A 2D array of values to write, where each inner array represents either a row or column depending on majorDimension. Supported types are boolean, string, and number; null values are ignored, and empty strings clear cells."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates cell values in a spreadsheet within a specified range using A1 notation. Specify how input data should be interpreted (raw or user-entered formulas) and optionally retrieve the updated values in the response."""
 
     # Construct request model with validation
@@ -1844,6 +2027,7 @@ async def update_sheet_values(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_sheet_values")
     _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_sheet_values", "PUT", _http_path, _request_id)
