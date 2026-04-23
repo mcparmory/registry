@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: LaunchDarkly Technical Support Team <support@launchdarkly.com> (https://support.launchdarkly.com)
 
-Generated: 2026-04-14 18:25:14 UTC
+Generated: 2026-04-23 21:25:48 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.launchdarkly.com")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -851,16 +969,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -874,6 +993,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -916,6 +1036,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -927,7 +1062,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1068,7 +1202,7 @@ mcp = FastMCP("LaunchDarkly", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Relay Proxy configurations
 @mcp.tool()
-async def list_relay_proxy_configs() -> dict[str, Any]:
+async def list_relay_proxy_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all Relay Proxy configurations currently configured in your account. Use this to view existing proxy setups and their settings."""
 
     # Extract parameters for API call
@@ -1098,7 +1232,7 @@ async def list_relay_proxy_configs() -> dict[str, Any]:
 async def create_relay_proxy_config(
     name: str = Field(..., description="A human-readable name for this Relay Proxy configuration. Used to identify and manage the configuration."),
     policy: list[_models.Statement] = Field(..., description="An inline policy array that defines which environments and projects this Relay Proxy should include or exclude. Policy items are evaluated in order to determine scope. Refer to the inline policy documentation for syntax and structure."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Relay Proxy configuration that controls which environments and projects the Relay Proxy should include or exclude."""
 
     # Construct request model with validation
@@ -1136,7 +1270,7 @@ async def create_relay_proxy_config(
 
 # Tags: Relay Proxy configurations
 @mcp.tool()
-async def get_relay_proxy_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to retrieve.")) -> dict[str, Any]:
+async def get_relay_proxy_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single Relay Proxy auto configuration by its unique identifier. Use this to fetch detailed settings for a specific relay proxy configuration."""
 
     # Construct request model with validation
@@ -1175,7 +1309,7 @@ async def get_relay_proxy_config(id_: str = Field(..., alias="id", description="
 async def update_relay_auto_config(
     id_: str = Field(..., alias="id", description="The unique identifier of the Relay Proxy configuration to update."),
     patch: list[_models.PatchOperation] = Field(..., description="An array of JSON patch operations (RFC 6902) or JSON merge patch operations (RFC 7386) describing the changes to apply to the configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Relay Proxy configuration using JSON patch or JSON merge patch operations. Changes are applied incrementally to the specified configuration."""
 
     # Construct request model with validation
@@ -1214,7 +1348,7 @@ async def update_relay_auto_config(
 
 # Tags: Relay Proxy configurations
 @mcp.tool()
-async def delete_relay_auto_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to delete. This is a string value that uniquely identifies the configuration within your account.")) -> dict[str, Any]:
+async def delete_relay_auto_config(id_: str = Field(..., alias="id", description="The unique identifier of the relay auto config to delete. This is a string value that uniquely identifies the configuration within your account.")) -> dict[str, Any] | ToolResult:
     """Delete a Relay Proxy auto-configuration by its unique identifier. This operation permanently removes the specified relay auto config from your account."""
 
     # Construct request model with validation
@@ -1253,7 +1387,7 @@ async def delete_relay_auto_config(id_: str = Field(..., alias="id", description
 async def reset_relay_auto_config(
     id_: str = Field(..., alias="id", description="The unique identifier of the Relay Proxy configuration to reset."),
     expiry: str | None = Field(None, description="Optional Unix epoch time in milliseconds when the old configuration key should expire. If not provided, the old key expires immediately upon reset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a new secret key for a Relay Proxy configuration, optionally setting an expiration time for the previous key before it becomes invalid."""
 
     _expiry = _parse_int(expiry)
@@ -1294,7 +1428,7 @@ async def reset_relay_auto_config(
 
 # Tags: Applications (beta)
 @mcp.tool()
-async def list_applications() -> dict[str, Any]:
+async def list_applications() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all applications. Optionally expand the response to include additional details such as flags evaluated by each application."""
 
     # Extract parameters for API call
@@ -1321,7 +1455,7 @@ async def list_applications() -> dict[str, Any]:
 
 # Tags: Applications (beta)
 @mcp.tool()
-async def get_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This is a string value that uniquely identifies the application within your LaunchDarkly workspace.")) -> dict[str, Any]:
+async def get_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This is a string value that uniquely identifies the application within your LaunchDarkly workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieve a LaunchDarkly application by its unique application key. Optionally expand the response to include evaluated flags and other application details."""
 
     # Construct request model with validation
@@ -1360,7 +1494,7 @@ async def get_application(application_key: str = Field(..., alias="applicationKe
 async def update_application(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type), 'path' (the field to modify), and 'value' (the new value for replace operations). Supported paths include '/description' and '/kind'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an application's description and kind fields using JSON Patch format. Specify changes as an array of patch operations following RFC 6902 standard."""
 
     # Construct request model with validation
@@ -1400,7 +1534,7 @@ async def update_application(
 
 # Tags: Applications (beta)
 @mcp.tool()
-async def delete_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application to delete. This is a string value that uniquely identifies the application within the system.")) -> dict[str, Any]:
+async def delete_application(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application to delete. This is a string value that uniquely identifies the application within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an application by its unique key. This action cannot be undone and will remove all associated data."""
 
     # Construct request model with validation
@@ -1436,7 +1570,7 @@ async def delete_application(application_key: str = Field(..., alias="applicatio
 
 # Tags: Applications (beta)
 @mcp.tool()
-async def list_application_versions(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This string key is used to look up and retrieve all versions belonging to that specific application.")) -> dict[str, Any]:
+async def list_application_versions(application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application. This string key is used to look up and retrieve all versions belonging to that specific application.")) -> dict[str, Any] | ToolResult:
     """Retrieve all versions for a specific application identified by its application key. Returns a list of version records associated with the application in the account."""
 
     # Construct request model with validation
@@ -1476,7 +1610,7 @@ async def update_application_version(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application being modified."),
     version_key: str = Field(..., alias="versionKey", description="The unique identifier for the specific application version to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each operation must specify an `op` (operation type like 'replace'), `path` (the field to modify), and `value` (the new value). Multiple operations can be included in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an application version using JSON Patch operations. Currently supports updating the `supported` field to enable or disable the version."""
 
     # Construct request model with validation
@@ -1519,7 +1653,7 @@ async def update_application_version(
 async def delete_application_version(
     application_key: str = Field(..., alias="applicationKey", description="The unique identifier for the application containing the version to delete."),
     version_key: str = Field(..., alias="versionKey", description="The unique identifier for the specific application version to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific version of an application. This operation removes the version and all associated data."""
 
     # Construct request model with validation
@@ -1555,7 +1689,7 @@ async def delete_application_version(
 
 # Tags: Approvals
 @mcp.tool()
-async def list_approval_requests() -> dict[str, Any]:
+async def list_approval_requests() -> dict[str, Any] | ToolResult:
     """Retrieve all approval requests with support for filtering by assignee, requestor, resource, status, and review status. Optionally expand the response to include related flag, project, and environment details."""
 
     # Extract parameters for API call
@@ -1587,7 +1721,7 @@ async def create_approval_request(
     description: str = Field(..., description="A brief summary of the requested changes. This helps reviewers understand the intent of the approval request."),
     instructions: list[_models.Instruction] = Field(..., description="An ordered list of semantic patch instructions to apply when the approval is granted. Instructions vary by resource type: use addVariation, removeVariation, updateVariation, or updateDefaultVariation for flags; refer to AI Config or segment patch documentation for other resource types."),
     integration_config: dict[str, Any] | None = Field(None, alias="integrationConfig", description="Optional object containing additional fields for third-party approval system integrations. Field requirements are defined in the manifest.json of the specific integration being used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an approval request for changes to a feature flag, AI Config, or segment. The request includes semantic patch instructions that will be applied upon approval."""
 
     # Construct request model with validation
@@ -1625,7 +1759,7 @@ async def create_approval_request(
 
 # Tags: Approvals
 @mcp.tool()
-async def get_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to retrieve.")) -> dict[str, Any]:
+async def get_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific approval request by its ID. Optionally expand the response to include related resources such as environments, flags, projects, or resource details."""
 
     # Construct request model with validation
@@ -1664,7 +1798,7 @@ async def get_approval_request(id_: str = Field(..., alias="id", description="Th
 async def update_approval_request(
     id_: str = Field(..., alias="id", description="The unique identifier of the approval request to update."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions to apply. Each instruction specifies an operation (addReviewers or updateDescription) with its required parameters. At least one instruction must be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an approval request using semantic patch instructions. Supports adding reviewers or updating the request description through a structured instruction format."""
 
     # Construct request model with validation
@@ -1703,7 +1837,7 @@ async def update_approval_request(
 
 # Tags: Approvals
 @mcp.tool()
-async def delete_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to delete.")) -> dict[str, Any]:
+async def delete_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an approval request by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1739,7 +1873,7 @@ async def delete_approval_request(id_: str = Field(..., alias="id", description=
 
 # Tags: Approvals
 @mcp.tool()
-async def apply_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to apply. This is a string value that identifies which approval request should be executed.")) -> dict[str, Any]:
+async def apply_approval_request(id_: str = Field(..., alias="id", description="The unique identifier of the approval request to apply. This is a string value that identifies which approval request should be executed.")) -> dict[str, Any] | ToolResult:
     """Execute an approval request that has been approved. This operation finalizes the approval workflow for any approval request type."""
 
     # Construct request model with validation
@@ -1778,7 +1912,7 @@ async def apply_approval_request(id_: str = Field(..., alias="id", description="
 async def submit_approval_request_review(
     id_: str = Field(..., alias="id", description="The unique identifier of the approval request being reviewed."),
     kind: Literal["approve", "comment", "decline"] | None = Field(None, description="The type of review action to perform: 'approve' to accept the changes, 'decline' to reject them, or 'comment' to provide feedback without making a final decision."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a review decision on an approval request by approving, declining, or adding a comment to the proposed changes."""
 
     # Construct request model with validation
@@ -1820,7 +1954,7 @@ async def submit_approval_request_review(
 async def list_audit_log_entries(
     q: str | None = Field(None, description="Full or partial resource name to search for in audit logs. Supports text-based matching across resource identifiers."),
     spec: str | None = Field(None, description="Resource specifier to filter results by specific resources or resource collections. Use LaunchDarkly resource specifier syntax to target particular resource types or instances."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve audit log entries with optional filtering by date ranges, resource specifiers, or full-text search. Use resource specifier syntax to target specific resources or collections."""
 
     # Construct request model with validation
@@ -1861,7 +1995,7 @@ async def list_audit_log_entries(
 async def search_audit_log_entries(
     q: str | None = Field(None, description="Full-text search query to filter audit log entries by resource name or partial matches. Searches across resource names and related metadata."),
     body: list[_models.StatementPost] | None = Field(None, description="Array of resource specifiers to restrict results to specific resources or resource collections. Use LaunchDarkly resource specifier syntax to target particular entities (e.g., projects, environments, flags). Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search audit log entries by full-text query and resource specifiers. Filter results by date ranges and resource types using query parameters and request body constraints."""
 
     # Construct request model with validation
@@ -1903,7 +2037,7 @@ async def search_audit_log_entries(
 
 # Tags: Audit log
 @mcp.tool()
-async def get_audit_log_entry(id_: str = Field(..., alias="id", description="The unique identifier of the audit log entry to retrieve.")) -> dict[str, Any]:
+async def get_audit_log_entry(id_: str = Field(..., alias="id", description="The unique identifier of the audit log entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a detailed audit log entry with full change history. Returns comprehensive metadata including the previous and current versions of the modified entity, plus the JSON patch or semantic patch that was applied."""
 
     # Construct request model with validation
@@ -1939,7 +2073,7 @@ async def get_audit_log_entry(id_: str = Field(..., alias="id", description="The
 
 # Tags: Other
 @mcp.tool()
-async def get_caller_identity() -> dict[str, Any]:
+async def get_caller_identity() -> dict[str, Any] | ToolResult:
     """Retrieve information about the identity used to authenticate the current API request, including details about the session cookie, API token, SDK keys, or other credentials."""
 
     # Extract parameters for API call
@@ -1972,7 +2106,7 @@ async def list_extinctions(
     proj_key: str | None = Field(None, alias="projKey", description="Filter results to extinctions in a specific project by project key."),
     from_: str | None = Field(None, alias="from", description="Filter results to extinctions after a specific point in time, expressed as a Unix epoch timestamp in milliseconds. Must be used together with the `to` parameter."),
     to: str | None = Field(None, description="Filter results to extinctions before a specific point in time, expressed as a Unix epoch timestamp in milliseconds. Must be used together with the `from` parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all extinction events, which are created when all code references to a flag are removed. Filter results by repository, branch, project, or commit time window to find specific extinctions."""
 
     _from_ = _parse_int(from_)
@@ -2017,7 +2151,7 @@ async def list_repositories(
     with_branches: str | None = Field(None, alias="withBranches", description="Include branch metadata in the response. Set to any value to enable this option."),
     with_references_for_default_branch: str | None = Field(None, alias="withReferencesForDefaultBranch", description="Include branch metadata and code references for the default git branch in the response. Set to any value to enable this option."),
     proj_key: str | None = Field(None, alias="projKey", description="Filter code reference results to a specific LaunchDarkly project by providing its project key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of connected repositories with optional branch metadata and code references. Filter results by project key to scope code references to a specific LaunchDarkly project."""
 
     # Construct request model with validation
@@ -2061,7 +2195,7 @@ async def create_repository(
     commit_url_template: str | None = Field(None, alias="commitUrlTemplate", description="A URL template for constructing links to specific commits. Use the placeholder ${sha} to represent the commit hash (e.g., 'https://github.com/launchdarkly/LaunchDarkly-Docs/commit/${sha}')."),
     hunk_url_template: str | None = Field(None, alias="hunkUrlTemplate", description="A URL template for constructing links to specific code hunks or lines. Use placeholders ${sha} for commit hash, ${filePath} for file path, and ${lineNumber} for line number (e.g., 'https://github.com/launchdarkly/LaunchDarkly-Docs/blob/${sha}/${filePath}#L${lineNumber}')."),
     default_branch: str | None = Field(None, alias="defaultBranch", description="The repository's default branch name. Defaults to 'main' if not specified (e.g., 'main', 'master', or 'develop')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new code repository for tracking feature flag references. Optionally provide URLs for accessing the repository and constructing links to specific commits and code hunks."""
 
     # Construct request model with validation
@@ -2099,7 +2233,7 @@ async def create_repository(
 
 # Tags: Code references
 @mcp.tool()
-async def get_repository(repo: str = Field(..., description="The name of the repository to retrieve. This is a string identifier that uniquely identifies the repository within the system.")) -> dict[str, Any]:
+async def get_repository(repo: str = Field(..., description="The name of the repository to retrieve. This is a string identifier that uniquely identifies the repository within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single repository by its name. Use this to fetch detailed information about a specific code repository tracked in the system."""
 
     # Construct request model with validation
@@ -2138,7 +2272,7 @@ async def get_repository(repo: str = Field(..., description="The name of the rep
 async def update_repository(
     repo: str = Field(..., description="The name of the repository to update. This identifier is used to locate the specific repository in the system."),
     body: list[_models.PatchOperation] = Field(..., description="An array of patch operations describing the changes to apply. Each operation should specify an action (op), a JSON pointer path (path), and the new value (value) where applicable. Operations are processed in the order provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a repository's settings using JSON patch or JSON merge patch operations. Changes are applied according to RFC 6902 or RFC 7386 standards."""
 
     # Construct request model with validation
@@ -2178,7 +2312,7 @@ async def update_repository(
 
 # Tags: Code references
 @mcp.tool()
-async def delete_repository(repo: str = Field(..., description="The name of the repository to delete. Must be a valid string identifier.")) -> dict[str, Any]:
+async def delete_repository(repo: str = Field(..., description="The name of the repository to delete. Must be a valid string identifier.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a repository and all associated code references. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2217,7 +2351,7 @@ async def delete_repository(repo: str = Field(..., description="The name of the 
 async def delete_branches(
     repo: str = Field(..., description="The name of the repository from which branches will be deleted."),
     body: list[str] = Field(..., description="An array of branch names to delete. Each item should be a string representing a branch name. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Asynchronously delete multiple branches from a repository. Returns a task that processes the branch deletions in the background."""
 
     # Construct request model with validation
@@ -2257,7 +2391,7 @@ async def delete_branches(
 
 # Tags: Code references
 @mcp.tool()
-async def list_branches(repo: str = Field(..., description="The name of the repository to list branches from. This is a required identifier that specifies which repository's branches to retrieve.")) -> dict[str, Any]:
+async def list_branches(repo: str = Field(..., description="The name of the repository to list branches from. This is a required identifier that specifies which repository's branches to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all branches in the specified repository. Use this to discover available branches for code references and analysis."""
 
     # Construct request model with validation
@@ -2297,7 +2431,7 @@ async def get_branch(
     repo: str = Field(..., description="The name of the repository containing the branch."),
     branch: str = Field(..., description="The name of the branch to retrieve, URL-encoded to handle special characters in branch names."),
     proj_key: str | None = Field(None, alias="projKey", description="Optional project key to scope the branch lookup to a specific project within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific branch within a repository, optionally filtered to a particular project."""
 
     # Construct request model with validation
@@ -2343,7 +2477,7 @@ async def upsert_branch(
     head: str = Field(..., description="A commit identifier representing the current HEAD of the branch, typically a commit SHA hash."),
     sync_time: str = Field(..., alias="syncTime", description="A Unix timestamp (in milliseconds or seconds as int64) indicating when this branch was last synchronized with the source."),
     references: list[_models.ReferenceRep] | None = Field(None, description="An optional array of flag references discovered on this branch. Order and format depend on the flag reference structure used by the system."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new branch or update an existing branch in a repository. Use this to sync branch metadata including the current HEAD commit and last sync timestamp."""
 
     _sync_time = _parse_int(sync_time)
@@ -2388,7 +2522,7 @@ async def create_extinction_event(
     repo: str = Field(..., description="The repository name where the extinction event will be created."),
     branch: str = Field(..., description="The branch name, URL-encoded, where the extinction event applies."),
     body: list[_models.Extinction] = Field(..., description="Array of extinction event objects defining the code references and metadata for the extinction event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new extinction event for a specific branch in a repository. Extinction events track code reference removals or deprecations."""
 
     # Construct request model with validation
@@ -2428,7 +2562,7 @@ async def create_extinction_event(
 
 # Tags: Code references
 @mcp.tool()
-async def list_code_reference_statistics() -> dict[str, Any]:
+async def list_code_reference_statistics() -> dict[str, Any] | ToolResult:
     """Retrieve code reference statistics and repository links for all projects that have code references configured."""
 
     # Extract parameters for API call
@@ -2455,7 +2589,7 @@ async def list_code_reference_statistics() -> dict[str, Any]:
 
 # Tags: Code references
 @mcp.tool()
-async def get_code_references_statistics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the statistics query to a specific project.")) -> dict[str, Any]:
+async def get_code_references_statistics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the statistics query to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve code reference statistics for flags in a project, showing the number of references to flag keys across repositories in the default branch. Optionally filter results to a single flag using the flagKey query parameter."""
 
     # Construct request model with validation
@@ -2491,7 +2625,7 @@ async def get_code_references_statistics(project_key: str = Field(..., alias="pr
 
 # Tags: Data Export destinations
 @mcp.tool()
-async def list_destinations() -> dict[str, Any]:
+async def list_destinations() -> dict[str, Any] | ToolResult:
     """Retrieve all Data Export destinations configured across your projects and environments. This provides a comprehensive view of where your data is being exported."""
 
     # Extract parameters for API call
@@ -2521,7 +2655,7 @@ async def list_destinations() -> dict[str, Any]:
 async def generate_warehouse_destination_key_pair(
     proj_key: str = Field(..., alias="projKey", description="The unique identifier for the project containing the destination configuration."),
     env_key: str = Field(..., alias="envKey", description="The unique identifier for the environment within the project where the warehouse destination is configured."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a public-private key pair for authenticating Data Export operations to a Snowflake warehouse destination. This enables secure credential-based access without storing passwords."""
 
     # Construct request model with validation
@@ -2564,7 +2698,7 @@ async def create_data_export_destination(
     kind: Literal["google-pubsub", "kinesis", "mparticle", "segment", "azure-event-hubs", "snowflake-v2", "databricks", "bigquery", "redshift"] | None = Field(None, description="The type of Data Export destination. Choose from: google-pubsub, kinesis, mparticle, segment, azure-event-hubs, snowflake-v2, databricks, bigquery, or redshift. Each type requires specific configuration fields."),
     config: Any | None = Field(None, description="An object containing the configuration parameters required for your chosen destination type. Required fields vary: Azure Event Hubs needs namespace, name, policyName, and policyKey; Google Pub/Sub needs project and topic; Kinesis needs region, roleArn, and streamName; mParticle needs apiKey, secret, userIdentity, and anonymousUserIdentity; Segment needs writeKey; Snowflake needs publicKey and snowflakeHostAddress."),
     on: bool | None = Field(None, description="Whether the Data Export destination is active and exporting events. When true, events are streamed to the destination; when false, the destination is paused. Displayed as the integration status in the LaunchDarkly UI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Data Export destination to stream LaunchDarkly events to external platforms. Configuration requirements vary by destination type (e.g., Azure Event Hubs, Google Pub/Sub, Kinesis, mParticle, Segment, Snowflake, Databricks, BigQuery, or Redshift)."""
 
     # Construct request model with validation
@@ -2607,7 +2741,7 @@ async def get_destination(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the destination."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project contains the destination."),
     id_: str = Field(..., alias="id", description="The unique identifier of the Data Export destination to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single Data Export destination by its ID within a specific project and environment."""
 
     # Construct request model with validation
@@ -2648,7 +2782,7 @@ async def update_destination(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the destination is configured."),
     id_: str = Field(..., alias="id", description="The unique identifier of the Data Export destination to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of patch operations following RFC 6902 (JSON Patch) or RFC 7386 (JSON Merge Patch) format. Each operation specifies an action (op), target path (path), and new value (value) for the destination configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Data Export destination using JSON patch or JSON merge patch operations. Specify the changes you want to apply to the destination configuration."""
 
     # Construct request model with validation
@@ -2692,7 +2826,7 @@ async def delete_destination(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the destination to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the destination exists."),
     id_: str = Field(..., alias="id", description="The unique identifier of the Data Export destination to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a Data Export destination from a specific project and environment. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2732,7 +2866,7 @@ async def get_feature_flag_status_across_environments(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag. This is a required string key that identifies which project's flags to query."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the specific feature flag whose status you want to retrieve. This is a required string key that identifies the flag within the project."),
     env: str | None = Field(None, description="Optional filter to retrieve flag status for a specific environment only. If omitted, the response includes status across all environments in the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and configuration of a feature flag across all environments or a specific environment. Use this to check whether a flag is enabled, its targeting rules, and rollout percentages in your deployment pipeline."""
 
     # Construct request model with validation
@@ -2774,7 +2908,7 @@ async def get_feature_flag_status_across_environments(
 async def list_feature_flag_statuses(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flags."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status of all feature flags in a specific project and environment, including their current state (new, active, inactive, or launched) and last request timestamp."""
 
     # Construct request model with validation
@@ -2814,7 +2948,7 @@ async def get_feature_flag_status(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to check the feature flag status."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose status you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a specific feature flag within a given project and environment. This includes whether the flag is enabled or disabled and any associated targeting rules."""
 
     # Construct request model with validation
@@ -2854,7 +2988,7 @@ async def list_feature_flags(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flags."),
     env: str | None = Field(None, description="Filter flag configurations to a specific environment (e.g., 'production', 'staging'). Required when using environment-specific filters like `evaluated` or `targetingModifiedDate` sorting."),
     summary: bool | None = Field(None, description="Set to `0` to include detailed flag configuration including prerequisites, targets, and rules for each environment. By default, these details are excluded for performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all feature flags in a project with optional filtering by environment, tags, and other criteria. Supports pagination, sorting, and field expansion to optimize response payload and performance."""
 
     # Construct request model with validation
@@ -2909,7 +3043,7 @@ async def create_feature_flag(
     purpose: Literal["migration", "holdout"] | None = Field(None, description="The intended purpose of the flag. Use 'migration' for migration flags (which auto-generate variations based on stage count) or 'holdout' for holdout flags."),
     initial_prerequisites: list[_models.FlagPrerequisitePost] | None = Field(None, alias="initialPrerequisites", description="Array of prerequisite flags that must be satisfied before this flag is evaluated in all environments."),
     is_flag_on: bool | None = Field(None, alias="isFlagOn", description="Automatically enable the flag across all environments upon creation. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a feature flag in a project with customizable variations, targeting defaults, and optional migration settings. Supports cloning existing flags and configuring SDK availability."""
 
     # Construct request model with validation
@@ -2957,7 +3091,7 @@ async def get_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to retrieve."),
     env: str | None = Field(None, description="Optional environment filter to restrict returned configurations to a specific environment (e.g., 'production'). Omit to retrieve all environments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single feature flag by its key, with configurations for all environments by default. Use the `env` parameter to filter results to specific environments for faster responses and smaller payloads."""
 
     # Construct request model with validation
@@ -3002,7 +3136,7 @@ async def update_feature_flag(
     patch: list[_models.PatchOperation] = Field(..., description="Array of patch operations describing the changes to apply. Use semantic patch format (with Content-Type header domain-model=launchdarkly.semanticpatch), JSON patch (RFC 6902), or JSON merge patch (RFC 7386) format. Order of operations is significant."),
     ignore_conflicts: bool | None = Field(None, alias="ignoreConflicts", description="If true, applies the patch even if it conflicts with pending scheduled changes or approval requests. Use to override validation checks."),
     dry_run: bool | None = Field(None, alias="dryRun", description="If true, validates the patch and returns a preview of the flag after changes without persisting them. Useful for testing changes before applying."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Perform a partial update to a feature flag using semantic patch, JSON patch, or JSON merge patch. Supports targeting rules, variations, prerequisites, flag settings, and lifecycle management across environments."""
 
     # Construct request model with validation
@@ -3047,7 +3181,7 @@ async def update_feature_flag(
 async def delete_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique key that identifies the feature flag in your codebase. This is the identifier you reference when evaluating the flag in your application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a feature flag across all environments. This operation cannot be undone, so only use it for flags your application no longer references in code."""
 
     # Construct request model with validation
@@ -3090,7 +3224,7 @@ async def copy_feature_flag_between_environments(
     target_key: str = Field(..., alias="targetKey", description="The environment key of the target environment to copy flag settings to."),
     current_version: int | None = Field(None, alias="currentVersion", description="Optional flag version number. When provided, the copy operation only succeeds if the target environment's current flag version matches this value, enabling optimistic locking to prevent concurrent modification conflicts."),
     included_actions: list[Literal["updateOn", "updateRules", "updateFallthrough", "updateOffVariation", "updatePrerequisites", "updateTargets", "updateFlagConfigMigrationSettings"]] | None = Field(None, alias="includedActions", description="Optional list of specific flag changes to copy (e.g., 'updateOn'). Use this to copy only selected changes rather than the entire flag configuration. Cannot be combined with excludedActions; if neither is provided, all flag changes are copied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy feature flag configuration from a source environment to a target environment. This Enterprise-only operation supports selective copying of flag changes and optimistic locking via version matching."""
 
     # Construct request model with validation
@@ -3135,7 +3269,7 @@ async def list_expiring_context_targets(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the feature flag is configured."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose expiring context targets should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of context targets scheduled for removal from a feature flag. This helps identify and manage temporary targeting rules that are approaching their expiration date."""
 
     # Construct request model with validation
@@ -3176,7 +3310,7 @@ async def update_expiring_context_targets(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the feature flag targeting applies. A string identifier for the specific environment."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key to update expiring targets for. A string identifier for the feature flag."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions to execute. Each instruction must specify a `kind` (addExpiringTarget, updateExpiringTarget, or removeExpiringTarget), the target context via `contextKey` and `contextKind`, the `variationId` to target, and for add/update operations, a `value` representing the Unix millisecond timestamp for removal. Instructions are processed in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule, update, or remove the date when a context will be automatically removed from individual targeting on a feature flag. Use semantic patch instructions to add expiration dates, modify existing ones, or cancel scheduled removals."""
 
     # Construct request model with validation
@@ -3219,7 +3353,7 @@ async def list_expiring_user_targets_for_feature_flag(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that specifies which environment's feature flag targeting data to retrieve."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key that identifies which flag's expiring user targets to list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of user targets scheduled for removal from a feature flag in a specific environment. Note: This endpoint is deprecated; use list_expiring_context_targets_for_feature_flag instead after upgrading to context-based SDKs."""
 
     # Construct request model with validation
@@ -3260,7 +3394,7 @@ async def schedule_user_target_removal_on_flag(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the feature flag is configured."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key to update expiring user targets for."),
     instructions: list[_models.Instruction] = Field(..., description="Array of semantic patch instructions to add, update, or remove user target removal dates. Each instruction must specify a kind (addExpireUserTargetDate, updateExpireUserTargetDate, or removeExpireUserTargetDate), the userKey to target, and the variationId. For add and update operations, include value as a Unix timestamp in milliseconds. The update operation supports an optional version parameter to ensure consistency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule, update, or remove a removal date for a user from a feature flag's individual targeting. Use semantic patch instructions to manage when LaunchDarkly will stop serving a specific variation to targeted users."""
 
     # Construct request model with validation
@@ -3303,7 +3437,7 @@ async def list_flag_triggers(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag triggers are configured."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose triggers you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all triggers configured for a feature flag in a specific environment. Triggers define automated workflows that respond to flag changes."""
 
     # Construct request model with validation
@@ -3345,7 +3479,7 @@ async def create_flag_trigger(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier of the feature flag that will be triggered."),
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier of the integration that will activate this trigger. Use 'generic-trigger' for integrations that are not explicitly supported by the system."),
     instructions: list[_models.Instruction] | None = Field(None, description="An array containing a single object that specifies the action to perform when the trigger is activated. The object must have a 'kind' field set to either 'turnFlagOn' or 'turnFlagOff' to control the flag's state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new trigger for a feature flag that automatically performs an action (such as turning the flag on or off) when activated by an integrated system."""
 
     # Construct request model with validation
@@ -3389,7 +3523,7 @@ async def get_trigger_workflow_by_id(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the trigger."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which the trigger operates."),
     id_: str = Field(..., alias="id", description="The unique identifier of the specific flag trigger to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific flag trigger by its ID within a feature flag, project, and environment context. Use this to fetch detailed configuration and status of an individual trigger workflow."""
 
     # Construct request model with validation
@@ -3431,7 +3565,7 @@ async def update_flag_trigger(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key associated with this trigger."),
     id_: str = Field(..., alias="id", description="The unique identifier of the flag trigger to update."),
     instructions: list[_models.Instruction] | None = Field(None, description="An array of semantic patch instructions to apply. Each instruction is an object with a `kind` field specifying the operation: `replaceTriggerActionInstructions` (with `value` array of actions like `turnFlagOn` or `turnFlagOff`), `cycleTriggerUrl`, `disableTrigger`, or `enableTrigger`. Instructions are applied in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a flag trigger's configuration using semantic patch instructions. Supports actions like enabling/disabling the trigger, replacing trigger actions, or cycling the trigger URL."""
 
     # Construct request model with validation
@@ -3475,7 +3609,7 @@ async def delete_trigger_for_flag(
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag trigger is configured."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with this trigger."),
     id_: str = Field(..., alias="id", description="The unique identifier of the flag trigger to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific flag trigger by its ID. This removes the trigger configuration that automates flag state changes based on defined conditions."""
 
     # Construct request model with validation
@@ -3514,7 +3648,7 @@ async def delete_trigger_for_flag(
 async def get_release_by_flag_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flag."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the currently active release associated with a specific feature flag. Returns release metadata if an active release exists for the flag."""
 
     # Construct request model with validation
@@ -3554,7 +3688,7 @@ async def update_release_phase_status_by_flag_key(
     project_key: str = Field(..., alias="projectKey", description="The project key that contains the flag. A string identifier for the project."),
     flag_key: str = Field(..., alias="flagKey", description="The flag key identifying which flag's release to update. A string identifier for the flag."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON patch array specifying the phase status changes. Each patch object must contain an 'op' field set to 'replace', a 'path' field pointing to a phase's complete status (e.g., '/phases/0/complete'), and a 'value' field set to true or false. Array order matters—use the index to target specific phases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the completion status of a release phase for a flag in a legacy release pipeline. Use JSON patch format to mark specific phases as complete or incomplete by their array index."""
 
     # Construct request model with validation
@@ -3597,7 +3731,7 @@ async def update_release_phase_status_by_flag_key(
 async def delete_release_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flag. Used to scope the operation to the correct project context."),
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag from which the release will be deleted. Must correspond to an existing flag within the specified project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a release associated with a feature flag. This operation permanently deletes the release record from the specified flag within a project."""
 
     # Construct request model with validation
@@ -3633,7 +3767,7 @@ async def delete_release_for_flag(
 
 # Tags: Integration audit log subscriptions
 @mcp.tool()
-async def list_audit_subscriptions_by_integration(integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration whose audit log subscriptions you want to retrieve.")) -> dict[str, Any]:
+async def list_audit_subscriptions_by_integration(integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration whose audit log subscriptions you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all audit log subscriptions associated with a specific integration. Use this to view which audit events are being monitored for a given integration."""
 
     # Construct request model with validation
@@ -3672,7 +3806,7 @@ async def list_audit_subscriptions_by_integration(integration_key: str = Field(.
 async def get_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration. This key determines which integration context the subscription belongs to."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific audit log subscription by its ID within a given integration. Use this to fetch details about an existing subscription configuration."""
 
     # Construct request model with validation
@@ -3712,7 +3846,7 @@ async def update_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration containing the audit log subscription."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type), 'path' (the JSON pointer to the target field), and 'value' (the new value for replace/add operations)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an audit log subscription configuration using JSON Patch operations. Specify the changes you want to apply to the subscription settings."""
 
     # Construct request model with validation
@@ -3755,7 +3889,7 @@ async def update_audit_log_subscription(
 async def delete_audit_log_subscription(
     integration_key: str = Field(..., alias="integrationKey", description="The unique identifier for the integration from which the subscription will be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the audit log subscription to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an audit log subscription from an integration. This permanently deletes the subscription and stops audit log collection for the specified integration."""
 
     # Construct request model with validation
@@ -3791,7 +3925,7 @@ async def delete_audit_log_subscription(
 
 # Tags: Account members
 @mcp.tool()
-async def list_members() -> dict[str, Any]:
+async def list_members() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of account members with support for filtering by query, role, ID, email, team membership, and activity status. Optionally expand the response to include custom roles and role attributes."""
 
     # Extract parameters for API call
@@ -3818,7 +3952,7 @@ async def list_members() -> dict[str, Any]:
 
 # Tags: Account members
 @mcp.tool()
-async def invite_members(body: list[_models.NewMemberForm] = Field(..., description="Array of member objects to invite. Each object must include an email field and either a role field (base role name) or customRoles field (custom or preset role key). Some roles may require roleAttributes for scope specification. Maximum 50 members per request. The request fails entirely if any member data is invalid or if email addresses conflict with existing members in this account or others, or if duplicates exist within the request itself.")) -> dict[str, Any]:
+async def invite_members(body: list[_models.NewMemberForm] = Field(..., description="Array of member objects to invite. Each object must include an email field and either a role field (base role name) or customRoles field (custom or preset role key). Some roles may require roleAttributes for scope specification. Maximum 50 members per request. The request fails entirely if any member data is invalid or if email addresses conflict with existing members in this account or others, or if duplicates exist within the request itself.")) -> dict[str, Any] | ToolResult:
     """Invite one or more new members to join an account via email. Each member receives an invitation and must have a valid email address with either a base role (reader, writer, admin, owner/admin, no_access) or a custom role key. Up to 50 members can be invited per request; the entire request fails if any member's data is invalid or conflicts with existing members."""
 
     # Construct request model with validation
@@ -3857,7 +3991,7 @@ async def invite_members(body: list[_models.NewMemberForm] = Field(..., descript
 
 # Tags: Account members
 @mcp.tool()
-async def update_members_bulk(instructions: list[_models.Instruction] = Field(..., description="Array of semantic patch instructions defining the bulk update operations. Each instruction object must include a `kind` field specifying the operation type (replaceMembersRoles, replaceAllMembersRoles, replaceMembersCustomRoles, replaceAllMembersCustomRoles, or replaceMembersRoleAttributes) along with required parameters for that operation type. Instructions are processed sequentially.")) -> dict[str, Any]:
+async def update_members_bulk(instructions: list[_models.Instruction] = Field(..., description="Array of semantic patch instructions defining the bulk update operations. Each instruction object must include a `kind` field specifying the operation type (replaceMembersRoles, replaceAllMembersRoles, replaceMembersCustomRoles, replaceAllMembersCustomRoles, or replaceMembersRoleAttributes) along with required parameters for that operation type. Instructions are processed sequentially.")) -> dict[str, Any] | ToolResult:
     """Perform bulk updates to member roles and custom roles using semantic patch instructions. Supports targeted updates to specific members or filtered bulk updates across all members (Enterprise feature)."""
 
     # Construct request model with validation
@@ -3895,7 +4029,7 @@ async def update_members_bulk(instructions: list[_models.Instruction] = Field(..
 
 # Tags: Account members
 @mcp.tool()
-async def get_member(id_: str = Field(..., alias="id", description="The member ID as a string. Use the reserved value `me` to retrieve the caller's own member information instead of specifying a numeric ID.")) -> dict[str, Any]:
+async def get_member(id_: str = Field(..., alias="id", description="The member ID as a string. Use the reserved value `me` to retrieve the caller's own member information instead of specifying a numeric ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single account member by ID. Use the reserved value `me` to get the caller's own member information. Optionally expand the response to include custom role details and role attributes."""
 
     # Construct request model with validation
@@ -3934,7 +4068,7 @@ async def get_member(id_: str = Field(..., alias="id", description="The member I
 async def update_member(
     id_: str = Field(..., alias="id", description="The unique identifier of the member to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each patch object must contain an operation (add, remove, replace, etc.), a path (e.g., '/role' or '/customRoles/0'), and a value. Use array index notation to modify role arrays: use '/0' to prepend, '/-' to append, or a specific index to modify an existing position."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an account member's role or custom roles using JSON Patch format. Changes are applied to the member object, though IdP-managed accounts may be overridden by the Identity Provider shortly after."""
 
     # Construct request model with validation
@@ -3974,7 +4108,7 @@ async def update_member(
 
 # Tags: Account members
 @mcp.tool()
-async def delete_member(id_: str = Field(..., alias="id", description="The unique identifier of the member to delete")) -> dict[str, Any]:
+async def delete_member(id_: str = Field(..., alias="id", description="The unique identifier of the member to delete")) -> dict[str, Any] | ToolResult:
     """Remove an account member by their ID. This operation will fail if SCIM provisioning is enabled for the account."""
 
     # Construct request model with validation
@@ -4013,7 +4147,7 @@ async def delete_member(id_: str = Field(..., alias="id", description="The uniqu
 async def add_member_to_teams(
     id_: str = Field(..., alias="id", description="The unique identifier of the member to add to teams."),
     team_keys: list[str] = Field(..., alias="teamKeys", description="An array of team keys identifying which teams the member should be added to. Provide one or more team keys as strings in the array."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a single member to one or more teams. The member will be granted access to all specified teams."""
 
     # Construct request model with validation
@@ -4052,7 +4186,7 @@ async def add_member_to_teams(
 
 # Tags: Metrics
 @mcp.tool()
-async def list_metrics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metrics query to a specific project.")) -> dict[str, Any]:
+async def list_metrics(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metrics query to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all metrics for a specified project with support for filtering by various criteria (data sources, event types, tags, usage context) and optional expansion of related experiment counts."""
 
     # Construct request model with validation
@@ -4114,7 +4248,7 @@ async def create_metric(
     attribute: str | None = Field(None, description="The name of the context attribute or event property to filter on (e.g., 'country'). Not applicable for group-type filters."),
     trace_query: str | None = Field(None, alias="traceQuery", description="A trace query to identify relevant traces for this metric (e.g., 'service.name = \"checkout\"'). Required only for trace metrics."),
     trace_value_location: str | None = Field(None, alias="traceValueLocation", description="The location within a trace to extract numeric values from (e.g., 'duration'). Required only for numeric trace metrics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new metric in a specified project to track user interactions or custom events. The metric structure varies based on the kind (pageview, click, or custom) and whether it measures conversions or numeric values."""
 
     # Construct request model with validation
@@ -4160,7 +4294,7 @@ async def get_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the metric."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to retrieve."),
     version_id: str | None = Field(None, alias="versionId", description="The specific version ID of the metric to retrieve. If omitted, returns the current version. Use comma-separated values in the expand query parameter to include experiments, experimentCount, metricGroups, or metricGroupCount in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific metric in a LaunchDarkly project. Optionally expand the response to include related experiments and metric groups."""
 
     # Construct request model with validation
@@ -4203,7 +4337,7 @@ async def update_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type such as 'replace', 'add', or 'remove'), 'path' (the JSON pointer to the target property), and 'value' (the new value, required for 'replace' and 'add' operations)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a metric using JSON Patch operations. Specify the changes you want to make to the metric's properties such as name, description, or other attributes."""
 
     # Construct request model with validation
@@ -4246,7 +4380,7 @@ async def update_metric(
 async def delete_metric(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric to delete."),
     metric_key: str = Field(..., alias="metricKey", description="The unique identifier for the metric to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a metric from a project by its key. This operation removes the metric and all associated data."""
 
     # Construct request model with validation
@@ -4282,7 +4416,7 @@ async def delete_metric(
 
 # Tags: OAuth2 Clients
 @mcp.tool()
-async def list_oauth_clients() -> dict[str, Any]:
+async def list_oauth_clients() -> dict[str, Any] | ToolResult:
     """Retrieve all OAuth 2.0 clients registered with your account. Use this to view and manage your application integrations."""
 
     # Extract parameters for API call
@@ -4309,7 +4443,7 @@ async def list_oauth_clients() -> dict[str, Any]:
 
 # Tags: OAuth2 Clients
 @mcp.tool()
-async def get_oauth_client_by_id(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to retrieve.")) -> dict[str, Any]:
+async def get_oauth_client_by_id(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a registered OAuth 2.0 client by its unique client ID. Use this to fetch detailed configuration and metadata for a specific OAuth client application."""
 
     # Construct request model with validation
@@ -4348,7 +4482,7 @@ async def get_oauth_client_by_id(client_id: str = Field(..., alias="clientId", d
 async def update_oauth_client(
     client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each operation must specify an operation type (op), a JSON pointer path, and a value. Supported paths are /name, /description, and /redirectUri."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an OAuth 2.0 client's configuration using JSON Patch operations. Only the client name, description, and redirect URI can be modified."""
 
     # Construct request model with validation
@@ -4388,7 +4522,7 @@ async def update_oauth_client(
 
 # Tags: OAuth2 Clients
 @mcp.tool()
-async def delete_oauth_client(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to delete.")) -> dict[str, Any]:
+async def delete_oauth_client(client_id: str = Field(..., alias="clientId", description="The unique identifier of the OAuth 2.0 client to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an OAuth 2.0 client application by its unique identifier. This action cannot be undone and will invalidate all tokens issued to this client."""
 
     # Construct request model with validation
@@ -4424,7 +4558,7 @@ async def delete_oauth_client(client_id: str = Field(..., alias="clientId", desc
 
 # Tags: Projects
 @mcp.tool()
-async def list_projects() -> dict[str, Any]:
+async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects with support for filtering by name, tags, or keys, and sorting by name or creation date. Results are limited to 20 projects per page by default; use pagination links to navigate through additional pages."""
 
     # Extract parameters for API call
@@ -4460,7 +4594,7 @@ async def create_project(
     environments: list[_models.EnvironmentPost] | None = Field(None, description="Optional list of environments to create for this project. If omitted, default environments will be created automatically."),
     case: Literal["camelCase", "upperCamelCase", "snakeCase", "kebabCase", "constantCase"] | None = Field(None, description="Optional casing convention to enforce for new flag keys in this project. Choose from: camelCase, upperCamelCase, snakeCase, kebabCase, or constantCase."),
     prefix: str | None = Field(None, description="Optional prefix to enforce for all new flag keys in this project (e.g., 'enable-')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new project with a unique key and name. Configure SDK availability, naming conventions, and initial environments for the project."""
 
     # Construct request model with validation
@@ -4500,7 +4634,7 @@ async def create_project(
 
 # Tags: Projects
 @mcp.tool()
-async def get_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to specify which project to retrieve.")) -> dict[str, Any]:
+async def get_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to specify which project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single project by its key. Optionally expand the response to include related resources such as environments."""
 
     # Construct request model with validation
@@ -4539,7 +4673,7 @@ async def get_project(project_key: str = Field(..., alias="projectKey", descript
 async def update_project(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must specify an operation type (add, remove, replace, etc.), a JSON Pointer path to the target field, and a value where applicable. For array fields, use numeric indices or `/-` to append to the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a project using JSON Patch operations. Supports modifying project fields including adding, removing, or replacing values. Array fields like tags are automatically deduplicated and sorted alphabetically."""
 
     # Construct request model with validation
@@ -4579,7 +4713,7 @@ async def update_project(
 
 # Tags: Projects
 @mcp.tool()
-async def delete_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to delete. This is a string value that uniquely identifies the project within your account.")) -> dict[str, Any]:
+async def delete_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to delete. This is a string value that uniquely identifies the project within your account.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a project and all its associated environments and feature flags. This operation cannot be undone and will fail if the project is the last one in the account."""
 
     # Construct request model with validation
@@ -4615,7 +4749,7 @@ async def delete_project(project_key: str = Field(..., alias="projectKey", descr
 
 # Tags: Contexts
 @mcp.tool()
-async def list_context_kinds_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This is a string-based key that distinguishes the project within your LaunchDarkly workspace.")) -> dict[str, Any]:
+async def list_context_kinds_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This is a string-based key that distinguishes the project within your LaunchDarkly workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieve all context kinds configured for a specific project. Context kinds define the types of contextual information that can be associated with feature flags and experiments in the project."""
 
     # Construct request model with validation
@@ -4656,7 +4790,7 @@ async def update_context_kind(
     key: str = Field(..., description="The unique identifier for the context kind to create or update."),
     name: str = Field(..., description="The display name for the context kind (e.g., 'organization'). This is the human-readable label used to identify the context kind."),
     archived: bool | None = Field(None, description="Whether the context kind is archived. Archived context kinds cannot be used for targeting. Defaults to false if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update a context kind within a project. If the context kind exists, only the provided fields will be updated; otherwise, a new context kind will be created."""
 
     # Construct request model with validation
@@ -4695,7 +4829,7 @@ async def update_context_kind(
 
 # Tags: Environments
 @mcp.tool()
-async def list_environments_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the environment list to a specific project.")) -> dict[str, Any]:
+async def list_environments_by_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the environment list to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of environments for a specified project, with support for filtering by name/key and tags, and sorting by creation date, criticality, or name."""
 
     # Construct request model with validation
@@ -4744,7 +4878,7 @@ async def create_environment(
     require_comments: bool | None = Field(None, alias="requireComments", description="Optional: When enabled, requires users to provide comments explaining the reason for any flag or segment changes made via the UI."),
     tags: list[str] | None = Field(None, description="Optional: An array of tags to categorize and organize the environment (e.g., ['ops', 'production'], ['team:backend'])."),
     critical: bool | None = Field(None, description="Optional: Marks this environment as critical, which may trigger additional safeguards or notifications for changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new environment within a project. Specify the environment name, unique key, UI color, and optional settings like caching TTL, secure mode, and change approval requirements. Note: approval settings cannot be configured during creation and must be updated separately."""
 
     # Construct request model with validation
@@ -4787,7 +4921,7 @@ async def create_environment(
 async def get_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific environment within a project. Returns environment configuration including approval settings when the approvals feature is enabled."""
 
     # Construct request model with validation
@@ -4827,7 +4961,7 @@ async def update_environment(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project contains the environment to update."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch array describing the changes to apply. Each operation specifies an action (op), target path, and value. For array fields, append the index to the path (e.g., `/fieldName/0` to prepend). Only `canReviewOwnRequest`, `canApplyDeclinedChanges`, `minNumApprovals`, `required`, and `requiredApprovalTags` approval settings are editable; do not set both `required` and `requiredApprovalTags` simultaneously."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an environment's configuration using JSON Patch operations. Supports modifying fields including approval settings, comments requirements, and array-based properties."""
 
     # Construct request model with validation
@@ -4870,7 +5004,7 @@ async def update_environment(
 async def delete_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an environment from a project by its key. This action cannot be undone."""
 
     # Construct request model with validation
@@ -4910,7 +5044,7 @@ async def reset_environment_sdk_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment whose SDK key should be reset."),
     expiry: str | None = Field(None, description="Optional grace period for the old SDK key expiration, specified in UNIX milliseconds. If not provided, the old key expires immediately. This allows clients using the old key to transition to the new key without service interruption."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reset an environment's SDK key and optionally specify when the old key should expire. During the expiry grace period, both the old and new SDK keys remain valid, allowing for seamless client migration."""
 
     _expiry = _parse_int(expiry)
@@ -4954,7 +5088,7 @@ async def reset_environment_sdk_key(
 async def list_context_attribute_names(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all available context attribute names for a specific environment within a project. This returns the list of attributes that can be used to define user context in feature flag evaluations."""
 
     # Construct request model with validation
@@ -4994,7 +5128,7 @@ async def get_context_attribute_values(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context attribute."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the context attribute values are stored."),
     attribute_name: str = Field(..., alias="attributeName", description="The name of the context attribute for which to retrieve values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all values associated with a specific context attribute within a project environment. Use this to discover what values have been recorded or are available for a given attribute name."""
 
     # Construct request model with validation
@@ -5038,7 +5172,7 @@ async def search_context_instances(
     limit: int | None = Field(None, description="Maximum number of context instances to return in a single response, between 1 and 50 items (defaults to 20)."),
     sort: str | None = Field(None, description="Field to sort results by. Use `ts` for ascending timestamp order or `-ts` for descending timestamp order."),
     filter_: str | None = Field(None, alias="filter", description="Filter expression to narrow results by context attributes. Supports nested filter syntax for querying kindKeys, timestamps, and other context properties. See LaunchDarkly filtering documentation for syntax details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for context instances within a specific project and environment using filters, sorting, and pagination. Supports advanced filtering syntax for querying context data across your application."""
 
     # Construct request model with validation
@@ -5085,7 +5219,7 @@ async def get_context_instance(
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
     id_: str = Field(..., alias="id", description="The unique identifier of the context instance to retrieve."),
     include_total_count: bool | None = Field(None, alias="includeTotalCount", description="Whether to include the total count of matching context instances in the response. Defaults to true if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific context instance by its ID within a project and environment. Returns detailed information about the context instance configuration."""
 
     # Construct request model with validation
@@ -5128,7 +5262,7 @@ async def delete_context_instance(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the context instance to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the context instance is located."),
     id_: str = Field(..., alias="id", description="The unique identifier of the context instance to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific context instance by its ID within a project environment. This operation permanently removes the context instance and cannot be undone."""
 
     # Construct request model with validation
@@ -5171,7 +5305,7 @@ async def search_contexts(
     limit: int | None = Field(None, description="Maximum number of contexts to return in the response. Accepts values up to 50, with a default of 20 if not specified."),
     sort: str | None = Field(None, description="Field to sort results by. Use 'ts' for ascending chronological order or '-ts' for descending order by timestamp."),
     filter_: str | None = Field(None, alias="filter", description="Filter expression to narrow results by context attributes and kinds. Supports multiple conditions using operators like 'startsWith' and 'anyOf', separated by commas."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for contexts in a LaunchDarkly environment using filters, sorting, and pagination. Supports advanced filtering by context attributes and kinds to find specific contexts matching your criteria."""
 
     # Construct request model with validation
@@ -5220,7 +5354,7 @@ async def update_flag_setting_for_context(
     context_key: str = Field(..., alias="contextKey", description="The unique identifier for the context within its kind."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The key of the feature flag to update."),
     setting: Any | None = Field(None, description="The variation value to assign to this context. Must match the flag's variation type (e.g., true/false for boolean flags, a string value for string flags). Omit or set to null to remove the context's flag setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or clear a feature flag's variation value for a specific context. Omit or set `setting` to null to erase the current setting; otherwise, provide a variation value matching the flag's type (e.g., boolean, string)."""
 
     # Construct request model with validation
@@ -5265,7 +5399,7 @@ async def get_context(
     kind: str = Field(..., description="The category or type of context (e.g., 'user', 'organization', 'device')."),
     key: str = Field(..., description="The unique identifier for the specific context instance within its kind."),
     include_total_count: bool | None = Field(None, alias="includeTotalCount", description="Whether to include the total count of matching contexts in the response. Defaults to true if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific context by its kind and key within a project environment. Contexts are used to segment user data and targeting rules."""
 
     # Construct request model with validation
@@ -5308,7 +5442,7 @@ async def list_experiments(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project containing the experiments."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project where experiments are located."),
     lifecycle_state: str | None = Field(None, alias="lifecycleState", description="A comma-separated list specifying which experiment states to include in results. Valid values are `archived`, `active`, or both. Defaults to returning only active experiments if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all experiments in an environment with optional filtering by flag, metric, or iteration status, and optional expansion of related data such as iterations, metrics, treatments, and analysis configuration."""
 
     # Construct request model with validation
@@ -5373,7 +5507,7 @@ async def create_experiment(
     multiple_comparison_correction_scope: Literal["variations", "variations-and-metrics", "metrics"] | None = Field(None, alias="multipleComparisonCorrectionScope", description="Scope of multiple comparison correction: 'variations' corrects across variations only, 'metrics' corrects across metrics only, or 'variations-and-metrics' corrects across both."),
     sequential_testing_enabled: bool | None = Field(None, alias="sequentialTestingEnabled", description="Whether to enable sequential testing for Frequentist analysis, allowing results to be checked at interim points rather than only at the end."),
     data_source: Literal["launchdarkly", "snowflake"] | None = Field(None, alias="dataSource", description="The source system for metric data analysis: 'launchdarkly' (default) uses LaunchDarkly's event data, 'snowflake' or 'databricks' connect to external data warehouses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new experiment in a LaunchDarkly project environment. After creation, you must create an iteration and update the experiment with the `startIteration` instruction to run it."""
 
     # Construct request model with validation
@@ -5418,7 +5552,7 @@ async def get_experiment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the experiment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the experiment is running."),
     experiment_key: str = Field(..., alias="experimentKey", description="The unique identifier for the experiment to retrieve. Use the optional `expand` query parameter to include additional fields such as previousIterations, draftIteration, secondaryMetrics, treatments, or analysisConfig in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific experiment in a LaunchDarkly project environment. Optionally expand the response to include iterations, metrics, treatments, and analysis configuration."""
 
     # Construct request model with validation
@@ -5459,7 +5593,7 @@ async def update_experiment(
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the experiment exists."),
     experiment_key: str = Field(..., alias="experimentKey", description="The unique identifier for the experiment to update."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions to apply to the experiment. Each instruction is an object with a `kind` field specifying the operation (updateName, updateDescription, startIteration, stopIteration, archiveExperiment, or restoreExperiment) and optional parameters like `value`, `changeJustification`, `winningTreatmentId`, or `winningReason` depending on the instruction type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an experiment using semantic patch instructions. Supports operations like renaming, updating descriptions, managing iterations, and archiving experiments."""
 
     # Construct request model with validation
@@ -5501,7 +5635,7 @@ async def update_experiment(
 async def list_flag_followers_by_project_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the flags and environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where you want to retrieve flag followers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all followers across feature flags within a specific project and environment. This returns the list of users or teams monitoring flag changes in that environment."""
 
     # Construct request model with validation
@@ -5540,7 +5674,7 @@ async def list_flag_followers_by_project_environment(
 async def reset_mobile_key_for_environment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the environment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment whose mobile SDK key should be reset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reset an environment's mobile SDK key, immediately expiring the previous key. This operation generates a new mobile key for the specified environment within a project."""
 
     # Construct request model with validation
@@ -5580,7 +5714,7 @@ async def evaluate_context_instance_segment_memberships(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies the LaunchDarkly project. This is a string identifier used to scope the operation within your workspace."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies the specific environment within the project. This determines which segment definitions and rules are evaluated."),
     body: dict[str, Any] = Field(..., description="The context instance to evaluate. Must include a unique key identifier, a kind (e.g., 'user', 'organization'), and any custom attributes relevant to segment rules (e.g., name, jobFunction, address). The structure supports nested objects for complex attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Evaluate which segments a context instance belongs to based on its attributes. Provide a context instance with its key, kind, and custom attributes to retrieve membership status across all segments in the environment."""
 
     # Construct request model with validation
@@ -5620,7 +5754,7 @@ async def evaluate_context_instance_segment_memberships(
 
 # Tags: Experiments
 @mcp.tool()
-async def get_experimentation_settings(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose experimentation settings you want to retrieve.")) -> dict[str, Any]:
+async def get_experimentation_settings(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose experimentation settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current experimentation settings configured for a specific project. This includes all active experimentation policies and configurations."""
 
     # Construct request model with validation
@@ -5659,7 +5793,7 @@ async def get_experimentation_settings(project_key: str = Field(..., alias="proj
 async def update_experimentation_settings(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose experimentation settings should be updated."),
     randomization_units: list[_models.RandomizationUnitInput] = Field(..., alias="randomizationUnits", description="An array of randomization units that are permitted for experiments in this project. Each unit defines how experiment subjects are randomly assigned to variations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the experimentation settings for a project, including the randomization units that are allowed for running experiments."""
 
     # Construct request model with validation
@@ -5701,7 +5835,7 @@ async def update_experimentation_settings(
 async def list_experiments_project(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project from which to retrieve experiments."),
     lifecycle_state: str | None = Field(None, alias="lifecycleState", description="Filter experiments by lifecycle state using a comma-separated list. Valid values are `active`, `archived`, or both. Defaults to `active` experiments only if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of experiments across all environments in a project, optionally filtered by lifecycle state (active, archived, or both)."""
 
     # Construct request model with validation
@@ -5740,7 +5874,7 @@ async def list_experiments_project(
 
 # Tags: Projects
 @mcp.tool()
-async def get_flag_defaults_for_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the flag defaults to a specific project.")) -> dict[str, Any]:
+async def get_flag_defaults_for_project(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the flag defaults to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve the default flag settings configured for a specific project. These defaults apply to feature flags within the project unless overridden at a more granular level."""
 
     # Construct request model with validation
@@ -5788,7 +5922,7 @@ async def update_flag_defaults_for_project(
     off_variation: int = Field(..., alias="offVariation", description="The index (0 or 1) of the variation to serve when flag targeting is disabled."),
     using_mobile_key: bool = Field(..., alias="usingMobileKey", description="Whether flags should be available to mobile SDKs by default."),
     using_environment_id: bool = Field(..., alias="usingEnvironmentId", description="Whether flags should be available to client-side SDKs by default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set default configuration values for all feature flags created in a project, including naming conventions, targeting behavior, and SDK availability."""
 
     # Construct request model with validation
@@ -5832,7 +5966,7 @@ async def update_flag_defaults_for_project(
 async def update_flag_defaults_for_project_partial(
     project_key: str = Field(..., alias="projectKey", description="The project key that uniquely identifies the project containing the flag defaults to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of patch operations following RFC 6902 (JSON Patch) or RFC 7386 (JSON Merge Patch) format, specifying the changes to apply to the flag defaults."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update flag defaults for a project using JSON patch or JSON merge patch operations. This allows you to modify default flag configurations applied across the project."""
 
     # Construct request model with validation
@@ -5876,7 +6010,7 @@ async def list_approval_requests_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to retrieve approval requests for."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to list approval requests."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all pending approval requests for a feature flag in a specific environment. Use this to review changes awaiting approval before they can be deployed."""
 
     # Construct request model with validation
@@ -5921,7 +6055,7 @@ async def create_approval_request_for_feature_flag(
     execution_date: str | None = Field(None, alias="executionDate", description="Optional Unix timestamp (in milliseconds) specifying when the approval request instructions should be automatically executed. If omitted, execution occurs immediately upon approval."),
     operating_on_id: str | None = Field(None, alias="operatingOnId", description="The ID of an existing scheduled change, required only if your instructions modify or delete a previously scheduled change to the flag."),
     integration_config: dict[str, Any] | None = Field(None, alias="integrationConfig", description="Optional custom fields for third-party approval system integrations. Field definitions are provided in the integration's manifest.json file in the LaunchDarkly integration framework repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit an approval request to modify a feature flag in a specific environment. The request includes semantic patch instructions that will be applied upon approval, with optional scheduling and third-party integration metadata."""
 
     _execution_date = _parse_int(execution_date)
@@ -5969,7 +6103,7 @@ async def create_flag_copy_approval_request(
     description: str = Field(..., description="A brief summary explaining the purpose of this configuration copy request (e.g., 'copy flag settings to another environment')."),
     key: str = Field(..., description="The unique identifier for the source environment from which the flag configuration will be copied."),
     included_actions: list[Literal["updateOn", "updateFallthrough", "updateOffVariation", "updateRules", "updateTargets", "updatePrerequisites"]] | None = Field(None, alias="includedActions", description="Optional list of specific flag changes to copy from source to target environment (e.g., 'updateOn'). You may specify either included or excluded actions, but not both. If omitted, all flag changes will be copied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an approval request to copy a feature flag's configuration from a source environment to a target environment. This allows controlled promotion of flag settings across your deployment environments."""
 
     # Construct request model with validation
@@ -6014,7 +6148,7 @@ async def get_approval_request_for_flag(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with this approval request."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the approval request applies."),
     id_: str = Field(..., alias="id", description="The unique identifier for the specific approval request to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific approval request for a feature flag in a given environment. Use this to check the status and details of a pending or completed approval workflow."""
 
     # Construct request model with validation
@@ -6055,7 +6189,7 @@ async def delete_approval_request_for_flag(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the approval request."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the approval request applies."),
     id_: str = Field(..., alias="id", description="The unique identifier of the approval request to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a pending approval request for a feature flag in a specific environment. This removes the approval workflow, preventing further review or approval actions on the request."""
 
     # Construct request model with validation
@@ -6096,7 +6230,7 @@ async def apply_approval_request_for_flag(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the approval request."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the approval request will be applied."),
     id_: str = Field(..., alias="id", description="The unique identifier for the approval request to apply. The request must have been previously approved before it can be applied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Apply an approval request that has been approved for a feature flag in a specific environment. This executes the changes specified in the approval request."""
 
     # Construct request model with validation
@@ -6138,7 +6272,7 @@ async def review_approval_request_for_flag(
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the approval request applies."),
     id_: str = Field(..., alias="id", description="The unique identifier for the approval request being reviewed."),
     kind: Literal["approve", "comment", "decline"] | None = Field(None, description="The type of review action: approve to accept the changes, decline to reject them, or comment to provide feedback without a final decision."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a review decision on a pending approval request for a feature flag, either approving, declining, or commenting on the proposed changes."""
 
     # Construct request model with validation
@@ -6181,7 +6315,7 @@ async def list_flag_followers(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose followers you want to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to retrieve flag followers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of team members who are following a specific feature flag within a project and environment. This helps identify who is monitoring changes to the flag."""
 
     # Construct request model with validation
@@ -6222,7 +6356,7 @@ async def add_flag_follower(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag to follow."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag follower relationship applies."),
     member_id: str = Field(..., alias="memberId", description="The unique identifier of the team member to add as a follower. Members with reader-level permissions can only add themselves, while higher-privileged members can add any team member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe a team member to receive updates about a feature flag's changes in a specific project and environment. Members with reader roles can only add themselves as followers."""
 
     # Construct request model with validation
@@ -6263,7 +6397,7 @@ async def remove_flag_follower(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag from which to remove the follower."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the flag follower relationship exists."),
     member_id: str = Field(..., alias="memberId", description="The unique identifier of the member to remove as a follower. Members with reader roles can only remove themselves; other roles can remove any member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a member as a follower of a feature flag in a specific project and environment. Members with reader roles can only remove themselves as followers."""
 
     # Construct request model with validation
@@ -6303,7 +6437,7 @@ async def list_scheduled_changes_for_flag(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the feature flag."),
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose scheduled changes you want to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to list scheduled changes for the feature flag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all scheduled changes pending application to a feature flag in a specific environment. This shows future modifications that will be automatically applied at their scheduled times."""
 
     # Construct request model with validation
@@ -6346,7 +6480,7 @@ async def create_scheduled_changes_for_flag(
     execution_date: str = Field(..., alias="executionDate", description="Unix timestamp (milliseconds) indicating when the scheduled changes should be executed."),
     instructions: list[_models.Instruction] = Field(..., description="Array containing a single object with `kind: \"scheduled_action\"` and semantic patch instructions. Supported instructions are the same as those available when updating a feature flag directly."),
     ignore_conflicts: bool | None = Field(None, alias="ignoreConflicts", description="If true, the operation succeeds even when these instructions conflict with existing scheduled changes. If false (default), the operation fails on conflicts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule semantic patch instructions to be applied to a feature flag at a specified future date. Optionally allow the operation to succeed even if scheduled changes conflict with existing ones."""
 
     _execution_date = _parse_int(execution_date)
@@ -6395,7 +6529,7 @@ async def get_scheduled_change_for_feature_flag(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag associated with the scheduled change."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the scheduled change will be applied."),
     id_: str = Field(..., alias="id", description="The unique identifier for the scheduled change to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific scheduled change that will be applied to a feature flag in a given environment. Use this to inspect the details of a pending flag modification by its ID."""
 
     # Construct request model with validation
@@ -6438,7 +6572,7 @@ async def update_scheduled_flag_change(
     id_: str = Field(..., alias="id", description="The unique identifier of the scheduled change to update."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions to apply. Each instruction is an object with a `kind` field specifying the operation (deleteScheduledChange, replaceScheduledChangesInstructions, or updateScheduledChangesExecutionDate). Some instructions require a `value` field with the new data."),
     ignore_conflicts: bool | None = Field(None, alias="ignoreConflicts", description="Set to `true` to allow the update even if new instructions conflict with existing scheduled changes, or `false` to reject conflicting updates. Defaults to `false`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a scheduled flag change by replacing its instructions or execution date using semantic patch operations. Supports deleting the scheduled change, modifying its execution time, or changing the flag actions to be performed."""
 
     # Construct request model with validation
@@ -6485,7 +6619,7 @@ async def delete_scheduled_flag_changes(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The feature flag key identifying which flag's scheduled changes should be deleted."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key specifying which environment's scheduled changes workflow should be removed."),
     id_: str = Field(..., alias="id", description="The unique identifier of the scheduled changes workflow to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a scheduled changes workflow for a feature flag in a specific environment. This removes the pending scheduled changes and cancels any automation associated with the workflow."""
 
     # Construct request model with validation
@@ -6526,7 +6660,7 @@ async def list_workflows_for_feature_flag(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag whose workflows you want to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which to retrieve workflows."),
     status: str | None = Field(None, description="Filter workflows by their current status. Supported values are `active` (ongoing workflows), `completed` (finished workflows), and `failed` (workflows that encountered errors). Omit to retrieve workflows of all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all workflows associated with a feature flag in a specific environment. Optionally filter results by workflow status to view active, completed, or failed workflows."""
 
     # Construct request model with validation
@@ -6570,7 +6704,7 @@ async def get_custom_workflow(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the workflow."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which the workflow operates."),
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier of the specific workflow to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom workflow by its ID within a feature flag's environment. Use this to inspect workflow configuration, status, and details."""
 
     # Construct request model with validation
@@ -6611,7 +6745,7 @@ async def delete_workflow(
     feature_flag_key: str = Field(..., alias="featureFlagKey", description="The unique identifier for the feature flag that contains the workflow to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the workflow is configured."),
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier for the workflow to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a workflow from a feature flag in a specific environment. This permanently deletes the workflow and its associated configuration."""
 
     # Construct request model with validation
@@ -6652,7 +6786,7 @@ async def get_migration_safety_issues(
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the feature flag being evaluated for migration safety."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment in which the flag changes would be applied."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions that describe the flag modifications to evaluate. Use the same instruction format as standard flag update operations. Order matters—instructions are applied sequentially."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Analyzes a feature flag patch and returns any migration safety issues that would result from applying those changes. Use this to validate flag modifications before deployment."""
 
     # Construct request model with validation
@@ -6696,7 +6830,7 @@ async def add_flag_to_release_pipeline(
     flag_key: str = Field(..., alias="flagKey", description="The unique identifier for the flag to be added to the release pipeline."),
     release_pipeline_key: str = Field(..., alias="releasePipelineKey", description="The unique identifier of the release pipeline to attach the flag to."),
     release_variation_id: str | None = Field(None, alias="releaseVariationId", description="The variation to release across all phases of the pipeline. If not specified, the default variation will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a flag to a release pipeline, optionally specifying which variation to release across all phases. This initiates the flag's progression through the release pipeline's defined stages."""
 
     # Construct request model with validation
@@ -6741,7 +6875,7 @@ async def update_release_phase_status(
     phase_id: str = Field(..., alias="phaseId", description="The unique identifier for the specific phase within the release whose status should be updated."),
     status: str | None = Field(None, description="The new execution status to assign to the phase, controlling its progression through the release lifecycle."),
     audiences: list[_models.ReleaserAudienceConfigInput] | None = Field(None, description="An ordered list of audience configurations to apply when initializing the phase. Each item specifies targeting rules and rollout parameters for that audience segment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the execution status of a specific phase within a feature flag release. Use this to advance phases through their lifecycle and configure audience targeting for phase initialization."""
 
     # Construct request model with validation
@@ -6780,7 +6914,7 @@ async def update_release_phase_status(
 
 # Tags: Layers
 @mcp.tool()
-async def list_layers(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This string value is used to scope the layer collection to a specific project.")) -> dict[str, Any]:
+async def list_layers(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. This string value is used to scope the layer collection to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all layers for a specified project. Returns a collection of layer resources associated with the given project."""
 
     # Construct request model with validation
@@ -6821,7 +6955,7 @@ async def create_layer(
     key: str = Field(..., description="A unique identifier for the layer, typically in kebab-case format (e.g., 'checkout-flow'). This key is used to reference the layer in API calls and must be distinct within the project."),
     name: str = Field(..., description="A human-readable name for the layer that describes its purpose (e.g., 'Checkout Flow'). This is displayed in the UI and should be clear and descriptive."),
     description: str = Field(..., description="A detailed description explaining the layer's purpose and scope within the application. This helps team members understand what experiments belong in this layer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new layer within a project to enable mutually-exclusive traffic allocation across experiments. Experiments running in the same layer will have their traffic split exclusively among them."""
 
     # Construct request model with validation
@@ -6865,7 +6999,7 @@ async def update_layer(
     layer_key: str = Field(..., alias="layerKey", description="The unique identifier for the layer to update."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instructions defining the updates to apply. Each instruction object must include a `kind` field specifying the operation type (updateName, updateDescription, updateExperimentReservation, or removeExperiment), along with any required parameters for that instruction type."),
     environment_key: str | None = Field(None, alias="environmentKey", description="The environment key for environment-specific updates, such as modifying experiment traffic reservations. Required when updating experiment reservations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify a layer's properties or experiment traffic reservations using semantic patch instructions. Supports updating layer name/description or managing traffic reservations for experiments within the layer."""
 
     # Construct request model with validation
@@ -6904,7 +7038,7 @@ async def update_layer(
 
 # Tags: Metrics (beta)
 @mcp.tool()
-async def list_metric_groups(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metric groups to a specific project.")) -> dict[str, Any]:
+async def list_metric_groups(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Used to scope the metric groups to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all metric groups for a project. Supports filtering by experiment status, connections, kind, maintainers, and fuzzy search; results can be sorted by name, creation date, or connection count."""
 
     # Construct request model with validation
@@ -6948,7 +7082,7 @@ async def create_metric_group(
     tags: list[str] = Field(..., description="One or more tags to categorize and organize the metric group for easier discovery and filtering."),
     metrics: list[_models.MetricInMetricGroupInput] = Field(..., description="An ordered list of metrics to include in the group. The order is significant and determines the sequence in which metrics are displayed and processed."),
     key: str | None = Field(None, description="A unique identifier for the metric group used in API references and integrations. If not provided, one will be auto-generated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new metric group within a project to organize and track related metrics. Metric groups can be configured as standard collections or funnel-type progressions."""
 
     # Construct request model with validation
@@ -6990,7 +7124,7 @@ async def create_metric_group(
 async def get_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific metric group within a project. Optionally expand the response to include associated experiments or experiment counts."""
 
     # Construct request model with validation
@@ -7030,7 +7164,7 @@ async def update_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to be updated."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations (RFC 6902) specifying the changes to apply. Each operation must include 'op' (the operation type such as 'replace', 'add', or 'remove'), 'path' (the JSON pointer to the target property), and 'value' (the new value, required for 'replace' and 'add' operations)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a metric group using JSON Patch operations. Apply one or more changes to a metric group's properties by specifying the operation type, target path, and new value."""
 
     # Construct request model with validation
@@ -7073,7 +7207,7 @@ async def update_metric_group(
 async def delete_metric_group(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the metric group to delete."),
     metric_group_key: str = Field(..., alias="metricGroupKey", description="The unique identifier for the metric group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a metric group from a project by its key. This action cannot be undone."""
 
     # Construct request model with validation
@@ -7109,7 +7243,7 @@ async def delete_metric_group(
 
 # Tags: Release pipelines (beta)
 @mcp.tool()
-async def list_release_pipelines(project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's release pipelines to retrieve.")) -> dict[str, Any]:
+async def list_release_pipelines(project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's release pipelines to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all release pipelines for a project. Supports filtering by pipeline attributes (key, name, description) and environment."""
 
     # Construct request model with validation
@@ -7153,7 +7287,7 @@ async def create_release_pipeline(
     tags: list[str] | None = Field(None, description="An optional list of tags to categorize and organize the release pipeline (e.g., ['example-tag']). Useful for filtering and searching pipelines."),
     is_project_default: bool | None = Field(None, alias="isProjectDefault", description="Optional boolean flag. When true, sets this pipeline as the default for the project. If not specified, only the first pipeline created becomes the default."),
     is_legacy: bool | None = Field(None, alias="isLegacy", description="Optional boolean flag. When true, enables this pipeline for Release Automation features. Controls whether the pipeline participates in automated release workflows."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new release pipeline for a project. The first pipeline created automatically becomes the default; subsequent pipelines can be set as default via the project update API. Projects support up to 20 release pipelines."""
 
     # Construct request model with validation
@@ -7195,7 +7329,7 @@ async def create_release_pipeline(
 async def get_release_pipeline_by_key(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific release pipeline within a project using its unique key identifier. This operation returns the complete pipeline configuration and metadata."""
 
     # Construct request model with validation
@@ -7237,7 +7371,7 @@ async def update_release_pipeline(
     name: str = Field(..., description="The display name for the release pipeline (e.g., 'Standard Pipeline'). Used to identify the pipeline in the UI and reports."),
     phases: list[_models.CreatePhaseInput] = Field(..., description="An ordered array of deployment phases, where each phase represents a logical grouping of one or more environments that share attributes for rolling out changes. Phase order determines the sequence of deployments."),
     tags: list[str] | None = Field(None, description="An optional array of tags for categorizing and filtering the release pipeline (e.g., ['example-tag']). Tags help organize pipelines by team, environment type, or other attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing release pipeline with new configuration, including its name, deployment phases, and optional tags for organization and filtering."""
 
     # Construct request model with validation
@@ -7279,7 +7413,7 @@ async def update_release_pipeline(
 async def delete_release_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a release pipeline from a project. Note that the default release pipeline cannot be deleted; if you need to remove it, first create and set a different pipeline as default."""
 
     # Construct request model with validation
@@ -7318,7 +7452,7 @@ async def delete_release_pipeline(
 async def list_release_progressions_for_pipeline(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release pipeline."),
     pipeline_key: str = Field(..., alias="pipelineKey", description="The unique identifier for the release pipeline whose release progressions you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the progression status of all releases across all feature flags within a specified release pipeline. This provides a comprehensive view of how releases are advancing through the pipeline."""
 
     # Construct request model with validation
@@ -7354,7 +7488,7 @@ async def list_release_progressions_for_pipeline(
 
 # Tags: Custom roles
 @mcp.tool()
-async def list_custom_roles() -> dict[str, Any]:
+async def list_custom_roles() -> dict[str, Any] | ToolResult:
     """Retrieve all custom roles available in your LaunchDarkly organization, including project-specific roles, organization-wide roles, and LaunchDarkly-provided preset roles. Base roles are excluded from this list."""
 
     # Extract parameters for API call
@@ -7381,7 +7515,7 @@ async def list_custom_roles() -> dict[str, Any]:
 
 # Tags: Custom roles
 @mcp.tool()
-async def get_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role, specified as either the custom role key or its ID.")) -> dict[str, Any]:
+async def get_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role, specified as either the custom role key or its ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single custom role by its unique key or ID. Use this to fetch detailed information about a specific custom role in your organization."""
 
     # Construct request model with validation
@@ -7420,7 +7554,7 @@ async def get_custom_role(custom_role_key: str = Field(..., alias="customRoleKey
 async def update_custom_role(
     custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier key for the custom role to update."),
     patch: list[_models.PatchOperation] = Field(..., description="An array of JSON patch operations (RFC 6902) or JSON merge patch (RFC 7386) representing the changes to apply. To modify the policy array, use path `/policy` followed by an array index (`/0` for beginning, `/-` for end), or specify other role properties to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a custom role using JSON patch or JSON merge patch operations. Supports modifying role policies by specifying the desired changes as a patch document."""
 
     # Construct request model with validation
@@ -7459,7 +7593,7 @@ async def update_custom_role(
 
 # Tags: Custom roles
 @mcp.tool()
-async def delete_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role to delete. This is a string value that uniquely identifies the role within the system.")) -> dict[str, Any]:
+async def delete_custom_role(custom_role_key: str = Field(..., alias="customRoleKey", description="The unique identifier for the custom role to delete. This is a string value that uniquely identifies the role within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a custom role by its unique key. This action removes the role and any associated permissions from the system."""
 
     # Construct request model with validation
@@ -7498,7 +7632,7 @@ async def delete_custom_role(custom_role_key: str = Field(..., alias="customRole
 async def list_segments(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segments."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project from which to retrieve segments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segments in a project environment, including rule-based, list-based, and synced segments. Supports filtering by tags, keys, segment type, external sync status, and fuzzy search across segment metadata."""
 
     # Construct request model with validation
@@ -7542,7 +7676,7 @@ async def create_segment(
     tags: list[str] | None = Field(None, description="Optional labels to organize and categorize the segment for easier management and filtering."),
     unbounded: bool | None = Field(None, description="Set to true to create a big segment for handling more than 15,000 individual targets; false for standard segments with rule-based or smaller list-based criteria."),
     unbounded_context_kind: str | None = Field(None, alias="unboundedContextKind", description="For big segments, specifies the context kind (e.g., 'device', 'user') that the segment targets. Required when creating a big segment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new segment in a LaunchDarkly project environment. Segments can be standard (rule-based or small list-based) or big segments (large list-based or synced) for targeting contexts."""
 
     # Construct request model with validation
@@ -7585,7 +7719,7 @@ async def get_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the segment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single segment by its key. Segments can be rule-based, list-based, or synced; big segments include larger list-based and synced segments with additional metadata fields."""
 
     # Construct request model with validation
@@ -7627,7 +7761,7 @@ async def update_segment(
     segment_key: str = Field(..., alias="segmentKey", description="The segment key identifying which segment to update."),
     patch: list[_models.PatchOperation] = Field(..., description="The patch instructions as a JSON array. Use semantic patch (with `domain-model=launchdarkly.semanticpatch` header) for segment-specific operations like managing targets and rules, or standard JSON patch/merge patch for direct field modifications. Semantic patch requires `environmentKey` and `instructions` properties; JSON patch uses standard RFC 6902 operations."),
     dry_run: bool | None = Field(None, alias="dryRun", description="When true, validates the patch and returns a preview of the updated segment without persisting changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a segment using semantic patch, JSON patch, or JSON merge patch. Supports modifications to segment metadata, targeting rules, individual targets, and big segment operations."""
 
     # Construct request model with validation
@@ -7673,7 +7807,7 @@ async def delete_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment to delete."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment exists."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the segment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a segment from a specific project and environment. This action cannot be undone."""
 
     # Construct request model with validation
@@ -7717,7 +7851,7 @@ async def update_big_segment_context_targets(
     excluded_add: list[str] | None = Field(None, alias="excludedAdd", description="Array of context identifiers to add to the segment's excluded list. Order is not significant."),
     included_remove: list[str] | None = Field(None, alias="includedRemove", description="Array of context identifiers to remove from the segment's included list. Order is not significant."),
     excluded_remove: list[str] | None = Field(None, alias="excludedRemove", description="Array of context identifiers to remove from the segment's excluded list. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update which contexts are included in or excluded from a big segment. Big segments support larger list-based and synced segments, unlike standard segments which are not supported by this operation."""
 
     # Construct request model with validation
@@ -7762,7 +7896,7 @@ async def get_segment_membership_for_context(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment to query for segment membership."),
     segment_key: str = Field(..., alias="segmentKey", description="The segment key that identifies the big segment to check membership against."),
     context_key: str = Field(..., alias="contextKey", description="The context key that identifies the specific context whose membership status you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a specific context is included or excluded from a big segment. Big segments support larger list-based and synced segments, but not standard segments."""
 
     # Construct request model with validation
@@ -7802,7 +7936,7 @@ async def create_big_segment_export(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segment to export."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment exists."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the big segment to export."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an export process for a large segment (synced or list-based) containing more than 15,000 entries. The export runs asynchronously and can be monitored for completion status."""
 
     # Construct request model with validation
@@ -7843,7 +7977,7 @@ async def get_big_segment_export(
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment is defined."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the segment being exported."),
     export_id: str = Field(..., alias="exportID", description="The unique identifier for the specific export process to retrieve information about."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a big segment export process for a synced or list-based segment containing more than 15,000 entries."""
 
     # Construct request model with validation
@@ -7886,7 +8020,7 @@ async def create_big_segment_import(
     file_: str | None = Field(None, alias="file", description="A CSV file containing the segment keys to import. Each row should contain one key entry."),
     mode: str | None = Field(None, description="The import strategy: use `merge` to add new entries while preserving existing ones, or `replace` to overwrite all existing entries with the imported data."),
     wait_on_approvals: bool | None = Field(None, alias="waitOnApprovals", description="If true, the import process will pause and wait for any required approvals before processing the data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an import process for a big segment to add or replace list-based segment entries. This operation supports importing large datasets with more than 15,000 entries from a CSV file."""
 
     # Construct request model with validation
@@ -7919,6 +8053,7 @@ async def create_big_segment_import(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -7931,7 +8066,7 @@ async def get_big_segment_import(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment contains the segment being imported."),
     segment_key: str = Field(..., alias="segmentKey", description="The segment key that identifies the specific big segment associated with this import."),
     import_id: str = Field(..., alias="importID", description="The import ID that uniquely identifies the specific import process to retrieve status and details for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an in-progress or completed big segment import process. Big segments support list-based imports with more than 15,000 entries."""
 
     # Construct request model with validation
@@ -7975,7 +8110,7 @@ async def update_big_segment_user_targets(
     excluded_add: list[str] | None = Field(None, alias="excludedAdd", description="Array of user context identifiers to add to the segment's excluded targets. Order is not significant."),
     included_remove: list[str] | None = Field(None, alias="includedRemove", description="Array of user context identifiers to remove from the segment's included targets. Order is not significant."),
     excluded_remove: list[str] | None = Field(None, alias="excludedRemove", description="Array of user context identifiers to remove from the segment's excluded targets. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify user context targets included or excluded in a big segment. Use this operation to add or remove users from list-based or synced segments, which support larger audiences than standard segments."""
 
     # Construct request model with validation
@@ -8020,7 +8155,7 @@ async def get_user_segment_membership(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment membership is evaluated."),
     segment_key: str = Field(..., alias="segmentKey", description="The big segment key to check membership for."),
     user_key: str = Field(..., alias="userKey", description="The user key to check for membership in the segment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a user is included or excluded from a big segment. This operation only works with big segments, not standard segments."""
 
     # Construct request model with validation
@@ -8060,7 +8195,7 @@ async def list_expiring_targets_for_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment where the segment's expiring targets are managed."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the segment whose expiring context targets you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of context targets within a segment that are scheduled for removal. This helps identify which targets will be automatically deleted from the segment."""
 
     # Construct request model with validation
@@ -8101,7 +8236,7 @@ async def update_segment_expiring_targets(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment targeting applies. Specifies which environment's segment expiration rules to update."),
     segment_key: str = Field(..., alias="segmentKey", description="The segment key identifying which segment's expiring targets to modify."),
     instructions: list[_models.PatchSegmentExpiringTargetInstruction] = Field(..., description="Array of semantic patch instructions defining the changes to apply. Each instruction must specify a kind (addExpiringTarget, updateExpiringTarget, or removeExpiringTarget), the target type (included or excluded), context key, context kind, and for add/update operations, an expiration timestamp in Unix milliseconds. Instructions are processed sequentially and partial failures return status 200 with errors listed in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule or modify expiration dates for context targets within a segment using semantic patch instructions. Supports adding, updating, or removing scheduled expirations for included or excluded contexts."""
 
     # Construct request model with validation
@@ -8144,7 +8279,7 @@ async def list_expiring_user_targets_for_segment(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the LaunchDarkly project containing the segment."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project where the segment is defined."),
     segment_key: str = Field(..., alias="segmentKey", description="The unique identifier for the segment whose expiring user targets should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of user targets scheduled for removal from a specific segment. Note: This endpoint is deprecated; use list_expiring_targets_for_segment instead after upgrading to context-based SDKs."""
 
     # Construct request model with validation
@@ -8185,7 +8320,7 @@ async def update_expiring_user_targets_for_segment(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key where the segment targeting applies. Specifies which environment's user targets should be modified."),
     segment_key: str = Field(..., alias="segmentKey", description="The segment key identifying which segment's user target expirations to update."),
     instructions: list[_models.PatchSegmentInstruction] = Field(..., description="Array of semantic patch instructions defining the changes to apply. Each instruction must specify a kind (addExpireUserTargetDate, updateExpireUserTargetDate, or removeExpireUserTargetDate), targetType (included or excluded), userKey, and optionally a value (Unix milliseconds for expiration date) or version number. Instructions are processed in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update expiration dates for users targeted in a segment using semantic patch instructions. This endpoint manages when LaunchDarkly will automatically remove users from segment targeting."""
 
     # Construct request model with validation
@@ -8224,7 +8359,7 @@ async def update_expiring_user_targets_for_segment(
 
 # Tags: Teams
 @mcp.tool()
-async def list_teams() -> dict[str, Any]:
+async def list_teams() -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of teams with optional filtering and field expansion. By default returns the first 20 teams; use pagination links and the limit parameter to navigate through results."""
 
     # Extract parameters for API call
@@ -8258,7 +8393,7 @@ async def create_team(
     member_i_ds: list[str] | None = Field(None, alias="memberIDs", description="Array of member IDs to add to the team upon creation. Each ID should be a valid LaunchDarkly member identifier."),
     permission_grants: list[_models.PermissionGrantInput] | None = Field(None, alias="permissionGrants", description="Array of permission grants that define specific actions the team can perform without requiring a custom role. Each grant specifies an action and resource scope."),
     role_attributes: dict[str, _models.RoleAttributeValues] | None = Field(None, alias="roleAttributes", description="Object containing role attributes as key-value pairs. Attributes provide additional context or metadata for the team's roles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new team in LaunchDarkly with optional members, custom roles, and permission grants. Supports expanding the response to include members, roles, projects, and maintainers."""
 
     # Construct request model with validation
@@ -8296,7 +8431,7 @@ async def create_team(
 
 # Tags: Teams
 @mcp.tool()
-async def get_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team. Use this key to fetch the specific team's details.")) -> dict[str, Any]:
+async def get_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team. Use this key to fetch the specific team's details.")) -> dict[str, Any] | ToolResult:
     """Retrieve a team by its unique key. Optionally expand the response to include members, roles, role attributes, projects, or maintainers."""
 
     # Construct request model with validation
@@ -8335,7 +8470,7 @@ async def get_team(team_key: str = Field(..., alias="teamKey", description="The 
 async def update_team(
     team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team to update. Use the team key value returned from team listing operations."),
     instructions: list[_models.Instruction] = Field(..., description="An array of semantic patch instruction objects that specify the updates to apply. Each instruction object must include a `kind` field indicating the operation type (e.g., addMembers, updateName, removeCustomRoles) and any required parameters for that operation. Multiple instructions are processed sequentially."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Perform a partial update to a team using semantic patch instructions. Supports operations like adding/removing members, updating team metadata, managing custom roles, and configuring permission grants."""
 
     # Construct request model with validation
@@ -8374,7 +8509,7 @@ async def update_team(
 
 # Tags: Teams
 @mcp.tool()
-async def delete_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team to delete. This is a string value that uniquely identifies the team within your LaunchDarkly organization.")) -> dict[str, Any]:
+async def delete_team(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team to delete. This is a string value that uniquely identifies the team within your LaunchDarkly organization.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team by its key. This action cannot be undone and will remove the team from your LaunchDarkly account."""
 
     # Construct request model with validation
@@ -8410,7 +8545,7 @@ async def delete_team(team_key: str = Field(..., alias="teamKey", description="T
 
 # Tags: Teams
 @mcp.tool()
-async def list_team_maintainers(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose maintainers you want to retrieve.")) -> dict[str, Any]:
+async def list_team_maintainers(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose maintainers you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of maintainers assigned to a specific team. Maintainers have elevated permissions to manage team settings and members."""
 
     # Construct request model with validation
@@ -8449,7 +8584,7 @@ async def list_team_maintainers(team_key: str = Field(..., alias="teamKey", desc
 async def add_members_to_team(
     team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team. Used to route the request to the correct team."),
     file_: str | None = Field(None, alias="file", description="A CSV file containing email addresses in the first column (headers optional). LaunchDarkly ignores additional columns. File must not exceed 25MB and must contain at least one valid email address belonging to a LaunchDarkly organization member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add multiple team members to an existing team by uploading a CSV file containing email addresses. The operation validates all entries before adding any members—a single invalid entry prevents all additions."""
 
     # Construct request model with validation
@@ -8482,6 +8617,7 @@ async def add_members_to_team(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -8489,7 +8625,7 @@ async def add_members_to_team(
 
 # Tags: Teams
 @mcp.tool()
-async def list_team_roles(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose roles you want to retrieve.")) -> dict[str, Any]:
+async def list_team_roles(team_key: str = Field(..., alias="teamKey", description="The unique identifier for the team whose roles you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom roles assigned to a specific team. Custom roles define granular permissions for team members within LaunchDarkly."""
 
     # Construct request model with validation
@@ -8528,7 +8664,7 @@ async def list_team_roles(team_key: str = Field(..., alias="teamKey", descriptio
 async def list_workflow_templates(
     summary: bool | None = Field(None, description="Return lightweight template summaries instead of full template objects. When true, returns only essential metadata; when false or omitted, returns complete template details."),
     search: str | None = Field(None, description="Filter templates by searching for a substring within template names or descriptions. The search is case-sensitive and matches partial strings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve workflow templates for your account with optional filtering and summary mode. Use the summary parameter to get lightweight template metadata or the search parameter to filter templates by name or description."""
 
     # Construct request model with validation
@@ -8566,7 +8702,7 @@ async def list_workflow_templates(
 
 # Tags: Access tokens
 @mcp.tool()
-async def get_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to retrieve.")) -> dict[str, Any]:
+async def get_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single access token by its unique identifier. Use this to fetch details about a specific token for inspection or validation purposes."""
 
     # Construct request model with validation
@@ -8605,7 +8741,7 @@ async def get_token(id_: str = Field(..., alias="id", description="The unique id
 async def update_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the access token to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include 'op' (the operation type), 'path' (the token property to modify), and 'value' (the new value for replace operations). Operations are applied in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an access token's settings using JSON Patch operations. Specify the changes you want to make (such as modifying the role) in RFC 6902 patch format."""
 
     # Construct request model with validation
@@ -8645,7 +8781,7 @@ async def update_token(
 
 # Tags: Access tokens
 @mcp.tool()
-async def delete_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to delete. This is a string value that uniquely identifies the token in the system.")) -> dict[str, Any]:
+async def delete_token(id_: str = Field(..., alias="id", description="The unique identifier of the access token to delete. This is a string value that uniquely identifies the token in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an access token by its ID. This operation removes the token immediately, invalidating any authentication attempts using it."""
 
     # Construct request model with validation
@@ -8684,7 +8820,7 @@ async def delete_token(id_: str = Field(..., alias="id", description="The unique
 async def reset_token(
     id_: str = Field(..., alias="id", description="The unique identifier of the access token to reset."),
     expiry: str | None = Field(None, description="Optional Unix epoch time in milliseconds when the old token key should expire. If not provided, the old key expires immediately upon reset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a new secret key for an access token, optionally setting an expiration time for the old key. Use this to rotate credentials while maintaining token validity."""
 
     _expiry = _parse_int(expiry)
@@ -8729,7 +8865,7 @@ async def get_events_usage_by_type(
     type_: str = Field(..., alias="type", description="The event category to retrieve usage data for. Must be either 'received' (events received by the system) or 'published' (events published by the system)."),
     from_: str | None = Field(None, alias="from", description="ISO 8601 timestamp marking the start of the requested data range. If not provided, defaults to 24 hours before the 'to' timestamp."),
     to: str | None = Field(None, description="ISO 8601 timestamp marking the end of the requested data range. If not provided, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time-series data showing how many times a flag was evaluated and which variation resulted from each evaluation. Data granularity automatically adjusts based on age: minutely for the past 2 hours, hourly for the past 2 days, and daily for older data."""
 
     # Construct request model with validation
@@ -8768,7 +8904,7 @@ async def get_events_usage_by_type(
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks() -> dict[str, Any]:
+async def list_webhooks() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all configured webhooks for the account. Use this to view all active webhook endpoints and their configurations."""
 
     # Extract parameters for API call
@@ -8795,7 +8931,7 @@ async def list_webhooks() -> dict[str, Any]:
 
 # Tags: Webhooks
 @mcp.tool()
-async def get_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single webhook by its unique identifier. Use this to fetch detailed information about a specific webhook configuration."""
 
     # Construct request model with validation
@@ -8834,7 +8970,7 @@ async def get_webhook(id_: str = Field(..., alias="id", description="The unique 
 async def update_webhook(
     id_: str = Field(..., alias="id", description="The unique identifier of the webhook to update."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations describing the changes to apply. Each operation must include an 'op' field (e.g., 'replace'), a 'path' field indicating which property to modify, and a 'value' field with the new value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a webhook's configuration using JSON Patch operations. Specify the changes you want to make (such as enabling/disabling the webhook) as an array of patch operations."""
 
     # Construct request model with validation
@@ -8874,7 +9010,7 @@ async def update_webhook(
 
 # Tags: Webhooks
 @mcp.tool()
-async def delete_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to delete. This is a string value that uniquely identifies the webhook in the system.")) -> dict[str, Any]:
+async def delete_webhook(id_: str = Field(..., alias="id", description="The unique identifier of the webhook to delete. This is a string value that uniquely identifies the webhook in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook by its ID. This action cannot be undone and will stop all event notifications from being sent to the webhook's configured endpoint."""
 
     # Construct request model with validation
@@ -8915,7 +9051,7 @@ async def list_tags(
     pre: str | None = Field(None, description="Return only tags that begin with the specified prefix string."),
     archived: bool | None = Field(None, description="Include or exclude archived tags in the results. When true, returns archived tags; when false or omitted, returns only active tags."),
     as_of: str | None = Field(None, alias="asOf", description="Retrieve tags as they existed at a specific point in time, specified in ISO 8601 format. Defaults to the current time if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of tags, optionally filtered by resource type, prefix, or archived status, and as of a specific point in time."""
 
     # Construct request model with validation
@@ -8956,7 +9092,7 @@ async def list_tags(
 async def get_ai_config_targeting(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose targeting configuration should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the targeting configuration for a specific AI Config. Returns the targeting rules and criteria that determine which users or contexts this AI Config applies to."""
 
     # Construct request model with validation
@@ -8997,7 +9133,7 @@ async def update_ai_config_targeting(
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config to update."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the LaunchDarkly environment where the AI Config targeting applies."),
     instructions: list[dict[str, Any]] = Field(..., description="An array of semantic patch instructions that define the targeting changes to apply. Each instruction must include a `kind` property specifying the operation type (e.g., addRule, addClauses, removeTargets) and relevant parameters for that operation. Instructions are processed in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an AI Config's targeting rules, variations, and rollouts using semantic patch instructions. Supports adding/removing rules and clauses, managing individual context targets, and configuring percentage-based rollouts."""
 
     # Construct request model with validation
@@ -9036,7 +9172,7 @@ async def update_ai_config_targeting(
 
 # Tags: AI Configs
 @mcp.tool()
-async def list_ai_configs(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project. Use the project key (e.g., 'default') to specify which project's AI Configs to retrieve.")) -> dict[str, Any]:
+async def list_ai_configs(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project. Use the project key (e.g., 'default') to specify which project's AI Configs to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all AI Configs available in a specified project. Returns a list of AI configuration objects that define AI behavior and settings for the project."""
 
     # Construct request model with validation
@@ -9087,7 +9223,7 @@ async def create_ai_config(
     judges: list[_models.JudgeAttachment] | None = Field(None, description="Optional array of judges attached to this variation for evaluation purposes. When provided, this replaces all existing judge attachments; an empty array removes all judges."),
     evaluation_metric_key: str | None = Field(None, alias="evaluationMetricKey", description="Optional key referencing an evaluation metric to assess the performance of this AI Config."),
     is_inverted: bool | None = Field(None, alias="isInverted", description="Optional boolean flag indicating whether the evaluation metric is inverted, meaning lower values indicate better performance when set to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AI Config within a project to define AI model behavior, variations, and evaluation criteria. Supports multiple modes (completion, agent, or judge) with customizable instructions, messages, and evaluation metrics."""
 
     # Construct request model with validation
@@ -9133,7 +9269,7 @@ async def create_ai_config(
 async def get_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI configuration."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the specific AI configuration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AI configuration by its project and configuration keys. Use this to fetch detailed settings and properties for a particular AI config within a project."""
 
     # Construct request model with validation
@@ -9176,7 +9312,7 @@ async def update_ai_config(
     tags: list[str] | None = Field(None, description="A list of tags to associate with the AI Config. Tags are used for organization and filtering."),
     evaluation_metric_key: str | None = Field(None, alias="evaluationMetricKey", description="The unique identifier of the evaluation metric to use for assessing this AI Config's performance."),
     is_inverted: bool | None = Field(None, alias="isInverted", description="Set to true if the evaluation metric is inverted, meaning lower values indicate better performance. Set to false if higher values are better."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing AI Config by modifying specific fields. Only the fields included in the request body will be updated; other fields remain unchanged."""
 
     # Construct request model with validation
@@ -9218,7 +9354,7 @@ async def update_ai_config(
 async def delete_ai_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI Config. Use 'default' for the default project or specify a custom project key."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier of the AI Config to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an AI Config from a project. This operation removes the configuration and cannot be undone."""
 
     # Construct request model with validation
@@ -9263,7 +9399,7 @@ async def create_ai_config_variation(
     messages: list[_models.Message] | None = Field(None, description="Array of message objects defining the conversation or prompt structure for this variation. Order and format depend on the model type."),
     model_config_key: str | None = Field(None, alias="modelConfigKey", description="Optional reference to a model configuration key. If provided, uses a predefined model configuration; otherwise, model details must be specified in the request body."),
     judges: list[_models.JudgeAttachment] | None = Field(None, description="List of judge configurations for evaluating this variation. When provided, replaces all existing judges; an empty array removes all judge attachments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new variation for an AI Config, specifying model configuration, instructions, and optional judges for evaluation."""
 
     # Construct request model with validation
@@ -9307,7 +9443,7 @@ async def get_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config. Use 'default' for the default project."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config within the project. Use 'default' for the default configuration."),
     variation_key: str = Field(..., alias="variationKey", description="The unique identifier for the specific variation within the AI Config. Use 'default' for the default variation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AI Config variation by its key, including all versions associated with that variation."""
 
     # Construct request model with validation
@@ -9353,7 +9489,7 @@ async def update_ai_config_variation(
     name: str | None = Field(None, description="A human-readable name for this variation."),
     state: str | None = Field(None, description="The lifecycle state of the variation. Must be either 'archived' to hide the variation or 'published' to make it active."),
     judges: list[_models.JudgeAttachment] | None = Field(None, description="Array of judge objects that evaluate this variation's performance. Replaces all existing judges; provide an empty array to remove all judge attachments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing AI Config variation by modifying its properties. Changes create a new version of the variation while preserving the original."""
 
     # Construct request model with validation
@@ -9397,7 +9533,7 @@ async def delete_ai_config_variation(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Config."),
     config_key: str = Field(..., alias="configKey", description="The unique identifier for the AI Config whose variation should be deleted."),
     variation_key: str = Field(..., alias="variationKey", description="The unique identifier for the specific variation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific variation of an AI Config. This removes the variation and all its associated data from the project."""
 
     # Construct request model with validation
@@ -9436,7 +9572,7 @@ async def delete_ai_config_variation(
 async def get_ai_config_quick_stats(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI Configs. This key determines which project's statistics will be retrieved."),
     env: str = Field(..., description="The environment key that filters which metrics are included in the results. Only statistics from this specific environment will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate quick statistics for AI Configs within a specific project and environment. Returns metrics summarizing AI Config usage and performance for the specified environment."""
 
     # Construct request model with validation
@@ -9481,7 +9617,7 @@ async def get_ai_config_metrics(
     from_: int = Field(..., alias="from", description="The start of the metrics time range as milliseconds since epoch (inclusive). Use this to define the beginning of your analysis period."),
     to: int = Field(..., description="The end of the metrics time range as milliseconds since epoch (exclusive). The time range between `from` and `to` cannot exceed 100 days."),
     env: str = Field(..., description="The environment key to filter metrics by. Only metrics collected in this specific environment will be included in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve usage and performance metrics for a specific AI Config within a defined time range and environment. Metrics are aggregated for the specified period to help monitor AI Config performance and usage patterns."""
 
     # Construct request model with validation
@@ -9526,7 +9662,7 @@ async def get_ai_config_metrics_by_variation(
     from_: int = Field(..., alias="from", description="The start of the time range for metrics, specified as milliseconds since epoch (inclusive)."),
     to: int = Field(..., description="The end of the time range for metrics, specified as milliseconds since epoch (exclusive). The time range cannot span more than 100 days."),
     env: str = Field(..., description="The environment key to filter metrics. Only metrics from this specific environment will be included in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve usage and performance metrics for an AI Config segmented by variation. Results are filtered to a specific time range and environment."""
 
     # Construct request model with validation
@@ -9568,7 +9704,7 @@ async def get_ai_config_metrics_by_variation(
 async def add_restricted_models(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's restricted model list to update. Use the project key from your LaunchDarkly workspace (e.g., 'default')."),
     keys: list[str] = Field(..., description="An array of AI model keys to add to the restricted list. Each key must be a valid model key returned by the List AI model configs endpoint. Duplicate keys in the array will be deduplicated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more AI models to the restricted list for a project. Restricted models cannot be used in AI configurations for that project. Model keys are obtained from the List AI model configs endpoint."""
 
     # Construct request model with validation
@@ -9610,7 +9746,7 @@ async def add_restricted_models(
 async def remove_restricted_models(
     project_key: str = Field(..., alias="projectKey", description="The project identifier (e.g., 'default') that contains the restricted model list to modify."),
     keys: list[str] = Field(..., description="An array of model keys to remove from the restricted list. Each key identifies a specific model to unrestrict."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more AI models from the project's restricted list by their keys. This allows previously restricted models to be used again in the project."""
 
     # Construct request model with validation
@@ -9652,7 +9788,7 @@ async def remove_restricted_models(
 async def list_model_configs(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default'). This determines which project's model configurations are returned."),
     restricted: bool | None = Field(None, description="When set to true, returns only model configurations that are restricted. Omit or set to false to return all configurations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all AI model configurations for a specified project. Optionally filter to show only restricted models."""
 
     # Construct request model with validation
@@ -9703,7 +9839,7 @@ async def create_model_config(
     tags: list[str] | None = Field(None, description="Optional array of tags for categorizing and organizing this model configuration."),
     cost_per_input_token: float | None = Field(None, alias="costPerInputToken", description="The cost in USD per input token for this model, used for tracking and billing calculations."),
     cost_per_output_token: float | None = Field(None, alias="costPerOutputToken", description="The cost in USD per output token for this model, used for tracking and billing calculations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AI model configuration for your project. This configuration defines model identity, provider details, and cost metrics for use across AI features in your project."""
 
     # Construct request model with validation
@@ -9745,7 +9881,7 @@ async def create_model_config(
 async def get_model_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the model configuration. Typically 'default' for standard projects."),
     model_config_key: str = Field(..., alias="modelConfigKey", description="The unique identifier for the AI model configuration to retrieve. Typically 'default' for the standard model configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AI model configuration by its unique key within a project. Use this to fetch detailed settings and parameters for a configured AI model."""
 
     # Construct request model with validation
@@ -9784,7 +9920,7 @@ async def get_model_config(
 async def delete_model_config(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the model config. Use 'default' for the default project or specify a custom project key."),
     model_config_key: str = Field(..., alias="modelConfigKey", description="The unique identifier of the AI model configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an AI model configuration from a project. This operation removes the specified model config and cannot be undone."""
 
     # Construct request model with validation
@@ -9820,7 +9956,7 @@ async def delete_model_config(
 
 # Tags: AI Configs
 @mcp.tool()
-async def list_ai_tools(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tools to retrieve.")) -> dict[str, Any]:
+async def list_ai_tools(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tools to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all AI tools available in a specific project. Returns a complete list of configured AI tools that can be used within the project."""
 
     # Construct request model with validation
@@ -9861,7 +9997,7 @@ async def create_ai_tool(
     key: str = Field(..., description="The unique identifier for the AI tool within the project. Used to reference this tool in subsequent operations."),
     schema_: dict[str, Any] = Field(..., alias="schema", description="A JSON Schema object that defines the tool's input parameters and their constraints. This schema is sent to the LLM to describe what inputs the tool accepts and how to invoke it."),
     custom_parameters: dict[str, Any] | None = Field(None, alias="customParameters", description="Optional object containing custom metadata and configuration settings for application-level use. These values are not exposed to the LLM and are used only by your application logic."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AI tool within a project that defines custom functionality for LLM consumption. The tool's parameters are specified via JSON Schema, with optional custom metadata for application-level configuration."""
 
     # Construct request model with validation
@@ -9903,7 +10039,7 @@ async def create_ai_tool(
 async def list_ai_tool_versions(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tool."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier of the AI tool for which to retrieve versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a specific AI tool within a project. Returns a list of version records for the identified tool."""
 
     # Construct request model with validation
@@ -9942,7 +10078,7 @@ async def list_ai_tool_versions(
 async def get_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the AI tool."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier for the AI tool to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AI tool by its project and tool identifiers. Use this operation to fetch detailed information about a configured AI tool within a project."""
 
     # Construct request model with validation
@@ -9983,7 +10119,7 @@ async def update_ai_tool(
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier for the AI tool to be updated."),
     schema_: dict[str, Any] | None = Field(None, alias="schema", description="A JSON Schema object that defines the tool's input parameters and their constraints for LLM consumption. This schema is used by language models to understand how to invoke the tool correctly."),
     custom_parameters: dict[str, Any] | None = Field(None, alias="customParameters", description="Custom metadata and configuration settings for application-level use. These parameters are not exposed to or used by the LLM, allowing you to store tool-specific application logic and settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing AI tool's configuration, including its parameter schema for LLM consumption and custom application-level settings."""
 
     # Construct request model with validation
@@ -10025,7 +10161,7 @@ async def update_ai_tool(
 async def delete_ai_tool(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the AI tool to delete."),
     tool_key: str = Field(..., alias="toolKey", description="The unique identifier of the AI tool to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an AI tool from a project. This action cannot be undone and will remove the tool and all associated configurations."""
 
     # Construct request model with validation
@@ -10061,7 +10197,7 @@ async def delete_ai_tool(
 
 # Tags: AI Configs
 @mcp.tool()
-async def list_prompt_snippets(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippets to retrieve.")) -> dict[str, Any]:
+async def list_prompt_snippets(project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippets to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all prompt snippets available in a specific project. Prompt snippets are reusable text templates used to configure AI behavior and responses."""
 
     # Construct request model with validation
@@ -10102,7 +10238,7 @@ async def create_prompt_snippet(
     key: str = Field(..., description="A unique key identifier for the prompt snippet within the project, used for referencing the snippet in configurations."),
     name: str = Field(..., description="A human-readable name for the prompt snippet to help identify its purpose."),
     text: str = Field(..., description="The text content of the prompt snippet that will be stored and reused in AI configurations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new prompt snippet within a project to store reusable AI prompt text for use in AI configurations."""
 
     # Construct request model with validation
@@ -10144,7 +10280,7 @@ async def create_prompt_snippet(
 async def get_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippet."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier for the prompt snippet to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific prompt snippet by its unique key within a project. Use this to fetch the full details of a saved prompt snippet for use in AI configurations."""
 
     # Construct request model with validation
@@ -10185,7 +10321,7 @@ async def update_prompt_snippet(
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier of the prompt snippet to update."),
     name: str | None = Field(None, description="The display name for the prompt snippet. If provided, updates the snippet's name."),
     text: str | None = Field(None, description="The text content of the prompt snippet. If provided, updates the snippet's template text."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing prompt snippet in a project, creating a new version with the modified content or metadata."""
 
     # Construct request model with validation
@@ -10227,7 +10363,7 @@ async def update_prompt_snippet(
 async def delete_prompt_snippet(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the prompt snippet to delete."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier of the prompt snippet to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an existing prompt snippet from a project's AI configuration. This operation permanently removes the specified prompt snippet and cannot be undone."""
 
     # Construct request model with validation
@@ -10266,7 +10402,7 @@ async def delete_prompt_snippet(
 async def list_prompt_snippet_references(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the prompt snippet."),
     snippet_key: str = Field(..., alias="snippetKey", description="The unique identifier for the prompt snippet whose references you want to list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all AI Config variations that currently reference a specific prompt snippet, helping you understand where a snippet is being used across your project."""
 
     # Construct request model with validation
@@ -10305,7 +10441,7 @@ async def list_prompt_snippet_references(
 async def list_agent_graphs(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graphs to list."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all agent graphs in a project with their metadata. Returns graph information without edge data for efficient listing."""
 
     # Construct request model with validation
@@ -10349,7 +10485,7 @@ async def create_agent_graph(
     name: str = Field(..., description="A human-readable display name for the agent graph."),
     root_config_key: str | None = Field(None, alias="rootConfigKey", description="The AI Config key that serves as the root node of the graph. Required if edges are provided; omit both this and edges to create a metadata-only graph."),
     edges: list[_models.AgentGraphEdgePost] | None = Field(None, description="An array of edges defining connections between nodes in the graph. Each edge specifies the relationship between two nodes. Required if rootConfigKey is provided; both must be present together or both omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new agent graph within a project. The graph can be initialized with a root configuration node and edges, or created as metadata-only if neither is provided."""
 
     # Construct request model with validation
@@ -10393,7 +10529,7 @@ async def get_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graph."),
     graph_key: str = Field(..., alias="graphKey", description="The unique identifier for the agent graph to retrieve."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Currently only the beta version is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific agent graph by its key, including all its edges and configuration details."""
 
     # Construct request model with validation
@@ -10437,7 +10573,7 @@ async def update_agent_graph(
     name: str | None = Field(None, description="A human-readable name for the agent graph. Use this to provide a descriptive label for the graph."),
     root_config_key: str | None = Field(None, alias="rootConfigKey", description="The AI Config key designating the root node of the graph. When provided, edges must also be included in the same request, and both will completely replace existing values."),
     edges: list[_models.AgentGraphEdge] | None = Field(None, description="An ordered array of edges defining the graph structure and connections between nodes. When provided, rootConfigKey must also be included in the same request, and both will completely replace all existing edges."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing agent graph by modifying its configuration. Provide only the fields you want to change; unspecified fields retain their current values. If updating the root node or graph structure, both rootConfigKey and edges must be provided together as they are treated as a complete replacement."""
 
     # Construct request model with validation
@@ -10481,7 +10617,7 @@ async def delete_agent_graph(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent graph to delete."),
     graph_key: str = Field(..., alias="graphKey", description="The unique identifier for the agent graph to delete."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an agent graph and all of its associated edges from a project. This operation cannot be undone."""
 
     # Construct request model with validation
@@ -10518,7 +10654,7 @@ async def delete_agent_graph(
 
 # Tags: AI Configs
 @mcp.tool()
-async def list_agent_optimizations(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimizations to retrieve.")) -> dict[str, Any]:
+async def list_agent_optimizations(project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimizations to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all agent optimizations configured for a specific project. Returns a list of optimization settings and configurations applied to agents within the project."""
 
     # Construct request model with validation
@@ -10567,7 +10703,7 @@ async def create_agent_optimization(
     user_input_options: list[str] | None = Field(None, alias="userInputOptions", description="An optional list of user input options or scenarios that the agent should handle during optimization testing."),
     ground_truth_responses: list[str] | None = Field(None, alias="groundTruthResponses", description="An optional list of expected or reference responses used to measure agent accuracy and performance against ground truth."),
     metric_key: str | None = Field(None, alias="metricKey", description="An optional key referencing a specific metric to track and optimize for during the agent optimization process."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new agent optimization configuration within a project to define how an AI agent should be evaluated and optimized using specified models, judges, and acceptance criteria."""
 
     # Construct request model with validation
@@ -10609,7 +10745,7 @@ async def create_agent_optimization(
 async def get_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the agent optimization."),
     optimization_key: str = Field(..., alias="optimizationKey", description="The unique identifier for the specific agent optimization to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific agent optimization configuration by its unique key within a project. Use this to inspect the details and settings of an existing optimization."""
 
     # Construct request model with validation
@@ -10657,7 +10793,7 @@ async def update_agent_optimization(
     user_input_options: list[str] | None = Field(None, alias="userInputOptions", description="A list of user input options or scenarios to test during optimization. Defines the range of inputs the agent should handle."),
     ground_truth_responses: list[str] | None = Field(None, alias="groundTruthResponses", description="A list of ground truth responses corresponding to test inputs. Used as reference standards for evaluating agent accuracy."),
     metric_key: str | None = Field(None, alias="metricKey", description="The identifier of the metric to optimize against. Specifies which performance metric should be the primary optimization target."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing agent optimization configuration for a project. This operation creates a new version of the optimization with the provided changes."""
 
     # Construct request model with validation
@@ -10699,7 +10835,7 @@ async def update_agent_optimization(
 async def delete_agent_optimization(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the agent optimization to delete."),
     optimization_key: str = Field(..., alias="optimizationKey", description="The unique identifier of the agent optimization to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an agent optimization configuration from a project. This action cannot be undone."""
 
     # Construct request model with validation
@@ -10735,7 +10871,7 @@ async def delete_agent_optimization(
 
 # Tags: Announcements
 @mcp.tool()
-async def list_announcements(status: Literal["active", "inactive", "scheduled"] | None = Field(None, description="Filter announcements by their current status: active (published and visible), inactive (unpublished), or scheduled (queued for future publication).")) -> dict[str, Any]:
+async def list_announcements(status: Literal["active", "inactive", "scheduled"] | None = Field(None, description="Filter announcements by their current status: active (published and visible), inactive (unpublished), or scheduled (queued for future publication).")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of announcements filtered by their publication status. Use this to fetch active, inactive, or scheduled announcements for display or management purposes."""
 
     # Construct request model with validation
@@ -10780,7 +10916,7 @@ async def create_announcement(
     start_time: str = Field(..., alias="startTime", description="The Unix timestamp in milliseconds when the announcement becomes visible to users. This marks the start of the announcement's active period."),
     severity: Literal["info", "warning", "critical"] = Field(..., description="The urgency level of the announcement. Use 'info' for general notices, 'warning' for important alerts, or 'critical' for urgent system issues requiring immediate attention."),
     end_time: str | None = Field(None, alias="endTime", description="The Unix timestamp in milliseconds when the announcement stops being displayed to users. If omitted, the announcement remains active indefinitely after the start time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new announcement to notify users about system events, maintenance, or important updates. The announcement will be displayed to users during the specified time window."""
 
     _start_time = _parse_int(start_time)
@@ -10824,7 +10960,7 @@ async def create_announcement(
 async def update_announcement(
     announcement_id: str = Field(..., alias="announcementId", description="The unique identifier of the announcement to update, provided as a numeric string (e.g., '1234567890')."),
     body: list[_models.AnnouncementPatchOperation] = Field(..., description="An array of patch operations to apply to the announcement. Each operation specifies how to modify the announcement's properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing announcement by applying a series of changes. Specify the announcement to modify using its ID and provide the updates as an array of patch operations."""
 
     # Construct request model with validation
@@ -10864,7 +11000,7 @@ async def update_announcement(
 
 # Tags: Announcements
 @mcp.tool()
-async def delete_announcement(announcement_id: str = Field(..., alias="announcementId", description="The unique identifier of the announcement to delete, provided as a numeric string (e.g., '1234567890').")) -> dict[str, Any]:
+async def delete_announcement(announcement_id: str = Field(..., alias="announcementId", description="The unique identifier of the announcement to delete, provided as a numeric string (e.g., '1234567890').")) -> dict[str, Any] | ToolResult:
     """Permanently delete an announcement by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -10915,7 +11051,7 @@ async def update_approval_request_settings_for_project_environment(
     service_config: dict[str, Any] | None = Field(None, alias="serviceConfig", description="Custom configuration object specific to the approval service being used."),
     service_kind: str | None = Field(None, alias="serviceKind", description="The approval service provider to use for managing approvals (e.g., 'launchdarkly' for native approvals)."),
     service_kind_configuration_id: str | None = Field(None, alias="serviceKindConfigurationId", description="Integration configuration ID for a custom approval service. This is an Enterprise-only feature and identifies which custom integration to use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update approval request settings for a specific environment within a project. Configure approval requirements, reviewer permissions, and integration settings for flag change approvals."""
 
     _min_num_approvals = _parse_int(min_num_approvals)
@@ -10960,7 +11096,7 @@ async def update_approval_request_settings_for_project_environment(
 async def list_views(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Use 'default' for the default project or specify a custom project key."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="API version specification. Must be set to 'beta' to access this endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all views available in a specified project. Views are saved configurations or perspectives for organizing and displaying project data."""
 
     # Construct request model with validation
@@ -11004,7 +11140,7 @@ async def create_view(
     name: str = Field(..., description="A human-readable display name for the view that appears in the user interface."),
     generate_sdk_keys: bool | None = Field(None, alias="generateSdkKeys", description="Whether to automatically generate SDK keys associated with this view. Defaults to false if not specified."),
     tags: list[str] | None = Field(None, description="An optional list of tags to categorize and organize the view. Tags help with filtering and searching views."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view within a specified project. Views are used to organize and filter feature flags and other resources within your LaunchDarkly project."""
 
     # Construct request model with validation
@@ -11048,7 +11184,7 @@ async def get_view(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the view (e.g., 'default')."),
     view_key: str = Field(..., alias="viewKey", description="The unique identifier for the view to retrieve (e.g., 'my-view')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific view by its project and view keys. Returns the view configuration and metadata for the specified view."""
 
     # Construct request model with validation
@@ -11093,7 +11229,7 @@ async def update_view(
     generate_sdk_keys: bool | None = Field(None, alias="generateSdkKeys", description="Whether to automatically generate SDK keys for this view. Set to true to enable SDK key generation."),
     tags: list[str] | None = Field(None, description="Tags to associate with this view for organization and filtering. Provide as an array of tag strings."),
     archived: bool | None = Field(None, description="Whether the view is archived. Set to true to archive the view, or false to unarchive it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing view by replacing specified fields. Provide a JSON object containing only the fields you want to modify; unchanged fields retain their current values."""
 
     # Construct request model with validation
@@ -11137,7 +11273,7 @@ async def delete_view(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier of the project containing the view. Use the project key (e.g., 'default') to specify which project to access."),
     view_key: str = Field(..., alias="viewKey", description="The unique identifier of the view to delete. Specify the view key (e.g., 'my-view') to target the exact view for deletion."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta' for this endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific view from a project by its key. This operation removes the view and cannot be undone."""
 
     # Construct request model with validation
@@ -11180,7 +11316,7 @@ async def link_resources_to_view(
     resource_type: Literal["flags", "segments"] = Field(..., alias="resourceType", description="The type of resource to link. Must be either 'flags' or 'segments'."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version for this endpoint. Must be 'beta'."),
     body: _models.ViewLinkRequestKeys | _models.ViewLinkRequestSegmentIdentifiers | _models.ViewLinkRequestFilter = Field(..., description="Request body containing resource keys and/or filters to link. For flags, you can filter by maintainerId, maintainerTeamKey, tags, state, or query. For segments, you can filter by tags, query, or unbounded status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link one or multiple resources (flags or segments) to a view using resource keys, filters, or both. When both keys and filters are provided, resources matching either condition are linked."""
 
     # Construct request model with validation
@@ -11227,7 +11363,7 @@ async def delete_view_resource_links(
     resource_type: Literal["flags", "segments"] = Field(..., alias="resourceType", description="The type of resource to unlink: either 'flags' for feature flags or 'segments' for audience segments."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="API version identifier. Must be set to 'beta' for this endpoint."),
     body: _models.ViewLinkRequestKeys | _models.ViewLinkRequestSegmentIdentifiers | _models.ViewLinkRequestFilter = Field(..., description="Request body containing the resource identifiers to unlink. For flags, provide flag keys; for segments, provide segment IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or multiple linked resources (feature flags or segments) from a view. Specify the resource type and provide the identifiers to unlink."""
 
     # Construct request model with validation
@@ -11274,7 +11410,7 @@ async def list_linked_resources_for_view(
     resource_type: Literal["flags", "segments"] = Field(..., alias="resourceType", description="The type of linked resource to retrieve. Must be either 'flags' for feature flags or 'segments' for user segments."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version for this endpoint. Must be set to 'beta' to access this operation."),
     query: str | None = Field(None, description="Optional case-insensitive search filter that matches against the resource key and resource name. Leave empty to retrieve all linked resources without filtering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all linked resources of a specified type (flags or segments) associated with a given view within a project. Optionally filter results using a case-insensitive search query."""
 
     # Construct request model with validation
@@ -11320,7 +11456,7 @@ async def list_linked_views_for_resource(
     resource_key: str = Field(..., alias="resourceKey", description="The unique identifier for the resource. For flags, use the flag key. For segments, use the segment ID."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Currently supports 'beta' version."),
     environment_id: str | None = Field(None, alias="environmentId", description="The environment ID where the resource exists. Required when resourceType is 'segments'; optional for flags."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all views linked to a specific resource (flag or segment). Use the resource key for flags and segment ID for segments to identify the target resource."""
 
     # Construct request model with validation
@@ -11364,7 +11500,7 @@ async def list_release_policies(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this endpoint; must be set to 'beta'."),
     exclude_default: bool | None = Field(None, alias="excludeDefault", description="Set to true to exclude the default release policy from the results; when false or omitted, the default policy is included if an environment filter is present."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of release policies for a specified project with optional filtering to exclude the default policy."""
 
     # Construct request model with validation
@@ -11408,7 +11544,7 @@ async def reorder_release_policies(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project whose release policies should be reordered. Use the project key assigned during project creation (e.g., 'default')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this operation. Currently only the beta version is available."),
     body: list[str] = Field(..., description="An ordered array of release policy keys that defines the new execution sequence. The order of keys in this array determines the order in which policies are evaluated and applied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder the release policies for a project by specifying their desired sequence. This operation updates the policy execution order without modifying individual policy configurations."""
 
     # Construct request model with validation
@@ -11453,7 +11589,7 @@ async def get_release_policy(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project (e.g., 'default'). This scopes the release policy lookup to a specific project."),
     policy_key: str = Field(..., alias="policyKey", description="The unique identifier for the release policy within the project (e.g., 'production-release'). This specifies which policy to retrieve."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this request. Must be set to 'beta' to access this endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific release policy by its key within a project. Use this to fetch detailed configuration and settings for a named release policy."""
 
     # Construct request model with validation
@@ -11504,7 +11640,7 @@ async def update_release_policy(
     metric_group_keys: list[str] | None = Field(None, alias="metricGroupKeys", description="Optional list of metric group keys to monitor during release. Groups allow monitoring multiple related metrics together."),
     guarded_release_config_stages: list[_models.ReleasePolicyStage] | None = Field(None, alias="guardedReleaseConfigStages", description="Optional array of release stages for guarded-release policies, defining sequential validation gates and approval requirements."),
     progressive_release_config_stages: list[_models.ReleasePolicyStage] | None = Field(None, alias="progressiveReleaseConfigStages", description="Optional array of release stages for progressive-release policies, defining percentage-based rollout increments and timing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing release policy for a project, configuring how feature flags are released across environments with optional metrics-based validation and rollback controls."""
 
     # Construct request model with validation
@@ -11551,7 +11687,7 @@ async def delete_release_policy(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project containing the release policy (e.g., 'default')."),
     policy_key: str = Field(..., alias="policyKey", description="The human-readable identifier for the release policy to delete (e.g., 'production-release')."),
     ld_api_version: Literal["beta"] = Field(..., alias="LD-API-Version", description="The API version to use for this operation. Must be set to 'beta'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a release policy from a project. This action cannot be undone and will remove all associated policy configurations."""
 
     # Construct request model with validation
@@ -11597,7 +11733,7 @@ async def get_deployment_frequency_chart(
     bucket_type: str | None = Field(None, alias="bucketType", description="Type of time bucket for aggregating data: `rolling` (continuous window), `hour` (hourly intervals), or `day` (daily intervals). Defaults to `rolling`."),
     bucket_ms: str | None = Field(None, alias="bucketMs", description="Duration of intervals for the x-axis in milliseconds. Defaults to one day (86400000 milliseconds). Adjust to control granularity of the chart data."),
     group_by: str | None = Field(None, alias="groupBy", description="Dimension to group deployment frequency data by: `application` (per application) or `kind` (by deployment type)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve deployment frequency chart data for engineering insights, showing how often deployments occur across your infrastructure. Optionally expand the response to include detailed metrics related to deployment frequency."""
 
     _bucket_ms = _parse_int(bucket_ms)
@@ -11642,7 +11778,7 @@ async def get_stale_flags_chart(
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that identifies which environment within the project to retrieve stale flags data for."),
     application_key: str | None = Field(None, alias="applicationKey", description="Optional comma-separated list of application keys to filter stale flags data to specific applications."),
     group_by: str | None = Field(None, alias="groupBy", description="Optional property to group the stale flags results by. Currently supports grouping by maintainer to organize flags by their responsible team members."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve stale flags chart data for engineering insights, showing flag health metrics across a project and environment. Optionally expand the response to include detailed metrics and group results by maintainer."""
 
     # Construct request model with validation
@@ -11684,7 +11820,7 @@ async def get_flag_status_chart(
     project_key: str = Field(..., alias="projectKey", description="The project key that identifies which project's flag data to retrieve."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key that specifies which environment's flag statuses to chart."),
     application_key: str | None = Field(None, alias="applicationKey", description="Optional comma-separated list of application keys to filter the flag status data to specific applications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve flag status chart data for a specific project and environment, optionally filtered by applications. This provides observability into flag health and status distribution across your infrastructure."""
 
     # Construct request model with validation
@@ -11731,7 +11867,7 @@ async def get_lead_time_chart(
     bucket_type: str | None = Field(None, alias="bucketType", description="Optional bucket type for aggregating data points. Choose from: `rolling` (continuous window), `hour` (hourly intervals), or `day` (daily intervals). Defaults to `rolling`."),
     bucket_ms: str | None = Field(None, alias="bucketMs", description="Optional duration in milliseconds for each interval on the x-axis. Defaults to one day (86400000 milliseconds). Only applies when bucketType is `hour` or `day`."),
     group_by: str | None = Field(None, alias="groupBy", description="Optional dimension for grouping chart data. Choose from: `application` (group by application) or `stage` (group by deployment stage). Defaults to `stage`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve lead time chart data for engineering insights, showing deployment frequency metrics across specified time periods and grouping dimensions."""
 
     _from_ = _parse_int(from_)
@@ -11784,7 +11920,7 @@ async def get_release_frequency_chart(
     to: str | None = Field(None, description="End of the time range as a Unix timestamp in milliseconds. Defaults to the current time if not specified."),
     bucket_type: str | None = Field(None, alias="bucketType", description="Time interval bucketing strategy: 'rolling' for continuous aggregation, 'hour' for hourly buckets, or 'day' for daily buckets. Defaults to 'rolling'."),
     bucket_ms: str | None = Field(None, alias="bucketMs", description="Duration of each time interval bucket in milliseconds. Defaults to one day (86400000 milliseconds). Only applies when bucketType is not 'rolling'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve release frequency chart data for a project and environment, with optional filtering by application, experiment association, and time range. Results can be grouped by impact and bucketed into time intervals for visualization."""
 
     _bucket_ms = _parse_int(bucket_ms)
@@ -11833,7 +11969,7 @@ async def create_deployment_event(
     application_kind: Literal["server", "browser", "mobile"] | None = Field(None, alias="applicationKind", description="The type of application being deployed. Defaults to 'server' if not specified. Choose from: server, browser, or mobile."),
     event_metadata: dict[str, Any] | None = Field(None, alias="eventMetadata", description="Optional JSON object with event-specific metadata such as build system version or other contextual information about this particular event."),
     deployment_metadata: dict[str, Any] | None = Field(None, alias="deploymentMetadata", description="Optional JSON object with deployment-wide metadata such as build number or other information relevant to the entire deployment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record a deployment event for an application to track deployment lifecycle and metrics in engineering insights. Events can mark deployment start, completion, failure, or custom milestones."""
 
     # Construct request model with validation
@@ -11879,7 +12015,7 @@ async def list_deployments(
     to: str | None = Field(None, description="Unix timestamp in milliseconds marking the end of the time range. Defaults to the current time if not specified."),
     kind: str | None = Field(None, description="Filter deployments by deployment kind (e.g., 'blue-green', 'canary'). Omit to include all kinds."),
     status: str | None = Field(None, description="Filter deployments by deployment status (e.g., 'active', 'completed'). Omit to include all statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of deployments for a specific project and environment, with optional filtering by application, time range, kind, and status. Supports expansion to include associated pull requests and flag references."""
 
     _from_ = _parse_int(from_)
@@ -11920,7 +12056,7 @@ async def list_deployments(
 
 # Tags: Insights deployments (beta)
 @mcp.tool()
-async def get_deployment(deployment_id: str = Field(..., alias="deploymentID", description="The unique identifier of the deployment to retrieve. This ID is provided in the `id` field when listing deployments.")) -> dict[str, Any]:
+async def get_deployment(deployment_id: str = Field(..., alias="deploymentID", description="The unique identifier of the deployment to retrieve. This ID is provided in the `id` field when listing deployments.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment by its ID. Optionally expand the response to include associated pull requests and flag references."""
 
     # Construct request model with validation
@@ -11959,7 +12095,7 @@ async def get_deployment(deployment_id: str = Field(..., alias="deploymentID", d
 async def update_deployment(
     deployment_id: str = Field(..., alias="deploymentID", description="The unique identifier of the deployment to update. This ID is returned in the `id` field when listing deployments."),
     body: list[_models.PatchOperation] = Field(..., description="An array of JSON Patch operations (RFC 6902) describing the changes to apply. Each operation must include `op` (the operation type), `path` (the property to modify), and `value` (the new value for replace operations). Operations are applied in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a deployment's properties using JSON Patch operations. Specify the deployment by ID and provide an array of patch operations to modify its state."""
 
     # Construct request model with validation
@@ -12009,7 +12145,7 @@ async def list_flag_events(
     global_: str | None = Field(None, alias="global", description="Include or exclude global events from results. Defaults to `include`. Valid options are `include` or `exclude`."),
     from_: str | None = Field(None, alias="from", description="Unix timestamp in milliseconds marking the start of the time range. Defaults to 7 days ago if not specified."),
     to: str | None = Field(None, description="Unix timestamp in milliseconds marking the end of the time range. Defaults to the current time if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of flag events for a specific project and environment, with optional filtering by application, flag key, impact size, and experiment association. Supports expanding the response to include experiment details."""
 
     _from_ = _parse_int(from_)
@@ -12056,7 +12192,7 @@ async def create_insight_group(
     project_key: str = Field(..., alias="projectKey", description="The project key that this insight group belongs to. Determines which project's data and configuration the group operates within."),
     environment_key: str = Field(..., alias="environmentKey", description="The environment key (e.g., 'production', 'staging') that this insight group monitors. Scopes insights to a specific deployment environment."),
     application_keys: list[str] | None = Field(None, alias="applicationKeys", description="Optional list of application keys to include in this insight group (e.g., ['billing-service', 'inventory-service']). If omitted, the group will automatically include data from all applications in the specified project and environment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new insight group to organize and monitor engineering insights across a specific project and environment. Optionally scope the group to specific applications."""
 
     # Construct request model with validation
@@ -12094,7 +12230,7 @@ async def create_insight_group(
 
 # Tags: Insights scores (beta)
 @mcp.tool()
-async def list_insight_groups(query: str | None = Field(None, description="Filter the insight groups list by group name. Supports partial string matching to find groups by name.")) -> dict[str, Any]:
+async def list_insight_groups(query: str | None = Field(None, description="Filter the insight groups list by group name. Supports partial string matching to find groups by name.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of insight groups for which you are collecting engineering insights. Optionally filter by group name and expand the response to include scores, environment details, or metadata indicators."""
 
     # Construct request model with validation
@@ -12132,7 +12268,7 @@ async def list_insight_groups(query: str | None = Field(None, description="Filte
 
 # Tags: Insights scores (beta)
 @mcp.tool()
-async def get_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to retrieve.")) -> dict[str, Any]:
+async def get_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific insight group by its key, with optional expansion to include scoring details and environment associations used in engineering insights metrics."""
 
     # Construct request model with validation
@@ -12171,7 +12307,7 @@ async def get_insight_group(insight_group_key: str = Field(..., alias="insightGr
 async def update_insight_group(
     insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to update."),
     body: list[_models.PatchOperation] = Field(..., description="A JSON Patch document (RFC 6902) describing the updates to apply. Each operation must include 'op' (the operation type), 'path' (the JSON pointer to the field), and 'value' (the new value for replace operations). Common operations include 'replace' to change field values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an insight group using JSON Patch operations. Specify the changes you want to make (such as renaming the group) via a JSON Patch document following RFC 6902 standards."""
 
     # Construct request model with validation
@@ -12211,7 +12347,7 @@ async def update_insight_group(
 
 # Tags: Insights scores (beta)
 @mcp.tool()
-async def delete_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to delete. This is a string value that uniquely identifies the insight group within the system.")) -> dict[str, Any]:
+async def delete_insight_group(insight_group_key: str = Field(..., alias="insightGroupKey", description="The unique identifier for the insight group to delete. This is a string value that uniquely identifies the insight group within the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an insight group by its unique key. This operation removes the insight group and all associated data."""
 
     # Construct request model with validation
@@ -12251,7 +12387,7 @@ async def get_insights_scores(
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project. Required to scope the insights scores to a specific project."),
     environment_key: str = Field(..., alias="environmentKey", description="The unique identifier for the environment within the project. Required to retrieve environment-specific insight metrics."),
     application_key: str | None = Field(None, alias="applicationKey", description="Optional comma-separated list of application identifiers to filter insights scores to specific applications. When omitted, scores for all applications in the environment are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve engineering insights scores for a specified project and environment, optionally filtered by one or more applications. This data powers engineering insights metrics dashboards and performance analysis views."""
 
     # Construct request model with validation
@@ -12297,7 +12433,7 @@ async def list_pull_requests(
     query: str | None = Field(None, description="Search pull requests by title or author name. Performs a text match against these fields."),
     from_: str | None = Field(None, alias="from", description="Start of the date range as a Unix timestamp in milliseconds. Defaults to 7 days before the end date if not specified."),
     to: str | None = Field(None, description="End of the date range as a Unix timestamp in milliseconds. Defaults to the current time if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of pull requests for a project with optional filtering by status, application, date range, and search terms. Supports expanding the response to include deployment details, flag references, and lead time metrics."""
 
     # Construct request model with validation
@@ -12335,7 +12471,7 @@ async def list_pull_requests(
 
 # Tags: Insights repositories (beta)
 @mcp.tool()
-async def list_repositories_insights() -> dict[str, Any]:
+async def list_repositories_insights() -> dict[str, Any] | ToolResult:
     """Retrieve a list of repositories integrated with LaunchDarkly's engineering insights. Optionally expand the response to include associated project details for each repository."""
 
     # Extract parameters for API call
@@ -12362,7 +12498,7 @@ async def list_repositories_insights() -> dict[str, Any]:
 
 # Tags: Insights repositories (beta)
 @mcp.tool()
-async def associate_repositories_with_projects(mappings: list[_models.InsightsRepositoryProject] = Field(..., description="Array of repository-to-project mappings. Each mapping object should specify which repository associates with which project. Order is preserved and processed sequentially.")) -> dict[str, Any]:
+async def associate_repositories_with_projects(mappings: list[_models.InsightsRepositoryProject] = Field(..., description="Array of repository-to-project mappings. Each mapping object should specify which repository associates with which project. Order is preserved and processed sequentially.")) -> dict[str, Any] | ToolResult:
     """Create or update associations between repositories and projects. Use this operation to map one or more repositories to their corresponding projects for engineering insights tracking."""
 
     # Construct request model with validation
@@ -12403,7 +12539,7 @@ async def associate_repositories_with_projects(mappings: list[_models.InsightsRe
 async def remove_repository_project_association(
     repository_key: str = Field(..., alias="repositoryKey", description="The unique identifier for the repository from which the project association will be removed."),
     project_key: str = Field(..., alias="projectKey", description="The unique identifier for the project to be disassociated from the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove the association between a repository and a project in engineering insights. This operation disassociates the specified project from the given repository."""
 
     # Construct request model with validation
