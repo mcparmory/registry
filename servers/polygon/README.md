@@ -1,11 +1,12 @@
 # Polygon API MCP Server
+<!-- mcp-name: com.mcparmory/polygon -->
 
 Base URL: https://api.massive.com
 | | |
 |---|---|
 | **Category** | Finance |
 | **Tools** | 131 |
-| **Auth** | API Key |
+| **Auth** | Bearer Token |
 
 ---
 
@@ -14,7 +15,7 @@ Base URL: https://api.massive.com
 ### Quick Start (recommended)
 
 ```bash
-API_KEY=YOUR_API_KEY \
+BEARER_TOKEN=YOUR_BEARER_TOKEN \
 uvx mcparmory-polygon
 ```
 
@@ -22,7 +23,7 @@ uvx mcparmory-polygon
 
 ```bash
 pip install mcparmory-polygon
-API_KEY=YOUR_API_KEY \
+BEARER_TOKEN=YOUR_BEARER_TOKEN \
 mcparmory-polygon
 ```
 
@@ -37,7 +38,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-polygon"],
       "env": {
-        "API_KEY": "YOUR_API_KEY"
+        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
   }
@@ -50,7 +51,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY` — API Key Authentication (apiKey)
+- `BEARER_TOKEN` — Bearer token
 Do not commit credentials to version control.
 
 ---
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/polygon`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/polygon:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t polygon .
 docker run -p 8000:8000 --env-file .env polygon
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

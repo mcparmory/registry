@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Polygon API MCP Server
-Generated: 2026-04-14 18:30:55 UTC
+Generated: 2026-04-23 21:37:40 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.massive.com")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -846,16 +964,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -869,6 +988,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -911,6 +1031,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -922,26 +1057,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'apiKey',
+    'BearerAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["apiKey"] = _auth.APIKeyAuth(env_var="API_KEY", location="query", param_name="apiKey")
-    logging.info("Authentication configured: apiKey")
+    _auth_handlers["BearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
+    logging.info("Authentication configured: BearerAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for apiKey not configured: {error_msg}")
-    _auth_handlers["apiKey"] = None
+    logging.warning(f"Credentials for BearerAuth not configured: {error_msg}")
+    _auth_handlers["BearerAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1081,7 +1215,7 @@ async def list_analyst_insights(
     benzinga_rating_id_lte: str | None = Field(None, alias="benzinga_rating_id.lte", description="Filter results to Benzinga rating IDs numerically less than or equal to the specified value."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified. Maximum allowed value is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with sort direction appended to each column using '.asc' or '.desc'. Defaults to sorting by 'last_updated' in descending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analyst insights and ratings for publicly traded companies, including recommendations and price targets from financial analysts. Filter by analyst firm, rating actions, or Benzinga rating IDs, with support for sorting and pagination."""
 
     # Construct request model with validation
@@ -1096,10 +1230,11 @@ async def list_analyst_insights(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/analyst-insights"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_analyst_insights")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_analyst_insights", "GET", _http_path, _request_id)
@@ -1111,6 +1246,7 @@ async def list_analyst_insights(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1122,7 +1258,7 @@ async def list_analysts(
     full_name: str | None = Field(None, description="Filter results to a specific analyst by their full name. Optional filter that narrows results to matching analysts."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Defaults to 100 if not specified. Must be between 1 and 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by full_name in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a comprehensive list of financial analysts with their performance metrics and identification details. Filter by research firm or analyst name, and customize sorting and result limits."""
 
     # Construct request model with validation
@@ -1137,10 +1273,11 @@ async def list_analysts(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/analysts"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_analysts")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_analysts", "GET", _http_path, _request_id)
@@ -1152,6 +1289,7 @@ async def list_analysts(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1161,7 +1299,7 @@ async def list_analysts(
 async def list_bulls_bears_say(
     limit: int | None = Field(None, description="Maximum number of results to return in the response, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by ticker in descending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analyst bull and bear case summaries for publicly traded companies, enabling investors to review both bullish and bearish investment arguments for informed decision-making."""
 
     # Construct request model with validation
@@ -1176,10 +1314,11 @@ async def list_bulls_bears_say(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/bulls-bears-say"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_bulls_bears_say")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_bulls_bears_say", "GET", _http_path, _request_id)
@@ -1191,6 +1330,7 @@ async def list_bulls_bears_say(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1200,7 +1340,7 @@ async def list_bulls_bears_say(
 async def get_consensus_ratings(
     ticker: str = Field(..., description="The stock ticker symbol for which to retrieve consensus ratings."),
     limit: int | None = Field(None, description="Maximum number of results to return, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated analyst consensus ratings and price targets for a stock ticker, including detailed rating breakdowns and statistical insights across multiple analysts."""
 
     # Construct request model with validation
@@ -1216,10 +1356,11 @@ async def get_consensus_ratings(
     # Extract parameters for API call
     _http_path = _build_path("/benzinga/v1/consensus-ratings/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/benzinga/v1/consensus-ratings/{ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_consensus_ratings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_consensus_ratings", "GET", _http_path, _request_id)
@@ -1231,6 +1372,7 @@ async def get_consensus_ratings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1255,7 +1397,7 @@ async def list_earnings(
     revenue_surprise_percent_lte: float | None = Field(None, alias="revenue_surprise_percent.lte", description="Filter results to earnings records where revenue surprise percent is less than or equal to the specified value."),
     limit: int | None = Field(None, description="Maximum number of earnings records to return in the response. Defaults to 100 if not specified; maximum allowed is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by. Append '.asc' or '.desc' to each column to specify sort direction. Defaults to sorting by 'last_updated' in descending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve earnings data from Benzinga for publicly traded companies, including actual and estimated EPS and revenue figures with surprise calculations. Filter by date status, earnings surprises, and customize result ordering and limits."""
 
     # Construct request model with validation
@@ -1270,10 +1412,11 @@ async def list_earnings(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/earnings"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_earnings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_earnings", "GET", _http_path, _request_id)
@@ -1285,6 +1428,7 @@ async def list_earnings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1294,7 +1438,7 @@ async def list_earnings(
 async def list_firms(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Defaults to 100 if not specified. Must be between 1 and 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by firm name in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of financial firms from a comprehensive database of financial institutions and research firms, with support for pagination and custom sorting."""
 
     # Construct request model with validation
@@ -1309,10 +1453,11 @@ async def list_firms(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/firms"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_firms")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_firms", "GET", _http_path, _request_id)
@@ -1324,6 +1469,7 @@ async def list_firms(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1334,7 +1480,7 @@ async def list_guidance(
     positioning: str | None = Field(None, description="Filter guidance by presentation type: 'primary' for the company's emphasized figure or 'secondary' for supporting or alternate figures."),
     limit: int | None = Field(None, description="Maximum number of results to return, between 1 and 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with '.asc' or '.desc' appended to each column to specify direction. Defaults to sorting by date in descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve financial guidance and earnings estimates for companies, including EPS and revenue projections across different fiscal periods."""
 
     # Construct request model with validation
@@ -1349,10 +1495,11 @@ async def list_guidance(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/guidance"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_guidance")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_guidance", "GET", _http_path, _request_id)
@@ -1364,6 +1511,7 @@ async def list_guidance(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1388,7 +1536,7 @@ async def list_analyst_ratings(
     benzinga_analyst_id_lte: str | None = Field(None, alias="benzinga_analyst_id.lte", description="Filter analysts by ID using less-than-or-equal comparison. Useful for numeric filtering of analyst identifiers."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified. Maximum allowed value is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with sort direction appended to each column (e.g., 'last_updated.desc,rating_action.asc'). Defaults to 'last_updated.desc' if not specified. Append '.asc' for ascending or '.desc' for descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analyst ratings and price target data from investment firms, including rating changes (upgrades, downgrades, initiations) and price target adjustments for publicly traded companies. Results can be filtered by rating action, price target action, and analyst ID, with customizable sorting and pagination."""
 
     # Construct request model with validation
@@ -1403,10 +1551,11 @@ async def list_analyst_ratings(
     # Extract parameters for API call
     _http_path = "/benzinga/v1/ratings"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_analyst_ratings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_analyst_ratings", "GET", _http_path, _request_id)
@@ -1418,6 +1567,7 @@ async def list_analyst_ratings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1443,7 +1593,7 @@ async def search_financial_news(
     stocks_any_of: str | None = Field(None, alias="stocks.any_of", description="Filter for articles that mention any of the specified stock symbols. Provide multiple symbols as a comma-separated list."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified; maximum allowed is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order. Use comma-separated format with '.asc' or '.desc' suffix (e.g., 'published.desc,author.asc'). Defaults to 'published.desc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve financial news articles from Benzinga's comprehensive database, with filtering by publication date, channels, tags, authors, and related stocks."""
 
     # Construct request model with validation
@@ -1458,10 +1608,11 @@ async def search_financial_news(
     # Extract parameters for API call
     _http_path = "/benzinga/v2/news"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_financial_news")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_financial_news", "GET", _http_path, _request_id)
@@ -1473,6 +1624,7 @@ async def search_financial_news(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1491,7 +1643,7 @@ async def list_merchant_aggregates_eu(
     parent_name_any_of: str | None = Field(None, alias="parent_name.any_of", description="Filter by parent company name. Accepts multiple comma-separated values for matching any of the specified parent entities."),
     limit: int | None = Field(None, description="Maximum number of results to return. Must be between 1 and 5000; defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with .asc or .desc appended to each column name to specify direction. Defaults to transaction_date.desc if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated consumer spending data from European credit card and open banking panels, segmented by merchant, currency, country, and transaction channel. Data reflects daily transactions with a 7-day lag and includes user counts for custom normalization across 250+ US public companies."""
 
     # Construct request model with validation
@@ -1506,10 +1658,11 @@ async def list_merchant_aggregates_eu(
     # Extract parameters for API call
     _http_path = "/consumer-spending/eu/v1/merchant-aggregates"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_merchant_aggregates_eu")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_merchant_aggregates_eu", "GET", _http_path, _request_id)
@@ -1521,6 +1674,7 @@ async def list_merchant_aggregates_eu(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1544,7 +1698,7 @@ async def list_merchant_hierarchy(
     active_to_lte: str | None = Field(None, alias="active_to.lte", description="Filter merchants with active_to date on or before the specified date (format: yyyy-mm-dd)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified; maximum allowed is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order using comma-separated format (e.g., 'lookup_name.asc,active_from.desc'). Defaults to 'lookup_name.asc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve merchant reference data with corporate hierarchy, ticker symbols, sectors, and industries for European consumer transactions. Use this to enrich transaction data by joining on merchant name and filtering by active date ranges to match specific transaction dates."""
 
     # Construct request model with validation
@@ -1559,10 +1713,11 @@ async def list_merchant_hierarchy(
     # Extract parameters for API call
     _http_path = "/consumer-spending/eu/v1/merchant-hierarchy"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_merchant_hierarchy")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_merchant_hierarchy", "GET", _http_path, _request_id)
@@ -1574,6 +1729,7 @@ async def list_merchant_hierarchy(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1624,7 +1780,7 @@ async def list_etf_analytics(
     quant_composite_quality_lte: float | None = Field(None, alias="quant_composite_quality.lte", description="Filter ETFs with composite quality score less than or equal to this value (floating point number)."),
     limit: int | None = Field(None, description="Maximum number of results to return (1 to 5000, defaults to 100 if not specified).", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with '.asc' or '.desc' appended to each column to specify direction. Defaults to sorting by composite_ticker in ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve ETF Global analytics data with risk scores, reward metrics, and quantitative analysis across multiple dimensions. Filter and sort results by performance indicators, risk profiles, and composite grades."""
 
     # Construct request model with validation
@@ -1639,10 +1795,11 @@ async def list_etf_analytics(
     # Extract parameters for API call
     _http_path = "/etf-global/v1/analytics"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_etf_analytics")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_etf_analytics", "GET", _http_path, _request_id)
@@ -1654,6 +1811,7 @@ async def list_etf_analytics(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1663,7 +1821,7 @@ async def list_etf_analytics(
 async def list_etf_constituents(
     limit: int | None = Field(None, description="Maximum number of constituent records to return per request, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of fields to sort results by, with each field suffixed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about securities held within ETFs, including their weights, market values, and identifiers. Results can be paginated and sorted by any constituent field."""
 
     # Construct request model with validation
@@ -1678,10 +1836,11 @@ async def list_etf_constituents(
     # Extract parameters for API call
     _http_path = "/etf-global/v1/constituents"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_etf_constituents")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_etf_constituents", "GET", _http_path, _request_id)
@@ -1693,6 +1852,7 @@ async def list_etf_constituents(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1702,7 +1862,7 @@ async def list_etf_constituents(
 async def list_etf_fund_flows(
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 5000. Defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve ETF Global fund flow data including share movements, net asset values, and flow metrics across ETFs. Results can be paginated and sorted by multiple columns."""
 
     # Construct request model with validation
@@ -1717,10 +1877,11 @@ async def list_etf_fund_flows(
     # Extract parameters for API call
     _http_path = "/etf-global/v1/fund-flows"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_etf_fund_flows")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_etf_fund_flows", "GET", _http_path, _request_id)
@@ -1732,6 +1893,7 @@ async def list_etf_fund_flows(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1741,7 +1903,7 @@ async def list_etf_fund_flows(
 async def list_etf_profiles(
     limit: int | None = Field(None, description="Maximum number of ETF profiles to return in a single response. Must be between 1 and 5000, defaults to 100 if not specified.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of fields to sort results by, with each field followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by composite_ticker in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive ETF Global industry profile data including financial metrics, operational details, and exposure information. Results can be paginated and sorted by any profile field."""
 
     # Construct request model with validation
@@ -1756,10 +1918,11 @@ async def list_etf_profiles(
     # Extract parameters for API call
     _http_path = "/etf-global/v1/profiles"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_etf_profiles")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_etf_profiles", "GET", _http_path, _request_id)
@@ -1771,6 +1934,7 @@ async def list_etf_profiles(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1780,7 +1944,7 @@ async def list_etf_profiles(
 async def list_etf_taxonomies(
     limit: int | None = Field(None, description="Maximum number of taxonomy records to return in the response. Defaults to 100 if not specified. Must be between 1 and 5000.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by 'composite_ticker' in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve ETF Global taxonomy data containing detailed classification and categorization information for ETFs, including investment strategy, methodology, and structural characteristics."""
 
     # Construct request model with validation
@@ -1795,10 +1959,11 @@ async def list_etf_taxonomies(
     # Extract parameters for API call
     _http_path = "/etf-global/v1/taxonomies"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_etf_taxonomies")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_etf_taxonomies", "GET", _http_path, _request_id)
@@ -1810,6 +1975,7 @@ async def list_etf_taxonomies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1819,7 +1985,7 @@ async def list_etf_taxonomies(
 async def list_inflation_metrics(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 results if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by date in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical inflation and price index data, including Consumer Price Index (CPI) and Personal Consumption Expenditures (PCE) metrics. Results can be sorted and paginated for flexible data access."""
 
     # Construct request model with validation
@@ -1834,10 +2000,11 @@ async def list_inflation_metrics(
     # Extract parameters for API call
     _http_path = "/fed/v1/inflation"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_inflation_metrics")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_inflation_metrics", "GET", _http_path, _request_id)
@@ -1849,6 +2016,7 @@ async def list_inflation_metrics(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1858,7 +2026,7 @@ async def list_inflation_metrics(
 async def list_inflation_expectations(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by date in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve inflation expectations data from both market-based and economic model perspectives across multiple time horizons. Results can be paginated and sorted by any available column."""
 
     # Construct request model with validation
@@ -1873,10 +2041,11 @@ async def list_inflation_expectations(
     # Extract parameters for API call
     _http_path = "/fed/v1/inflation-expectations"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_inflation_expectations")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_inflation_expectations", "GET", _http_path, _request_id)
@@ -1888,6 +2057,7 @@ async def list_inflation_expectations(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1897,7 +2067,7 @@ async def list_inflation_expectations(
 async def list_labor_market_indicators(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by date in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Federal Reserve labor market indicators including unemployment rate, labor force participation, average hourly earnings, and job openings data. Results are paginated and sortable by date or other available fields."""
 
     # Construct request model with validation
@@ -1912,10 +2082,11 @@ async def list_labor_market_indicators(
     # Extract parameters for API call
     _http_path = "/fed/v1/labor-market"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_labor_market_indicators")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_labor_market_indicators", "GET", _http_path, _request_id)
@@ -1927,6 +2098,7 @@ async def list_labor_market_indicators(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1936,7 +2108,7 @@ async def list_labor_market_indicators(
 async def list_treasury_yields(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 results if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by date in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical U.S. Treasury bond yields across various maturity periods, providing a comprehensive view of government securities interest rates from short-term to long-term instruments."""
 
     # Construct request model with validation
@@ -1951,10 +2123,11 @@ async def list_treasury_yields(
     # Extract parameters for API call
     _http_path = "/fed/v1/treasury-yields"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_treasury_yields")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_treasury_yields", "GET", _http_path, _request_id)
@@ -1966,6 +2139,7 @@ async def list_treasury_yields(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1978,7 +2152,7 @@ async def get_futures_aggregates(
     window_start: str | None = Field(None, description="Filter candles by start time using a date (YYYY-MM-DD format) or nanosecond Unix timestamp. Supports comparison operators: gte (greater than or equal), gt (greater than), lte (less than or equal), lt (less than) for range queries. When omitted, returns the most recent candles up to the specified limit."),
     limit: int | None = Field(None, description="Maximum number of results to return per page. Must be between 1 and 50,000, defaults to 1,000.", ge=1, le=50000),
     sort: Literal["window_start.asc", "window_start.desc"] | None = Field(None, description="Sort results by window_start in ascending or descending order. Defaults to descending (most recent first)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve OHLCV aggregates (candles) for a futures contract over a specified time range. Supports flexible time windows and multiple resolution granularities from seconds to years."""
 
     # Construct request model with validation
@@ -1994,10 +2168,11 @@ async def get_futures_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/futures/v1/aggs/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/futures/v1/aggs/{ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_futures_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_futures_aggregates", "GET", _http_path, _request_id)
@@ -2009,6 +2184,7 @@ async def get_futures_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2021,7 +2197,7 @@ async def get_futures_aggregates_vx(
     window_start: str | None = Field(None, description="Filter candles by start time using a date (YYYY-MM-DD format) or nanosecond Unix timestamp. Use comparison operators (gte, gt, lte, lt) to define ranges. When omitted, returns the most recent candles up to the specified limit."),
     limit: int | None = Field(None, description="Maximum number of candles to return per request, between 1 and 50,000. Defaults to 1,000 results.", ge=1, le=50000),
     sort: Literal["window_start.asc", "window_start.desc"] | None = Field(None, description="Sort results by window_start timestamp in ascending or descending order. Defaults to descending (most recent first)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve OHLCV candle data for a futures contract over a specified time range. Supports flexible time windows and multiple resolution granularities from seconds to years."""
 
     # Construct request model with validation
@@ -2037,10 +2213,11 @@ async def get_futures_aggregates_vx(
     # Extract parameters for API call
     _http_path = _build_path("/futures/vX/aggs/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/futures/vX/aggs/{ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_futures_aggregates_vx")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_futures_aggregates_vx", "GET", _http_path, _request_id)
@@ -2052,6 +2229,7 @@ async def get_futures_aggregates_vx(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2062,7 +2240,7 @@ async def list_futures_contracts(
     active: bool | None = Field(None, description="Filter results to only include contracts that were actively tradeable on the specified date. A contract is active when its first trade date is on or before the query date and its last trade date is on or after the query date."),
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 1000. Defaults to 100 if not specified.", ge=1, le=1001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by product_code in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of futures contracts with optional filtering by active status and custom sorting. Use this to discover all listed contracts, access complete contract specifications, or perform point-in-time lookups of contract definitions."""
 
     # Construct request model with validation
@@ -2077,10 +2255,11 @@ async def list_futures_contracts(
     # Extract parameters for API call
     _http_path = "/futures/vX/contracts"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_contracts")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_contracts", "GET", _http_path, _request_id)
@@ -2092,13 +2271,14 @@ async def list_futures_contracts(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: us_futures
 @mcp.tool()
-async def list_futures_exchanges(limit: int | None = Field(None, description="Maximum number of results to return in the response. Accepts values between 1 and 1,000, with a default of 100 if not specified.", ge=1, le=1000)) -> dict[str, Any]:
+async def list_futures_exchanges(limit: int | None = Field(None, description="Maximum number of results to return in the response. Accepts values between 1 and 1,000, with a default of 100 if not specified.", ge=1, le=1000)) -> dict[str, Any] | ToolResult:
     """Retrieve a list of US futures exchanges and trading venues, including major derivatives exchanges (CME, CBOT, NYMEX, COMEX) and other futures market infrastructure for commodity, financial, and derivative contract trading."""
 
     # Construct request model with validation
@@ -2113,10 +2293,11 @@ async def list_futures_exchanges(limit: int | None = Field(None, description="Ma
     # Extract parameters for API call
     _http_path = "/futures/vX/exchanges"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_exchanges")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_exchanges", "GET", _http_path, _request_id)
@@ -2128,13 +2309,14 @@ async def list_futures_exchanges(limit: int | None = Field(None, description="Ma
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: us_futures
 @mcp.tool()
-async def list_futures_market_statuses(limit: int | None = Field(None, description="Maximum number of market status records to return in the response. Must be between 1 and 100, defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any]:
+async def list_futures_market_statuses(limit: int | None = Field(None, description="Maximum number of market status records to return in the response. Must be between 1 and 100, defaults to 10 if not specified.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieve the current market status for futures products, including real-time operational indicators (open, pause, close) with exchange and product codes. Use this to monitor market conditions and adjust trading strategies in real-time."""
 
     # Construct request model with validation
@@ -2149,10 +2331,11 @@ async def list_futures_market_statuses(limit: int | None = Field(None, descripti
     # Extract parameters for API call
     _http_path = "/futures/vX/market-status"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_market_statuses")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_market_statuses", "GET", _http_path, _request_id)
@@ -2164,6 +2347,7 @@ async def list_futures_market_statuses(limit: int | None = Field(None, descripti
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2178,7 +2362,7 @@ async def list_futures_products(
     asset_sub_class_any_of: Literal["agricultural", "commodity_index", "energy", "equity", "foreign_exchange", "freight", "housing", "interest_rate", "metals", "weather"] | None = Field(None, alias="asset_sub_class.any_of", description="Filter products by asset sub-class. Accepts multiple comma-separated values including agricultural, energy, metals, equity, foreign exchange, interest rates, freight, housing, commodity indices, and weather."),
     limit: int | None = Field(None, description="Limit the number of results returned. Must be between 1 and 50,000; defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order. Specify columns as comma-separated values with '.asc' or '.desc' suffix (e.g., 'name.asc,date.desc'). Defaults to 'date.asc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete universe of supported futures products with full specifications including codes, names, exchange identifiers, classifications, settlement methods, and pricing details. Filter by product attributes or retrieve specifications for a single product to support trading system integration, risk management, and historical reconciliation."""
 
     # Construct request model with validation
@@ -2193,10 +2377,11 @@ async def list_futures_products(
     # Extract parameters for API call
     _http_path = "/futures/vX/products"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_products")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_products", "GET", _http_path, _request_id)
@@ -2208,6 +2393,7 @@ async def list_futures_products(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2218,7 +2404,7 @@ async def get_futures_quotes(
     ticker: str = Field(..., description="The futures contract identifier combining the base symbol and expiration month/year (e.g., GCJ5 for April 2025 gold futures)."),
     limit: int | None = Field(None, description="Maximum number of quote records to return, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50000),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column suffixed by '.asc' or '.desc' to specify direction. Defaults to sorting by timestamp in descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve real-time quote data for a specified futures contract, including best bid/offer prices, sizes, and timestamps to analyze price dynamics and liquidity conditions."""
 
     # Construct request model with validation
@@ -2234,10 +2420,11 @@ async def get_futures_quotes(
     # Extract parameters for API call
     _http_path = _build_path("/futures/vX/quotes/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/futures/vX/quotes/{ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_futures_quotes")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_futures_quotes", "GET", _http_path, _request_id)
@@ -2249,6 +2436,7 @@ async def get_futures_quotes(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2262,7 +2450,7 @@ async def list_futures_schedules(
     session_end_date_lte: str | None = Field(None, alias="session_end_date.lte", description="Filter schedules to those with session end dates on or before this date (formatted as yyyy-mm-dd). Use this to include schedules up through a specific date."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Defaults to 10 if not specified; maximum allowed is 1000.", ge=1, le=1001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction (e.g., 'product_code.asc,session_end_date.desc'). Defaults to sorting by product_code in ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve trading schedules for futures markets with session open/close times, intraday breaks, and holiday adjustments. All times are returned in UTC to support cross-system alignment for trading, execution, and operations workflows."""
 
     # Construct request model with validation
@@ -2277,10 +2465,11 @@ async def list_futures_schedules(
     # Extract parameters for API call
     _http_path = "/futures/vX/schedules"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_schedules")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_schedules", "GET", _http_path, _request_id)
@@ -2292,6 +2481,7 @@ async def list_futures_schedules(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2301,7 +2491,7 @@ async def list_futures_schedules(
 async def list_futures_snapshots(
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Must be between 1 and 50,000, defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by 'ticker' in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a snapshot of the most recent futures contract data with optional pagination and sorting capabilities."""
 
     # Construct request model with validation
@@ -2316,10 +2506,11 @@ async def list_futures_snapshots(
     # Extract parameters for API call
     _http_path = "/futures/vX/snapshot"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_snapshots")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_snapshots", "GET", _http_path, _request_id)
@@ -2331,6 +2522,7 @@ async def list_futures_snapshots(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2341,7 +2533,7 @@ async def list_futures_trades(
     ticker: str = Field(..., description="The futures contract identifier, including the base symbol and contract expiration month/year (e.g., GCJ5 for April 2025 gold contract)."),
     limit: int | None = Field(None, description="Maximum number of trade records to return in the response. Defaults to 10 if not specified; maximum allowed is 49,999 records per request.", ge=1, le=50000),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by timestamp in descending order (most recent first) if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve tick-level trade data for a specified futures contract over a defined time range. Each record captures individual trade events with price, size, session date, and precise timestamps, enabling detailed intraday analysis, backtesting, and algorithmic strategy development."""
 
     # Construct request model with validation
@@ -2357,10 +2549,11 @@ async def list_futures_trades(
     # Extract parameters for API call
     _http_path = _build_path("/futures/vX/trades/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/futures/vX/trades/{ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_futures_trades")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_futures_trades", "GET", _http_path, _request_id)
@@ -2372,6 +2565,7 @@ async def list_futures_trades(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2382,7 +2576,7 @@ async def list_stock_filings_10_k_sections(
     section: Literal["business", "risk_factors"] | None = Field(None, description="Filter results by standardized section type. Valid options are 'business' (company operations and segments) or 'risk_factors' (identified business risks). Omit to retrieve all available sections."),
     limit: int | None = Field(None, description="Maximum number of filing sections to return in the response. Must be between 1 and 100, defaults to 10 if not specified.", ge=1, le=100),
     sort: str | None = Field(None, description="Sort results by one or more columns using comma-separated format, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by 'period_end' in descending order (most recent first) if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve raw text content from specific sections of SEC 10-K filings. Returns standardized section excerpts from corporate annual reports, useful for extracting business descriptions, risk disclosures, and other regulatory content."""
 
     # Construct request model with validation
@@ -2397,10 +2591,11 @@ async def list_stock_filings_10_k_sections(
     # Extract parameters for API call
     _http_path = "/stocks/filings/10-K/vX/sections"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_filings_10_k_sections")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_filings_10_k_sections", "GET", _http_path, _request_id)
@@ -2412,6 +2607,7 @@ async def list_stock_filings_10_k_sections(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2425,7 +2621,7 @@ async def list_stocks_8k_filings_text(
     form_type_lte: str | None = Field(None, alias="form_type.lte", description="Filter results to filings with form_type values less than or equal to the specified value."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Defaults to 10 if not specified, with a maximum allowed value of 99.", ge=1, le=100),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify sort direction. Defaults to sorting by filing_date in descending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve parsed text content from SEC 8-K current report filings, which disclose material corporate events such as earnings announcements, acquisitions, executive changes, and other significant developments."""
 
     # Construct request model with validation
@@ -2440,10 +2636,11 @@ async def list_stocks_8k_filings_text(
     # Extract parameters for API call
     _http_path = "/stocks/filings/8-K/vX/text"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stocks_8k_filings_text")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stocks_8k_filings_text", "GET", _http_path, _request_id)
@@ -2455,6 +2652,7 @@ async def list_stocks_8k_filings_text(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2466,7 +2664,7 @@ async def list_13f_filings(
     accession_number: str | None = Field(None, description="Unique SEC accession number for a specific filing (format: NNNNNNNNNN-YY-NNNNNN). Use this to retrieve a particular 13F filing by its unique identifier."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Must be between 1 and 1000; defaults to 100 if not specified.", ge=1, le=1001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by filing_date in descending order (most recent first) if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve SEC Form 13F quarterly filings data showing institutional investment manager holdings. Filter by filer or accession number to access specific filings from investment managers with at least $100 million in qualifying assets under management."""
 
     # Construct request model with validation
@@ -2481,10 +2679,11 @@ async def list_13f_filings(
     # Extract parameters for API call
     _http_path = "/stocks/filings/vX/13-F"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_13f_filings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_13f_filings", "GET", _http_path, _request_id)
@@ -2496,6 +2695,7 @@ async def list_13f_filings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2509,7 +2709,7 @@ async def list_sec_filings(
     form_type_lte: str | None = Field(None, alias="form_type.lte", description="Filter results to form types less than or equal to the specified value (alphabetically)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000 if not specified. Maximum allowed value is 50000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column suffixed by '.asc' or '.desc' to specify sort direction. Defaults to 'filing_date.desc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve SEC EDGAR master index records for all SEC filings, including form types, filing dates, and direct links to source documents. Supports filtering by form type and customizable sorting and pagination."""
 
     # Construct request model with validation
@@ -2524,10 +2724,11 @@ async def list_sec_filings(
     # Extract parameters for API call
     _http_path = "/stocks/filings/vX/index"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_sec_filings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_sec_filings", "GET", _http_path, _request_id)
@@ -2539,6 +2740,7 @@ async def list_sec_filings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2549,7 +2751,7 @@ async def list_risk_factors_from_stock_filings(
     filing_date_any_of: str | None = Field(None, alias="filing_date.any_of", description="Filter results to filings with dates matching any of the specified values. Provide one or more dates as a comma-separated list."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified. Must be between 1 and 50,000.", ge=1, le=50000),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by filing_date in descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve risk factors disclosed in companies' 10-K SEC filings. Filter by filing date and control result size and ordering."""
 
     # Construct request model with validation
@@ -2564,10 +2766,11 @@ async def list_risk_factors_from_stock_filings(
     # Extract parameters for API call
     _http_path = "/stocks/filings/vX/risk-factors"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_risk_factors_from_stock_filings")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_risk_factors_from_stock_filings", "GET", _http_path, _request_id)
@@ -2579,6 +2782,7 @@ async def list_risk_factors_from_stock_filings(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2588,7 +2792,7 @@ async def list_risk_factors_from_stock_filings(
 async def list_balance_sheets(
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Accepts values from 1 to 50,000, with a default of 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by 'period_end' in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve quarterly and annual balance sheet data for public companies, showing point-in-time snapshots of assets, liabilities, and shareholders' equity at each period end."""
 
     # Construct request model with validation
@@ -2603,10 +2807,11 @@ async def list_balance_sheets(
     # Extract parameters for API call
     _http_path = "/stocks/financials/v1/balance-sheets"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_balance_sheets")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_balance_sheets", "GET", _http_path, _request_id)
@@ -2618,6 +2823,7 @@ async def list_balance_sheets(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2627,7 +2833,7 @@ async def list_balance_sheets(
 async def list_cash_flow_statements(
     limit: int | None = Field(None, description="Maximum number of results to return in a single response. Accepts values from 1 to 50,000, with a default of 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to 'period_end.asc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve quarterly, annual, and trailing twelve-month cash flow statement data for public companies, including detailed operating, investing, and financing cash flows with validated TTM calculations spanning exactly four quarters."""
 
     # Construct request model with validation
@@ -2642,10 +2848,11 @@ async def list_cash_flow_statements(
     # Extract parameters for API call
     _http_path = "/stocks/financials/v1/cash-flow-statements"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_cash_flow_statements")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_cash_flow_statements", "GET", _http_path, _request_id)
@@ -2657,6 +2864,7 @@ async def list_cash_flow_statements(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2666,7 +2874,7 @@ async def list_cash_flow_statements(
 async def list_income_statements(
     limit: int | None = Field(None, description="Maximum number of results to return per request, ranging from 1 to 50,000. Defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort results by, with each column followed by '.asc' or '.desc' to specify ascending or descending order. Defaults to sorting by period_end in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve income statement financial data for public companies, including revenue, expenses, and net income across multiple reporting periods. Results can be paginated and sorted by various financial metrics."""
 
     # Construct request model with validation
@@ -2681,10 +2889,11 @@ async def list_income_statements(
     # Extract parameters for API call
     _http_path = "/stocks/financials/v1/income-statements"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_income_statements")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_income_statements", "GET", _http_path, _request_id)
@@ -2696,6 +2905,7 @@ async def list_income_statements(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2785,7 +2995,7 @@ async def list_stock_financial_ratios(
     free_cash_flow_lte: float | None = Field(None, alias="free_cash_flow.lte", description="Filter for free cash flow less than or equal to the specified value."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified; maximum allowed is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column optionally suffixed by '.asc' or '.desc' to specify sort direction. Defaults to 'ticker.asc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive financial ratios for public companies including valuation, profitability, liquidity, and leverage metrics. Data combines income statements, balance sheets, and cash flow statements with daily stock prices, using trailing twelve months (TTM) data for income/cash flow metrics and quarterly data for balance sheet items."""
 
     # Construct request model with validation
@@ -2800,10 +3010,11 @@ async def list_stock_financial_ratios(
     # Extract parameters for API call
     _http_path = "/stocks/financials/v1/ratios"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_financial_ratios")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_financial_ratios", "GET", _http_path, _request_id)
@@ -2815,6 +3026,7 @@ async def list_stock_financial_ratios(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2843,7 +3055,7 @@ async def list_risk_factor_taxonomies(
     tertiary_category_lte: str | None = Field(None, alias="tertiary_category.lte", description="Filter taxonomies by tertiary category values less than or equal to the specified value (alphabetically for strings)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 200 if not specified; maximum allowed is 999.", ge=1, le=1000),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order. Specify columns as a comma-separated list with '.asc' or '.desc' suffix (e.g., 'taxonomy.asc,primary_category.desc'). Defaults to 'taxonomy.desc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete taxonomy of risk factor classifications used across the platform. Filter and sort by taxonomy value, primary/secondary/tertiary categories to find specific risk factor definitions."""
 
     # Construct request model with validation
@@ -2858,10 +3070,11 @@ async def list_risk_factor_taxonomies(
     # Extract parameters for API call
     _http_path = "/stocks/taxonomies/vX/risk-factors"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_risk_factor_taxonomies")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_risk_factor_taxonomies", "GET", _http_path, _request_id)
@@ -2873,6 +3086,7 @@ async def list_risk_factor_taxonomies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2887,7 +3101,7 @@ async def list_stock_dividends(
     distribution_type_any_of: Literal["recurring", "special", "supplemental", "irregular", "unknown"] | None = Field(None, alias="distribution_type.any_of", description="Filter results to dividends matching any of the specified distribution types. Accepts comma-separated values from: recurring, special, supplemental, irregular, or unknown."),
     limit: int | None = Field(None, description="Maximum number of results to return per request. Defaults to 100 if not specified; maximum allowed is 5000.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with sort direction specified per column using '.asc' or '.desc' suffix. Defaults to sorting by ticker in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical dividend payment records for US stocks, including split-adjusted amounts and historical adjustment factors for price normalization. Filter by dividend frequency and distribution type, with flexible sorting and pagination options."""
 
     _frequency_gt = _parse_int(frequency_gt)
@@ -2907,10 +3121,11 @@ async def list_stock_dividends(
     # Extract parameters for API call
     _http_path = "/stocks/v1/dividends"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_dividends")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_dividends", "GET", _http_path, _request_id)
@@ -2922,6 +3137,7 @@ async def list_stock_dividends(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2934,7 +3150,7 @@ async def list_short_interest(
     avg_daily_volume: str | None = Field(None, description="Filter results by average daily trading volume as an integer, used to contextualize short interest levels and calculate days-to-cover metrics."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Defaults to 10 if not specified; maximum allowed value is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by .asc or .desc to specify ascending or descending order. Defaults to sorting by ticker in ascending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve FINRA short interest data for securities on a specific settlement date, including metrics on short positions, trading volume, and days-to-cover calculations."""
 
     _avg_daily_volume = _parse_int(avg_daily_volume)
@@ -2951,10 +3167,11 @@ async def list_short_interest(
     # Extract parameters for API call
     _http_path = "/stocks/v1/short-interest"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_short_interest")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_short_interest", "GET", _http_path, _request_id)
@@ -2966,6 +3183,7 @@ async def list_short_interest(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2980,7 +3198,7 @@ async def list_short_volume_by_ticker(
     short_volume_ratio_lte: float | None = Field(None, alias="short_volume_ratio.lte", description="Filter results to include only records where the short volume ratio is less than or equal to the specified floating point value."),
     limit: int | None = Field(None, description="Limit the number of results returned. Defaults to 10 if not specified. Maximum allowed value is 50,000.", ge=1, le=50001),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order. Specify columns as a comma-separated list with '.asc' or '.desc' appended to each column name (e.g., 'ticker.asc,short_volume_ratio.desc'). Defaults to sorting by ticker in ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve short selling volume data across stock tickers, including total trading volume, short sale metrics, and platform-specific breakdowns. Filter and sort results to analyze short selling activity."""
 
     # Construct request model with validation
@@ -2995,10 +3213,11 @@ async def list_short_volume_by_ticker(
     # Extract parameters for API call
     _http_path = "/stocks/v1/short-volume"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_short_volume_by_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_short_volume_by_ticker", "GET", _http_path, _request_id)
@@ -3010,6 +3229,7 @@ async def list_short_volume_by_ticker(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3024,7 +3244,7 @@ async def list_stock_splits_historical(
     adjustment_type_any_of: Literal["forward_split", "reverse_split", "stock_dividend"] | None = Field(None, alias="adjustment_type.any_of", description="Filter results by split type. Accepts one or more values (forward_split, reverse_split, or stock_dividend) as a comma-separated list."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified; maximum allowed is 5000.", ge=1, le=5001),
     sort: str | None = Field(None, description="Sort results by one or more columns in ascending or descending order. Specify as comma-separated list with '.asc' or '.desc' suffix (e.g., 'execution_date.desc'). Defaults to 'execution_date.desc' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical stock split and reverse split events for US equities, including adjustment factors for normalizing historical price data."""
 
     # Construct request model with validation
@@ -3039,10 +3259,11 @@ async def list_stock_splits_historical(
     # Extract parameters for API call
     _http_path = "/stocks/v1/splits"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_splits_historical")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_splits_historical", "GET", _http_path, _request_id)
@@ -3054,6 +3275,7 @@ async def list_stock_splits_historical(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3067,7 +3289,7 @@ async def list_stocks_by_float(
     free_float_percent_lte: float | None = Field(None, alias="free_float_percent.lte", description="Filter results to securities with free float percentage less than or equal to this value. Accepts decimal numbers."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 100 if not specified; maximum allowed is 5000.", ge=1, le=5001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with each column followed by '.asc' or '.desc' to specify direction. Defaults to sorting by ticker in ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve free float data for US-listed securities, including the number of shares available for public trading and the percentage of total shares outstanding. Results can be filtered by free float percentage and sorted by multiple columns."""
 
     # Construct request model with validation
@@ -3082,10 +3304,11 @@ async def list_stocks_by_float(
     # Extract parameters for API call
     _http_path = "/stocks/vX/float"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stocks_by_float")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stocks_by_float", "GET", _http_path, _request_id)
@@ -3097,6 +3320,7 @@ async def list_stocks_by_float(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3113,7 +3337,7 @@ async def list_corporate_events(
     tmx_record_id: str | None = Field(None, description="Filter events by the unique TMX event record identifier (alphanumeric string)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Must be between 1 and 50,000; defaults to 100 if not specified.", ge=1, le=50001),
     sort: str | None = Field(None, description="Comma-separated list of columns to sort by, with '.asc' or '.desc' appended to each column to specify direction. Defaults to sorting by date in descending order if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve corporate events and announcements for publicly traded companies, including earnings releases, conferences, dividends, and business updates from TMX. Filter by company, event status, or record ID, and customize result ordering and pagination."""
 
     _tmx_company_id = _parse_int(tmx_company_id)
@@ -3134,10 +3358,11 @@ async def list_corporate_events(
     # Extract parameters for API call
     _http_path = "/tmx/v1/corporate-events"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_corporate_events")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_corporate_events", "GET", _http_path, _request_id)
@@ -3149,6 +3374,7 @@ async def list_corporate_events(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3160,7 +3386,7 @@ async def get_currency_conversion(
     to: str = Field(..., description="The target currency code (e.g., USD, CAD). Use standard ISO 4217 three-letter currency codes."),
     amount: float | None = Field(None, description="The amount to convert as a decimal number. Defaults to 1 if not specified."),
     precision: Literal[0, 1, 2, 3, 4] | None = Field(None, description="The number of decimal places for the conversion result, ranging from 0 to 4. Defaults to 2 decimal places."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert between two currencies using real-time market rates. Supports bidirectional conversion (e.g., USD to CAD or CAD to USD) with customizable amount and decimal precision."""
 
     # Construct request model with validation
@@ -3176,10 +3402,11 @@ async def get_currency_conversion(
     # Extract parameters for API call
     _http_path = _build_path("/v1/conversion/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/conversion/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_currency_conversion")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_currency_conversion", "GET", _http_path, _request_id)
@@ -3191,6 +3418,7 @@ async def get_currency_conversion(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3203,7 +3431,7 @@ async def get_historic_forex_ticks(
     date: str = Field(..., description="The date for which to retrieve historic ticks, specified in ISO 8601 date format (YYYY-MM-DD)."),
     offset: int | None = Field(None, description="Pagination offset for retrieving subsequent pages of results. Pass the timestamp value from the last result of the previous page to continue from that point."),
     limit: int | None = Field(None, description="Maximum number of ticks to return in the response. Accepts values up to 10,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historic tick data for a forex currency pair on a specific date. Use pagination parameters to navigate through large result sets."""
 
     # Construct request model with validation
@@ -3219,10 +3447,11 @@ async def get_historic_forex_ticks(
     # Extract parameters for API call
     _http_path = _build_path("/v1/historic/forex/{from}/{to}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/historic/forex/{from}/{to}/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_historic_forex_ticks")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_historic_forex_ticks", "GET", _http_path, _request_id)
@@ -3234,6 +3463,7 @@ async def get_historic_forex_ticks(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3247,7 +3477,7 @@ async def get_crypto_ema(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used for EMA calculation: open, high, low, or close price. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts 1 to 5000 results, defaults to 10.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the exponential moving average (EMA) for a cryptocurrency ticker over a specified time range. Use this to analyze price trends and momentum across different timeframes and price types."""
 
     # Construct request model with validation
@@ -3263,10 +3493,11 @@ async def get_crypto_ema(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/ema/{cryptoTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/ema/{cryptoTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_ema")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_ema", "GET", _http_path, _request_id)
@@ -3278,6 +3509,7 @@ async def get_crypto_ema(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3292,7 +3524,7 @@ async def get_forex_ema(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used for EMA calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts values from 1 to 5000, with a default of 10 results.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the exponential moving average (EMA) for a forex currency pair over a specified time range. Returns EMA values based on configurable aggregation periods and price series."""
 
     # Construct request model with validation
@@ -3308,10 +3540,11 @@ async def get_forex_ema(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/ema/{fxTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/ema/{fxTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_ema")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_ema", "GET", _http_path, _request_id)
@@ -3323,6 +3556,7 @@ async def get_forex_ema(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3337,7 +3571,7 @@ async def get_exponential_moving_average(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="Which price value to use for EMA calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts 1 to 5000 results. Defaults to 10 results.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the exponential moving average (EMA) for an indices ticker over a specified time range. Use this to analyze trend direction and momentum for index symbols like NDX."""
 
     # Construct request model with validation
@@ -3353,10 +3587,11 @@ async def get_exponential_moving_average(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/ema/{indicesTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/ema/{indicesTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_exponential_moving_average")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_exponential_moving_average", "GET", _http_path, _request_id)
@@ -3368,6 +3603,7 @@ async def get_exponential_moving_average(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3382,7 +3618,7 @@ async def get_ema_for_options_ticker(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for EMA calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts values from 1 to 5000, with a default of 10 results.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate and retrieve the exponential moving average (EMA) for an options ticker symbol over a specified time range. Use this to analyze price trends and momentum for options contracts."""
 
     # Construct request model with validation
@@ -3398,10 +3634,11 @@ async def get_ema_for_options_ticker(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/ema/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/ema/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_ema_for_options_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_ema_for_options_ticker", "GET", _http_path, _request_id)
@@ -3413,6 +3650,7 @@ async def get_ema_for_options_ticker(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3427,7 +3665,7 @@ async def get_exponential_moving_average_stock(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used to calculate the EMA: open, high, low, or close. Defaults to using closing prices."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts values from 1 to 5000, with a default of 10 results.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the exponential moving average (EMA) for a stock ticker over a specified time range. The EMA is calculated based on aggregated price data at your chosen timespan interval."""
 
     # Construct request model with validation
@@ -3443,10 +3681,11 @@ async def get_exponential_moving_average_stock(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/ema/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/ema/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_exponential_moving_average_stock")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_exponential_moving_average_stock", "GET", _http_path, _request_id)
@@ -3458,6 +3697,7 @@ async def get_exponential_moving_average_stock(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3473,7 +3713,7 @@ async def get_crypto_macd(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for calculations: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 10, with a maximum of 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Moving Average Convergence/Divergence (MACD) technical indicator data for a cryptocurrency ticker over a specified time range. MACD helps identify trend changes and momentum by comparing exponential moving averages."""
 
     # Construct request model with validation
@@ -3489,10 +3729,11 @@ async def get_crypto_macd(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/macd/{cryptoTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/macd/{cryptoTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_macd")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_macd", "GET", _http_path, _request_id)
@@ -3504,6 +3745,7 @@ async def get_crypto_macd(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3520,7 +3762,7 @@ async def get_macd_indicator_forex(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for MACD calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 10; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Moving Average Convergence/Divergence (MACD) indicator data for a forex ticker symbol. MACD is a momentum oscillator that measures the relationship between two exponential moving averages to identify trend direction and momentum shifts."""
 
     # Construct request model with validation
@@ -3536,10 +3778,11 @@ async def get_macd_indicator_forex(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/macd/{fxTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/macd/{fxTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_macd_indicator_forex")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_macd_indicator_forex", "GET", _http_path, _request_id)
@@ -3551,6 +3794,7 @@ async def get_macd_indicator_forex(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3567,7 +3811,7 @@ async def get_macd_for_indices(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price series to use for MACD calculation: open, high, low, or close. Defaults to close price, which is the most common choice for technical analysis."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending order (most recent data first)."),
     limit: int | None = Field(None, description="Maximum number of MACD data points to return. Defaults to 10 results; can be increased up to 5000 for larger datasets.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Moving Average Convergence/Divergence (MACD) indicator values for an indices ticker over a specified time range. MACD is a momentum indicator that shows the relationship between two moving averages of price."""
 
     # Construct request model with validation
@@ -3583,10 +3827,11 @@ async def get_macd_for_indices(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/macd/{indicesTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/macd/{indicesTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_macd_for_indices")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_macd_for_indices", "GET", _http_path, _request_id)
@@ -3598,6 +3843,7 @@ async def get_macd_for_indices(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3614,7 +3860,7 @@ async def get_macd_for_options_ticker(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use in MACD calculations: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of MACD data points to return. Defaults to 10; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate and retrieve Moving Average Convergence/Divergence (MACD) indicator values for an options contract over a specified time range. MACD helps identify trend direction and momentum changes."""
 
     # Construct request model with validation
@@ -3630,10 +3876,11 @@ async def get_macd_for_options_ticker(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/macd/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/macd/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_macd_for_options_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_macd_for_options_ticker", "GET", _http_path, _request_id)
@@ -3645,6 +3892,7 @@ async def get_macd_for_options_ticker(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3661,7 +3909,7 @@ async def get_macd_indicator(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for MACD calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 10; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Moving Average Convergence/Divergence (MACD) technical indicator data for a stock ticker over a specified time range. MACD helps identify trend direction and momentum changes."""
 
     # Construct request model with validation
@@ -3677,10 +3925,11 @@ async def get_macd_indicator(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/macd/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/macd/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_macd_indicator")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_macd_indicator", "GET", _http_path, _request_id)
@@ -3692,6 +3941,7 @@ async def get_macd_indicator(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3705,7 +3955,7 @@ async def get_crypto_rsi(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used in RSI calculation. Defaults to closing price. Options are open, high, low, or close prices."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Defaults to descending (most recent first). Choose ascending for oldest-first ordering."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 10, with a maximum of 5000 results per request.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the Relative Strength Index (RSI) indicator for a cryptocurrency ticker over a specified time range. RSI measures momentum on a scale of 0-100 to identify overbought or oversold conditions."""
 
     # Construct request model with validation
@@ -3721,10 +3971,11 @@ async def get_crypto_rsi(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/rsi/{cryptoTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/rsi/{cryptoTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_rsi")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_rsi", "GET", _http_path, _request_id)
@@ -3736,6 +3987,7 @@ async def get_crypto_rsi(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3750,7 +4002,7 @@ async def get_forex_rsi(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="Which price component to use for RSI calculation: open, high, low, or close. Defaults to close price, which is the most common choice."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of RSI data points to return. Defaults to 10 results; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the Relative Strength Index (RSI) for a forex currency pair over a specified time range. RSI is a momentum oscillator that measures the magnitude of recent price changes to evaluate overbought or oversold conditions."""
 
     # Construct request model with validation
@@ -3766,10 +4018,11 @@ async def get_forex_rsi(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/rsi/{fxTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/rsi/{fxTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_rsi")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_rsi", "GET", _http_path, _request_id)
@@ -3781,6 +4034,7 @@ async def get_forex_rsi(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3795,7 +4049,7 @@ async def get_rsi_for_indices(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="Which price component to use for RSI calculation: open, high, low, or close. Defaults to close price. Determines which value from each candle feeds into the RSI formula."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of RSI data points to return. Defaults to 10, with a maximum of 5000 results per request.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the Relative Strength Index (RSI) for an indices ticker over a specified time range. RSI is a momentum oscillator that measures the magnitude of recent price changes to evaluate overbought or oversold conditions."""
 
     # Construct request model with validation
@@ -3811,10 +4065,11 @@ async def get_rsi_for_indices(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/rsi/{indicesTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/rsi/{indicesTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_rsi_for_indices")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_rsi_for_indices", "GET", _http_path, _request_id)
@@ -3826,6 +4081,7 @@ async def get_rsi_for_indices(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3840,7 +4096,7 @@ async def get_options_rsi(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price series to use for RSI calculation: open, high, low, or close. Defaults to close price, which is the most common choice for technical analysis."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest-first or 'desc' for newest-first (default)."),
     limit: int | None = Field(None, description="Maximum number of RSI data points to return. Defaults to 10; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the Relative Strength Index (RSI) for an options ticker symbol over a specified time range. RSI is a momentum oscillator that measures the magnitude of recent price changes to evaluate overbought or oversold conditions."""
 
     # Construct request model with validation
@@ -3856,10 +4112,11 @@ async def get_options_rsi(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/rsi/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/rsi/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_options_rsi")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_options_rsi", "GET", _http_path, _request_id)
@@ -3871,6 +4128,7 @@ async def get_options_rsi(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3885,7 +4143,7 @@ async def get_rsi_for_stock(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="Which price type to use for RSI calculation: open, high, low, or close. Defaults to close price, which is the most common choice."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of RSI data points to return. Defaults to 10, with a maximum of 5000 results per request.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the Relative Strength Index (RSI) momentum indicator for a stock ticker over a specified time range. RSI measures the magnitude of recent price changes to evaluate overbought or oversold conditions."""
 
     # Construct request model with validation
@@ -3901,10 +4159,11 @@ async def get_rsi_for_stock(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/rsi/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/rsi/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_rsi_for_stock")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_rsi_for_stock", "GET", _http_path, _request_id)
@@ -3916,6 +4175,7 @@ async def get_rsi_for_stock(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3929,7 +4189,7 @@ async def get_crypto_simple_moving_average(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used in the SMA calculation: open, high, low, or close price. Defaults to using closing prices."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts values from 1 to 5000, with a default of 10 results.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the simple moving average (SMA) for a cryptocurrency ticker over a specified time range. Returns SMA values computed from historical price data aggregated at your chosen interval."""
 
     # Construct request model with validation
@@ -3945,10 +4205,11 @@ async def get_crypto_simple_moving_average(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/sma/{cryptoTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/sma/{cryptoTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_simple_moving_average")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_simple_moving_average", "GET", _http_path, _request_id)
@@ -3960,6 +4221,7 @@ async def get_crypto_simple_moving_average(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -3974,7 +4236,7 @@ async def get_forex_simple_moving_average(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used in the SMA calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of SMA values to return. Accepts 1 to 5000 results, with a default of 10.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the simple moving average (SMA) for a forex currency pair over a specified time range. Returns SMA values based on configurable window size, price series, and time aggregation."""
 
     # Construct request model with validation
@@ -3990,10 +4252,11 @@ async def get_forex_simple_moving_average(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/sma/{fxTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/sma/{fxTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_simple_moving_average")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_simple_moving_average", "GET", _http_path, _request_id)
@@ -4005,6 +4268,7 @@ async def get_forex_simple_moving_average(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4019,7 +4283,7 @@ async def get_sma_for_indices(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for SMA calculation: open, high, low, or close. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest first or 'desc' for newest first. Defaults to descending (most recent first)."),
     limit: int | None = Field(None, description="Maximum number of SMA data points to return. Accepts 1 to 5000 results. Defaults to 10.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the simple moving average (SMA) for an indices ticker symbol over a specified time range. Use this to analyze trend direction and momentum for index instruments like the Nasdaq-100."""
 
     # Construct request model with validation
@@ -4035,10 +4299,11 @@ async def get_sma_for_indices(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/sma/{indicesTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/sma/{indicesTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_sma_for_indices")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_sma_for_indices", "GET", _http_path, _request_id)
@@ -4050,6 +4315,7 @@ async def get_sma_for_indices(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4064,7 +4330,7 @@ async def get_sma_for_options_ticker(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type used in the SMA calculation: open, high, low, or close price. Defaults to close price."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Accepts values from 1 to 5000, with a default of 10.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the simple moving average (SMA) for an options ticker symbol over a specified time range. Returns SMA values based on configurable aggregation periods, price series, and window sizes."""
 
     # Construct request model with validation
@@ -4080,10 +4346,11 @@ async def get_sma_for_options_ticker(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/sma/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/sma/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_sma_for_options_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_sma_for_options_ticker", "GET", _http_path, _request_id)
@@ -4095,6 +4362,7 @@ async def get_sma_for_options_ticker(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4109,7 +4377,7 @@ async def get_simple_moving_average(
     series_type: Literal["open", "high", "low", "close"] | None = Field(None, description="The price type to use for SMA calculation: open, high, low, or close. Defaults to using closing prices."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp: ascending (oldest first) or descending (newest first). Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 10; maximum allowed is 5000.", le=5000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the simple moving average (SMA) for a stock ticker over a specified time range and aggregation period. Returns SMA values ordered by timestamp to track price trends."""
 
     # Construct request model with validation
@@ -4125,10 +4393,11 @@ async def get_simple_moving_average(
     # Extract parameters for API call
     _http_path = _build_path("/v1/indicators/sma/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/indicators/sma/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_simple_moving_average")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_simple_moving_average", "GET", _http_path, _request_id)
@@ -4140,6 +4409,7 @@ async def get_simple_moving_average(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4149,7 +4419,7 @@ async def get_simple_moving_average(
 async def get_last_trade_for_crypto_pair(
     from_: str = Field(..., alias="from", description="The source cryptocurrency symbol (e.g., BTC for Bitcoin). Use the standard ticker symbol for the cryptocurrency you want to trade from."),
     to: str = Field(..., description="The target currency or cryptocurrency symbol (e.g., USD for US Dollar). Use the standard ticker symbol for the currency you want to trade to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent trade tick for a specified cryptocurrency pair. Returns the latest executed trade data including price and timestamp for the given from/to currency combination."""
 
     # Construct request model with validation
@@ -4163,11 +4433,11 @@ async def get_last_trade_for_crypto_pair(
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/last/crypto/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/last/crypto/{from}/{to}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_last_trade_for_crypto_pair")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_last_trade_for_crypto_pair", "GET", _http_path, _request_id)
@@ -4178,7 +4448,7 @@ async def get_last_trade_for_crypto_pair(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4188,7 +4458,7 @@ async def get_last_trade_for_crypto_pair(
 async def get_last_quote_for_currency_pair(
     from_: str = Field(..., alias="from", description="The source currency symbol (ISO 4217 code) for the currency pair conversion, such as AUD for Australian Dollar."),
     to: str = Field(..., description="The target currency symbol (ISO 4217 code) to convert into, such as USD for US Dollar."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent exchange rate quote for a specified forex currency pair. Returns the latest tick data for converting between two currencies."""
 
     # Construct request model with validation
@@ -4202,11 +4472,11 @@ async def get_last_quote_for_currency_pair(
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/last_quote/currencies/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/last_quote/currencies/{from}/{to}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_last_quote_for_currency_pair")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_last_quote_for_currency_pair", "GET", _http_path, _request_id)
@@ -4217,23 +4487,23 @@ async def get_last_quote_for_currency_pair(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:stocks:market
 @mcp.tool()
-async def get_market_status() -> dict[str, Any]:
+async def get_market_status() -> dict[str, Any] | ToolResult:
     """Retrieve the current trading status of all exchanges and overall financial markets, including whether markets are open, closed, or in pre/post-trading sessions."""
 
     # Extract parameters for API call
     _http_path = "/v1/marketstatus/now"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_market_status")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_market_status", "GET", _http_path, _request_id)
@@ -4244,23 +4514,23 @@ async def get_market_status() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:stocks:market
 @mcp.tool()
-async def list_market_holidays() -> dict[str, Any]:
+async def list_market_holidays() -> dict[str, Any] | ToolResult:
     """Retrieve a list of upcoming market holidays with their corresponding market open and close times. Use this to identify when markets will be closed or have modified trading hours."""
 
     # Extract parameters for API call
     _http_path = "/v1/marketstatus/upcoming"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_market_holidays")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_market_holidays", "GET", _http_path, _request_id)
@@ -4271,7 +4541,7 @@ async def list_market_holidays() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4283,7 +4553,7 @@ async def get_crypto_daily_open_close(
     to: str = Field(..., description="The quote currency symbol of the trading pair (e.g., USD for US Dollar)."),
     date: str = Field(..., description="The date for which to retrieve open/close prices, formatted as YYYY-MM-DD."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted prices. Defaults to true for adjusted results; set to false to retrieve unadjusted prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the opening and closing prices for a cryptocurrency trading pair on a specific date. Prices are adjusted for splits by default."""
 
     # Construct request model with validation
@@ -4299,10 +4569,11 @@ async def get_crypto_daily_open_close(
     # Extract parameters for API call
     _http_path = _build_path("/v1/open-close/crypto/{from}/{to}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/open-close/crypto/{from}/{to}/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_daily_open_close")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_daily_open_close", "GET", _http_path, _request_id)
@@ -4314,6 +4585,7 @@ async def get_crypto_daily_open_close(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4323,7 +4595,7 @@ async def get_crypto_daily_open_close(
 async def get_index_open_close(
     indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index to query, prefixed with 'I:' (e.g., I:NDX for Nasdaq-100)."),
     date: str = Field(..., description="The date for which to retrieve open/close data, formatted as YYYY-MM-DD (e.g., 2023-03-10)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the opening, closing, and after-hours prices for an index on a specific date. Useful for analyzing daily price movements and market hours performance."""
 
     # Construct request model with validation
@@ -4337,11 +4609,11 @@ async def get_index_open_close(
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/open-close/{indicesTicker}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/open-close/{indicesTicker}/{date}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_index_open_close")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_index_open_close", "GET", _http_path, _request_id)
@@ -4352,7 +4624,7 @@ async def get_index_open_close(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4363,7 +4635,7 @@ async def get_options_daily_open_close(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:UNDERLYING[EXPIRATION][TYPE][STRIKE] (e.g., O:SPY251219C00650000 for SPY call option expiring December 19, 2025 with $650 strike)."),
     date: str = Field(..., description="The date for which to retrieve open/close data, formatted as YYYY-MM-DD (e.g., 2023-01-09)."),
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true (adjusted); set to false to retrieve unadjusted prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the open, close, and after-hours prices for a specific options contract on a given date."""
 
     # Construct request model with validation
@@ -4379,10 +4651,11 @@ async def get_options_daily_open_close(
     # Extract parameters for API call
     _http_path = _build_path("/v1/open-close/{optionsTicker}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/open-close/{optionsTicker}/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_options_daily_open_close")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_options_daily_open_close", "GET", _http_path, _request_id)
@@ -4394,6 +4667,7 @@ async def get_options_daily_open_close(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4404,7 +4678,7 @@ async def get_stock_daily_open_close(
     stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be case-sensitive and match the official exchange listing."),
     date: str = Field(..., description="The date for which to retrieve pricing data, formatted as YYYY-MM-DD (e.g., 2023-01-09)."),
     adjusted: bool | None = Field(None, description="Whether to adjust prices for stock splits. When true (default), prices reflect split adjustments; set to false to retrieve unadjusted historical prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the opening, closing, and after-hours prices for a stock on a specific date. Results are adjusted for stock splits by default."""
 
     # Construct request model with validation
@@ -4420,10 +4694,11 @@ async def get_stock_daily_open_close(
     # Extract parameters for API call
     _http_path = _build_path("/v1/open-close/{stocksTicker}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/open-close/{stocksTicker}/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_stock_daily_open_close")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_stock_daily_open_close", "GET", _http_path, _request_id)
@@ -4435,6 +4710,7 @@ async def get_stock_daily_open_close(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4454,7 +4730,7 @@ async def list_sec_filings_reference(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the selected sort field."),
     limit: int | None = Field(None, description="Maximum number of filings to return per request. Defaults to 10; maximum allowed is 1000.", ge=1, le=1000),
     sort: Literal["filing_date", "period_of_report_date"] | None = Field(None, description="Field to sort results by. Choose filing_date for the date the filing was submitted, or period_of_report_date for the reporting period end date. Defaults to filing_date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve SEC filings with flexible filtering by company identifiers, reporting dates, and XBRL availability. Results can be sorted and paginated for efficient data retrieval."""
 
     # Construct request model with validation
@@ -4469,10 +4745,11 @@ async def list_sec_filings_reference(
     # Extract parameters for API call
     _http_path = "/v1/reference/sec/filings"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_sec_filings_reference")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_sec_filings_reference", "GET", _http_path, _request_id)
@@ -4484,13 +4761,14 @@ async def list_sec_filings_reference(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:sec:filing
 @mcp.tool()
-async def get_filing(filing_id: str = Field(..., description="The unique identifier for the SEC filing to retrieve. This ID corresponds to a specific filing record in the SEC database.")) -> dict[str, Any]:
+async def get_filing(filing_id: str = Field(..., description="The unique identifier for the SEC filing to retrieve. This ID corresponds to a specific filing record in the SEC database.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific SEC filing document by its unique filing identifier. Returns detailed filing information from the Securities and Exchange Commission database."""
 
     # Construct request model with validation
@@ -4504,11 +4782,11 @@ async def get_filing(filing_id: str = Field(..., description="The unique identif
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/reference/sec/filings/{filing_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/reference/sec/filings/{filing_id}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_filing")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_filing", "GET", _http_path, _request_id)
@@ -4519,7 +4797,7 @@ async def get_filing(filing_id: str = Field(..., description="The unique identif
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4539,7 +4817,7 @@ async def list_filing_files(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: 'asc' for ascending or 'desc' for descending order based on the selected sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return per request. Defaults to 10 if not specified; maximum allowed is 1000.", ge=1, le=1000),
     sort: Literal["sequence", "filename"] | None = Field(None, description="Field to sort results by: 'sequence' (default) sorts by file sequence number, or 'filename' sorts alphabetically by filename."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of files associated with a specific SEC filing. Results can be filtered by sequence number or filename, and sorted by either field in ascending or descending order."""
 
     _sequence_gte = _parse_int(sequence_gte)
@@ -4560,10 +4838,11 @@ async def list_filing_files(
     # Extract parameters for API call
     _http_path = _build_path("/v1/reference/sec/filings/{filing_id}/files", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/reference/sec/filings/{filing_id}/files"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_filing_files")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_filing_files", "GET", _http_path, _request_id)
@@ -4575,6 +4854,7 @@ async def list_filing_files(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4584,7 +4864,7 @@ async def list_filing_files(
 async def get_sec_filing_file(
     filing_id: str = Field(..., description="The unique identifier of the SEC filing. This ID specifies which filing submission to retrieve the file from."),
     file_id: str = Field(..., description="The unique identifier of the specific file within the filing. This ID pinpoints the exact document or exhibit to retrieve (e.g., '1' for the first file)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific file from an SEC filing by its filing ID and file ID. Use this to access individual documents or exhibits within a complete SEC filing submission."""
 
     # Construct request model with validation
@@ -4598,11 +4878,11 @@ async def get_sec_filing_file(
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/reference/sec/filings/{filing_id}/files/{file_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/reference/sec/filings/{filing_id}/files/{file_id}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_sec_filing_file")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_sec_filing_file", "GET", _http_path, _request_id)
@@ -4613,14 +4893,14 @@ async def get_sec_filing_file(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:related:companies
 @mcp.tool()
-async def list_related_companies(ticker: str = Field(..., description="The stock ticker symbol to find related companies for (e.g., AAPL for Apple Inc.)")) -> dict[str, Any]:
+async def list_related_companies(ticker: str = Field(..., description="The stock ticker symbol to find related companies for (e.g., AAPL for Apple Inc.)")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of company tickers related to a given ticker symbol, identified through analysis of news coverage and stock return patterns."""
 
     # Construct request model with validation
@@ -4634,11 +4914,11 @@ async def list_related_companies(ticker: str = Field(..., description="The stock
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/related-companies/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/related-companies/{ticker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_related_companies")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_related_companies", "GET", _http_path, _request_id)
@@ -4649,23 +4929,23 @@ async def list_related_companies(ticker: str = Field(..., description="The stock
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 
 @mcp.tool()
-async def get_ticker_summaries() -> dict[str, Any]:
+async def get_ticker_summaries() -> dict[str, Any] | ToolResult:
     """Retrieve tick-by-tick movement summaries for all tickers, providing all data needed to visualize price and volume changes."""
 
     # Extract parameters for API call
     _http_path = "/v1/summaries"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_ticker_summaries")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_ticker_summaries", "GET", _http_path, _request_id)
@@ -4676,7 +4956,7 @@ async def get_ticker_summaries() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4686,7 +4966,7 @@ async def get_ticker_summaries() -> dict[str, Any]:
 async def get_grouped_crypto_aggregates(
     date: str = Field(..., description="The date for which to retrieve cryptocurrency market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to adjust results for splits. Set to true (default) for split-adjusted prices, or false to receive unadjusted data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve daily OHLC (open, high, low, close) price aggregates for the entire cryptocurrency market on a specified date. Results are adjusted for splits by default."""
 
     # Construct request model with validation
@@ -4702,10 +4982,11 @@ async def get_grouped_crypto_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/grouped/locale/global/market/crypto/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/grouped/locale/global/market/crypto/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_grouped_crypto_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_grouped_crypto_aggregates", "GET", _http_path, _request_id)
@@ -4717,6 +4998,7 @@ async def get_grouped_crypto_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4726,7 +5008,7 @@ async def get_grouped_crypto_aggregates(
 async def get_grouped_forex_aggregates(
     date: str = Field(..., description="The date for which to retrieve forex market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve daily OHLC (open, high, low, close) aggregated data for all forex currency pairs on a specified date. Results are adjusted for splits by default."""
 
     # Construct request model with validation
@@ -4742,10 +5024,11 @@ async def get_grouped_forex_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/grouped/locale/global/market/fx/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/grouped/locale/global/market/fx/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_grouped_forex_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_grouped_forex_aggregates", "GET", _http_path, _request_id)
@@ -4757,6 +5040,7 @@ async def get_grouped_forex_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4767,7 +5051,7 @@ async def get_grouped_stocks_aggregates(
     date: str = Field(..., description="The date for which to retrieve market aggregates, formatted as YYYY-MM-DD (e.g., 2025-11-03)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted prices. Defaults to true; set to false to retrieve unadjusted data."),
     include_otc: bool | None = Field(None, description="Whether to include over-the-counter (OTC) securities in the results. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve daily OHLC (open, high, low, close) aggregate data for the entire US equities market on a specified date. Results are adjusted for splits by default."""
 
     # Construct request model with validation
@@ -4783,10 +5067,11 @@ async def get_grouped_stocks_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/grouped/locale/us/market/stocks/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/grouped/locale/us/market/stocks/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_grouped_stocks_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_grouped_stocks_aggregates", "GET", _http_path, _request_id)
@@ -4798,6 +5083,7 @@ async def get_grouped_stocks_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4807,7 +5093,7 @@ async def get_grouped_stocks_aggregates(
 async def get_previous_crypto_aggregates(
     crypto_ticker: str = Field(..., alias="cryptoTicker", description="The ticker symbol representing the cryptocurrency pair (e.g., X:BTCUSD for Bitcoin to US Dollar)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's OHLC (open, high, low, close) data for a specified cryptocurrency pair. Use this to analyze the prior day's price movement and market range."""
 
     # Construct request model with validation
@@ -4823,10 +5109,11 @@ async def get_previous_crypto_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{cryptoTicker}/prev", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{cryptoTicker}/prev"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_previous_crypto_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_previous_crypto_aggregates", "GET", _http_path, _request_id)
@@ -4838,6 +5125,7 @@ async def get_previous_crypto_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4853,7 +5141,7 @@ async def get_crypto_aggregates(
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true (adjusted). Set to false to retrieve unadjusted data."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest-first or 'desc' for newest-first ordering."),
     limit: int | None = Field(None, description="Maximum number of base aggregates to query for creating results. Accepts values up to 50,000; defaults to 5,000 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate bars (OHLCV data) for a cryptocurrency pair over a specified date range with customizable time window sizes. For example, use multiplier=5 with timespan='minute' to get 5-minute bars."""
 
     # Construct request model with validation
@@ -4869,10 +5157,11 @@ async def get_crypto_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_aggregates", "GET", _http_path, _request_id)
@@ -4884,6 +5173,7 @@ async def get_crypto_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4893,7 +5183,7 @@ async def get_crypto_aggregates(
 async def get_previous_forex_close(
     forex_ticker: str = Field(..., alias="forexTicker", description="The forex ticker symbol representing a currency pair (e.g., C:EURUSD for Euro/US Dollar)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's OHLC (open, high, low, close) data for a specified forex currency pair. Useful for analyzing recent price action and market trends."""
 
     # Construct request model with validation
@@ -4909,10 +5199,11 @@ async def get_previous_forex_close(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{forexTicker}/prev", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{forexTicker}/prev"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_previous_forex_close")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_previous_forex_close", "GET", _http_path, _request_id)
@@ -4924,6 +5215,7 @@ async def get_previous_forex_close(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -4939,7 +5231,7 @@ async def get_forex_aggregates(
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true (adjusted). Set to false to retrieve unadjusted data."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest-first or 'desc' for newest-first ordering."),
     limit: int | None = Field(None, description="Maximum number of base aggregates to query for creating results. Accepts values up to 50,000; defaults to 5,000 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate (OHLCV) bars for a forex currency pair over a specified date range with customizable time window sizes. For example, use multiplier=5 with timespan='minute' to get 5-minute bars."""
 
     # Construct request model with validation
@@ -4955,10 +5247,11 @@ async def get_forex_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_aggregates", "GET", _http_path, _request_id)
@@ -4970,13 +5263,14 @@ async def get_forex_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: indices:aggregates
 @mcp.tool()
-async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index (e.g., I:NDX for Nasdaq-100). Use the index ticker in the format specified by your data provider.")) -> dict[str, Any]:
+async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="indicesTicker", description="The ticker symbol of the index (e.g., I:NDX for Nasdaq-100). Use the index ticker in the format specified by your data provider.")) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's OHLC (open, high, low, close) aggregate data for a specified index. Useful for comparing current performance against the prior day's closing values."""
 
     # Construct request model with validation
@@ -4990,11 +5284,11 @@ async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{indicesTicker}/prev", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{indicesTicker}/prev"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_previous_index_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_previous_index_aggregates", "GET", _http_path, _request_id)
@@ -5005,7 +5299,7 @@ async def get_previous_index_aggregates(indices_ticker: str = Field(..., alias="
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5020,7 +5314,7 @@ async def get_indices_aggregates(
     to: str = Field(..., description="The end of the aggregate time window. Provide either a date in YYYY-MM-DD format or a millisecond Unix timestamp."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort results by timestamp in ascending order (oldest first) or descending order (newest first). Defaults to ascending if not specified."),
     limit: int | None = Field(None, description="Maximum number of base aggregates to query for creating results. Accepts values up to 50,000; defaults to 5,000 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate (OHLCV) bars for an index over a specified date range with customizable time window sizes. For example, use multiplier=5 with timespan='minute' to get 5-minute bars."""
 
     # Construct request model with validation
@@ -5036,10 +5330,11 @@ async def get_indices_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_indices_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_indices_aggregates", "GET", _http_path, _request_id)
@@ -5051,6 +5346,7 @@ async def get_indices_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5060,7 +5356,7 @@ async def get_indices_aggregates(
 async def get_previous_close_for_options_contract(
     options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:{underlying}{expiration}{type}{strike} (e.g., O:SPY251219C00650000 for SPY call option expiring December 19, 2025 at $650 strike)."),
     adjusted: bool | None = Field(None, description="Whether to return split-adjusted results. Defaults to true for adjusted data; set to false to retrieve unadjusted historical prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's OHLC (open, high, low, close) data for a specified options contract. Results are adjusted for splits by default."""
 
     # Construct request model with validation
@@ -5076,10 +5372,11 @@ async def get_previous_close_for_options_contract(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{optionsTicker}/prev", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{optionsTicker}/prev"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_previous_close_for_options_contract")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_previous_close_for_options_contract", "GET", _http_path, _request_id)
@@ -5091,6 +5388,7 @@ async def get_previous_close_for_options_contract(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5106,7 +5404,7 @@ async def get_options_aggregates(
     adjusted: bool | None = Field(None, description="Whether to adjust results for corporate actions like splits. Defaults to true (adjusted). Set to false to retrieve unadjusted data."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for oldest-first or 'desc' for newest-first ordering."),
     limit: int | None = Field(None, description="Maximum number of base aggregates to query when constructing the result set. Accepts values up to 50,000; defaults to 5,000. Higher limits may improve accuracy for custom timespan aggregations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate bars for an options contract over a specified date range in custom time window sizes. For example, with a 5-minute timespan, the API returns 5-minute OHLCV bars."""
 
     # Construct request model with validation
@@ -5122,10 +5420,11 @@ async def get_options_aggregates(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_options_aggregates")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_options_aggregates", "GET", _http_path, _request_id)
@@ -5137,6 +5436,7 @@ async def get_options_aggregates(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5146,7 +5446,7 @@ async def get_options_aggregates(
 async def get_previous_day_stock_ohlc(
     stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be an exact, case-sensitive match."),
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true; set to false to retrieve unadjusted prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the previous trading day's open, high, low, and close (OHLC) prices for a specified stock ticker. Results are adjusted for stock splits by default."""
 
     # Construct request model with validation
@@ -5162,10 +5462,11 @@ async def get_previous_day_stock_ohlc(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{stocksTicker}/prev", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{stocksTicker}/prev"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_previous_day_stock_ohlc")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_previous_day_stock_ohlc", "GET", _http_path, _request_id)
@@ -5177,6 +5478,7 @@ async def get_previous_day_stock_ohlc(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5192,7 +5494,7 @@ async def get_stock_aggregates_by_range(
     adjusted: bool | None = Field(None, description="Whether to adjust results for stock splits. Defaults to true (adjusted). Set to false to retrieve unadjusted data."),
     sort: Literal["asc", "desc"] | None = Field(None, description="Sort order for results by timestamp. Use 'asc' for ascending order (oldest first) or 'desc' for descending order (newest first)."),
     limit: int | None = Field(None, description="Maximum number of base aggregates to query when building results. Accepts values from 1 to 50,000; defaults to 5,000 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregate (OHLCV) bars for a stock over a specified date range with customizable time window sizes. For example, use multiplier=5 with timespan='minute' to get 5-minute bars."""
 
     # Construct request model with validation
@@ -5208,10 +5510,11 @@ async def get_stock_aggregates_by_range(
     # Extract parameters for API call
     _http_path = _build_path("/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_stock_aggregates_by_range")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_stock_aggregates_by_range", "GET", _http_path, _request_id)
@@ -5223,13 +5526,14 @@ async def get_stock_aggregates_by_range(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: stocks:last:quote
 @mcp.tool()
-async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in case-sensitive format (e.g., AAPL for Apple Inc.).")) -> dict[str, Any]:
+async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in case-sensitive format (e.g., AAPL for Apple Inc.).")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent NBBO (National Best Bid and Offer) quote for a specified stock ticker symbol."""
 
     # Construct request model with validation
@@ -5243,11 +5547,11 @@ async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", d
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/last/nbbo/{stocksTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/last/nbbo/{stocksTicker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_last_quote")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_last_quote", "GET", _http_path, _request_id)
@@ -5258,14 +5562,14 @@ async def get_last_quote(stocks_ticker: str = Field(..., alias="stocksTicker", d
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: options:last:trade
 @mcp.tool()
-async def get_last_trade_for_options_contract(options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:{underlying_symbol}{expiration_date}{contract_type}{strike_price} (e.g., O:TSLA210903C00700000 for a Tesla call option expiring September 3, 2021 with a $700 strike).")) -> dict[str, Any]:
+async def get_last_trade_for_options_contract(options_ticker: str = Field(..., alias="optionsTicker", description="The options contract ticker symbol in the format O:{underlying_symbol}{expiration_date}{contract_type}{strike_price} (e.g., O:TSLA210903C00700000 for a Tesla call option expiring September 3, 2021 with a $700 strike).")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent trade execution for a specified options contract. Returns trade details including price, size, and timestamp for the latest transaction."""
 
     # Construct request model with validation
@@ -5279,11 +5583,11 @@ async def get_last_trade_for_options_contract(options_ticker: str = Field(..., a
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/last/trade/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/last/trade/{optionsTicker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_last_trade_for_options_contract")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_last_trade_for_options_contract", "GET", _http_path, _request_id)
@@ -5294,14 +5598,14 @@ async def get_last_trade_for_options_contract(options_ticker: str = Field(..., a
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: stocks:last:trade
 @mcp.tool()
-async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be a valid, case-sensitive ticker symbol.")) -> dict[str, Any]:
+async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must be a valid, case-sensitive ticker symbol.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent trade execution for a specified stock ticker symbol. Returns the latest trade data including price, size, and timestamp."""
 
     # Construct request model with validation
@@ -5315,11 +5619,11 @@ async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", d
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/last/trade/{stocksTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/last/trade/{stocksTicker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_last_trade")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_last_trade", "GET", _http_path, _request_id)
@@ -5330,7 +5634,7 @@ async def get_last_trade(stocks_ticker: str = Field(..., alias="stocksTicker", d
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5342,7 +5646,7 @@ async def list_news_for_ticker(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending (oldest first) or descending (newest first). Defaults to descending when used with the sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return. Must be between 1 and 1000 articles; defaults to 10 if not specified.", ge=1, le=1000),
     sort: Literal["published_utc"] | None = Field(None, description="Field to sort results by. Currently supports sorting by publication date (published_utc), which is the default ordering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent news articles for a stock ticker symbol, including article summaries and links to original sources. Results can be filtered by publication date and sorted by recency."""
 
     # Construct request model with validation
@@ -5357,10 +5661,11 @@ async def list_news_for_ticker(
     # Extract parameters for API call
     _http_path = "/v2/reference/news"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_news_for_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_news_for_ticker", "GET", _http_path, _request_id)
@@ -5372,22 +5677,23 @@ async def list_news_for_ticker(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: crypto:snapshot
 @mcp.tool()
-async def list_crypto_tickers_snapshot() -> dict[str, Any]:
+async def list_crypto_tickers_snapshot() -> dict[str, Any] | ToolResult:
     """Retrieve current market snapshot data for all traded cryptocurrency symbols, including minute and day aggregates, previous day comparison, and latest trade/quote information. Data is refreshed from exchanges starting around 4am EST daily, with snapshots cleared at 12am EST."""
 
     # Extract parameters for API call
     _http_path = "/v2/snapshot/locale/global/markets/crypto/tickers"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_crypto_tickers_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_crypto_tickers_snapshot", "GET", _http_path, _request_id)
@@ -5398,14 +5704,14 @@ async def list_crypto_tickers_snapshot() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: crypto:snapshot
 @mcp.tool()
-async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The cryptocurrency ticker symbol to retrieve snapshot data for, formatted as an exchange prefix and currency pair (e.g., X:BTCUSD for Bitcoin in USD).")) -> dict[str, Any]:
+async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The cryptocurrency ticker symbol to retrieve snapshot data for, formatted as an exchange prefix and currency pair (e.g., X:BTCUSD for Bitcoin in USD).")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time and aggregate market data for a cryptocurrency ticker, including current minute and day aggregates, previous day comparison, and the latest trade and quote information. Data is refreshed as exchange data arrives and resets daily at 12am EST."""
 
     # Construct request model with validation
@@ -5419,11 +5725,11 @@ async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The c
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/global/markets/crypto/tickers/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/global/markets/crypto/tickers/{ticker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_crypto_ticker_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_crypto_ticker_snapshot", "GET", _http_path, _request_id)
@@ -5434,14 +5740,14 @@ async def get_crypto_ticker_snapshot(ticker: str = Field(..., description="The c
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: crypto:snapshot
 @mcp.tool()
-async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return top gainers or top losers. Use 'gainers' for tickers with the highest positive percentage change, or 'losers' for tickers with the highest negative percentage change since the previous day's close.")) -> dict[str, Any]:
+async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return top gainers or top losers. Use 'gainers' for tickers with the highest positive percentage change, or 'losers' for tickers with the highest negative percentage change since the previous day's close.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 cryptocurrency gainers or losers by percentage change since the previous day's close. Snapshot data resets daily at 12am EST and populates as exchange data arrives."""
 
     # Construct request model with validation
@@ -5455,11 +5761,11 @@ async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] 
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/global/markets/crypto/{direction}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/global/markets/crypto/{direction}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_crypto_gainers_or_losers")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_crypto_gainers_or_losers", "GET", _http_path, _request_id)
@@ -5470,23 +5776,23 @@ async def list_crypto_gainers_or_losers(direction: Literal["gainers", "losers"] 
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: fx:snapshot
 @mcp.tool()
-async def get_forex_snapshot_tickers() -> dict[str, Any]:
+async def get_forex_snapshot_tickers() -> dict[str, Any] | ToolResult:
     """Retrieve real-time snapshot data for all traded forex symbols, including current minute and day aggregates, previous day aggregates, and the latest trade and quote information. Note: Snapshot data resets daily at 12am EST and begins populating as early as 4am EST when exchange data arrives."""
 
     # Extract parameters for API call
     _http_path = "/v2/snapshot/locale/global/markets/forex/tickers"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_snapshot_tickers")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_snapshot_tickers", "GET", _http_path, _request_id)
@@ -5497,14 +5803,14 @@ async def get_forex_snapshot_tickers() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: fx:snapshot
 @mcp.tool()
-async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The forex currency pair ticker symbol (e.g., C:EURUSD for Euro/US Dollar). Use the format C: prefix followed by the three-letter currency codes.")) -> dict[str, Any]:
+async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The forex currency pair ticker symbol (e.g., C:EURUSD for Euro/US Dollar). Use the format C: prefix followed by the three-letter currency codes.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time forex market data for a currency pair, including current minute and day aggregates, previous day comparison, and the latest trade and quote information. Data is refreshed as exchange data arrives and resets daily at 12am EST."""
 
     # Construct request model with validation
@@ -5518,11 +5824,11 @@ async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The fo
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/global/markets/forex/tickers/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/global/markets/forex/tickers/{ticker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_forex_ticker_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_forex_ticker_snapshot", "GET", _http_path, _request_id)
@@ -5533,14 +5839,14 @@ async def get_forex_ticker_snapshot(ticker: str = Field(..., description="The fo
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: fx:snapshot
 @mcp.tool()
-async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return the top gainers or top losers. Use 'gainers' for pairs with the highest positive percentage change, or 'losers' for pairs with the highest negative percentage change since the previous day's close.")) -> dict[str, Any]:
+async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return the top gainers or top losers. Use 'gainers' for pairs with the highest positive percentage change, or 'losers' for pairs with the highest negative percentage change since the previous day's close.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 forex currency pairs ranked by daily percentage change. Returns either the biggest gainers or losers since the previous day's close, with snapshot data refreshed daily at 12am EST."""
 
     # Construct request model with validation
@@ -5554,11 +5860,11 @@ async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] =
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/global/markets/forex/{direction}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/global/markets/forex/{direction}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_forex_gainers_or_losers")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_forex_gainers_or_losers", "GET", _http_path, _request_id)
@@ -5569,14 +5875,14 @@ async def list_forex_gainers_or_losers(direction: Literal["gainers", "losers"] =
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: stocks:snapshot
 @mcp.tool()
-async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, description="Set to true to include over-the-counter (OTC) securities in the results; defaults to false to return only exchange-listed stocks.")) -> dict[str, Any]:
+async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, description="Set to true to include over-the-counter (OTC) securities in the results; defaults to false to return only exchange-listed stocks.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time market data snapshot for all traded stock symbols. Data is refreshed continuously from exchanges starting around 4am EST daily, with the previous day's data cleared at 3:30am EST."""
 
     # Construct request model with validation
@@ -5591,10 +5897,11 @@ async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, des
     # Extract parameters for API call
     _http_path = "/v2/snapshot/locale/us/markets/stocks/tickers"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_tickers_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_tickers_snapshot", "GET", _http_path, _request_id)
@@ -5606,13 +5913,14 @@ async def list_stock_tickers_snapshot(include_otc: bool | None = Field(None, des
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: stocks:snapshot
 @mcp.tool()
-async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must match the exact case-sensitive symbol used by the exchange.")) -> dict[str, Any]:
+async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="stocksTicker", description="The stock ticker symbol in uppercase (e.g., AAPL for Apple Inc.). Must match the exact case-sensitive symbol used by the exchange.")) -> dict[str, Any] | ToolResult:
     """Retrieve real-time market data snapshot for a specific stock ticker symbol. Data is refreshed as exchange data arrives, typically starting at 4am EST after the 3:30am EST daily reset."""
 
     # Construct request model with validation
@@ -5626,11 +5934,11 @@ async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="st
 
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_stock_snapshot_by_ticker")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_stock_snapshot_by_ticker", "GET", _http_path, _request_id)
@@ -5641,7 +5949,7 @@ async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="st
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5651,7 +5959,7 @@ async def get_stock_snapshot_by_ticker(stocks_ticker: str = Field(..., alias="st
 async def list_stocks_by_direction(
     direction: Literal["gainers", "losers"] = Field(..., description="Specify whether to return top gainers or top losers ranked by percentage price change since the previous close."),
     include_otc: bool | None = Field(None, description="Set to true to include over-the-counter (OTC) securities in the results; defaults to false to exclude OTC securities."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 stocks with the highest percentage gains or losses since the previous day's close. Results include only tickers with trading volume of 10,000 or more and are updated throughout the trading day."""
 
     # Construct request model with validation
@@ -5667,10 +5975,11 @@ async def list_stocks_by_direction(
     # Extract parameters for API call
     _http_path = _build_path("/v2/snapshot/locale/us/markets/stocks/{direction}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/snapshot/locale/us/markets/stocks/{direction}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stocks_by_direction")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stocks_by_direction", "GET", _http_path, _request_id)
@@ -5682,6 +5991,7 @@ async def list_stocks_by_direction(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5694,7 +6004,7 @@ async def get_nbbo_quotes_for_date(
     timestamp_limit: int | None = Field(None, alias="timestampLimit", description="Optional maximum timestamp threshold; only quotes at or before this timestamp will be included in results."),
     reverse: bool | None = Field(None, description="Optional flag to reverse the sort order of results; when true, results are returned in descending order."),
     limit: int | None = Field(None, description="Optional limit on the number of quotes returned in the response, with a maximum of 50,000 and default of 5,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve National Best Bid and Offer (NBBO) quotes for a specific stock ticker on a given date. Returns intraday quote data with optional filtering and ordering."""
 
     # Construct request model with validation
@@ -5710,10 +6020,11 @@ async def get_nbbo_quotes_for_date(
     # Extract parameters for API call
     _http_path = _build_path("/v2/ticks/stocks/nbbo/{ticker}/{date}", _request.path.model_dump(by_alias=True)) if _request.path else "/v2/ticks/stocks/nbbo/{ticker}/{date}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nbbo_quotes_for_date")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_nbbo_quotes_for_date", "GET", _http_path, _request_id)
@@ -5725,6 +6036,7 @@ async def get_nbbo_quotes_for_date(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5736,7 +6048,7 @@ async def get_fx_quotes(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending or descending. Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Must be between 1 and 50,000; defaults to 1,000.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by. Currently supports sorting by timestamp only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve best bid-offer (BBO) quotes for a foreign exchange ticker symbol. Returns quote data sorted by timestamp in descending order by default, with configurable pagination and ordering."""
 
     # Construct request model with validation
@@ -5752,10 +6064,11 @@ async def get_fx_quotes(
     # Extract parameters for API call
     _http_path = _build_path("/v3/quotes/{fxTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/quotes/{fxTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_fx_quotes")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_fx_quotes", "GET", _http_path, _request_id)
@@ -5767,6 +6080,7 @@ async def get_fx_quotes(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5778,7 +6092,7 @@ async def list_options_quotes(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Defaults to descending order (newest first)."),
     limit: int | None = Field(None, description="Maximum number of quote records to return in the response. Accepts values from 1 to 50,000, with a default of 1,000.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by. Currently supports sorting by timestamp only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical quote data for an options contract ticker symbol, with configurable sorting and pagination to handle large result sets."""
 
     # Construct request model with validation
@@ -5794,10 +6108,11 @@ async def list_options_quotes(
     # Extract parameters for API call
     _http_path = _build_path("/v3/quotes/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/quotes/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_options_quotes")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_options_quotes", "GET", _http_path, _request_id)
@@ -5809,6 +6124,7 @@ async def list_options_quotes(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5820,7 +6136,7 @@ async def get_stock_quotes(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of quote records to return. Accepts values from 1 to 50,000, with a default of 1,000.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by. Currently supports sorting by timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve National Best Bid and Offer (NBBO) quotes for a stock ticker symbol. Returns quote data sorted and limited according to specified parameters."""
 
     # Construct request model with validation
@@ -5836,10 +6152,11 @@ async def get_stock_quotes(
     # Extract parameters for API call
     _http_path = _build_path("/v3/quotes/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/quotes/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_stock_quotes")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_stock_quotes", "GET", _http_path, _request_id)
@@ -5851,6 +6168,7 @@ async def get_stock_quotes(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5864,7 +6182,7 @@ async def list_conditions(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the selected sort field."),
     limit: int | None = Field(None, description="Limit the number of results returned; defaults to 10 with a maximum of 1000 results per request.", ge=1, le=1000),
     sort: Literal["asset_class", "id", "type", "name", "data_types", "legacy"] | None = Field(None, description="Select the field to sort by: asset class, condition ID, type, name, supported data types, or legacy status. Defaults to asset class."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all market conditions used by Massive, with optional filtering by data type, SIP, or condition ID. Results can be sorted and paginated for efficient data retrieval."""
 
     # Construct request model with validation
@@ -5879,10 +6197,11 @@ async def list_conditions(
     # Extract parameters for API call
     _http_path = "/v3/reference/conditions"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_conditions")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_conditions", "GET", _http_path, _request_id)
@@ -5894,6 +6213,7 @@ async def list_conditions(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5909,7 +6229,7 @@ async def list_dividends(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the selected sort field."),
     limit: int | None = Field(None, description="Limit the number of results returned. Must be between 1 and 1000, with a default of 10 results.", ge=1, le=1000),
     sort: Literal["ex_dividend_date", "pay_date", "declaration_date", "record_date", "cash_amount", "ticker"] | None = Field(None, description="Choose which field to sort by: ex_dividend_date (default), pay_date, declaration_date, record_date, cash_amount, or ticker symbol."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical dividend payments with filtering and sorting capabilities. Query by date, amount, or dividend type to find specific dividend records across securities."""
 
     # Construct request model with validation
@@ -5924,10 +6244,11 @@ async def list_dividends(
     # Extract parameters for API call
     _http_path = "/v3/reference/dividends"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_dividends")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_dividends", "GET", _http_path, _request_id)
@@ -5939,13 +6260,14 @@ async def list_dividends(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:exchanges
 @mcp.tool()
-async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, description="Filter results by geographic region: use 'us' for United States exchanges or 'global' for worldwide exchanges.")) -> dict[str, Any]:
+async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, description="Filter results by geographic region: use 'us' for United States exchanges or 'global' for worldwide exchanges.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all exchanges that Massive has data for, optionally filtered by geographic locale."""
 
     # Construct request model with validation
@@ -5960,10 +6282,11 @@ async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, de
     # Extract parameters for API call
     _http_path = "/v3/reference/exchanges"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_exchanges")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_exchanges", "GET", _http_path, _request_id)
@@ -5975,6 +6298,7 @@ async def list_exchanges(locale: Literal["us", "global"] | None = Field(None, de
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -5989,7 +6313,7 @@ async def list_options_contracts(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the selected sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return, between 1 and 1000. Defaults to 10 results per request.", ge=1, le=1000),
     sort: Literal["ticker", "underlying_ticker", "expiration_date", "strike_price"] | None = Field(None, description="Field to sort results by: ticker symbol, underlying ticker, expiration date, or strike price. Defaults to sorting by ticker."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical options contracts for a given underlying asset, including both active and expired contracts. Filter by contract type, expiration date, and other criteria to find specific options trading opportunities."""
 
     # Construct request model with validation
@@ -6004,10 +6328,11 @@ async def list_options_contracts(
     # Extract parameters for API call
     _http_path = "/v3/reference/options/contracts"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_options_contracts")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_options_contracts", "GET", _http_path, _request_id)
@@ -6019,6 +6344,7 @@ async def list_options_contracts(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6028,7 +6354,7 @@ async def list_options_contracts(
 async def get_options_contract(
     options_ticker: str = Field(..., description="The options ticker symbol identifying the contract (e.g., O:SPY251219C00650000). This follows the standard options ticker format which encodes the underlying symbol, expiration date, option type, and strike price."),
     as_of: str | None = Field(None, description="Historical reference date for the contract data in YYYY-MM-DD format. If not provided, defaults to today's date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific options contract using its ticker symbol. Optionally specify a historical date to view the contract as it existed on that date."""
 
     # Construct request model with validation
@@ -6044,10 +6370,11 @@ async def get_options_contract(
     # Extract parameters for API call
     _http_path = _build_path("/v3/reference/options/contracts/{options_ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/reference/options/contracts/{options_ticker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_options_contract")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_options_contract", "GET", _http_path, _request_id)
@@ -6059,6 +6386,7 @@ async def get_options_contract(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6074,7 +6402,7 @@ async def list_stock_splits(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the sort field. Defaults to ascending."),
     limit: int | None = Field(None, description="Maximum number of results to return per request. Must be between 1 and 1000, defaults to 10.", ge=1, le=1000),
     sort: Literal["execution_date", "ticker"] | None = Field(None, description="Field to sort results by: execution_date or ticker. Defaults to execution_date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical stock splits with details including ticker symbol, execution date, and split ratio factors. Filter by reverse splits, date range, and customize sorting and pagination."""
 
     # Construct request model with validation
@@ -6089,10 +6417,11 @@ async def list_stock_splits(
     # Extract parameters for API call
     _http_path = "/v3/reference/splits"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_stock_splits")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_stock_splits", "GET", _http_path, _request_id)
@@ -6104,6 +6433,7 @@ async def list_stock_splits(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6119,7 +6449,7 @@ async def list_tickers(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the sort field."),
     limit: int | None = Field(None, description="Limit the number of results returned. Must be between 1 and 1000, defaults to 100.", ge=1, le=1000),
     sort: Literal["ticker", "name", "market", "locale", "primary_exchange", "type", "currency_symbol", "currency_name", "base_currency_symbol", "base_currency_name", "cik", "composite_figi", "share_class_figi", "last_updated_utc", "delisted_utc"] | None = Field(None, description="Sort results by a specific field: ticker, name, market, locale, primary_exchange, type, currency details, identifiers (CIK, FIGI), or last_updated_utc. Defaults to ticker."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query all supported ticker symbols across stocks, indices, forex, and crypto markets. Filter by market type, exchange, CUSIP, or search terms to find specific assets."""
 
     # Construct request model with validation
@@ -6134,10 +6464,11 @@ async def list_tickers(
     # Extract parameters for API call
     _http_path = "/v3/reference/tickers"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_tickers")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_tickers", "GET", _http_path, _request_id)
@@ -6149,13 +6480,14 @@ async def list_tickers(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:tickers:types
 @mcp.tool()
-async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None, description="Filter ticker types by geographic market: use 'us' for United States market or 'global' for worldwide tickers. If omitted, returns all ticker types.")) -> dict[str, Any]:
+async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None, description="Filter ticker types by geographic market: use 'us' for United States market or 'global' for worldwide tickers. If omitted, returns all ticker types.")) -> dict[str, Any] | ToolResult:
     """Retrieve all ticker types available in the Massive database. Optionally filter results by geographic locale to see ticker types relevant to a specific market."""
 
     # Construct request model with validation
@@ -6170,10 +6502,11 @@ async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None,
     # Extract parameters for API call
     _http_path = "/v3/reference/tickers/types"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_ticker_types")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_ticker_types", "GET", _http_path, _request_id)
@@ -6185,13 +6518,14 @@ async def list_ticker_types(locale: Literal["us", "global"] | None = Field(None,
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: reference:tickers:get
 @mcp.tool()
-async def get_ticker_details(ticker: str = Field(..., description="The ticker symbol to look up, case-sensitive (e.g., AAPL for Apple Inc.). Must be a valid ticker symbol supported by the service.")) -> dict[str, Any]:
+async def get_ticker_details(ticker: str = Field(..., description="The ticker symbol to look up, case-sensitive (e.g., AAPL for Apple Inc.). Must be a valid ticker symbol supported by the service.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific ticker symbol, including company data and market details supported by Massive."""
 
     # Construct request model with validation
@@ -6205,11 +6539,11 @@ async def get_ticker_details(ticker: str = Field(..., description="The ticker sy
 
     # Extract parameters for API call
     _http_path = _build_path("/v3/reference/tickers/{ticker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/reference/tickers/{ticker}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_ticker_details")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_ticker_details", "GET", _http_path, _request_id)
@@ -6220,7 +6554,7 @@ async def get_ticker_details(ticker: str = Field(..., description="The ticker sy
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6231,7 +6565,7 @@ async def list_snapshots(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order direction for results: ascending or descending based on the sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return per request, between 1 and 250 (defaults to 10).", ge=1, le=250),
     sort: Literal["ticker"] | None = Field(None, description="Field to sort results by; currently supports sorting by ticker symbol."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve current snapshots for assets across all asset types, with optional sorting and pagination controls."""
 
     # Construct request model with validation
@@ -6246,10 +6580,11 @@ async def list_snapshots(
     # Extract parameters for API call
     _http_path = "/v3/snapshot"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_snapshots")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_snapshots", "GET", _http_path, _request_id)
@@ -6261,6 +6596,7 @@ async def list_snapshots(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6271,7 +6607,7 @@ async def list_indices_snapshot(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results: ascending or descending order based on the sort field."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response, ranging from 1 to 250 (defaults to 10 if not specified).", ge=1, le=250),
     sort: Literal["ticker"] | None = Field(None, description="Field to use for ordering results; currently supports sorting by ticker symbol."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a snapshot of current indices data for specified tickers, with optional sorting and pagination controls."""
 
     # Construct request model with validation
@@ -6286,10 +6622,11 @@ async def list_indices_snapshot(
     # Extract parameters for API call
     _http_path = "/v3/snapshot/indices"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_indices_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_indices_snapshot", "GET", _http_path, _request_id)
@@ -6301,6 +6638,7 @@ async def list_indices_snapshot(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6313,7 +6651,7 @@ async def list_options_chain(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the sort field. Defaults to ascending if not specified."),
     limit: int | None = Field(None, description="Maximum number of results to return, between 1 and 250. Defaults to 10 if not specified.", ge=1, le=250),
     sort: Literal["ticker", "expiration_date", "strike_price"] | None = Field(None, description="Field to sort by: ticker symbol, expiration date, or strike price. Defaults to ticker if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all options contracts for a given underlying asset, with optional filtering by contract type and customizable sorting and pagination."""
 
     # Construct request model with validation
@@ -6329,10 +6667,11 @@ async def list_options_chain(
     # Extract parameters for API call
     _http_path = _build_path("/v3/snapshot/options/{underlyingAsset}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/snapshot/options/{underlyingAsset}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_options_chain")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_options_chain", "GET", _http_path, _request_id)
@@ -6344,6 +6683,7 @@ async def list_options_chain(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6353,7 +6693,7 @@ async def list_options_chain(
 async def get_option_contract_snapshot(
     underlying_asset: str = Field(..., alias="underlyingAsset", description="The ticker symbol of the underlying stock (e.g., EVRI). This identifies which equity the option contract is based on."),
     option_contract: str = Field(..., alias="optionContract", description="The unique identifier for the specific option contract (e.g., O:EVRI260116C00015000). This format typically encodes the underlying asset, expiration date, contract type (call/put), and strike price."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a real-time snapshot of an option contract for a given underlying stock, including current pricing and contract details."""
 
     # Construct request model with validation
@@ -6367,11 +6707,11 @@ async def get_option_contract_snapshot(
 
     # Extract parameters for API call
     _http_path = _build_path("/v3/snapshot/options/{underlyingAsset}/{optionContract}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/snapshot/options/{underlyingAsset}/{optionContract}"
-    _http_query = {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_option_contract_snapshot")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_option_contract_snapshot", "GET", _http_path, _request_id)
@@ -6382,7 +6722,7 @@ async def get_option_contract_snapshot(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6394,7 +6734,7 @@ async def list_crypto_trades(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results: ascending (oldest first) or descending (newest first). Defaults to descending order."),
     limit: int | None = Field(None, description="Maximum number of trade records to return. Must be between 1 and 50,000; defaults to 1,000 if not specified.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by. Currently supports sorting by timestamp only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of trades for a specified cryptocurrency ticker symbol, with options to sort, order, and limit results. Useful for analyzing recent trading activity and market movements."""
 
     # Construct request model with validation
@@ -6410,10 +6750,11 @@ async def list_crypto_trades(
     # Extract parameters for API call
     _http_path = _build_path("/v3/trades/{cryptoTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/trades/{cryptoTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_crypto_trades")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_crypto_trades", "GET", _http_path, _request_id)
@@ -6425,6 +6766,7 @@ async def list_crypto_trades(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6436,7 +6778,7 @@ async def list_options_trades(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results based on the sort field; defaults to descending order (newest first)."),
     limit: int | None = Field(None, description="Maximum number of trade records to return, between 1 and 50,000; defaults to 1,000 if not specified.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by; currently supports sorting by timestamp only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of trades executed for a specific options contract within an optional time range, with configurable sorting and pagination."""
 
     # Construct request model with validation
@@ -6452,10 +6794,11 @@ async def list_options_trades(
     # Extract parameters for API call
     _http_path = _build_path("/v3/trades/{optionsTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/trades/{optionsTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_options_trades")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_options_trades", "GET", _http_path, _request_id)
@@ -6467,6 +6810,7 @@ async def list_options_trades(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6478,7 +6822,7 @@ async def list_trades(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for results based on the sort field. Choose ascending or descending order; defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of trade records to return. Accepts values from 1 to 50,000; defaults to 1,000 if not specified.", ge=1, le=50000),
     sort: Literal["timestamp"] | None = Field(None, description="Field to sort results by. Currently supports sorting by timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of trades for a specified stock ticker within an optional time range, with configurable sorting and pagination."""
 
     # Construct request model with validation
@@ -6494,10 +6838,11 @@ async def list_trades(
     # Extract parameters for API call
     _http_path = _build_path("/v3/trades/{stockTicker}", _request.path.model_dump(by_alias=True)) if _request.path else "/v3/trades/{stockTicker}"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_trades")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_trades", "GET", _http_path, _request_id)
@@ -6509,6 +6854,7 @@ async def list_trades(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6525,7 +6871,7 @@ async def list_financials(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order based on the field specified in the sort parameter."),
     limit: int | None = Field(None, description="Maximum number of results to return per request. Defaults to 10 and cannot exceed 100.", ge=1, le=100),
     sort: Literal["filing_date", "period_of_report_date"] | None = Field(None, description="Field to sort results by. Choose between filing date or period-of-report date. Defaults to period-of-report date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical financial data for stocks extracted from SEC XBRL filings. Filter by company, industry classification, reporting period, and customize result ordering and pagination."""
 
     # Construct request model with validation
@@ -6540,10 +6886,11 @@ async def list_financials(
     # Extract parameters for API call
     _http_path = "/vX/reference/financials"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_financials")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_financials", "GET", _http_path, _request_id)
@@ -6555,6 +6902,7 @@ async def list_financials(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6567,7 +6915,7 @@ async def list_ipos_detailed(
     order: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order. Defaults to descending."),
     limit: int | None = Field(None, description="Maximum number of results to return. Must be between 1 and 1000, defaults to 10.", ge=1, le=1000),
     sort: Literal["listing_date", "ticker", "last_updated", "security_type", "issuer_name", "currency_code", "isin", "us_code", "final_issue_price", "min_shares_offered", "max_shares_offered", "lowest_offer_price", "highest_offer_price", "total_offer_size", "shares_outstanding", "primary_exchange", "lot_size", "security_description", "ipo_status", "announced_date"] | None = Field(None, description="Field to sort by, such as listing date, ticker symbol, issuer name, offering price, or IPO status. Defaults to listing date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of Initial Public Offerings with detailed information including issuer names, ticker symbols, pricing, and offering details. Filter by status (new, pending, historical, etc.) and customize sorting and pagination."""
 
     # Construct request model with validation
@@ -6582,10 +6930,11 @@ async def list_ipos_detailed(
     # Extract parameters for API call
     _http_path = "/vX/reference/ipos"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_ipos_detailed")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_ipos_detailed", "GET", _http_path, _request_id)
@@ -6597,6 +6946,7 @@ async def list_ipos_detailed(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -6606,7 +6956,7 @@ async def list_ipos_detailed(
 async def list_ticker_events(
     id_: str = Field(..., alias="id", description="The security identifier as a ticker symbol (case-sensitive, e.g., AAPL), CUSIP, or Composite FIGI. When using a ticker, events are returned for the entity currently represented by that ticker; use the Ticker Details endpoint to find identifiers for entities previously associated with a ticker."),
     types: str | None = Field(None, description="Filter results by event type using a comma-separated list. Currently supports ticker_change. Omit to return all available event types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a chronological timeline of corporate events for a security identified by ticker symbol, CUSIP, or Composite FIGI. Returns events for the entity currently associated with the identifier."""
 
     # Construct request model with validation
@@ -6622,10 +6972,11 @@ async def list_ticker_events(
     # Extract parameters for API call
     _http_path = _build_path("/vX/reference/tickers/{id}/events", _request.path.model_dump(by_alias=True)) if _request.path else "/vX/reference/tickers/{id}/events"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_ticker_events")
-    _http_query.update(_auth.get("params", {}))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_ticker_events", "GET", _http_path, _request_id)
@@ -6637,6 +6988,7 @@ async def list_ticker_events(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
