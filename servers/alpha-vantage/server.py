@@ -6,7 +6,7 @@ API Info:
 - Contact: Alpha Vantage Support <support@alphavantage.co> (https://www.alphavantage.co/support/)
 - Terms of Service: https://www.alphavantage.co/terms_of_service/
 
-Generated: 2026-04-14 18:13:46 UTC
+Generated: 2026-04-23 20:57:18 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://www.alphavantage.co")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -827,16 +940,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -850,6 +964,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -892,6 +1007,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -903,7 +1033,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1052,7 +1181,7 @@ async def get_intraday_time_series(
     extended_hours: bool | None = Field(None, description="Whether to include pre-market and post-market trading hours in the results. Defaults to true."),
     month: str | None = Field(None, description="Query a specific month of historical data in YYYY-MM format (e.g., 2009-01). Supported from January 2000 onwards.", pattern="^\\d{4}-\\d{2}$"),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Control the amount of data returned. Use 'compact' for the latest 100 data points, or 'full' for trailing 30 days of data (or the entire month if a specific month is requested). Defaults to compact."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve intraday OHLCV (open, high, low, close, volume) time series data for an equity, with support for 20+ years of historical data and optional adjustment for splits and dividends."""
 
     # Construct request model with validation
@@ -1092,7 +1221,7 @@ async def get_daily_time_series(
     function: Literal["TIME_SERIES_DAILY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_DAILY for daily candlestick data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Controls the amount of historical data returned. Use 'compact' for the latest 100 data points (recommended for reducing response size), or 'full' for the complete 20+ year historical dataset. Full output requires a premium API key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves daily OHLCV (open, high, low, close, volume) time series data for a specified equity, covering 20+ years of historical data. Choose between compact (latest 100 data points) or full historical dataset."""
 
     # Construct request model with validation
@@ -1132,7 +1261,7 @@ async def get_daily_adjusted_time_series(
     function: Literal["TIME_SERIES_DAILY_ADJUSTED"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_DAILY_ADJUSTED for daily adjusted price and volume data."),
     symbol: str = Field(..., description="The stock ticker symbol of the equity to query (e.g., IBM, AAPL). Case-insensitive."),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Controls the amount of historical data returned. Use 'compact' for the most recent 100 trading days, or 'full' for the complete 20+ year historical dataset. Defaults to compact."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves daily adjusted OHLCV (open, high, low, close, volume) time series data for an equity, including split and dividend adjustments. Supports up to 20+ years of historical data with flexible output sizing."""
 
     # Construct request model with validation
@@ -1171,7 +1300,7 @@ async def get_daily_adjusted_time_series(
 async def get_weekly_time_series(
     function: Literal["TIME_SERIES_WEEKLY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_WEEKLY for weekly equity data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves weekly time series data for a specified equity, including open, high, low, close prices and trading volume for the last trading day of each week, covering 20+ years of historical data."""
 
     # Construct request model with validation
@@ -1210,7 +1339,7 @@ async def get_weekly_time_series(
 async def get_weekly_adjusted_time_series(
     function: Literal["TIME_SERIES_WEEKLY_ADJUSTED"] = Field(..., description="The time series function type. Must be set to TIME_SERIES_WEEKLY_ADJUSTED to retrieve weekly adjusted historical data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL). Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves weekly adjusted time series data for an equity, including open, high, low, close, adjusted close, volume, and dividend information. Covers 20+ years of historical data with the last trading day of each week as the reference point."""
 
     # Construct request model with validation
@@ -1249,7 +1378,7 @@ async def get_weekly_adjusted_time_series(
 async def get_equity_monthly_time_series(
     function: Literal["TIME_SERIES_MONTHLY"] = Field(..., description="The time series data type to retrieve. Must be set to TIME_SERIES_MONTHLY for monthly aggregated equity data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL, MSFT)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves monthly time series data for a specified global equity, including open, high, low, close prices and trading volume for the last trading day of each month, covering 20+ years of historical data."""
 
     # Construct request model with validation
@@ -1288,7 +1417,7 @@ async def get_equity_monthly_time_series(
 async def get_monthly_adjusted_time_series(
     function: Literal["TIME_SERIES_MONTHLY_ADJUSTED"] = Field(..., description="The time series function type. Must be set to TIME_SERIES_MONTHLY_ADJUSTED to retrieve monthly adjusted data."),
     symbol: str = Field(..., description="The stock symbol or ticker of the equity to retrieve data for (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves monthly adjusted historical time series data for an equity, including split and dividend-adjusted prices, volumes, and dividends covering 20+ years of historical data."""
 
     # Construct request model with validation
@@ -1327,7 +1456,7 @@ async def get_monthly_adjusted_time_series(
 async def get_realtime_quotes(
     function: Literal["REALTIME_BULK_QUOTES"] = Field(..., description="The API function type; must be set to REALTIME_BULK_QUOTES to retrieve real-time quotes."),
     symbol: str = Field(..., description="One or more stock symbols separated by commas (e.g., MSFT,AAPL,IBM). Up to 100 symbols are accepted per request; additional symbols beyond 100 will be ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Fetch real-time market quotes for multiple US-traded symbols in a single request, supporting up to 100 symbols with coverage of regular and extended trading hours."""
 
     # Construct request model with validation
@@ -1366,7 +1495,7 @@ async def get_realtime_quotes(
 async def search_symbols(
     function: Literal["SYMBOL_SEARCH"] = Field(..., description="The search function to execute. Must be set to SYMBOL_SEARCH to perform symbol lookups."),
     keywords: str = Field(..., description="A text string containing one or more keywords to search for symbols. For example, company names like 'microsoft' or 'tesco'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for financial symbols and market information by keywords. Returns matching symbols ranked by relevance with match scores to support custom filtering logic."""
 
     # Construct request model with validation
@@ -1402,7 +1531,7 @@ async def search_symbols(
 
 # Tags: Core Stock APIs
 @mcp.tool()
-async def check_market_status(function: Literal["MARKET_STATUS"] = Field(..., description="The function to execute; must be set to MARKET_STATUS to retrieve global market status information.")) -> dict[str, Any]:
+async def check_market_status(function: Literal["MARKET_STATUS"] = Field(..., description="The function to execute; must be set to MARKET_STATUS to retrieve global market status information.")) -> dict[str, Any] | ToolResult:
     """Check the current open or closed status of major global trading venues across equities, forex, and cryptocurrency markets."""
 
     # Construct request model with validation
@@ -1442,7 +1571,7 @@ async def get_index_data(
     function: Literal["INDEX_DATA"] = Field(..., description="The data function type to retrieve. Must be set to INDEX_DATA to fetch index time series information."),
     symbol: Literal["COMP"] = Field(..., description="The stock market index symbol. Must be set to COMP to retrieve NASDAQ Composite Index data."),
     interval: Literal["daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points in the returned series. Choose from daily, weekly, or monthly granularity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves historical OHLC (open, high, low, close) time series data for the NASDAQ Composite Index spanning decades of market data."""
 
     # Construct request model with validation
@@ -1478,7 +1607,7 @@ async def get_index_data(
 
 # Tags: Index Data APIs
 @mcp.tool()
-async def list_index_symbols(function: Literal["INDEX_CATALOG"] = Field(..., description="The catalog function to execute. Must be set to INDEX_CATALOG to retrieve the index symbol catalog.")) -> dict[str, Any]:
+async def list_index_symbols(function: Literal["INDEX_CATALOG"] = Field(..., description="The catalog function to execute. Must be set to INDEX_CATALOG to retrieve the index symbol catalog.")) -> dict[str, Any] | ToolResult:
     """Retrieves a complete catalog of all supported index symbols with their full names. Use this to discover available indices for market data queries."""
 
     # Construct request model with validation
@@ -1520,7 +1649,7 @@ async def list_realtime_options(
     require_greeks: bool | None = Field(None, description="Include greeks (delta, gamma, vega, theta, rho) and implied volatility (IV) calculations in the response. Disabled by default for faster responses."),
     contract: str | None = Field(None, description="Filter results to a specific options contract by its contract ID. When omitted, returns the entire option chain for the symbol."),
     expiration: str | None = Field(None, description="Filter results to contracts expiring on a specific date in YYYY-MM-DD format. The date must be today or later. When omitted, returns contracts across all available expiration dates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve realtime US options data with full market coverage. Option chains are automatically sorted by expiration date (chronological) and then by strike price (low to high)."""
 
     # Construct request model with validation
@@ -1559,7 +1688,7 @@ async def list_realtime_options(
 async def get_realtime_put_call_ratio(
     function: Literal["REALTIME_PUT_CALL_RATIO"] = Field(..., description="The function type for this operation, which must be set to REALTIME_PUT_CALL_RATIO to retrieve realtime put-call ratio data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity to analyze (e.g., IBM). This identifies which company's option chain data to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the realtime put-call ratio for a specified equity symbol, indicating market sentiment across the entire option chain and by expiration date. Lower ratios (≤0.6) suggest bullish sentiment with more call buying, while higher ratios (≥1.0) indicate bearish sentiment with more put buying."""
 
     # Construct request model with validation
@@ -1599,7 +1728,7 @@ async def get_historical_options(
     function: Literal["HISTORICAL_OPTIONS"] = Field(..., description="The data type to retrieve. Must be set to HISTORICAL_OPTIONS to fetch historical options chain data."),
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM). Used to identify which stock's options data to retrieve."),
     date: str | None = Field(None, description="The date for which to retrieve options data in YYYY-MM-DD format. Any date from 2008-01-01 onwards is accepted. If omitted, defaults to the previous trading session."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical options chain data for a given equity symbol, including implied volatility and Greeks (delta, gamma, theta, vega, rho). Data spans 15+ years and defaults to the previous trading session if no date is specified."""
 
     # Construct request model with validation
@@ -1639,7 +1768,7 @@ async def get_historical_put_call_ratio(
     function: Literal["HISTORICAL_PUT_CALL_RATIO"] = Field(..., description="The function type for this operation. Must be set to HISTORICAL_PUT_CALL_RATIO to retrieve put-call ratio data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity (e.g., IBM). This identifies which company's options data to retrieve."),
     date: str | None = Field(None, description="The date for which to retrieve put-call ratio data in YYYY-MM-DD format. If not provided, defaults to the most recent trading session. Any date from 2008-01-01 onwards is accepted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves historical put-call ratios for an equity symbol, indicating market sentiment through the proportion of put to call options. Ratios below 0.6 suggest bullish sentiment, while ratios above 1.0 indicate bearish sentiment."""
 
     # Construct request model with validation
@@ -1683,7 +1812,7 @@ async def search_news_sentiment(
     time_to: str | None = Field(None, description="Filter articles published on or before this date and time. Use YYYYMMDDTHHMM format. If omitted, defaults to the current time."),
     sort: Literal["LATEST", "EARLIEST", "RELEVANCE"] | None = Field(None, description="Order results by LATEST (most recent first, default), EARLIEST (oldest first), or RELEVANCE (best match first)."),
     limit: Literal[50, 1000] | None = Field(None, description="Maximum number of results to return. Choose 50 (default) or 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search live and historical market news with sentiment analysis across stocks, cryptocurrencies, forex, and economic topics from global news outlets."""
 
     # Construct request model with validation
@@ -1723,7 +1852,7 @@ async def get_earnings_call_transcript(
     function: Literal["EARNINGS_CALL_TRANSCRIPT"] = Field(..., description="The function identifier for this operation. Must be set to EARNINGS_CALL_TRANSCRIPT to retrieve earnings call transcripts."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM). Used to identify which company's earnings call transcript to retrieve."),
     quarter: str = Field(..., description="The fiscal quarter in YYYYQM format (e.g., 2024Q1), where Q is followed by a digit 1-4. Any quarter from 2010Q1 onwards is supported.", pattern="^[0-9]{4}Q[1-4]$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the earnings call transcript for a specified company and fiscal quarter, with historical data spanning over 15 years and enriched with LLM-based sentiment analysis."""
 
     # Construct request model with validation
@@ -1759,7 +1888,7 @@ async def get_earnings_call_transcript(
 
 # Tags: Alpha Intelligence
 @mcp.tool()
-async def list_market_movers(function: Literal["TOP_GAINERS_LOSERS"] = Field(..., description="The function to execute. Must be set to TOP_GAINERS_LOSERS to retrieve market mover data.")) -> dict[str, Any]:
+async def list_market_movers(function: Literal["TOP_GAINERS_LOSERS"] = Field(..., description="The function to execute. Must be set to TOP_GAINERS_LOSERS to retrieve market mover data.")) -> dict[str, Any] | ToolResult:
     """Retrieve the top 20 gainers, losers, and most actively traded stocks in the US market. Historical data is returned by default, with real-time or 15-minute delayed data available for premium members."""
 
     # Construct request model with validation
@@ -1798,7 +1927,7 @@ async def list_market_movers(function: Literal["TOP_GAINERS_LOSERS"] = Field(...
 async def list_insider_transactions(
     function: Literal["INSIDER_TRANSACTIONS"] = Field(..., description="The function type to invoke. Must be set to INSIDER_TRANSACTIONS to retrieve insider transaction data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company for which to retrieve insider transactions (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve insider transactions (SEC Form 4 filings) for a specified company, including historical records of trades made by key stakeholders such as executives, founders, and board members."""
 
     # Construct request model with validation
@@ -1837,7 +1966,7 @@ async def list_insider_transactions(
 async def get_institutional_holdings(
     function: Literal["INSTITUTIONAL_HOLDINGS"] = Field(..., description="The function type to execute; must be set to INSTITUTIONAL_HOLDINGS to retrieve institutional ownership data."),
     symbol: str = Field(..., description="The stock ticker symbol for the equity of interest (e.g., IBM, AAPL). Use the standard market symbol without exchange suffix."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves institutional ownership and holdings data for a specified equity, showing which institutions hold shares and their ownership percentages."""
 
     # Construct request model with validation
@@ -1880,7 +2009,7 @@ async def calculate_analytics_fixed_window(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "DAILY", "WEEKLY", "MONTHLY"] = Field(..., alias="INTERVAL", description="The frequency of data points in the time series. Choose from minute-level intervals (1min, 5min, 15min, 30min, 60min) or daily/weekly/monthly aggregations (DAILY, WEEKLY, MONTHLY)."),
     calculations: str = Field(..., alias="CALCULATIONS", description="Comma-separated list of metrics to calculate. Available metrics include MIN, MAX, MEAN, MEDIAN, CUMULATIVE_RETURN, VARIANCE, STDDEV, MAX_DRAWDOWN, HISTOGRAM, AUTOCORRELATION, COVARIANCE, and CORRELATION. Some metrics accept optional parameters in parentheses (e.g., VARIANCE(annualized=True), HISTOGRAM(bins=20), AUTOCORRELATION(lag=2), CORRELATION(method=KENDALL))."),
     ohlc: Literal["open", "high", "low", "close"] | None = Field(None, alias="OHLC", description="The price field to use for calculations: open, high, low, or close. Defaults to close price if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate advanced analytics metrics for one or more financial symbols over a fixed time window, including statistical measures like returns, variance, drawdown, and correlation analysis."""
 
     # Construct request model with validation
@@ -1924,7 +2053,7 @@ async def analyze_sliding_window_metrics(
     window_size: int = Field(..., alias="WINDOW_SIZE", description="The number of data points in each sliding window. Must be at least 10, though larger windows (e.g., 20+) are recommended for more reliable statistical results.", ge=10),
     calculations: str = Field(..., alias="CALCULATIONS", description="A comma-separated list of metrics to calculate, such as MEAN, MEDIAN, CUMULATIVE_RETURN, VARIANCE, STDDEV, COVARIANCE, or CORRELATION. Free API keys allow 1 metric per request; premium keys allow multiple. Optional parameters can be appended to metrics (e.g., STDDEV(annualized=True), CORRELATION(method=KENDALL))."),
     ohlc: Literal["open", "high", "low", "close"] | None = Field(None, alias="OHLC", description="The price field to use for calculations: open, high, low, or close price. Defaults to close price if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate advanced analytics metrics (mean, variance, correlation, etc.) for one or more stock symbols over sliding time windows, enabling trend analysis and statistical insights across different time intervals."""
 
     # Construct request model with validation
@@ -1963,7 +2092,7 @@ async def analyze_sliding_window_metrics(
 async def get_company_overview(
     function: Literal["OVERVIEW"] = Field(..., description="The type of company data to retrieve. Must be set to OVERVIEW to fetch company information and financial metrics."),
     symbol: str = Field(..., description="The stock ticker symbol of the company you want to look up (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive company information including financial ratios and key metrics for a specified equity ticker. Data is typically updated on the same day the company reports its latest earnings and financial results."""
 
     # Construct request model with validation
@@ -2002,7 +2131,7 @@ async def get_company_overview(
 async def get_etf_profile(
     function: Literal["ETF_PROFILE"] = Field(..., description="The function type to execute; must be set to ETF_PROFILE to retrieve ETF profile and holdings data."),
     symbol: str = Field(..., description="The ticker symbol of the ETF to retrieve profile information for (e.g., QQQ, SPY)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves comprehensive ETF profile data including key metrics (net assets, expense ratio, turnover) and detailed holdings information with allocation breakdown by asset types and sectors."""
 
     # Construct request model with validation
@@ -2041,7 +2170,7 @@ async def get_etf_profile(
 async def get_dividend_history(
     function: Literal["DIVIDENDS"] = Field(..., description="The dividend query function type. Must be set to DIVIDENDS to retrieve dividend data."),
     symbol: str = Field(..., description="The equity ticker symbol for which to retrieve dividend information (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical and declared future dividend distributions for a specified equity ticker symbol."""
 
     # Construct request model with validation
@@ -2080,7 +2209,7 @@ async def get_dividend_history(
 async def get_stock_splits(
     function: Literal["SPLITS"] = Field(..., description="The function type to execute. Must be set to SPLITS to retrieve stock split data."),
     symbol: str = Field(..., description="The stock ticker symbol for which to retrieve historical split data (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves historical stock split events for a given equity ticker symbol, including dates and split ratios."""
 
     # Construct request model with validation
@@ -2119,7 +2248,7 @@ async def get_stock_splits(
 async def get_income_statement(
     function: Literal["INCOME_STATEMENT"] = Field(..., description="The financial statement type to retrieve. Must be set to INCOME_STATEMENT to fetch income statement data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company whose income statement you want to retrieve (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve annual and quarterly income statements for a specified equity, with normalized fields mapped to GAAP and IFRS taxonomies. Data is typically updated on the same day the company reports its latest earnings."""
 
     # Construct request model with validation
@@ -2158,7 +2287,7 @@ async def get_income_statement(
 async def get_balance_sheet(
     function: Literal["BALANCE_SHEET"] = Field(..., description="The balance sheet data type to retrieve. Must be set to BALANCE_SHEET."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM, AAPL). Used to identify which equity's balance sheet to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve annual and quarterly balance sheet data for a specified equity, with normalized fields mapped to GAAP and IFRS taxonomies. Data is typically updated on the same day the company reports its latest earnings and financials."""
 
     # Construct request model with validation
@@ -2197,7 +2326,7 @@ async def get_balance_sheet(
 async def get_cash_flow_statement(
     function: Literal["CASH_FLOW"] = Field(..., description="The cash flow statement function type. Must be set to CASH_FLOW to retrieve cash flow data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company for which to retrieve cash flow statements (e.g., IBM, AAPL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves annual and quarterly cash flow statements for a specified equity, with normalized fields mapped to GAAP and IFRS taxonomies. Data is typically updated on the same day the company reports its latest earnings and financial results."""
 
     # Construct request model with validation
@@ -2236,7 +2365,7 @@ async def get_cash_flow_statement(
 async def get_shares_outstanding(
     function: Literal["SHARES_OUTSTANDING"] = Field(..., description="The function identifier for this operation. Must be set to SHARES_OUTSTANDING to retrieve shares outstanding data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., MSFT). Use the standard market ticker symbol for the equity of interest."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves quarterly shares outstanding data for a specified equity, including both basic and diluted share counts. Data is typically updated on the same day the company reports its latest earnings and financial results."""
 
     # Construct request model with validation
@@ -2275,7 +2404,7 @@ async def get_shares_outstanding(
 async def get_earnings(
     function: Literal["EARNINGS"] = Field(..., description="The earnings data function type. Must be set to EARNINGS to retrieve earnings data."),
     symbol: str = Field(..., description="The stock ticker symbol of the company (e.g., IBM, AAPL). Used to identify which company's earnings data to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve annual and quarterly earnings per share (EPS) data for a company, including analyst estimates and surprise metrics for quarterly periods."""
 
     # Construct request model with validation
@@ -2314,7 +2443,7 @@ async def get_earnings(
 async def get_earnings_estimates(
     function: Literal["EARNINGS_ESTIMATES"] = Field(..., description="The earnings estimates function type. Must be set to EARNINGS_ESTIMATES to retrieve consensus analyst estimates."),
     symbol: str = Field(..., description="The stock ticker symbol for the company of interest (e.g., IBM, AAPL). Used to identify which equity's earnings estimates to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve consensus earnings estimates for a specified equity, including annual and quarterly EPS and revenue projections, analyst count, and revision history."""
 
     # Construct request model with validation
@@ -2354,7 +2483,7 @@ async def list_listing_status(
     function: Literal["LISTING_STATUS"] = Field(..., description="The function type for this operation. Must be set to LISTING_STATUS to query asset listing status."),
     date: str | None = Field(None, description="The date for which to retrieve listing status. Use YYYY-MM-DD format for any date from January 1, 2010 onwards. If omitted, returns data as of the latest trading day."),
     state: Literal["active", "delisted"] | None = Field(None, description="Filter results by asset state: active returns currently traded stocks and ETFs, while delisted returns assets that have been removed from exchanges. Defaults to active if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of active or delisted US stocks and ETFs as of a specific date or the latest trading day, enabling equity research on asset lifecycle and survivorship."""
 
     # Construct request model with validation
@@ -2394,7 +2523,7 @@ async def list_earnings_calendar(
     function: Literal["EARNINGS_CALENDAR"] = Field(..., description="The function identifier for this operation. Must be set to EARNINGS_CALENDAR."),
     symbol: str | None = Field(None, description="Optional company stock symbol to filter results for a specific company. When omitted, returns earnings data for all companies."),
     horizon: Literal["3month", "6month", "12month"] | None = Field(None, description="Time horizon for the earnings forecast. Choose from 3 months, 6 months, or 12 months. Defaults to 3 months if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve expected earnings release dates for companies over a specified time horizon. Filter by a specific company symbol or view the full market earnings calendar."""
 
     # Construct request model with validation
@@ -2430,7 +2559,7 @@ async def list_earnings_calendar(
 
 # Tags: Fundamental Data
 @mcp.tool()
-async def list_ipo_calendar(function: Literal["IPO_CALENDAR"] = Field(..., description="The API function to invoke. Must be set to IPO_CALENDAR to retrieve IPO calendar data.")) -> dict[str, Any]:
+async def list_ipo_calendar(function: Literal["IPO_CALENDAR"] = Field(..., description="The API function to invoke. Must be set to IPO_CALENDAR to retrieve IPO calendar data.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of upcoming IPO events scheduled in the US market over the next 3 months."""
 
     # Construct request model with validation
@@ -2470,7 +2599,7 @@ async def get_exchange_rate(
     function: Literal["CURRENCY_EXCHANGE_RATE"] = Field(..., description="The function identifier for this operation; must be set to CURRENCY_EXCHANGE_RATE."),
     from_currency: str = Field(..., description="The source currency code (e.g., BTC for Bitcoin, USD for US Dollar). Accepts both cryptocurrency and fiat currency codes."),
     to_currency: str = Field(..., description="The target currency code (e.g., EUR for Euro, BTC for Bitcoin). Accepts both cryptocurrency and fiat currency codes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current exchange rate between two currencies, supporting both cryptocurrencies (e.g., BTC) and fiat currencies (e.g., USD, EUR)."""
 
     # Construct request model with validation
@@ -2512,7 +2641,7 @@ async def get_forex_intraday(
     to_symbol: str = Field(..., description="The three-letter ISO 4217 currency code for the quote currency (e.g., USD, EUR, GBP).", min_length=3, max_length=3),
     interval: Literal["1min", "5min", "15min", "30min", "60min"] = Field(..., description="The time interval between consecutive data points; choose from 1-minute, 5-minute, 15-minute, 30-minute, or 60-minute intervals."),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Controls the amount of data returned: use 'compact' for the latest 100 data points (default) or 'full' for the complete intraday time series."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves real-time intraday time series data (open, high, low, close prices with timestamps) for a specified forex currency pair at your chosen time interval."""
 
     # Construct request model with validation
@@ -2553,7 +2682,7 @@ async def get_fx_daily(
     from_symbol: str = Field(..., description="The base currency as a three-letter ISO 4217 code (e.g., EUR, GBP, JPY)."),
     to_symbol: str = Field(..., description="The quote currency as a three-letter ISO 4217 code (e.g., USD, EUR, GBP)."),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Controls the amount of historical data returned. Use 'compact' for the latest 100 data points (recommended for smaller responses) or 'full' for the complete historical time series. Defaults to compact."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve daily forex time series data (open, high, low, close prices) for a specified currency pair, updated in real-time."""
 
     # Construct request model with validation
@@ -2593,7 +2722,7 @@ async def get_forex_weekly(
     function: Literal["FX_WEEKLY"] = Field(..., description="The time series function type. Must be set to FX_WEEKLY to retrieve weekly forex data."),
     from_symbol: str = Field(..., description="The three-letter ISO 4217 currency code for the base currency (e.g., EUR, GBP, JPY).", min_length=3, max_length=3),
     to_symbol: str = Field(..., description="The three-letter ISO 4217 currency code for the quote currency (e.g., USD, EUR, GBP).", min_length=3, max_length=3),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves weekly OHLC (open, high, low, close) time series data for a specified forex currency pair, with real-time updates reflecting the current or partial trading week."""
 
     # Construct request model with validation
@@ -2633,7 +2762,7 @@ async def get_forex_monthly(
     function: Literal["FX_MONTHLY"] = Field(..., description="The time series function type. Must be set to FX_MONTHLY to retrieve monthly forex data."),
     from_symbol: str = Field(..., description="The base currency as a three-letter ISO 4217 code (e.g., EUR, GBP, JPY). This is the currency being converted from."),
     to_symbol: str = Field(..., description="The target currency as a three-letter ISO 4217 code (e.g., USD, EUR, GBP). This is the currency being converted to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves monthly time series data for a forex currency pair, including open, high, low, and close prices. Data is updated in real-time, with the latest data point representing the current or partial month."""
 
     # Construct request model with validation
@@ -2675,7 +2804,7 @@ async def get_crypto_intraday(
     market: str = Field(..., description="The market currency to trade against (e.g., USD for US Dollar, EUR for Euro). Must be a valid currency code from the supported list."),
     interval: Literal["1min", "5min", "15min", "30min", "60min"] = Field(..., description="The time interval between consecutive data points. Choose from 1-minute, 5-minute, 15-minute, 30-minute, or 60-minute intervals."),
     outputsize: Literal["compact", "full"] | None = Field(None, description="Controls the amount of data returned. Use 'compact' (default) to get the latest 100 data points for faster responses, or 'full' to retrieve the complete intraday time series."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves real-time intraday price data for a cryptocurrency, including open, high, low, close prices and trading volume at specified time intervals."""
 
     # Construct request model with validation
@@ -2715,7 +2844,7 @@ async def get_cryptocurrency_daily_prices(
     function: Literal["DIGITAL_CURRENCY_DAILY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_DAILY to retrieve daily cryptocurrency price history."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Use any valid cryptocurrency code from the supported currency list."),
     market: str = Field(..., description="The target market currency for price conversion (e.g., EUR for Euro). Use any valid fiat or cryptocurrency code from the supported currency list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves daily historical price and volume data for a cryptocurrency traded against a specific fiat currency. Data is updated daily at midnight UTC and includes prices quoted in both the target market currency and USD."""
 
     # Construct request model with validation
@@ -2755,7 +2884,7 @@ async def get_cryptocurrency_weekly_prices(
     function: Literal["DIGITAL_CURRENCY_WEEKLY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_WEEKLY to retrieve weekly cryptocurrency time series data."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Use any valid cryptocurrency code from the supported currency list."),
     market: str = Field(..., description="The target market currency for price conversion (e.g., EUR for Euro). Use any valid fiat currency code from the supported market list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves weekly historical price and volume data for a cryptocurrency traded against a specified fiat currency. Data is updated daily at midnight UTC and includes prices quoted in both the target market currency and USD."""
 
     # Construct request model with validation
@@ -2795,7 +2924,7 @@ async def get_cryptocurrency_monthly_history(
     function: Literal["DIGITAL_CURRENCY_MONTHLY"] = Field(..., description="The API function to invoke. Must be set to DIGITAL_CURRENCY_MONTHLY to retrieve monthly time series data."),
     symbol: str = Field(..., description="The cryptocurrency symbol to query (e.g., BTC for Bitcoin). Must be a valid cryptocurrency code from the supported currency list."),
     market: str = Field(..., description="The target market or currency to trade against (e.g., EUR for Euro). Can be any fiat or cryptocurrency code from the supported currency list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves monthly historical price and volume data for a cryptocurrency traded against a specific fiat or crypto market currency. Data is updated daily at midnight UTC and includes prices quoted in both the market currency and USD."""
 
     # Construct request model with validation
@@ -2834,7 +2963,7 @@ async def get_cryptocurrency_monthly_history(
 async def get_spot_price(
     function: Literal["GOLD_SILVER_SPOT"] = Field(..., description="The API function to invoke; must be set to GOLD_SILVER_SPOT to retrieve precious metal spot prices."),
     symbol: Literal["GOLD", "XAU", "SILVER", "XAG"] = Field(..., description="The precious metal symbol to query: use GOLD or XAU for gold prices, or SILVER or XAG for silver prices."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current live spot price for gold or silver in real-time market data."""
 
     # Construct request model with validation
@@ -2874,7 +3003,7 @@ async def get_precious_metal_history(
     function: Literal["GOLD_SILVER_HISTORY"] = Field(..., description="The API function to invoke. Must be set to GOLD_SILVER_HISTORY to retrieve precious metal historical data."),
     symbol: Literal["GOLD", "XAU", "SILVER", "XAG"] = Field(..., description="The precious metal to query. Use GOLD or XAU for gold prices, or SILVER or XAG for silver prices."),
     interval: Literal["daily", "weekly", "monthly"] = Field(..., description="The time interval for historical data aggregation. Choose from daily, weekly, or monthly price snapshots."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves historical price data for gold or silver across multiple time horizons (daily, weekly, or monthly intervals)."""
 
     # Construct request model with validation
@@ -2913,7 +3042,7 @@ async def get_precious_metal_history(
 async def get_wti_crude_oil_prices(
     function: Literal["WTI"] = Field(..., description="The data function to retrieve. Must be set to WTI to fetch West Texas Intermediate crude oil prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for price data aggregation. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves West Texas Intermediate (WTI) crude oil prices from the U.S. Energy Information Administration. Supports daily, weekly, and monthly price data sourced from FRED (Federal Reserve Bank of St. Louis)."""
 
     # Construct request model with validation
@@ -2952,7 +3081,7 @@ async def get_wti_crude_oil_prices(
 async def get_brent_crude_oil_prices(
     function: Literal["BRENT"] = Field(..., description="The data source identifier. Must be set to BRENT to retrieve Brent crude oil prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for price data. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Brent (Europe) crude oil prices from the U.S. Energy Information Administration via FRED. Data is available in daily, weekly, or monthly intervals."""
 
     # Construct request model with validation
@@ -2991,7 +3120,7 @@ async def get_brent_crude_oil_prices(
 async def get_natural_gas_prices(
     function: Literal["NATURAL_GAS"] = Field(..., description="Specifies the data type to retrieve. Must be set to NATURAL_GAS to fetch Henry Hub natural gas spot prices."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Time interval for price data aggregation. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Henry Hub natural gas spot prices from the U.S. Energy Information Administration. Supports daily, weekly, and monthly price data sourced from the Federal Reserve Bank of St. Louis."""
 
     # Construct request model with validation
@@ -3030,7 +3159,7 @@ async def get_natural_gas_prices(
 async def get_copper_prices(
     function: Literal["COPPER"] = Field(..., description="The commodity type to query. Must be set to COPPER to retrieve copper price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly (default), quarterly, or annual intervals to match your analysis needs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global copper prices from the International Monetary Fund (IMF) via the Federal Reserve Economic Data (FRED) service, available in monthly, quarterly, or annual time intervals."""
 
     # Construct request model with validation
@@ -3069,7 +3198,7 @@ async def get_copper_prices(
 async def get_aluminum_prices(
     function: Literal["ALUMINUM"] = Field(..., description="Specifies the commodity type to query. Must be set to ALUMINUM to retrieve aluminum price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Time interval for the price data. Accepts monthly (default), quarterly, or annual aggregations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global aluminum prices from the International Monetary Fund via the Federal Reserve Economic Data (FRED) service, available in monthly, quarterly, or annual time intervals."""
 
     # Construct request model with validation
@@ -3108,7 +3237,7 @@ async def get_aluminum_prices(
 async def get_wheat_price(
     function: Literal["WHEAT"] = Field(..., description="The commodity type to query. Must be set to WHEAT for this operation."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for the price data. Choose from monthly (default), quarterly, or annual aggregations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve global wheat prices from the International Monetary Fund (IMF) via FRED. Data is available in monthly, quarterly, or annual intervals."""
 
     # Construct request model with validation
@@ -3147,7 +3276,7 @@ async def get_wheat_price(
 async def get_corn_prices(
     function: Literal["CORN"] = Field(..., description="The commodity type to query. Must be set to CORN to retrieve corn price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly (default), quarterly, or annual intervals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global corn prices from the International Monetary Fund (IMF) via FRED (Federal Reserve Bank of St. Louis) in your choice of monthly, quarterly, or annual time intervals."""
 
     # Construct request model with validation
@@ -3186,7 +3315,7 @@ async def get_corn_prices(
 async def get_cotton_prices(
     function: Literal["COTTON"] = Field(..., description="Specifies the commodity data to retrieve. Must be set to COTTON to fetch cotton price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Specifies the time interval for the price data. Choose from monthly (default), quarterly, or annual aggregations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global cotton prices from the International Monetary Fund via the Federal Reserve Economic Data (FRED) service, available in monthly, quarterly, or annual time intervals."""
 
     # Construct request model with validation
@@ -3225,7 +3354,7 @@ async def get_cotton_prices(
 async def get_sugar_prices(
     function: Literal["SUGAR"] = Field(..., description="The commodity type to query. Must be set to SUGAR for sugar price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="The time interval for price data aggregation. Choose from monthly, quarterly, or annual intervals. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global sugar prices from the International Monetary Fund (IMF) across different time horizons. Data is sourced from the Federal Reserve Bank of St. Louis FRED database."""
 
     # Construct request model with validation
@@ -3264,7 +3393,7 @@ async def get_sugar_prices(
 async def get_coffee_prices(
     function: Literal["COFFEE"] = Field(..., description="Specifies the commodity type to query. Must be set to COFFEE to retrieve coffee price data."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Defines the time period aggregation for price data. Accepts monthly, quarterly, or annual intervals, with monthly as the default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves global coffee prices from the International Monetary Fund (IMF) across different time horizons. Data represents the global price of Other Mild Arabica coffee sourced from the Federal Reserve Bank of St. Louis."""
 
     # Construct request model with validation
@@ -3303,7 +3432,7 @@ async def get_coffee_prices(
 async def get_commodity_price_index(
     function: Literal["ALL_COMMODITIES"] = Field(..., description="Specifies the commodity dataset to retrieve. Must be set to ALL_COMMODITIES to fetch the global price index for all commodities."),
     interval: Literal["monthly", "quarterly", "annual"] | None = Field(None, description="Defines the time period granularity for the price index data. Accepts monthly (default), quarterly, or annual intervals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the global price index for all commodities across different time periods. Data is sourced from the International Monetary Fund (IMF) Global Price Index and provided by the Federal Reserve Bank of St. Louis."""
 
     # Construct request model with validation
@@ -3342,7 +3471,7 @@ async def get_commodity_price_index(
 async def get_real_gdp(
     function: Literal["REAL_GDP"] = Field(..., description="The data function to retrieve; must be set to REAL_GDP to fetch Real Gross Domestic Product data."),
     interval: Literal["annual", "quarterly"] | None = Field(None, description="The time interval for the data; choose either annual or quarterly frequency. Defaults to annual if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves annual or quarterly Real Gross Domestic Product data for the United States from the Federal Reserve Economic Data (FRED) database, sourced from the U.S. Bureau of Economic Analysis."""
 
     # Construct request model with validation
@@ -3378,7 +3507,7 @@ async def get_real_gdp(
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_real_gdp_per_capita(function: Literal["REAL_GDP_PER_CAPITA"] = Field(..., description="The data function to retrieve; must be set to REAL_GDP_PER_CAPITA to fetch quarterly Real GDP per Capita metrics.")) -> dict[str, Any]:
+async def get_real_gdp_per_capita(function: Literal["REAL_GDP_PER_CAPITA"] = Field(..., description="The data function to retrieve; must be set to REAL_GDP_PER_CAPITA to fetch quarterly Real GDP per Capita metrics.")) -> dict[str, Any] | ToolResult:
     """Retrieves quarterly Real GDP per Capita data for the United States from the Federal Reserve Economic Data (FRED) database, sourced from the U.S. Bureau of Economic Analysis."""
 
     # Construct request model with validation
@@ -3418,7 +3547,7 @@ async def fetch_treasury_yield(
     function: Literal["TREASURY_YIELD"] = Field(..., description="The data function to execute. Must be set to TREASURY_YIELD to retrieve Treasury yield data."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for data points. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
     maturity: Literal["3month", "2year", "5year", "7year", "10year", "30year"] | None = Field(None, description="The maturity timeline of the Treasury security. Select from 3-month, 2-year, 5-year, 7-year, 10-year, or 30-year constant maturities. Defaults to 10-year if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves US Treasury yield data for a specified maturity timeline at daily, weekly, or monthly intervals. Data sourced from the Federal Reserve's official market yield on constant maturity securities."""
 
     # Construct request model with validation
@@ -3457,7 +3586,7 @@ async def fetch_treasury_yield(
 async def get_federal_funds_rate(
     function: Literal["FEDERAL_FUNDS_RATE"] = Field(..., description="The data function to retrieve; must be set to FEDERAL_FUNDS_RATE to fetch federal funds rate data."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for the data: daily for individual trading days, weekly for week-over-week rates, or monthly for month-over-month rates. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current federal funds rate (interest rate) set by the United States Federal Reserve. Data is available at daily, weekly, or monthly intervals and sourced from the Federal Reserve Bank of St. Louis."""
 
     # Construct request model with validation
@@ -3496,7 +3625,7 @@ async def get_federal_funds_rate(
 async def get_cpi_data(
     function: Literal["CPI"] = Field(..., description="The data type to retrieve; must be set to CPI for Consumer Price Index data."),
     interval: Literal["monthly", "semiannual"] | None = Field(None, description="The reporting frequency for CPI data; choose either monthly (default) for month-over-month data or semiannual for six-month intervals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves monthly or semiannual Consumer Price Index (CPI) data for the United States, which measures inflation levels across the broader economy."""
 
     # Construct request model with validation
@@ -3532,7 +3661,7 @@ async def get_cpi_data(
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_inflation_rates(function: Literal["INFLATION"] = Field(..., description="Specifies the data function to retrieve; must be set to INFLATION to fetch annual consumer price inflation rates.")) -> dict[str, Any]:
+async def get_inflation_rates(function: Literal["INFLATION"] = Field(..., description="Specifies the data function to retrieve; must be set to INFLATION to fetch annual consumer price inflation rates.")) -> dict[str, Any] | ToolResult:
     """Retrieves annual inflation rates based on consumer prices for the United States, sourced from the Federal Reserve Economic Data (FRED) database via the World Bank."""
 
     # Construct request model with validation
@@ -3568,7 +3697,7 @@ async def get_inflation_rates(function: Literal["INFLATION"] = Field(..., descri
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_retail_sales(function: Literal["RETAIL_SALES"] = Field(..., description="The data function to retrieve; must be set to RETAIL_SALES to fetch monthly retail trade sales data.")) -> dict[str, Any]:
+async def get_retail_sales(function: Literal["RETAIL_SALES"] = Field(..., description="The data function to retrieve; must be set to RETAIL_SALES to fetch monthly retail trade sales data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly Advance Retail Sales data for the United States from the U.S. Census Bureau, sourced through the Federal Reserve Economic Data (FRED) system."""
 
     # Construct request model with validation
@@ -3604,7 +3733,7 @@ async def get_retail_sales(function: Literal["RETAIL_SALES"] = Field(..., descri
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_durable_goods_orders(function: Literal["DURABLES"] = Field(..., description="The data function to retrieve; must be set to DURABLES to fetch durable goods orders data.")) -> dict[str, Any]:
+async def get_durable_goods_orders(function: Literal["DURABLES"] = Field(..., description="The data function to retrieve; must be set to DURABLES to fetch durable goods orders data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly data on manufacturers' new orders for durable goods in the United States, sourced from the U.S. Census Bureau via the Federal Reserve Economic Data (FRED) database."""
 
     # Construct request model with validation
@@ -3640,7 +3769,7 @@ async def get_durable_goods_orders(function: Literal["DURABLES"] = Field(..., de
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_unemployment_rate(function: Literal["UNEMPLOYMENT"] = Field(..., description="Specifies the data function to retrieve; must be set to UNEMPLOYMENT to fetch unemployment rate data.")) -> dict[str, Any]:
+async def get_unemployment_rate(function: Literal["UNEMPLOYMENT"] = Field(..., description="Specifies the data function to retrieve; must be set to UNEMPLOYMENT to fetch unemployment rate data.")) -> dict[str, Any] | ToolResult:
     """Retrieves the monthly unemployment rate for the United States, showing the percentage of unemployed individuals within the labor force. Data covers the civilian population aged 16 and older residing in the 50 states or District of Columbia."""
 
     # Construct request model with validation
@@ -3676,7 +3805,7 @@ async def get_unemployment_rate(function: Literal["UNEMPLOYMENT"] = Field(..., d
 
 # Tags: Economic Indicators
 @mcp.tool()
-async def get_nonfarm_payroll(function: Literal["NONFARM_PAYROLL"] = Field(..., description="The data function to retrieve; must be set to NONFARM_PAYROLL to fetch monthly nonfarm payroll employment data.")) -> dict[str, Any]:
+async def get_nonfarm_payroll(function: Literal["NONFARM_PAYROLL"] = Field(..., description="The data function to retrieve; must be set to NONFARM_PAYROLL to fetch monthly nonfarm payroll employment data.")) -> dict[str, Any] | ToolResult:
     """Retrieves monthly US nonfarm payroll employment figures from the Bureau of Labor Statistics, representing the total number of employed workers in the economy excluding farm workers, proprietors, and self-employed individuals."""
 
     # Construct request model with validation
@@ -3719,7 +3848,7 @@ async def calculate_sma(
     time_period: int = Field(..., description="The number of data points used to calculate each moving average value. Must be at least 1. Larger values produce smoother averages over longer periods.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations: open (opening price), close (closing price), high (highest price), or low (lowest price) for each interval."),
     month: str | None = Field(None, description="Optional. Retrieve SMA values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, calculations use the default historical data length for the selected interval.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the simple moving average (SMA) for a given equity or currency pair over a specified time interval and period. Returns SMA values based on your chosen price type (open, close, high, or low)."""
 
     # Construct request model with validation
@@ -3762,7 +3891,7 @@ async def calculate_ema(
     time_period: int = Field(..., description="The number of data points used to calculate each EMA value. Must be a positive integer of at least 1.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing price, opening price, high price, or low price for each interval."),
     month: str | None = Field(None, description="Optional historical month for calculations in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of the underlying time series data.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates exponential moving average (EMA) values for a given equity or currency pair over a specified time interval and period."""
 
     # Construct request model with validation
@@ -3805,7 +3934,7 @@ async def calculate_weighted_moving_average(
     time_period: int = Field(..., description="The number of data points used to calculate each WMA value. Must be a positive integer of at least 1. Larger values produce smoother averages over longer periods.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing price, opening price, high price, or low price for each interval."),
     month: str | None = Field(None, description="Optional: Retrieve historical WMA data for a specific month in YYYY-MM format (e.g., 2009-01). Omit to get the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates weighted moving average (WMA) values for a given equity symbol across specified time intervals. Returns a time series of WMA data points based on your chosen price type and lookback period."""
 
     # Construct request model with validation
@@ -3848,7 +3977,7 @@ async def calculate_dema(
     time_period: int = Field(..., description="The number of data points used in each moving average calculation; determines the sensitivity and smoothing of the DEMA values."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations: closing price, opening price, high price, or low price for the interval."),
     month: str | None = Field(None, description="Optional historical month for retrieving past DEMA values, specified in YYYY-MM format (e.g., 2009-01). Omit to get current data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the double exponential moving average (DEMA) for a given equity symbol, providing smoothed price trend analysis across various time intervals and historical periods."""
 
     # Construct request model with validation
@@ -3891,7 +4020,7 @@ async def calculate_tema(
     time_period: int = Field(..., description="The number of data points used to calculate each TEMA value; must be at least 1. Larger values produce smoother averages.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations: closing price, opening price, high price, or low price for the interval."),
     month: str | None = Field(None, description="Optional historical month filter in YYYY-MM format to retrieve TEMA values for a specific month. If omitted, calculations use the default time series length.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Triple Exponential Moving Average (TEMA) for a given equity symbol, providing smoothed price trend analysis across various time intervals."""
 
     # Construct request model with validation
@@ -3934,7 +4063,7 @@ async def calculate_triangular_moving_average(
     time_period: int = Field(..., description="The number of data points used to calculate each TRIMA value. Must be a positive integer (minimum 1). Larger values produce smoother averages.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing, opening, high, or low prices for each interval."),
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format. If omitted, returns the most recent data based on the default time range."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the triangular moving average (TRIMA) for a given equity symbol across specified time intervals. TRIMA is a double-smoothed moving average that emphasizes mid-range price data."""
 
     # Construct request model with validation
@@ -3977,7 +4106,7 @@ async def calculate_kama(
     time_period: int = Field(..., description="The number of periods used to calculate each KAMA value. Must be at least 1; larger values produce smoother averages.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing, opening, high, or low prices."),
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format. If not specified, the indicator uses the default time series length for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Kaufman Adaptive Moving Average (KAMA) for a given equity symbol, providing adaptive trend-following values that adjust to market volatility and noise."""
 
     # Construct request model with validation
@@ -4021,7 +4150,7 @@ async def get_mama_indicator(
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format. If omitted, uses the default length of the underlying time series data."),
     fastlimit: float | None = Field(None, description="Optional fast limit parameter controlling the upper bound of the adaptive moving average acceleration. Accepts positive decimal values; defaults to 0.01."),
     slowlimit: float | None = Field(None, description="Optional slow limit parameter controlling the lower bound of the adaptive moving average acceleration. Accepts positive decimal values; defaults to 0.01."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves MESA adaptive moving average (MAMA) values for a specified equity, allowing analysis of trend direction and momentum across multiple timeframes and price types."""
 
     # Construct request model with validation
@@ -4062,7 +4191,7 @@ async def calculate_vwap(
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM) for which to calculate VWAP."),
     interval: Literal["1min", "5min", "15min", "30min", "60min"] = Field(..., description="The time interval between consecutive data points in the intraday series; choose from 1-minute, 5-minute, 15-minute, 30-minute, or 60-minute intervals."),
     month: str | None = Field(None, description="Optional historical month to retrieve VWAP data for; specify in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the volume weighted average price (VWAP) for intraday time series data of a given equity, helping identify fair value and trend direction based on price and volume."""
 
     # Construct request model with validation
@@ -4105,7 +4234,7 @@ async def calculate_t3_moving_average(
     time_period: int = Field(..., description="The number of data points used to calculate each moving average value. Must be a positive integer of at least 1.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing price, opening price, high price, or low price for each interval."),
     month: str | None = Field(None, description="Optional. Retrieve historical technical indicator data for a specific month. Specify the month in YYYY-MM format (e.g., 2009-01)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Tilson T3 triple exponential moving average for a given equity symbol. Returns smoothed price data based on your specified time interval and period."""
 
     # Construct request model with validation
@@ -4150,7 +4279,7 @@ async def calculate_macd(
     fastperiod: int | None = Field(None, description="The number of periods for the fast exponential moving average. Must be a positive integer; defaults to 12 if not specified.", ge=1),
     slowperiod: int | None = Field(None, description="The number of periods for the slow exponential moving average. Must be a positive integer; defaults to 26 if not specified.", ge=1),
     signalperiod: int | None = Field(None, description="The number of periods for the signal line exponential moving average. Must be a positive integer; defaults to 9 if not specified.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates Moving Average Convergence/Divergence (MACD) technical indicator values for a given equity or forex pair, returning MACD line, signal line, and histogram data across specified time intervals."""
 
     # Construct request model with validation
@@ -4195,7 +4324,7 @@ async def calculate_macd_extended(
     fastperiod: int | None = Field(None, description="The number of periods for the fast-moving average. Must be a positive integer; defaults to 12 if not specified.", ge=1),
     slowperiod: int | None = Field(None, description="The number of periods for the slow-moving average. Must be a positive integer; defaults to 26 if not specified.", ge=1),
     signalperiod: int | None = Field(None, description="The number of periods for the signal line (exponential moving average of MACD). Must be a positive integer; defaults to 9 if not specified.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate MACD (Moving Average Convergence Divergence) with customizable moving average types for technical analysis of equity price movements. Returns MACD line, signal line, and histogram values."""
 
     # Construct request model with validation
@@ -4238,7 +4367,7 @@ async def get_stochastic_oscillator(
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format. If not specified, the indicator is calculated on the default time series data for the selected interval."),
     slowkperiod: int | None = Field(None, description="The number of periods for the slow K moving average smoothing. Must be a positive integer; defaults to 3 if not specified.", ge=1),
     slowdperiod: int | None = Field(None, description="The number of periods for the slow D moving average smoothing. Must be a positive integer; defaults to 3 if not specified.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves stochastic oscillator (STOCH) technical indicator values for a specified equity or forex pair at a given time interval. The stochastic oscillator measures momentum by comparing closing prices to price ranges over a defined period."""
 
     # Construct request model with validation
@@ -4279,7 +4408,7 @@ async def get_stochastic_fast_indicator(
     symbol: str = Field(..., description="The equity ticker symbol (e.g., IBM, AAPL). Used to identify the security for which to calculate the indicator."),
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Supported intervals range from 1-minute to monthly granularity, allowing analysis across intraday and longer-term timeframes."),
     month: str | None = Field(None, description="Optional historical month for calculation in YYYY-MM format (e.g., 2009-01). When omitted, the indicator is calculated using the default length of the underlying time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves stochastic fast (STOCHF) technical indicator values for a given equity symbol. The STOCHF oscillator measures momentum by comparing closing prices to price ranges over a specified period."""
 
     # Construct request model with validation
@@ -4322,7 +4451,7 @@ async def calculate_rsi(
     time_period: int = Field(..., description="The number of data points used to calculate each RSI value. Must be a positive integer (e.g., 10, 14, 60, 200).", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Choose from: close, open, high, or low."),
     month: str | None = Field(None, description="Optional historical month for which to calculate RSI values, specified in YYYY-MM format (e.g., 2009-01). If omitted, uses the default time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Relative Strength Index (RSI) technical indicator for a given equity or forex pair over a specified time period and interval."""
 
     # Construct request model with validation
@@ -4365,7 +4494,7 @@ async def calculate_stochrsi(
     time_period: int = Field(..., description="The number of periods used to calculate each STOCHRSI value. Must be a positive integer (e.g., 10, 14, 21)."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing, opening, high, or low prices."),
     month: str | None = Field(None, description="Optional. Retrieve STOCHRSI values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the Stochastic Relative Strength Index (STOCHRSI) for a given equity symbol. Returns STOCHRSI values at your specified time interval and lookback period."""
 
     # Construct request model with validation
@@ -4407,7 +4536,7 @@ async def get_williams_percent_r(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 1 hour) or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of periods used in the WILLR calculation. Must be a positive integer (e.g., 60 for a 60-period lookback window).", ge=1),
     month: str | None = Field(None, description="Optional filter to retrieve historical WILLR values for a specific month in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Williams' %R (WILLR) momentum oscillator values for a given equity symbol. This technical indicator measures the level of the closing price relative to the highest high over a specified period, helping identify overbought and oversold conditions."""
 
     # Construct request model with validation
@@ -4449,7 +4578,7 @@ async def calculate_adx(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     time_period: int = Field(..., description="The number of periods used to calculate each ADX value; must be a positive integer (e.g., 10, 14, 60, 200).", ge=1),
     month: str | None = Field(None, description="Optional historical month filter in YYYY-MM format (e.g., 2009-01) to retrieve ADX values for a specific month; if omitted, uses the default time series length for the selected interval.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Average Directional Movement Index (ADX) for a given equity or forex pair, returning trend strength values across your specified time interval and period."""
 
     # Construct request model with validation
@@ -4491,7 +4620,7 @@ async def get_adxr_values(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points, ranging from 1-minute to monthly granularity."),
     time_period: int = Field(..., description="The number of data points used to calculate each ADXR value; must be at least 1.", ge=1),
     month: str | None = Field(None, description="Optional historical month to retrieve data from, specified in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Average Directional Movement Index Rating (ADXR) values for a specified equity, providing trend strength analysis over a chosen time interval and historical period."""
 
     # Construct request model with validation
@@ -4535,7 +4664,7 @@ async def calculate_absolute_price_oscillator(
     fastperiod: int | None = Field(None, description="The number of periods for the faster exponential moving average. Accepts any positive integer; defaults to 12 if not specified."),
     slowperiod: int | None = Field(None, description="The number of periods for the slower exponential moving average. Accepts any positive integer; defaults to 26 if not specified."),
     month: str | None = Field(None, description="Retrieve APO values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Absolute Price Oscillator (APO) technical indicator for a given equity, measuring momentum by comparing two exponential moving averages. Returns APO values at your specified time interval."""
 
     # Construct request model with validation
@@ -4579,7 +4708,7 @@ async def calculate_ppo(
     fastperiod: int | None = Field(None, description="The period for the fast exponential moving average. Must be a positive integer; defaults to 12 if not specified.", ge=1),
     slowperiod: int | None = Field(None, description="The period for the slow exponential moving average. Must be a positive integer; defaults to 26 if not specified.", ge=1),
     month: str | None = Field(None, description="Optional historical month to retrieve PPO values for, specified in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Percentage Price Oscillator (PPO) for an equity, a momentum indicator that measures the relationship between two exponential moving averages. Returns PPO values across a specified time interval and historical period."""
 
     # Construct request model with validation
@@ -4622,7 +4751,7 @@ async def calculate_momentum(
     time_period: int = Field(..., description="The number of data points used to calculate each momentum value. Must be a positive integer (e.g., 10, 60, 200). Larger values smooth out short-term fluctuations.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Choose from: close, open, high, or low prices."),
     month: str | None = Field(None, description="Optional historical month for analysis in YYYY-MM format (e.g., 2009-01). If not specified, calculations use the default length of available time series data for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates momentum (MOM) technical indicator values for a given equity symbol. Returns momentum measurements based on price changes over a specified time period and interval."""
 
     # Construct request model with validation
@@ -4663,7 +4792,7 @@ async def get_balance_of_power(
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL) for which to calculate the Balance of Power indicator."),
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     month: str | None = Field(None, description="Optional. Retrieve Balance of Power values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, returns data based on the default time series length for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Balance of Power (BOP) technical indicator values for a specified equity symbol at your chosen time interval. Optionally filter results to a specific month in history."""
 
     # Construct request model with validation
@@ -4705,7 +4834,7 @@ async def calculate_commodity_channel_index(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points in the returned series. Choose from minute-level intervals (1, 5, 15, or 30 minutes), hourly (60 minutes), or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of data points used to calculate each CCI value. Must be a positive integer of at least 1. Larger values smooth the indicator over longer periods.", ge=1),
     month: str | None = Field(None, description="Optional. Retrieve CCI values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, returns data using the default historical length."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Commodity Channel Index (CCI) technical indicator for a given equity or forex pair, returning CCI values across a specified time series at your chosen interval."""
 
     # Construct request model with validation
@@ -4748,7 +4877,7 @@ async def calculate_momentum_oscillator(
     time_period: int = Field(..., description="The number of data points used in each CMO calculation; must be at least 1. Larger values smooth the oscillator over longer periods.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use for calculations: closing price, opening price, high price, or low price for each interval."),
     month: str | None = Field(None, description="Optional historical month to retrieve CMO values for a specific period in the past, specified in YYYY-MM format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Chande Momentum Oscillator (CMO) for a given equity, providing momentum-based technical analysis values across specified time intervals and historical periods."""
 
     # Construct request model with validation
@@ -4791,7 +4920,7 @@ async def calculate_equity_roc(
     time_period: int = Field(..., description="The number of periods used to calculate each ROC value. Must be a positive integer (e.g., 10 means ROC is calculated over the last 10 periods)."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Choose from closing price, opening price, high price, or low price for each period."),
     month: str | None = Field(None, description="Optional. Retrieve historical ROC values for a specific month in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data based on the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the rate of change (ROC) technical indicator for an equity, measuring the percentage change in price over a specified period. Returns ROC values at your chosen time interval."""
 
     # Construct request model with validation
@@ -4834,7 +4963,7 @@ async def calculate_rocr(
     time_period: int = Field(..., description="The number of periods to use in the ROCR calculation. Must be a positive integer (e.g., 10, 60, 200). Larger values smooth the indicator over longer timeframes.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations: closing price, opening price, high price, or low price for each period."),
     month: str | None = Field(None, description="Optional. Retrieve ROCR values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, uses the default historical data length for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the rate of change ratio (ROCR) technical indicator for an equity, measuring the percentage change in price over a specified period. Returns ROCR values at your chosen time interval."""
 
     # Construct request model with validation
@@ -4876,7 +5005,7 @@ async def calculate_aroon_indicator(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points, ranging from 1-minute to monthly granularity."),
     time_period: int = Field(..., description="The number of periods used to calculate the Aroon values; typically 14 periods is standard for this indicator."),
     month: str | None = Field(None, description="Optional historical month in YYYY-MM format to retrieve Aroon values for a specific month; if omitted, uses the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Aroon technical indicator for a given equity or forex pair, returning Aroon Up and Aroon Down values to identify trend direction and strength."""
 
     # Construct request model with validation
@@ -4918,7 +5047,7 @@ async def calculate_aroon_oscillator(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     time_period: int = Field(..., description="The number of periods used to calculate the oscillator value. Must be a positive integer (e.g., 10, 25, 60). Larger values smooth the indicator over longer timeframes.", ge=1),
     month: str | None = Field(None, description="Optional historical month for retrieving past indicator values in YYYY-MM format (e.g., 2009-01). If omitted, uses the default data length for the selected interval.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Aroon oscillator (AROONOSC) technical indicator for a given equity symbol. The Aroon oscillator measures the difference between Aroon-Up and Aroon-Down, helping identify trend strength and direction changes."""
 
     # Construct request model with validation
@@ -4960,7 +5089,7 @@ async def calculate_money_flow_index(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     time_period: int = Field(..., description="The number of data points used to calculate each MFI value. Must be a positive integer (e.g., 10, 14, 60). Larger values smooth the indicator over longer periods.", ge=1),
     month: str | None = Field(None, description="Optional historical month to retrieve MFI values for a specific period in the past, specified in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of the underlying time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Money Flow Index (MFI) technical indicator for a given equity symbol. MFI measures buying and selling pressure by analyzing price and volume data over a specified time period and interval."""
 
     # Construct request model with validation
@@ -5003,7 +5132,7 @@ async def calculate_trix(
     time_period: int = Field(..., description="The number of data points used to calculate each TRIX value. Must be a positive integer (e.g., 10, 60, 200). Larger values produce smoother results.", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing, opening, high, or low prices for each period."),
     month: str | None = Field(None, description="Optional historical month to retrieve TRIX values for a specific period in the past, specified in YYYY-MM format. If omitted, uses the default length of available time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the 1-day rate of change of a triple smooth exponential moving average (TRIX) for a given equity, providing momentum analysis based on the specified time interval and price series."""
 
     # Construct request model with validation
@@ -5047,7 +5176,7 @@ async def calculate_ultimate_oscillator(
     timeperiod1: int | None = Field(None, description="Optional: The first lookback period for the indicator calculation. Must be a positive integer; defaults to 7 if not specified.", ge=1),
     timeperiod2: int | None = Field(None, description="Optional: The second lookback period for the indicator calculation. Must be a positive integer; defaults to 14 if not specified.", ge=1),
     timeperiod3: int | None = Field(None, description="Optional: The third lookback period for the indicator calculation. Must be a positive integer; defaults to 28 if not specified.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Ultimate Oscillator (ULTOSC) technical indicator for a given equity symbol and time interval. The Ultimate Oscillator is a momentum indicator that combines multiple timeframes to identify overbought and oversold conditions."""
 
     # Construct request model with validation
@@ -5089,7 +5218,7 @@ async def get_directional_index(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points in the series. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 1 hour) or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of data points used to calculate each DX value. Must be a positive integer of at least 1.", ge=1),
     month: str | None = Field(None, description="Optional filter to retrieve DX values for a specific month in historical data. Specify in YYYY-MM format (e.g., 2009-01 for January 2009)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Directional Movement Index (DX) technical indicator values for a specified equity symbol, time interval, and calculation period. Optionally returns historical data for a specific month."""
 
     # Construct request model with validation
@@ -5131,7 +5260,7 @@ async def get_minus_directional_indicator(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term data."),
     time_period: int = Field(..., description="The number of data points used to calculate each MINUS_DI value. Must be a positive integer (e.g., 10, 60, 200).", ge=1),
     month: str | None = Field(None, description="Optional. Retrieve historical indicator values for a specific month in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of the underlying time series data.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Minus Directional Indicator (MINUS_DI) values for a given equity symbol, which measures downward price movement strength over a specified time period and interval."""
 
     # Construct request model with validation
@@ -5173,7 +5302,7 @@ async def get_plus_directional_indicator(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from 1-minute, 5-minute, 15-minute, 30-minute, 60-minute, daily, weekly, or monthly intervals."),
     time_period: int = Field(..., description="The number of data points used to calculate each PLUS_DI value. Must be a positive integer (e.g., 60).", ge=1),
     month: str | None = Field(None, description="Optional. Retrieve historical PLUS_DI values for a specific month in YYYY-MM format. If not provided, the calculation uses the default length of the underlying time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Plus Directional Indicator (PLUS_DI) values for a given equity symbol, which measures upward price movement strength over a specified time period and interval."""
 
     # Construct request model with validation
@@ -5215,7 +5344,7 @@ async def get_minus_directional_movement(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     time_period: int = Field(..., description="The number of periods used in the MINUS_DM calculation. Must be a positive integer (e.g., 10, 14, 60). Larger values smooth the indicator over longer timeframes.", ge=1),
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format (e.g., 2009-01). If omitted, uses the default data length for the selected interval.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves minus directional movement (MINUS_DM) technical indicator values for a specified equity, measuring downward price movement over a configurable time period and interval."""
 
     # Construct request model with validation
@@ -5257,7 +5386,7 @@ async def get_plus_directional_movement(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from minute-level intervals (1, 5, 15, 30, 60 minutes) or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of data points used to calculate each PLUS_DM value. Must be a positive integer of at least 1.", ge=1),
     month: str | None = Field(None, description="Optional historical month for retrieving technical indicators from a specific period. Specify in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of the underlying time series data.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Plus Directional Movement (PLUS_DM) values for a given equity symbol. PLUS_DM is a technical indicator that measures upward price movement over a specified time period."""
 
     # Construct request model with validation
@@ -5302,7 +5431,7 @@ async def calculate_bollinger_bands(
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format. If not provided, returns the most recent data available."),
     nbdevup: int | None = Field(None, description="The standard deviation multiplier for the upper Bollinger Band. Must be at least 1; defaults to 2 for typical two standard deviation bands.", ge=1),
     nbdevdn: int | None = Field(None, description="The standard deviation multiplier for the lower Bollinger Band. Must be at least 1; defaults to 2 for typical two standard deviation bands.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates Bollinger Bands technical indicator values for a given equity or forex pair, providing upper, middle, and lower bands based on standard deviation multipliers applied to a moving average."""
 
     # Construct request model with validation
@@ -5345,7 +5474,7 @@ async def calculate_midpoint(
     time_period: int = Field(..., description="The number of data points to use in calculating each midpoint value. Must be a positive integer (e.g., 10, 60, 200).", ge=1),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in the calculation: closing price, opening price, highest price, or lowest price of each interval."),
     month: str | None = Field(None, description="Optional historical month for which to calculate midpoint values, specified in YYYY-MM format. If not provided, calculations use the default time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the midpoint values (average of highest and lowest prices) for an equity over a specified period and time interval."""
 
     # Construct request model with validation
@@ -5387,7 +5516,7 @@ async def calculate_midprice(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from minute-level intervals (1, 5, 15, 30, or 60 minutes) or longer periods (daily, weekly, or monthly)."),
     time_period: int = Field(..., description="The number of data points used to calculate each MIDPRICE value. Must be a positive integer (e.g., 10, 60, 200).", ge=1),
     month: str | None = Field(None, description="Optional historical month for retrieving technical indicators from a specific period in the past. Specify in YYYY-MM format (e.g., 2009-01). If omitted, uses the default time series data for the selected interval.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the midpoint price (MIDPRICE) indicator for an equity over a specified period and time interval. MIDPRICE is computed as the average of the highest high and lowest low prices within each interval."""
 
     # Construct request model with validation
@@ -5430,7 +5559,7 @@ async def get_parabolic_sar(
     month: str | None = Field(None, description="Optional historical month filter in YYYY-MM format to retrieve SAR values for a specific month."),
     acceleration: float | None = Field(None, description="The acceleration factor used in SAR calculations; defaults to 0.01 and accepts positive decimal values to control how quickly the SAR adjusts to price movements."),
     maximum: float | None = Field(None, description="The maximum acceleration factor cap; defaults to 0.2 and accepts positive decimal values to limit the maximum rate of SAR adjustment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves parabolic SAR (Stop and Reverse) technical indicator values for a given equity at specified time intervals, useful for identifying potential trend reversals and stop-loss levels."""
 
     # Construct request model with validation
@@ -5471,7 +5600,7 @@ async def get_true_range(
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL). Identifies which equity to retrieve true range data for."),
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 1 hour) or daily/weekly/monthly aggregations."),
     month: str | None = Field(None, description="Optional. Retrieve true range values for a specific month in history using YYYY-MM format (e.g., 2009-01). If omitted, returns data based on the default time series length for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves True Range (TRANGE) volatility values for a specified equity symbol at your chosen time interval. Optionally retrieve historical data for a specific month."""
 
     # Construct request model with validation
@@ -5513,7 +5642,7 @@ async def get_atr(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from minute-level intervals (1, 5, 15, or 30 minutes), hourly (60 minutes), or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of periods used to calculate each ATR value. Must be a positive integer (e.g., 14 is a common default for daily charts).", ge=1),
     month: str | None = Field(None, description="Optional filter to retrieve historical ATR data for a specific month in YYYY-MM format (e.g., 2009-01). Omit to get the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Average True Range (ATR) technical indicator values for a specified equity, showing volatility measurements over a chosen time interval and period."""
 
     # Construct request model with validation
@@ -5555,7 +5684,7 @@ async def get_natr_values(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 1 hour) or daily/weekly/monthly aggregations."),
     time_period: int = Field(..., description="The number of periods used to calculate each NATR value. Must be a positive integer (e.g., 60 for a 60-period moving average).", ge=1),
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format (e.g., 2009-01 for January 2009). Omit to get the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves normalized average true range (NATR) technical indicator values for a specified equity symbol. NATR measures volatility as a percentage of the closing price, allowing for normalized comparison across different price levels."""
 
     # Construct request model with validation
@@ -5596,7 +5725,7 @@ async def get_chaikin_ad_line(
     symbol: str = Field(..., description="The stock ticker symbol (e.g., IBM, AAPL). Identifies which equity to retrieve data for."),
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points in the series. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 1 hour) or daily/weekly/monthly historical data."),
     month: str | None = Field(None, description="Optional filter to retrieve historical data for a specific month. Use YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Chaikin A/D line (Accumulation/Distribution) values for a given equity, showing the relationship between price and volume to identify buying and selling pressure."""
 
     # Construct request model with validation
@@ -5639,7 +5768,7 @@ async def get_adosc_values(
     month: str | None = Field(None, description="Optional historical month in YYYY-MM format to retrieve ADOSC values for a specific month. If not provided, uses the default time series data."),
     fastperiod: int | None = Field(None, description="The time period for the fast exponential moving average calculation. Must be a positive integer; defaults to 3 if not specified.", ge=1),
     slowperiod: int | None = Field(None, description="The time period for the slow exponential moving average calculation. Must be a positive integer; defaults to 10 if not specified.", ge=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Chaikin A/D oscillator (ADOSC) technical indicator values for a specified equity symbol and time interval, with optional historical month selection and EMA period customization."""
 
     # Construct request model with validation
@@ -5680,7 +5809,7 @@ async def get_obv(
     symbol: str = Field(..., description="The stock ticker symbol for the equity you want to analyze (e.g., IBM, AAPL)."),
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from: 1min, 5min, 15min, 30min, 60min for intraday data, or daily, weekly, monthly for longer-term analysis."),
     month: str | None = Field(None, description="Optional historical month to retrieve OBV values for a specific period in the past, specified in YYYY-MM format. If omitted, returns data based on the default time series length for the selected interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves on-balance volume (OBV) technical indicator values for a specified equity, showing cumulative volume trends across your chosen time interval."""
 
     # Construct request model with validation
@@ -5722,7 +5851,7 @@ async def get_hilbert_trendline(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from 1-minute, 5-minute, 15-minute, 30-minute, 60-minute, daily, weekly, or monthly intervals."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing price, opening price, high price, or low price for the interval."),
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format (e.g., 2009-01). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Hilbert transform instantaneous trendline (HT_TRENDLINE) technical indicator values for a specified equity, helping identify trend direction and potential reversal points."""
 
     # Construct request model with validation
@@ -5764,7 +5893,7 @@ async def get_hilbert_sine_indicator(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from 1-minute, 5-minute, 15-minute, 30-minute, 60-minute, daily, weekly, or monthly intervals."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from closing price, opening price, high price, or low price for the interval."),
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format (e.g., 2009-01 for January 2009). If omitted, returns the most recent data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Hilbert transform sine wave (HT_SINE) technical indicator values for a given equity symbol, useful for identifying cyclical trends and potential turning points in price movements."""
 
     # Construct request model with validation
@@ -5806,7 +5935,7 @@ async def analyze_hilbert_trend_cycle(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from minute-level intervals (1, 5, 15, 30, 60 minutes) or longer periods (daily, weekly, monthly)."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations: closing price, opening price, high price, or low price for each interval."),
     month: str | None = Field(None, description="Optional historical month for analysis in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of available time series data.", pattern="^\\d{4}-\\d{2}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Analyzes price data using the Hilbert Transform to identify whether the market is in a trend or cycle mode, returning mode values for the specified equity and time interval."""
 
     # Construct request model with validation
@@ -5848,7 +5977,7 @@ async def get_dominant_cycle_period(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from: 1-minute, 5-minute, 15-minute, 30-minute, 60-minute, daily, weekly, or monthly intervals."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from: close, open, high, or low prices."),
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format (e.g., 2009-01). If not specified, the calculation uses the default length of available time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the Hilbert transform dominant cycle period (HT_DCPERIOD) for a given equity, identifying the dominant cycle length in the price data at your specified time interval."""
 
     # Construct request model with validation
@@ -5890,7 +6019,7 @@ async def get_dominant_cycle_phase(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between data points. Choose from minute-level intervals (1, 5, 15, or 30 minutes, or 60 minutes) or daily/weekly/monthly historical data."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select from open, high, low, or close prices."),
     month: str | None = Field(None, description="Optional historical month to retrieve data for, specified in YYYY-MM format (e.g., 2009-01 for January 2009)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Hilbert transform dominant cycle phase indicator for a given equity symbol, helping identify the current phase position within the dominant market cycle."""
 
     # Construct request model with validation
@@ -5932,7 +6061,7 @@ async def get_hilbert_phasor(
     interval: Literal["1min", "5min", "15min", "30min", "60min", "daily", "weekly", "monthly"] = Field(..., description="The time interval between consecutive data points. Choose from: 1-minute, 5-minute, 15-minute, 30-minute, 60-minute, daily, weekly, or monthly intervals."),
     series_type: Literal["close", "open", "high", "low"] = Field(..., description="The price type to use in calculations. Select one of: closing price, opening price, high price, or low price for each period."),
     month: str | None = Field(None, description="Optional historical month for the calculation in YYYY-MM format (e.g., 2009-01). If omitted, uses the default length of the underlying time series data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Hilbert transform phasor components for a given equity symbol, providing phase and amplitude information derived from the specified price series and time interval."""
 
     # Construct request model with validation

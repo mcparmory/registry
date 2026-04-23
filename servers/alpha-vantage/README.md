@@ -1,4 +1,5 @@
 # Alpha Vantage MCP Server
+<!-- mcp-name: com.mcparmory/alpha-vantage -->
 
 Base URL: https://www.alphavantage.co
 | | |
@@ -88,6 +89,16 @@ Example (if server is at `/home/user/mcp-servers/alpha-vantage`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/alpha-vantage:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -95,7 +106,9 @@ docker build -t alpha-vantage .
 docker run -p 8000:8000 --env-file .env alpha-vantage
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
