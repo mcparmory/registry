@@ -1,4 +1,5 @@
 # MailerSend MCP Server
+<!-- mcp-name: com.mcparmory/mailersend -->
 
 Base URL: https://api.mailersend.com/v1
 | | |
@@ -15,6 +16,8 @@ Base URL: https://api.mailersend.com/v1
 
 ```bash
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
+SERVER_PROTOCOL=YOUR_SERVER_PROTOCOL \
+SERVER_HOST=YOUR_SERVER_HOST \
 uvx mcparmory-mailersend
 ```
 
@@ -23,6 +26,8 @@ uvx mcparmory-mailersend
 ```bash
 pip install mcparmory-mailersend
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
+SERVER_PROTOCOL=YOUR_SERVER_PROTOCOL \
+SERVER_HOST=YOUR_SERVER_HOST \
 mcparmory-mailersend
 ```
 
@@ -37,7 +42,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-mailersend"],
       "env": {
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
+        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
+        "SERVER_PROTOCOL": "YOUR_SERVER_PROTOCOL",
+        "SERVER_HOST": "YOUR_SERVER_HOST"
       }
     }
   }
@@ -51,6 +58,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+- `SERVER_PROTOCOL` — The protocol for the API request. (default: `https`)
+- `SERVER_HOST` — The host for the MailerSend API. (default: `api.mailersend.com`)
 Do not commit credentials to version control.
 
 ---
@@ -84,6 +93,18 @@ Example (if server is at `/home/user/mcp-servers/mailersend`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  -e SERVER_PROTOCOL=YOUR_SERVER_PROTOCOL \
+  -e SERVER_HOST=YOUR_SERVER_HOST \
+  ghcr.io/mcparmory/mailersend:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +112,9 @@ docker build -t mailersend .
 docker run -p 8000:8000 --env-file .env mailersend
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MailerSend MCP Server
-Generated: 2026-04-14 18:25:41 UTC
+Generated: 2026-04-23 21:27:16 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -36,6 +37,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -43,7 +45,7 @@ _SERVER_VARS = {
     "protocol": os.getenv("SERVER_PROTOCOL", "https"),
     "host": os.getenv("SERVER_HOST", "api.mailersend.com"),
 }
-BASE_URL = os.getenv("BASE_URL", "{protocol}://{host}/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
+BASE_URL = os.getenv("BASE_URL", "https://api.mailersend.com/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "MailerSend"
 SERVER_VERSION = "1.0.0"
 
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +724,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +780,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +846,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +880,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -852,16 +970,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -875,6 +994,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -917,6 +1037,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -928,7 +1063,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1075,7 +1209,7 @@ async def send_email(
     subject: str = Field(..., description="The email subject line. Provide a clear, concise subject that summarizes the email content (e.g., 'Hello Client')."),
     text: str = Field(..., description="The email message body as plain text. Include the main content and any relevant information for the recipient (e.g., 'This is just a friendly hello from your friends.')."),
     name: str | None = Field(None, description="The sender's display name or organization name that appears alongside the email address (e.g., 'Company Name'). Optional; if omitted, only the email address will be displayed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send an email message from a specified sender address to one or more recipients. Use this operation to deliver transactional or notification emails with a subject line and message body."""
 
     # Construct request model with validation
@@ -1114,7 +1248,7 @@ async def send_email(
 
 # Tags: Email
 @mcp.tool()
-async def send_bulk_emails(body: list[_models.SendEmailRequest] = Field(..., description="Array of email objects to send. Each object should contain recipient, subject, and message content. Order is preserved for processing.")) -> dict[str, Any]:
+async def send_bulk_emails(body: list[_models.SendEmailRequest] = Field(..., description="Array of email objects to send. Each object should contain recipient, subject, and message content. Order is preserved for processing.")) -> dict[str, Any] | ToolResult:
     """Send multiple emails in a single batch request. Accepts an array of email configurations to be processed and delivered."""
 
     # Construct request model with validation
@@ -1153,7 +1287,7 @@ async def send_bulk_emails(body: list[_models.SendEmailRequest] = Field(..., des
 
 # Tags: Email
 @mcp.tool()
-async def get_bulk_email_status(bulk_email_id: str = Field(..., description="The unique identifier of the bulk email campaign whose status you want to retrieve.")) -> dict[str, Any]:
+async def get_bulk_email_status(bulk_email_id: str = Field(..., description="The unique identifier of the bulk email campaign whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and details of a bulk email campaign. Use this to check delivery progress, completion state, and any associated metrics for a specific bulk email operation."""
 
     # Construct request model with validation
@@ -1193,7 +1327,7 @@ async def list_activities_for_domain(
     domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve activities."),
     date_from: str = Field(..., description="The start of the activity time range as a Unix timestamp in UTC. Activities on or after this date will be included."),
     date_to: str = Field(..., description="The end of the activity time range as a Unix timestamp in UTC. Activities on or before this date will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of activities for a specific domain within a given time range. Results are filtered by start and end dates in UTC."""
 
     _date_from = _parse_int(date_from)
@@ -1235,7 +1369,7 @@ async def list_activities_for_domain(
 
 # Tags: Activity
 @mcp.tool()
-async def get_activity(activity_id: str = Field(..., description="The unique identifier of the activity to retrieve.")) -> dict[str, Any]:
+async def get_activity(activity_id: str = Field(..., description="The unique identifier of the activity to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific activity by its unique identifier."""
 
     # Construct request model with validation
@@ -1275,7 +1409,7 @@ async def get_activity_data_by_date_range(
     date_from: str = Field(..., description="Start of the date range as a Unix timestamp (seconds since epoch). Must be earlier than or equal to date_to."),
     date_to: str = Field(..., description="End of the date range as a Unix timestamp (seconds since epoch). Must be later than or equal to date_from."),
     events: list[str] = Field(..., description="List of event types to include in the results. Specify which activity events to retrieve (e.g., user_login, page_view, transaction). Order may affect result grouping or filtering behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves activity data for a specified date range. Returns analytics events that occurred between the provided start and end timestamps."""
 
     _date_from = _parse_int(date_from)
@@ -1319,7 +1453,7 @@ async def get_activity_data_by_date_range(
 async def list_opens_by_country(
     date_from: str = Field(..., description="Start of the date range as a Unix timestamp (seconds since epoch). Defines the beginning of the analytics period to query."),
     date_to: str = Field(..., description="End of the date range as a Unix timestamp (seconds since epoch). Defines the end of the analytics period to query. Must be equal to or after date_from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve email open metrics aggregated by country for a specified date range. Returns open counts and statistics grouped by geographic location."""
 
     _date_from = _parse_int(date_from)
@@ -1363,7 +1497,7 @@ async def list_opens_by_country(
 async def list_opens_by_user_agent(
     date_from: str = Field(..., description="Start of the time range as a Unix timestamp (seconds since epoch). This defines the beginning of the analytics period to query."),
     date_to: str = Field(..., description="End of the time range as a Unix timestamp (seconds since epoch). This defines the end of the analytics period to query."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analytics data showing the number of opens grouped by user-agent within a specified time range. Use this to understand which browsers, devices, and applications are opening your content."""
 
     _date_from = _parse_int(date_from)
@@ -1407,7 +1541,7 @@ async def list_opens_by_user_agent(
 async def get_opens_by_reading_environment(
     date_from: str = Field(..., description="Start of the date range as a Unix timestamp (seconds since epoch). This defines the beginning of the analytics period to query."),
     date_to: str = Field(..., description="End of the date range as a Unix timestamp (seconds since epoch). This defines the end of the analytics period to query."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analytics data on content opens segmented by reading environment (e.g., web, mobile, app). Results are filtered by the specified date range."""
 
     _date_from = _parse_int(date_from)
@@ -1448,7 +1582,7 @@ async def get_opens_by_reading_environment(
 
 # Tags: Domains
 @mcp.tool()
-async def list_domains() -> dict[str, Any]:
+async def list_domains() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all domains available in the system. Use this operation to discover and enumerate domains for management or reference purposes."""
 
     # Extract parameters for API call
@@ -1475,7 +1609,7 @@ async def list_domains() -> dict[str, Any]:
 
 # Tags: Domains
 @mcp.tool()
-async def create_domain(name: str = Field(..., description="The fully-qualified domain name to register (e.g., domain.com). Must be a valid domain format.")) -> dict[str, Any]:
+async def create_domain(name: str = Field(..., description="The fully-qualified domain name to register (e.g., domain.com). Must be a valid domain format.")) -> dict[str, Any] | ToolResult:
     """Register a new domain in the system. The domain name should be a valid fully-qualified domain name (e.g., domain.com)."""
 
     # Construct request model with validation
@@ -1513,7 +1647,7 @@ async def create_domain(name: str = Field(..., description="The fully-qualified 
 
 # Tags: Domains
 @mcp.tool()
-async def get_domain(domain_id: str = Field(..., description="The unique identifier of the domain to retrieve.")) -> dict[str, Any]:
+async def get_domain(domain_id: str = Field(..., description="The unique identifier of the domain to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific domain by its ID. Returns the domain's configuration, status, and metadata."""
 
     # Construct request model with validation
@@ -1549,7 +1683,7 @@ async def get_domain(domain_id: str = Field(..., description="The unique identif
 
 # Tags: Domains
 @mcp.tool()
-async def delete_domain(domain_id: str = Field(..., description="The unique identifier of the domain to delete.")) -> dict[str, Any]:
+async def delete_domain(domain_id: str = Field(..., description="The unique identifier of the domain to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a domain and remove it from the system. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1585,7 +1719,7 @@ async def delete_domain(domain_id: str = Field(..., description="The unique iden
 
 # Tags: Domains
 @mcp.tool()
-async def list_recipients_for_domain(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve recipients.")) -> dict[str, Any]:
+async def list_recipients_for_domain(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve recipients.")) -> dict[str, Any] | ToolResult:
     """Retrieve all recipients associated with a specific domain. This returns the list of email recipients configured for the given domain."""
 
     # Construct request model with validation
@@ -1624,7 +1758,7 @@ async def list_recipients_for_domain(domain_id: str = Field(..., description="Th
 async def update_domain_settings(
     domain_id: str = Field(..., description="The unique identifier of the domain whose settings should be updated."),
     track_content: bool | None = Field(None, description="Enable or disable content tracking for this domain. When enabled, the system will monitor and record domain content activity."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for a specific domain. Allows modification of domain-level preferences including content tracking behavior."""
 
     # Construct request model with validation
@@ -1663,7 +1797,7 @@ async def update_domain_settings(
 
 # Tags: Domains
 @mcp.tool()
-async def list_dns_records(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve DNS records.")) -> dict[str, Any]:
+async def list_dns_records(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve DNS records.")) -> dict[str, Any] | ToolResult:
     """Retrieve all DNS records configured for a specific domain. Returns a collection of DNS records including their types, values, and configuration details."""
 
     # Construct request model with validation
@@ -1699,7 +1833,7 @@ async def list_dns_records(domain_id: str = Field(..., description="The unique i
 
 # Tags: Domains
 @mcp.tool()
-async def get_domain_verification_status(domain_id: str = Field(..., description="The unique identifier of the domain whose verification status you want to check.")) -> dict[str, Any]:
+async def get_domain_verification_status(domain_id: str = Field(..., description="The unique identifier of the domain whose verification status you want to check.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current verification status of a domain, including whether it has been successfully verified and any relevant verification details."""
 
     # Construct request model with validation
@@ -1735,7 +1869,7 @@ async def get_domain_verification_status(domain_id: str = Field(..., description
 
 # Tags: Sender Identities
 @mcp.tool()
-async def list_sender_identities() -> dict[str, Any]:
+async def list_sender_identities() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all configured sender identities available for sending messages or emails from this account."""
 
     # Extract parameters for API call
@@ -1766,7 +1900,7 @@ async def create_sender_identity(
     domain_id: str = Field(..., description="The unique identifier of your domain where this sender identity will be registered."),
     email: str = Field(..., description="The email address for this sender identity. Must be a valid email format (e.g., user@example.com)."),
     name: str = Field(..., description="The display name associated with this sender identity, shown to recipients when emails are sent (e.g., 'John Smith' or 'Support Team')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register a new sender identity for your domain, enabling you to send emails from a specific email address with an associated display name."""
 
     # Construct request model with validation
@@ -1804,7 +1938,7 @@ async def create_sender_identity(
 
 # Tags: Sender Identities
 @mcp.tool()
-async def get_sender_identity(identity_id: str = Field(..., description="The unique identifier of the sender identity to retrieve.")) -> dict[str, Any]:
+async def get_sender_identity(identity_id: str = Field(..., description="The unique identifier of the sender identity to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific sender identity by its ID. Use this to view configuration and settings for an individual sender identity."""
 
     # Construct request model with validation
@@ -1843,7 +1977,7 @@ async def get_sender_identity(identity_id: str = Field(..., description="The uni
 async def update_sender_identity(
     identity_id: str = Field(..., description="The unique identifier of the sender identity to update."),
     name: str | None = Field(None, description="The new display name for the sender identity. This is how the identity will be presented in outgoing messages."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of an existing sender identity, such as its display name. This allows you to modify how your sender identity appears in outgoing communications."""
 
     # Construct request model with validation
@@ -1882,7 +2016,7 @@ async def update_sender_identity(
 
 # Tags: Sender Identities
 @mcp.tool()
-async def delete_sender_identity(identity_id: str = Field(..., description="The unique identifier of the sender identity to delete. This ID must correspond to an existing sender identity in your account.")) -> dict[str, Any]:
+async def delete_sender_identity(identity_id: str = Field(..., description="The unique identifier of the sender identity to delete. This ID must correspond to an existing sender identity in your account.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a sender identity from your account. Once deleted, this identity can no longer be used to send messages."""
 
     # Construct request model with validation
@@ -1918,7 +2052,7 @@ async def delete_sender_identity(identity_id: str = Field(..., description="The 
 
 # Tags: Sender Identities
 @mcp.tool()
-async def get_sender_identity_by_email(client_email_com: str = Field(..., alias="clientemail.com", description="The email address of the sender identity to retrieve. Must be a valid email format.")) -> dict[str, Any]:
+async def get_sender_identity_by_email(client_email_com: str = Field(..., alias="clientemail.com", description="The email address of the sender identity to retrieve. Must be a valid email format.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single sender identity by its email address. Use this to look up configuration and details for a specific sender."""
 
     # Construct request model with validation
@@ -1957,7 +2091,7 @@ async def get_sender_identity_by_email(client_email_com: str = Field(..., alias=
 async def update_sender_identity_by_email(
     client_email_com: str = Field(..., alias="clientemail.com", description="The email address of the sender identity to update. Must be a valid email format."),
     name: str | None = Field(None, description="The new display name for the sender identity. Optional field to customize how the sender appears in outgoing communications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of a sender identity using its email address. Allows modification of sender identity properties such as the display name."""
 
     # Construct request model with validation
@@ -1996,7 +2130,7 @@ async def update_sender_identity_by_email(
 
 # Tags: Sender Identities
 @mcp.tool()
-async def delete_sender_identity_by_email(client_email_com: str = Field(..., alias="clientemail.com", description="The email address of the sender identity to delete. Must be a valid email format.")) -> dict[str, Any]:
+async def delete_sender_identity_by_email(client_email_com: str = Field(..., alias="clientemail.com", description="The email address of the sender identity to delete. Must be a valid email format.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a sender identity from your account using its email address. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2032,7 +2166,7 @@ async def delete_sender_identity_by_email(client_email_com: str = Field(..., ali
 
 # Tags: Inbound Routing
 @mcp.tool()
-async def list_inbound_routes() -> dict[str, Any]:
+async def list_inbound_routes() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all configured inbound routes. Use this to view routing rules for incoming messages or requests."""
 
     # Extract parameters for API call
@@ -2059,7 +2193,7 @@ async def list_inbound_routes() -> dict[str, Any]:
 
 # Tags: Inbound Routing
 @mcp.tool()
-async def get_inbound_route(inbound_id: str = Field(..., description="The unique identifier of the inbound route to retrieve.")) -> dict[str, Any]:
+async def get_inbound_route(inbound_id: str = Field(..., description="The unique identifier of the inbound route to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration and details of a specific inbound route by its ID. Use this to view routing rules, destination settings, and other properties of an individual inbound route."""
 
     # Construct request model with validation
@@ -2103,7 +2237,7 @@ async def update_inbound_route(
     match_filter_type: str | None = Field(None, alias="match_filterType", description="The type of matching filter to apply. Use 'match_all' to process all requests, or specify a more restrictive filter type to target specific request patterns."),
     catch_filter_type: str | None = Field(None, alias="catch_filterType", description="The type of catch filter to apply as a fallback. Use 'catch_all' to handle requests that don't match other filters, or specify a more specific filter type."),
     forwards: list[_models.UpdateAnInboundRouteBodyForwardsItem] | None = Field(None, description="An ordered list of forwarding destinations where matched inbound requests should be routed. The order determines the sequence in which destinations are attempted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for an inbound route, including its name, domain enablement, priority, and filtering rules. Changes take effect immediately for new incoming requests matching this route."""
 
     # Construct request model with validation
@@ -2144,7 +2278,7 @@ async def update_inbound_route(
 
 # Tags: Inbound Routing
 @mcp.tool()
-async def delete_inbound_route(inbound_id: str = Field(..., description="The unique identifier of the inbound route to delete. This must be a valid inbound route ID that exists in the system.")) -> dict[str, Any]:
+async def delete_inbound_route(inbound_id: str = Field(..., description="The unique identifier of the inbound route to delete. This must be a valid inbound route ID that exists in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an inbound route by its ID. This action cannot be undone and will remove all routing rules associated with the specified inbound route."""
 
     # Construct request model with validation
@@ -2180,7 +2314,7 @@ async def delete_inbound_route(inbound_id: str = Field(..., description="The uni
 
 # Tags: Messages
 @mcp.tool()
-async def list_messages() -> dict[str, Any]:
+async def list_messages() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all messages. Use this operation to fetch messages for display, filtering, or further processing."""
 
     # Extract parameters for API call
@@ -2207,7 +2341,7 @@ async def list_messages() -> dict[str, Any]:
 
 # Tags: Messages
 @mcp.tool()
-async def get_message(message_id: str = Field(..., description="The unique identifier of the message to retrieve.")) -> dict[str, Any]:
+async def get_message(message_id: str = Field(..., description="The unique identifier of the message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific message by its ID. Returns the complete message data including content, metadata, and timestamps."""
 
     # Construct request model with validation
@@ -2243,7 +2377,7 @@ async def get_message(message_id: str = Field(..., description="The unique ident
 
 # Tags: Scheduled Messages
 @mcp.tool()
-async def list_scheduled_messages() -> dict[str, Any]:
+async def list_scheduled_messages() -> dict[str, Any] | ToolResult:
     """Retrieve all scheduled messages that are queued for future delivery. Use this to view pending message schedules and their delivery status."""
 
     # Extract parameters for API call
@@ -2270,7 +2404,7 @@ async def list_scheduled_messages() -> dict[str, Any]:
 
 # Tags: Scheduled Messages
 @mcp.tool()
-async def get_scheduled_message(message_id: str = Field(..., description="The unique identifier of the scheduled message to retrieve.")) -> dict[str, Any]:
+async def get_scheduled_message(message_id: str = Field(..., description="The unique identifier of the scheduled message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a single scheduled message by its ID, including its content, schedule, and delivery status."""
 
     # Construct request model with validation
@@ -2306,7 +2440,7 @@ async def get_scheduled_message(message_id: str = Field(..., description="The un
 
 # Tags: Scheduled Messages
 @mcp.tool()
-async def delete_scheduled_message(message_id: str = Field(..., description="The unique identifier of the scheduled message to delete.")) -> dict[str, Any]:
+async def delete_scheduled_message(message_id: str = Field(..., description="The unique identifier of the scheduled message to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a scheduled message by its ID, preventing it from being sent at its scheduled time."""
 
     # Construct request model with validation
@@ -2342,7 +2476,7 @@ async def delete_scheduled_message(message_id: str = Field(..., description="The
 
 # Tags: Suppressions
 @mcp.tool()
-async def list_blocklist_recipients() -> dict[str, Any]:
+async def list_blocklist_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve all recipients currently on the blocklist suppression list. This list contains email addresses that have been suppressed from receiving communications."""
 
     # Extract parameters for API call
@@ -2372,7 +2506,7 @@ async def list_blocklist_recipients() -> dict[str, Any]:
 async def add_blocklist_recipients(
     domain_id: str = Field(..., description="The unique identifier for the domain to which blocklist recipients will be added."),
     recipients: list[str] = Field(..., description="An array of email recipient addresses to add to the blocklist. Each item should be a valid email address string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more email recipients to the blocklist suppression list for a specific domain. Blocklisted recipients will not receive emails sent through this domain."""
 
     # Construct request model with validation
@@ -2410,7 +2544,7 @@ async def add_blocklist_recipients(
 
 # Tags: Suppressions
 @mcp.tool()
-async def delete_blocklist_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the blocklist. Omit or set to false to delete only specified recipients.")) -> dict[str, Any]:
+async def delete_blocklist_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the blocklist. Omit or set to false to delete only specified recipients.")) -> dict[str, Any] | ToolResult:
     """Remove recipients from the blocklist suppression list. Use the all parameter to delete all blocklisted recipients at once, or omit it to delete specific recipients via request body."""
 
     # Construct request model with validation
@@ -2448,7 +2582,7 @@ async def delete_blocklist_recipients(all_: bool | None = Field(None, alias="all
 
 # Tags: Suppressions
 @mcp.tool()
-async def list_hard_bounces_recipients() -> dict[str, Any]:
+async def list_hard_bounces_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve all recipients from the hard bounces suppression list. This list contains email addresses that have permanently failed delivery and should not receive future messages."""
 
     # Extract parameters for API call
@@ -2478,7 +2612,7 @@ async def list_hard_bounces_recipients() -> dict[str, Any]:
 async def add_recipients_to_hard_bounces_suppression(
     domain_id: str = Field(..., description="The unique identifier of the domain to which the hard bounce suppression list applies."),
     recipients: list[str] = Field(..., description="An array of email recipient addresses to add to the hard bounces suppression list. Each item should be a valid email address string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more email recipients to the hard bounces suppression list for a specific domain. Hard-bounced addresses will be suppressed from future email sends to prevent delivery failures."""
 
     # Construct request model with validation
@@ -2516,7 +2650,7 @@ async def add_recipients_to_hard_bounces_suppression(
 
 # Tags: Suppressions
 @mcp.tool()
-async def delete_hard_bounces_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the hard bounces suppression list. Omit this parameter to remove specific recipients instead.")) -> dict[str, Any]:
+async def delete_hard_bounces_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the hard bounces suppression list. Omit this parameter to remove specific recipients instead.")) -> dict[str, Any] | ToolResult:
     """Remove recipients from the hard bounces suppression list. Set the all parameter to true to clear all hard bounced addresses, or omit it to remove specific recipients."""
 
     # Construct request model with validation
@@ -2554,7 +2688,7 @@ async def delete_hard_bounces_recipients(all_: bool | None = Field(None, alias="
 
 # Tags: Suppressions
 @mcp.tool()
-async def list_spam_complaint_recipients() -> dict[str, Any]:
+async def list_spam_complaint_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve all email addresses that have been added to the spam complaints suppression list, preventing future sends to these recipients."""
 
     # Extract parameters for API call
@@ -2584,7 +2718,7 @@ async def list_spam_complaint_recipients() -> dict[str, Any]:
 async def add_spam_complaints_recipients(
     domain_id: str = Field(..., description="The unique identifier of the domain to which spam complaint suppressions will be applied."),
     recipients: list[str] = Field(..., description="A list of email addresses to add to the spam complaints suppression list. Each item should be a valid email address string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more email recipients to the spam complaints suppression list for a specific domain. Suppressed recipients will not receive emails sent through this domain."""
 
     # Construct request model with validation
@@ -2622,7 +2756,7 @@ async def add_spam_complaints_recipients(
 
 # Tags: Suppressions
 @mcp.tool()
-async def delete_spam_complaints_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the spam complaints suppression list. Omit or set to false to delete only specified recipients.")) -> dict[str, Any]:
+async def delete_spam_complaints_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the spam complaints suppression list. Omit or set to false to delete only specified recipients.")) -> dict[str, Any] | ToolResult:
     """Remove recipients from the spam complaints suppression list. Use the 'all' parameter to delete all recipients at once, or omit it to delete specific recipients via request body."""
 
     # Construct request model with validation
@@ -2660,7 +2794,7 @@ async def delete_spam_complaints_recipients(all_: bool | None = Field(None, alia
 
 # Tags: Suppressions
 @mcp.tool()
-async def list_unsubscribed_recipients() -> dict[str, Any]:
+async def list_unsubscribed_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve all recipients from the unsubscribes suppression list. This list contains email addresses that have opted out of communications and should not receive messages."""
 
     # Extract parameters for API call
@@ -2690,7 +2824,7 @@ async def list_unsubscribed_recipients() -> dict[str, Any]:
 async def add_unsubscribe_recipients(
     domain_id: str = Field(..., description="The unique identifier for the domain to which the unsubscribe recipients will be added."),
     recipients: list[str] = Field(..., description="A list of email recipients to add to the unsubscribes suppression list. Each item should be a valid email address."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more email recipients to the unsubscribes suppression list for a specific domain, preventing them from receiving future messages."""
 
     # Construct request model with validation
@@ -2728,7 +2862,7 @@ async def add_unsubscribe_recipients(
 
 # Tags: Suppressions
 @mcp.tool()
-async def delete_unsubscribed_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the unsubscribes suppression list. Omit or set to false to perform targeted removals.")) -> dict[str, Any]:
+async def delete_unsubscribed_recipients(all_: bool | None = Field(None, alias="all", description="When set to true, removes all recipients from the unsubscribes suppression list. Omit or set to false to perform targeted removals.")) -> dict[str, Any] | ToolResult:
     """Remove recipients from the unsubscribes suppression list. Set the all parameter to true to clear all unsubscribed recipients at once."""
 
     # Construct request model with validation
@@ -2766,7 +2900,7 @@ async def delete_unsubscribed_recipients(all_: bool | None = Field(None, alias="
 
 # Tags: Recipients
 @mcp.tool()
-async def list_recipients() -> dict[str, Any]:
+async def list_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all recipients available in the system. Use this to view recipient configurations and details for message delivery or communication purposes."""
 
     # Extract parameters for API call
@@ -2793,7 +2927,7 @@ async def list_recipients() -> dict[str, Any]:
 
 # Tags: Recipients
 @mcp.tool()
-async def get_recipient(recipient_id: str = Field(..., description="The unique identifier of the recipient to retrieve.")) -> dict[str, Any]:
+async def get_recipient(recipient_id: str = Field(..., description="The unique identifier of the recipient to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific recipient by their unique identifier."""
 
     # Construct request model with validation
@@ -2829,7 +2963,7 @@ async def get_recipient(recipient_id: str = Field(..., description="The unique i
 
 # Tags: Recipients
 @mcp.tool()
-async def delete_recipient(recipient_id: str = Field(..., description="The unique identifier of the recipient to delete.")) -> dict[str, Any]:
+async def delete_recipient(recipient_id: str = Field(..., description="The unique identifier of the recipient to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a recipient from the system. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2865,7 +2999,7 @@ async def delete_recipient(recipient_id: str = Field(..., description="The uniqu
 
 # Tags: Templates
 @mcp.tool()
-async def list_templates() -> dict[str, Any]:
+async def list_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available templates. Use this to discover template options for your workflows or integrations."""
 
     # Extract parameters for API call
@@ -2892,7 +3026,7 @@ async def list_templates() -> dict[str, Any]:
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve webhooks.")) -> dict[str, Any]:
+async def list_webhooks(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve webhooks.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured for a specific domain. Returns a list of webhook configurations including their endpoints, event subscriptions, and status."""
 
     # Construct request model with validation
@@ -2930,7 +3064,7 @@ async def list_webhooks(domain_id: str = Field(..., description="The unique iden
 
 # Tags: Webhooks
 @mcp.tool()
-async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific webhook by its ID. Returns the webhook configuration including its URL, events, and status."""
 
     # Construct request model with validation
@@ -2966,7 +3100,7 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
 
 # Tags: Webhooks
 @mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any]:
+async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a webhook by its ID. This action cannot be undone and will stop all event notifications to the webhook's configured endpoint."""
 
     # Construct request model with validation
@@ -3002,7 +3136,7 @@ async def delete_webhook(webhook_id: str = Field(..., description="The unique id
 
 # Tags: Email Verification
 @mcp.tool()
-async def verify_email(email: str = Field(..., description="The email address to verify. Must be a valid email format (e.g., user@domain.com).")) -> dict[str, Any]:
+async def verify_email(email: str = Field(..., description="The email address to verify. Must be a valid email format (e.g., user@domain.com).")) -> dict[str, Any] | ToolResult:
     """Verify the validity and deliverability of an email address. This operation checks whether the provided email address is properly formatted and active."""
 
     # Construct request model with validation
@@ -3040,7 +3174,7 @@ async def verify_email(email: str = Field(..., description="The email address to
 
 # Tags: Email Verification
 @mcp.tool()
-async def list_email_verification_lists() -> dict[str, Any]:
+async def list_email_verification_lists() -> dict[str, Any] | ToolResult:
     """Retrieve all email verification lists available in the system. Use this to view existing verification lists and their configurations."""
 
     # Extract parameters for API call
@@ -3070,7 +3204,7 @@ async def list_email_verification_lists() -> dict[str, Any]:
 async def create_email_verification_list(
     name: str = Field(..., description="A descriptive name for the email verification list (e.g., 'List'). Used to identify and organize verification batches."),
     emails: list[str] = Field(..., description="An array of email addresses to include in the verification list. Each item should be a valid email address string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new email verification list with a name and set of email addresses to verify. This list can be used to batch-process email validation across multiple addresses."""
 
     # Construct request model with validation
@@ -3108,7 +3242,7 @@ async def create_email_verification_list(
 
 # Tags: Email Verification
 @mcp.tool()
-async def get_email_verification_list(email_verification_id: str = Field(..., description="The unique identifier of the email verification list to retrieve.")) -> dict[str, Any]:
+async def get_email_verification_list(email_verification_id: str = Field(..., description="The unique identifier of the email verification list to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single email verification list by its unique identifier. Use this to fetch details about a specific email verification list for review or further processing."""
 
     # Construct request model with validation
@@ -3144,7 +3278,7 @@ async def get_email_verification_list(email_verification_id: str = Field(..., de
 
 # Tags: Email Verification
 @mcp.tool()
-async def verify_email_verification_list(email_verification_id: str = Field(..., description="The unique identifier of the email verification list to verify. This ID references a specific list that will be processed and validated.")) -> dict[str, Any]:
+async def verify_email_verification_list(email_verification_id: str = Field(..., description="The unique identifier of the email verification list to verify. This ID references a specific list that will be processed and validated.")) -> dict[str, Any] | ToolResult:
     """Verify an email verification list by its ID. This operation processes and validates the email addresses in the specified verification list."""
 
     # Construct request model with validation
@@ -3180,7 +3314,7 @@ async def verify_email_verification_list(email_verification_id: str = Field(...,
 
 # Tags: Email Verification
 @mcp.tool()
-async def list_email_verification_results(email_verification_id: str = Field(..., description="The unique identifier of the email verification list for which to retrieve results.")) -> dict[str, Any]:
+async def list_email_verification_results(email_verification_id: str = Field(..., description="The unique identifier of the email verification list for which to retrieve results.")) -> dict[str, Any] | ToolResult:
     """Retrieve the verification results for a completed email verification list. Returns detailed status and outcome information for each email address that was processed."""
 
     # Construct request model with validation
@@ -3219,7 +3353,7 @@ async def list_email_verification_results(email_verification_id: str = Field(...
 async def update_token_status(
     token_id: str = Field(..., description="The unique identifier of the token whose status you want to update."),
     status: Literal["pause", "active"] = Field(..., description="The desired operational status for the token. Set to 'active' to enable the token or 'pause' to temporarily disable it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the operational status of a token by pausing or activating it. Use this to control whether a token is currently active or temporarily paused."""
 
     # Construct request model with validation
@@ -3258,7 +3392,7 @@ async def update_token_status(
 
 # Tags: Tokens
 @mcp.tool()
-async def delete_token(token_id: str = Field(..., description="The unique identifier of the token to delete.")) -> dict[str, Any]:
+async def delete_token(token_id: str = Field(..., description="The unique identifier of the token to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a token by its ID. This action cannot be undone and will immediately invalidate the token for all future requests."""
 
     # Construct request model with validation
@@ -3294,7 +3428,7 @@ async def delete_token(token_id: str = Field(..., description="The unique identi
 
 # Tags: Users
 @mcp.tool()
-async def list_users() -> dict[str, Any]:
+async def list_users() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all users in the system. Returns user records with their associated metadata and details."""
 
     # Extract parameters for API call
@@ -3321,7 +3455,7 @@ async def list_users() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve.")) -> dict[str, Any]:
+async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single user by their unique identifier. Returns the user's profile information and details."""
 
     # Construct request model with validation
@@ -3360,7 +3494,7 @@ async def get_user(user_id: str = Field(..., description="The unique identifier 
 async def update_user_role(
     user_id: str = Field(..., description="The unique identifier of the user whose role should be updated."),
     role: str = Field(..., description="The new role to assign to the user. Valid roles include Admin and other predefined role types supported by the system."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the role assignment for a specific user. This operation allows you to change a user's access level or permissions by assigning them a new role (e.g., Admin)."""
 
     # Construct request model with validation
@@ -3399,7 +3533,7 @@ async def update_user_role(
 
 # Tags: Users
 @mcp.tool()
-async def delete_user(user_id: str = Field(..., description="The unique identifier of the user to delete. This must be a valid user ID that exists in the system.")) -> dict[str, Any]:
+async def delete_user(user_id: str = Field(..., description="The unique identifier of the user to delete. This must be a valid user ID that exists in the system.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account and all associated data from the system. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3440,7 +3574,7 @@ async def send_sms(
     to: list[str] = Field(..., description="Array of recipient phone numbers in E.164 format. Each number will receive the message independently."),
     text: str = Field(..., description="The message content as a string. Supports template variables (e.g., {{name}}) that will be replaced with values from the personalization array for each recipient."),
     personalization: list[_models.SendAnSmsBodyPersonalizationItem] | None = Field(None, description="Optional array of personalization objects that map template variables to recipient-specific values. Used to customize message content for each recipient based on template variables in the text parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send an SMS message to one or more recipients with optional personalization support. Supports template variables for dynamic content customization."""
 
     # Construct request model with validation
@@ -3478,7 +3612,7 @@ async def send_sms(
 
 # Tags: SMS Phone Numbers
 @mcp.tool()
-async def list_sms_phone_numbers() -> dict[str, Any]:
+async def list_sms_phone_numbers() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all SMS phone numbers available in your account. Use this to view phone numbers configured for sending and receiving SMS messages."""
 
     # Extract parameters for API call
@@ -3505,7 +3639,7 @@ async def list_sms_phone_numbers() -> dict[str, Any]:
 
 # Tags: SMS Phone Numbers
 @mcp.tool()
-async def get_sms_phone_number(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number to retrieve.")) -> dict[str, Any]:
+async def get_sms_phone_number(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific SMS phone number by its ID. Returns the phone number configuration and associated metadata."""
 
     # Construct request model with validation
@@ -3544,7 +3678,7 @@ async def get_sms_phone_number(sms_number_id: str = Field(..., description="The 
 async def update_sms_phone_number_pause_status(
     sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number to update."),
     paused: bool = Field(..., description="Set to true to pause the SMS phone number (disable message sending), or false to resume it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the pause status of an SMS phone number. Use this to temporarily disable or re-enable an SMS phone number for sending messages."""
 
     # Construct request model with validation
@@ -3583,7 +3717,7 @@ async def update_sms_phone_number_pause_status(
 
 # Tags: SMS Phone Numbers
 @mcp.tool()
-async def delete_sms_number(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number to delete.")) -> dict[str, Any]:
+async def delete_sms_number(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an SMS phone number from your account. This action cannot be undone and will remove the number from all associated configurations."""
 
     # Construct request model with validation
@@ -3619,7 +3753,7 @@ async def delete_sms_number(sms_number_id: str = Field(..., description="The uni
 
 # Tags: SMS Messages
 @mcp.tool()
-async def list_sms_messages() -> dict[str, Any]:
+async def list_sms_messages() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all SMS messages. Use this operation to fetch SMS message records from the system."""
 
     # Extract parameters for API call
@@ -3646,7 +3780,7 @@ async def list_sms_messages() -> dict[str, Any]:
 
 # Tags: SMS Messages
 @mcp.tool()
-async def get_sms_message(sms_message_id: str = Field(..., description="The unique identifier of the SMS message to retrieve.")) -> dict[str, Any]:
+async def get_sms_message(sms_message_id: str = Field(..., description="The unique identifier of the SMS message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific SMS message by its unique identifier. Returns the full message details including content, sender, recipient, timestamp, and delivery status."""
 
     # Construct request model with validation
@@ -3682,7 +3816,7 @@ async def get_sms_message(sms_message_id: str = Field(..., description="The uniq
 
 # Tags: SMS Activity
 @mcp.tool()
-async def list_sms_activities() -> dict[str, Any]:
+async def list_sms_activities() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all SMS activities. Use this to view the history and status of SMS messages sent through the system."""
 
     # Extract parameters for API call
@@ -3709,7 +3843,7 @@ async def list_sms_activities() -> dict[str, Any]:
 
 # Tags: SMS Activity
 @mcp.tool()
-async def get_sms_message_activity(sms_message_id: str = Field(..., description="The unique identifier of the SMS message whose activity you want to retrieve.")) -> dict[str, Any]:
+async def get_sms_message_activity(sms_message_id: str = Field(..., description="The unique identifier of the SMS message whose activity you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the activity history and delivery status for a specific SMS message. This includes details about message processing, delivery attempts, and any related events."""
 
     # Construct request model with validation
@@ -3745,7 +3879,7 @@ async def get_sms_message_activity(sms_message_id: str = Field(..., description=
 
 # Tags: SMS Recipients
 @mcp.tool()
-async def list_sms_recipients() -> dict[str, Any]:
+async def list_sms_recipients() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all SMS recipients configured in the system. Use this to view and manage contacts eligible for SMS communications."""
 
     # Extract parameters for API call
@@ -3772,7 +3906,7 @@ async def list_sms_recipients() -> dict[str, Any]:
 
 # Tags: SMS Recipients
 @mcp.tool()
-async def get_sms_recipient(sms_recipient_id: str = Field(..., description="The unique identifier of the SMS recipient to retrieve.")) -> dict[str, Any]:
+async def get_sms_recipient(sms_recipient_id: str = Field(..., description="The unique identifier of the SMS recipient to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific SMS recipient by their unique identifier."""
 
     # Construct request model with validation
@@ -3811,7 +3945,7 @@ async def get_sms_recipient(sms_recipient_id: str = Field(..., description="The 
 async def update_sms_recipient_status(
     sms_recipient_id: str = Field(..., description="The unique identifier of the SMS recipient whose status you want to update."),
     status: Literal["opt_out", "active"] = Field(..., description="The new subscription status for the recipient. Set to 'active' to enable SMS communications or 'opt_out' to disable them."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the subscription status of an SMS recipient. Use this to activate a recipient or mark them as opted out from SMS communications."""
 
     # Construct request model with validation
@@ -3850,7 +3984,7 @@ async def update_sms_recipient_status(
 
 # Tags: SMS Webhooks
 @mcp.tool()
-async def list_sms_webhooks(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number for which you want to retrieve configured webhooks.")) -> dict[str, Any]:
+async def list_sms_webhooks(sms_number_id: str = Field(..., description="The unique identifier of the SMS phone number for which you want to retrieve configured webhooks.")) -> dict[str, Any] | ToolResult:
     """Retrieve all SMS webhooks configured for a specific SMS phone number. This allows you to view all webhook endpoints that are currently set up to receive SMS events for the given number."""
 
     # Construct request model with validation
@@ -3888,7 +4022,7 @@ async def list_sms_webhooks(sms_number_id: str = Field(..., description="The uni
 
 # Tags: SMS Webhooks
 @mcp.tool()
-async def get_sms_webhook(sms_webhook_id: str = Field(..., description="The unique identifier of the SMS webhook to retrieve.")) -> dict[str, Any]:
+async def get_sms_webhook(sms_webhook_id: str = Field(..., description="The unique identifier of the SMS webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration and details of a specific SMS webhook by its ID. Use this to inspect webhook settings, URL, event subscriptions, and other metadata."""
 
     # Construct request model with validation
@@ -3927,7 +4061,7 @@ async def get_sms_webhook(sms_webhook_id: str = Field(..., description="The uniq
 async def update_sms_webhook(
     sms_webhook_id: str = Field(..., description="The unique identifier of the SMS webhook to update."),
     enabled: bool = Field(..., description="Whether the SMS webhook should be active and receive events. Set to true to enable or false to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of an SMS webhook by enabling or disabling it. This allows you to control whether the webhook is active without deleting it."""
 
     # Construct request model with validation
@@ -3969,7 +4103,7 @@ async def update_sms_webhook(
 async def delete_sms_webhook(
     sms_webhook_id: str = Field(..., description="The unique identifier of the SMS webhook to delete."),
     enabled: bool = Field(..., description="A boolean flag indicating the desired state. Set to false to proceed with deletion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an SMS webhook by its ID. Once deleted, the webhook will no longer receive SMS events."""
 
     # Construct request model with validation
@@ -4008,7 +4142,7 @@ async def delete_sms_webhook(
 
 # Tags: SMS Inbound Routing
 @mcp.tool()
-async def list_sms_inbound_routes() -> dict[str, Any]:
+async def list_sms_inbound_routes() -> dict[str, Any] | ToolResult:
     """Retrieve all configured SMS inbound routes for your account. This returns the complete list of routes that handle incoming SMS messages."""
 
     # Extract parameters for API call
@@ -4035,7 +4169,7 @@ async def list_sms_inbound_routes() -> dict[str, Any]:
 
 # Tags: SMS Inbound Routing
 @mcp.tool()
-async def get_sms_inbound_route(sms_inbound_id: str = Field(..., description="The unique identifier of the SMS inbound route to retrieve.")) -> dict[str, Any]:
+async def get_sms_inbound_route(sms_inbound_id: str = Field(..., description="The unique identifier of the SMS inbound route to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration and details of a specific SMS inbound route by its unique identifier."""
 
     # Construct request model with validation
@@ -4077,7 +4211,7 @@ async def update_sms_inbound_route(
     name: str = Field(..., description="A descriptive name for this inbound route (e.g., 'Inbound')."),
     forward_url: str = Field(..., description="The webhook URL where incoming SMS messages will be forwarded. Must be a valid URI (e.g., https://yourapp.com/hook)."),
     enabled: bool = Field(..., description="Whether this inbound route is active and should process incoming messages."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing inbound SMS route configuration, including the associated phone number, display name, webhook destination, and activation status."""
 
     # Construct request model with validation
@@ -4116,7 +4250,7 @@ async def update_sms_inbound_route(
 
 # Tags: SMS Inbound Routing
 @mcp.tool()
-async def delete_sms_inbound_route(sms_inbound_id: str = Field(..., description="The unique identifier of the SMS inbound route to delete.")) -> dict[str, Any]:
+async def delete_sms_inbound_route(sms_inbound_id: str = Field(..., description="The unique identifier of the SMS inbound route to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an SMS inbound route by its ID. This action cannot be undone and will stop processing inbound SMS messages for this route."""
 
     # Construct request model with validation
@@ -4152,7 +4286,7 @@ async def delete_sms_inbound_route(sms_inbound_id: str = Field(..., description=
 
 # Tags: SMTP Users
 @mcp.tool()
-async def list_smtp_users(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve SMTP users.")) -> dict[str, Any]:
+async def list_smtp_users(domain_id: str = Field(..., description="The unique identifier of the domain for which to retrieve SMTP users.")) -> dict[str, Any] | ToolResult:
     """Retrieve all SMTP users configured for a specific domain. Returns a list of SMTP user accounts associated with the domain."""
 
     # Construct request model with validation
@@ -4191,7 +4325,7 @@ async def list_smtp_users(domain_id: str = Field(..., description="The unique id
 async def get_smtp_user(
     domain_id: str = Field(..., description="The unique identifier of the domain that contains the SMTP user."),
     smtp_user_id: str = Field(..., description="The unique identifier of the SMTP user to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific SMTP user within a domain. Use this to fetch configuration, credentials, and status for a single SMTP user account."""
 
     # Construct request model with validation
@@ -4232,7 +4366,7 @@ async def update_smtp_user(
     smtp_user_id: str = Field(..., description="The unique identifier of the SMTP user to be updated."),
     name: str = Field(..., description="The display name for the SMTP user (e.g., 'New Name')."),
     enabled: bool = Field(..., description="Whether the SMTP user account is active and can be used for authentication."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an SMTP user's configuration within a domain, including their display name and enabled status."""
 
     # Construct request model with validation
@@ -4274,7 +4408,7 @@ async def update_smtp_user(
 async def delete_smtp_user(
     domain_id: str = Field(..., description="The unique identifier of the domain that contains the SMTP user to be deleted."),
     smtp_user_id: str = Field(..., description="The unique identifier of the SMTP user to be deleted from the domain."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an SMTP user from a domain. This action cannot be undone and will immediately revoke the user's ability to send emails through this domain."""
 
     # Construct request model with validation
