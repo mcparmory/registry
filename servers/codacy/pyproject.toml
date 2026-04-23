@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcparmory-codacy"
 version = "1.0.0"
-description = "MCP server for Codacy"
+description = "Analyze code quality, security issues, and coverage across repositories"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
