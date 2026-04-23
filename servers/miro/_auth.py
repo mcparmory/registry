@@ -1,7 +1,7 @@
 """
 Authentication module for Miro MCP server.
 
-Generated: 2026-04-14 18:26:04 UTC
+Generated: 2026-04-23 21:28:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -74,10 +74,9 @@ class OAuth2Auth:
     Available Scopes (configure via OAUTH2_SCOPES):
         - boards:read
         - boards:write
-        - identity:read
-        - identity:write
-        - team:read
-        - team:write
+        - microphone:listen
+        - screen:record
+        - webcam:record
         - organizations:read
         - organizations:teams:read
         - organizations:teams:write

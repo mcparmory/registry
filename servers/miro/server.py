@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Miro MCP Server
-Generated: 2026-04-14 18:26:04 UTC
+Generated: 2026-04-23 21:28:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.miro.com")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -846,16 +964,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -869,6 +988,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -911,6 +1031,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -922,7 +1057,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1063,7 +1197,7 @@ mcp = FastMCP("Miro", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: tokens
 @mcp.tool()
-async def get_access_token_info() -> dict[str, Any]:
+async def get_access_token_info() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the current access token, including its type, assigned scopes, associated team and user, creation timestamp, and the user who created it."""
 
     # Extract parameters for API call
@@ -1095,7 +1229,7 @@ async def list_audit_logs(
     created_before: str = Field(..., alias="createdBefore", description="End of the date range for audit log retrieval in UTC ISO 8601 format with milliseconds (e.g., 2023-04-30T17:26:50.000Z). Audit logs created before this timestamp will be included."),
     limit: int | None = Field(None, description="Maximum number of audit log entries to return per request. Defaults to 100. Use pagination with the cursor from the response to retrieve additional results beyond this limit."),
     sorting: Literal["ASC", "DESC"] | None = Field(None, description="Sort order for results based on audit log creation date. Choose ASC for oldest-first or DESC for newest-first ordering. Defaults to ASC."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve audit events from your enterprise within a specified date range (limited to the last 90 days). Use pagination and sorting to navigate large result sets efficiently."""
 
     # Construct request model with validation
@@ -1138,7 +1272,7 @@ async def update_team_boards_classification_bulk(
     team_id: str = Field(..., description="The unique identifier of the team whose boards will be updated. This is a numeric ID that identifies the specific team within the organization."),
     label_id: str | None = Field(None, alias="labelId", description="The numeric ID of the data classification label to assign to the boards. This label must be valid for the organization."),
     not_classified_only: bool | None = Field(None, alias="notClassifiedOnly", description="When true, applies the classification label only to boards that are not yet classified. When false or omitted, applies the label to all boards in the team regardless of current classification status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk update data classification labels for boards within a team. Optionally target only unclassified boards or apply the classification to all boards in the team."""
 
     _label_id = _parse_int(label_id)
@@ -1183,7 +1317,7 @@ async def get_board_data_classification(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the board. Use the organization ID provided in your Enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization that contains the board."),
     board_id: str = Field(..., description="The unique identifier of the board whose data classification you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the data classification level assigned to a specific board within an organization and team. This enterprise-only endpoint requires Company Admin role and the boards:read scope."""
 
     # Construct request model with validation
@@ -1223,7 +1357,7 @@ async def create_markdown_doc(
     board_id: str = Field(..., description="The unique identifier of the board where the markdown document will be created."),
     content_type: Literal["markdown"] = Field(..., alias="contentType", description="The format type for the document content. Must be set to 'markdown' to specify markdown formatting."),
     content: str = Field(..., description="The markdown-formatted text content for the document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new markdown document item on a board. The document is formatted as markdown text and will be added to the specified board."""
 
     # Construct request model with validation
@@ -1266,7 +1400,7 @@ async def get_doc_format_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the doc format item to retrieve."),
     text_content_type: Literal["html", "markdown"] | None = Field(None, alias="textContentType", description="Specifies the format for the returned doc's content as either HTML or Markdown. If not specified, the default format is used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific doc format item from a board. Returns the item's metadata and content, with optional control over the content format."""
 
     # Construct request model with validation
@@ -1308,7 +1442,7 @@ async def get_doc_format_item(
 async def delete_doc_format_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the doc format item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a doc format item from a board. This action cannot be undone and requires write access to the board."""
 
     # Construct request model with validation
@@ -1347,7 +1481,7 @@ async def delete_doc_format_item(
 async def list_cases(
     org_id: str = Field(..., description="The numeric ID of the organization containing the cases to retrieve.", pattern="^[0-9]+$"),
     limit: str | None = Field(None, description="Maximum number of cases to return in the response, between 1 and 100 items (defaults to 100)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all eDiscovery cases in an organization. Requires Enterprise Guard add-on and eDiscovery Admin role."""
 
     _limit = _parse_int(limit)
@@ -1392,7 +1526,7 @@ async def create_case(
     org_id: str = Field(..., description="The numeric ID of the organization where the case will be created.", pattern="^[0-9]+$"),
     name: str = Field(..., description="A descriptive name for the case that identifies the legal matter or investigation."),
     description: str | None = Field(None, description="Optional additional details or context about the case to help organize and document the legal hold."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new legal hold case in your organization to initiate the eDiscovery process. Cases serve as containers for grouping multiple legal holds together during litigation or investigations. Requires Enterprise Guard add-on and eDiscovery Admin role."""
 
     # Construct request model with validation
@@ -1434,7 +1568,7 @@ async def create_case(
 async def get_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case to retrieve. Must be a numeric string.", pattern="^[0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific case within an organization. This operation requires Enterprise Guard add-on and appropriate admin roles (Company Admin and eDiscovery Admin)."""
 
     # Construct request model with validation
@@ -1475,7 +1609,7 @@ async def update_case(
     case_id: str = Field(..., description="The numeric ID of the case to be edited.", pattern="^[0-9]+$"),
     name: str = Field(..., description="The updated name for the case. This field is required and helps maintain clarity and consistency across stakeholders."),
     description: str | None = Field(None, description="An optional description providing additional context or details about the case, such as scope, focus, or internal documentation standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update case details such as name and description to keep case information accurate and aligned with the evolving scope of a legal matter. This operation is restricted to eDiscovery Admins and requires the Enterprise Guard add-on."""
 
     # Construct request model with validation
@@ -1517,7 +1651,7 @@ async def update_case(
 async def close_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case to close.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case to close and delete.", pattern="^[0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently close and delete a case, marking the conclusion of a legal matter or investigation. All associated legal holds must be closed before closing the case. Requires Enterprise Guard add-on with Company Admin and eDiscovery Admin roles."""
 
     # Construct request model with validation
@@ -1557,7 +1691,7 @@ async def list_legal_holds_in_case(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case for which to retrieve legal holds. Must be a numeric string.", pattern="^[0-9]+$"),
     limit: str | None = Field(None, description="The maximum number of legal holds to return in the response. Accepts values between 1 and 100, with a default of 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all legal holds associated with a specific case within an organization. This operation is restricted to Enterprise Guard users with Company Admin and eDiscovery Admin roles."""
 
     _limit = _parse_int(limit)
@@ -1604,7 +1738,7 @@ async def create_legal_hold_for_case(
     name: str = Field(..., description="A descriptive name for the legal hold to identify its purpose or scope."),
     scope: _models.LegalHoldRequestScopeUsers = Field(..., description="The scope criteria for the legal hold, currently supporting only the 'users' variant. Specify a list of up to 200 users to place under hold; this list must include all users for new holds or updates, as it replaces any previous user list."),
     description: str | None = Field(None, description="An optional detailed description providing additional context or information about the legal hold."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new legal hold within a case to preserve content owned, co-owned, created, edited, or accessed by specified users. Legal holds may take up to 24 hours to process."""
 
     # Construct request model with validation
@@ -1647,7 +1781,7 @@ async def list_legal_hold_export_jobs(
     org_id: str = Field(..., description="The numeric ID of the organization containing the case. Must be a valid organization ID in numeric format.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the legal hold case for which to retrieve export jobs. Must be a valid case ID in numeric format.", pattern="^[0-9]+$"),
     limit: str | None = Field(None, description="The maximum number of export jobs to return in the response. Accepts values between 1 and 100, with a default of 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all board export jobs for a specific legal hold case. This operation is available only to Enterprise Guard users with both Company Admin and eDiscovery Admin roles."""
 
     _limit = _parse_int(limit)
@@ -1692,7 +1826,7 @@ async def get_legal_hold(
     org_id: str = Field(..., description="The numeric ID of the organization containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold. Must be a numeric string.", pattern="^[0-9]+$"),
     legal_hold_id: str = Field(..., description="The numeric ID of the legal hold to retrieve. Must be a numeric string.", pattern="^[0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific legal hold within a case. This operation requires Enterprise Guard add-on and appropriate admin roles (Company Admin and eDiscovery Admin)."""
 
     # Construct request model with validation
@@ -1735,7 +1869,7 @@ async def update_legal_hold(
     name: str = Field(..., description="The name assigned to the legal hold. Used to identify the hold within the case."),
     scope: _models.LegalHoldRequestScopeUsers = Field(..., description="The scope criteria determining which content items are preserved under this hold. Currently supports the `users` variant to place specific users under hold. Provide a complete list of all users to be preserved (up to 200 users per hold), including both newly added and previously held users. The system will ignore any unexpected scope variants for forward compatibility."),
     description: str | None = Field(None, description="Optional description providing additional context or details about the legal hold and its scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing legal hold to adjust preservation scope as case requirements evolve. Modify the hold's name, description, and add or remove users and boards to ensure accurate data preservation throughout the legal process."""
 
     # Construct request model with validation
@@ -1778,7 +1912,7 @@ async def close_legal_hold(
     org_id: str = Field(..., description="The numeric ID of the organization containing the legal hold to close.", pattern="^[0-9]+$"),
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold to close.", pattern="^[0-9]+$"),
     legal_hold_id: str = Field(..., description="The numeric ID of the legal hold to close and permanently delete.", pattern="^[0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Close and permanently delete a legal hold in a case, releasing preserved Miro boards and custodians back to normal operations. Note: content release may take up to 24 hours to complete."""
 
     # Construct request model with validation
@@ -1819,7 +1953,7 @@ async def list_legal_hold_content_items(
     case_id: str = Field(..., description="The numeric ID of the case containing the legal hold.", pattern="^[0-9]+$"),
     legal_hold_id: str = Field(..., description="The numeric ID of the legal hold for which to retrieve preserved content items.", pattern="^[0-9]+$"),
     limit: str | None = Field(None, description="Maximum number of content items to return in a single response, between 1 and 100 items. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all content items (Miro boards) currently under a specific legal hold within a case. Verify the legal hold is in 'ACTIVE' state to ensure all preserved content has finished processing."""
 
     _limit = _parse_int(limit)
@@ -1865,7 +1999,7 @@ async def list_board_export_jobs(
     status: list[str] | None = Field(None, description="Filter results by job status. Accepts multiple statuses such as JOB_STATUS_CREATED, JOB_STATUS_IN_PROGRESS, JOB_STATUS_CANCELLED, or JOB_STATUS_FINISHED. If not specified, all statuses are returned."),
     creator_id: list[int] | None = Field(None, alias="creatorId", description="Filter results by the user ID of the job creator. Accepts multiple creator IDs to retrieve jobs created by specific users."),
     limit: str | None = Field(None, description="Maximum number of results to return per request, between 1 and 500. Defaults to 50. If the total results exceed this limit, a cursor is provided for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of board export jobs for an organization, filtered by status, creator, and pagination limits. Enterprise-only endpoint requiring Company Admin role with eDiscovery enabled."""
 
     _limit = _parse_int(limit)
@@ -1911,7 +2045,7 @@ async def create_board_export_job(
     request_id: str = Field(..., description="A unique identifier (UUID format) for this export job request, used to track and reference the job."),
     board_ids: list[str] | None = Field(None, alias="boardIds", description="List of board IDs to include in the export. Accepts 1 to 50 board IDs. If omitted, the behavior depends on your organization's default settings.", min_length=1, max_length=50),
     board_format: Literal["SVG", "HTML", "PDF"] | None = Field(None, alias="boardFormat", description="The output file format for the exported boards. Choose from SVG (default), HTML, or PDF. Defaults to SVG if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous export job for one or more boards in a specified format (SVG, HTML, or PDF). This enterprise-only operation requires Company Admin role and eDiscovery enablement."""
 
     # Construct request model with validation
@@ -1956,7 +2090,7 @@ async def create_board_export_job(
 async def get_board_export_job_status(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job."),
     job_id: str = Field(..., description="The unique identifier of the board export job, formatted as a UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a board export job, including completion progress and results. Available only for Enterprise plan users with Company Admin role and eDiscovery enabled."""
 
     # Construct request model with validation
@@ -1995,7 +2129,7 @@ async def get_board_export_job_status(
 async def get_board_export_job_results(
     org_id: str = Field(..., description="The unique identifier of the organization. This is a numeric string that identifies which organization's board export job to retrieve results for."),
     job_id: str = Field(..., description="The unique identifier of the export job. This is a UUID that identifies the specific board export job whose results you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the results of a completed board export job, including the S3 link to the exported files. This operation is available only for Enterprise plan users with Company Admin role and eDiscovery enabled."""
 
     # Construct request model with validation
@@ -2035,7 +2169,7 @@ async def cancel_board_export_job(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job. This is a numeric string identifier."),
     job_id: str = Field(..., description="The unique identifier of the board export job to cancel. This must be a valid UUID format."),
     status: Literal["CANCELLED"] = Field(..., description="The target status for the export job. Only CANCELLED is supported, which stops the ongoing export operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an ongoing board export job. This operation allows you to stop a board export job that is currently in progress by updating its status to CANCELLED."""
 
     # Construct request model with validation
@@ -2079,7 +2213,7 @@ async def list_board_export_job_tasks(
     job_id: str = Field(..., description="The unique identifier of the board export job (UUID format)."),
     status: list[str] | None = Field(None, description="Filter tasks by one or more statuses (e.g., TASK_STATUS_CREATED, TASK_STATUS_SCHEDULED, TASK_STATUS_SUCCESS, TASK_STATUS_ERROR, TASK_STATUS_CANCELLED). Omit to return tasks of all statuses."),
     limit: str | None = Field(None, description="Maximum number of tasks to return per request, between 1 and 500. Defaults to 50. Use pagination with the cursor parameter if more results are available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of tasks associated with a board export job. Use this to monitor the progress and status of individual export tasks within a job."""
 
     _limit = _parse_int(limit)
@@ -2124,7 +2258,7 @@ async def create_board_export_task_download_link(
     org_id: str = Field(..., description="The unique identifier of the organization that owns the export job. This is a numeric ID specific to your enterprise account."),
     job_id: str = Field(..., description="The unique identifier of the board export job. This must be a valid UUID that corresponds to an existing export job."),
     task_id: str = Field(..., description="The unique identifier of the specific task within the export job for which you want to create a download link. This must be a valid UUID that corresponds to an existing task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a downloadable link for the results of a specific board export task within an enterprise export job. This endpoint is available only to Enterprise plan users with Company Admin role and eDiscovery enabled."""
 
     # Construct request model with validation
@@ -2168,7 +2302,7 @@ async def list_board_item_content_logs(
     emails: list[str] | None = Field(None, description="Optional list of up to 15 user email addresses to filter logs by who created, modified, or deleted board items.", max_length=15),
     limit: str | None = Field(None, description="Maximum number of results to return per request, between 1 and 1000. Defaults to 1000. Use pagination with the cursor parameter if results exceed this limit."),
     sorting: Literal["asc", "desc"] | None = Field(None, description="Sort results by modification date in ascending (oldest first) or descending (newest first) order. Defaults to ascending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve content change logs for board items within your organization over a specified time period. Filter by board IDs, user emails, and modification dates to track all updates, modifications, and deletions of board item content."""
 
     _limit = _parse_int(limit)
@@ -2209,7 +2343,7 @@ async def list_board_item_content_logs(
 
 # Tags: Reset all sessions of a user
 @mcp.tool()
-async def delete_user_all_sessions(email: str = Field(..., description="The email address of the user whose sessions should be terminated. The user will be signed out from all devices and applications immediately.")) -> dict[str, Any]:
+async def delete_user_all_sessions(email: str = Field(..., description="The email address of the user whose sessions should be terminated. The user will be signed out from all devices and applications immediately.")) -> dict[str, Any] | ToolResult:
     """Immediately terminate all active sessions for a user across all devices, forcing them to sign in again. Use this to restrict access during security incidents, credential compromises, or when a user leaves the organization."""
 
     # Construct request model with validation
@@ -2253,7 +2387,7 @@ async def list_users(
     count: int | None = Field(None, description="Maximum number of results to return per page. Defaults to 100; maximum allowed is 1000. Use with startIndex for pagination."),
     sort_by: str | None = Field(None, alias="sortBy", description="Attribute name to sort results by. Examples: userName, emails.value."),
     sort_order: Literal["ascending", "descending"] | None = Field(None, alias="sortOrder", description="Sort direction for the sortBy attribute: ascending or descending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of users in your organization. Note: Only returns users who are organization members, not guest users."""
 
     # Construct request model with validation
@@ -2307,7 +2441,7 @@ async def create_user(
     division: str | None = Field(None, description="The division within the organization associated with the user, up to 120 characters."),
     department: str | None = Field(None, description="The department within the organization associated with the user, up to 120 characters."),
     value: str | None = Field(None, description="The manager's identifier as a numeric value. Non-numeric values are ignored. This field maps to Miro's internal managerId field which expects a Long type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new user in the organization and automatically adds them to the default team. The user's identity is established via email address provided in the userName field."""
 
     # Construct request model with validation
@@ -2348,7 +2482,7 @@ async def create_user(
 
 # Tags: User
 @mcp.tool()
-async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve. Must be a valid user ID for an organization member.")) -> dict[str, Any]:
+async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve. Must be a valid user ID for an organization member.")) -> dict[str, Any] | ToolResult:
     """Retrieves a single user resource by ID. Returns only users that are members of the organization; guest users are not included."""
 
     # Construct request model with validation
@@ -2403,7 +2537,7 @@ async def update_user(
     division: str | None = Field(None, description="The division within the organization to which the user belongs, up to 120 characters maximum."),
     department: str | None = Field(None, description="The department within the organization to which the user belongs, up to 120 characters maximum."),
     value: str | None = Field(None, description="The manager ID value. Must be numeric; non-numeric values are ignored by the system."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace an existing user resource with updated information. Note that deactivated users cannot have their userName, userType, or roles modified, and email updates for deactivated users are silently ignored. Only active organization members (non-guests) can be updated."""
 
     # Construct request model with validation
@@ -2449,7 +2583,7 @@ async def update_user_partial(
     id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the user being updated."),
     schemas: list[Literal["urn:ietf:params:scim:api:messages:2.0:PatchOp"]] = Field(..., description="Schema identifier array that designates this request as a SCIM PatchOp. Must include the SCIM patch operation schema."),
     operations: list[_models.PatchUserBodyOperationsItem] = Field(..., alias="Operations", description="Array of patch operations to apply to the user. Each operation specifies an action (Replace, Add, Remove), a target path, and a value. Supports operations for: activation status, display name, user type (license upgrade only), username, primary role (ORGANIZATION_INTERNAL_ADMIN or ORGANIZATION_INTERNAL_USER only), admin roles, and enterprise attributes (department, employeeNumber, costCenter, organization, division, manager). Guest roles and license downgrades are not supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a user resource by applying SCIM patch operations. Only specified fields are modified; unmodified fields remain unchanged. The user must be an active organization member (not a guest) to be updated."""
 
     # Construct request model with validation
@@ -2488,7 +2622,7 @@ async def update_user_partial(
 
 # Tags: User
 @mcp.tool()
-async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete, assigned by the server.")) -> dict[str, Any]:
+async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete, assigned by the server.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a user from the organization and transfers ownership of their boards to the oldest admin team member. The user must be an organization member (not a guest) and cannot be the last admin in their team or organization."""
 
     # Construct request model with validation
@@ -2530,7 +2664,7 @@ async def list_groups(
     count: int | None = Field(None, description="Maximum number of results to return per page. Defaults to 100 with a maximum allowed value of 1000. Use with startIndex for pagination."),
     sort_by: str | None = Field(None, alias="sortBy", description="Attribute name to sort results by. Example: displayName"),
     sort_order: Literal["ascending", "descending"] | None = Field(None, alias="sortOrder", description="Sort direction for the sortBy attribute. Must be either ascending or descending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all groups (teams) in the organization along with their member users. Only users with member role in the organization are included in the results."""
 
     # Construct request model with validation
@@ -2568,7 +2702,7 @@ async def list_groups(
 
 # Tags: Group
 @mcp.tool()
-async def get_group(id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the group (team) to retrieve.")) -> dict[str, Any]:
+async def get_group(id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the group (team) to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a single group (team) resource along with its member users. Only users with member role in the organization are included in the response."""
 
     # Construct request model with validation
@@ -2608,7 +2742,7 @@ async def update_group_members_and_details(
     id_: str = Field(..., alias="id", description="The unique server-assigned identifier for the group (team) to update."),
     schemas: Literal["urn:ietf:params:scim:api:messages:2.0:PatchOp"] = Field(..., description="Must be set to the PatchOp schema identifier to indicate this is a patch operation request."),
     operations: list[_models.PatchGroupBodyOperationsItem] = Field(..., alias="Operations", description="An array of patch operations to perform on the group. Each operation specifies an action (add, remove, or replace), a target path, and values. Multiple users can be added or removed in a single request. To update the group display name, use replace operation with the new displayName value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing group (team) by adding, removing, or replacing members, and modifying group properties like display name. Only specified attributes are updated; unchanged attributes remain as-is."""
 
     # Construct request model with validation
@@ -2647,7 +2781,7 @@ async def update_group_members_and_details(
 
 # Tags: Discovery
 @mcp.tool()
-async def list_resource_types() -> dict[str, Any]:
+async def list_resource_types() -> dict[str, Any] | ToolResult:
     """Retrieve the SCIM resource types supported by Miro, including Users and Groups. Use this to discover which resources can be managed through the SCIM API."""
 
     # Extract parameters for API call
@@ -2674,7 +2808,7 @@ async def list_resource_types() -> dict[str, Any]:
 
 # Tags: Discovery
 @mcp.tool()
-async def get_resource_type(resource: Literal["User", "Group"] = Field(..., description="The resource type to retrieve metadata for. Must be either 'User' or 'Group'.")) -> dict[str, Any]:
+async def get_resource_type(resource: Literal["User", "Group"] = Field(..., description="The resource type to retrieve metadata for. Must be either 'User' or 'Group'.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a supported resource type (User or Group). Use this to understand the structure and properties of the specified resource type."""
 
     # Construct request model with validation
@@ -2710,7 +2844,7 @@ async def get_resource_type(resource: Literal["User", "Group"] = Field(..., desc
 
 # Tags: Discovery
 @mcp.tool()
-async def list_schemas() -> dict[str, Any]:
+async def list_schemas() -> dict[str, Any] | ToolResult:
     """Retrieve metadata about supported Users, Groups, and extension attributes in the system. Use this to discover available schema definitions and their properties."""
 
     # Extract parameters for API call
@@ -2737,7 +2871,7 @@ async def list_schemas() -> dict[str, Any]:
 
 # Tags: Discovery
 @mcp.tool()
-async def get_schema(uri: Literal["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:core:2.0:Group", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"] = Field(..., description="The SCIM schema URI identifying the resource type: User, Group, or Enterprise User extension schema.")) -> dict[str, Any]:
+async def get_schema(uri: Literal["urn:ietf:params:scim:schemas:core:2.0:User", "urn:ietf:params:scim:schemas:core:2.0:Group", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"] = Field(..., description="The SCIM schema URI identifying the resource type: User, Group, or Enterprise User extension schema.")) -> dict[str, Any] | ToolResult:
     """Retrieve the SCIM schema definition for a specific resource type (User, Group, or Enterprise User), including details about supported attributes and their formatting requirements."""
 
     # Construct request model with validation
@@ -2773,7 +2907,7 @@ async def get_schema(uri: Literal["urn:ietf:params:scim:schemas:core:2.0:User", 
 
 # Tags: Organizations
 @mcp.tool()
-async def get_organization(org_id: str = Field(..., description="The unique identifier of the organization to retrieve.")) -> dict[str, Any]:
+async def get_organization(org_id: str = Field(..., description="The unique identifier of the organization to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an organization. This endpoint is available only to Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -2816,7 +2950,7 @@ async def enterprise_get_organization_members(
     license_: Literal["full", "occasional", "free", "free_restricted", "full_trial", "unknown"] | None = Field(None, alias="license", description="Filter organization members by license"),
     active: bool | None = Field(None, description="Filter results based on whether the user is active or deactivated. Learn more about <a target=\"blank\" href=\"https://help.miro.com/hc/en-us/articles/360025025894-Deactivated-users\">user deactivation</a>."),
     limit: str | None = Field(None, description="Limit for the number of organization members returned in the result list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Get organization members"""
 
     _limit = _parse_int(limit)
@@ -2860,7 +2994,7 @@ async def enterprise_get_organization_members(
 async def get_organization_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the member."),
     member_id: str = Field(..., description="The unique identifier of the organization member whose information you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific member within an organization. This operation requires Enterprise plan access and Company Admin role."""
 
     # Construct request model with validation
@@ -2903,7 +3037,7 @@ async def list_boards(
     limit: str | None = Field(None, description="Maximum number of boards to return per request. Must be between 1 and 50 boards; defaults to 20."),
     offset: str | None = Field(None, description="Zero-based offset for pagination. Use with limit to retrieve subsequent pages of results; defaults to 0."),
     sort: Literal["default", "last_modified", "last_opened", "last_created", "alphabetically"] | None = Field(None, description="Sort results by creation date, modification date, last opened date, or alphabetically by name. Defaults to last_created when filtering by team, otherwise last_opened."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of boards accessible to the authenticated user. Filter by team, project, owner, or search query, with support for pagination and sorting. Enterprise users with Content Admin permissions can access all boards including private ones (contents remain restricted)."""
 
     # Construct request model with validation
@@ -2952,7 +3086,7 @@ async def create_board(
     organization_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="organizationAccess", description="Controls organization-level access to the board. Defaults to private. Only applies if the team belongs to an organization; otherwise defaults are used."),
     team_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="teamAccess", description="Sets team-level access to the board. Defaults to edit access on free plans and private on other plans. Options include private, view-only, comment, or edit access."),
     team_id: str | None = Field(None, alias="teamId", description="The unique identifier of the team where the board will be created. If not specified, the board is created in the default team. On Enterprise plans, board owners and admins can move boards between teams via API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new board with a specified name, description, and access control policies. Configure sharing permissions, collaboration tool access, and team placement to control who can view, edit, and manage the board."""
 
     # Construct request model with validation
@@ -3004,7 +3138,7 @@ async def create_board_copy(
     organization_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="organizationAccess", description="Controls organization-level access to the board if it belongs to an organization. Options: private, view, comment, or edit. Defaults to private and is ignored for teams outside an organization."),
     team_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="teamAccess", description="Sets team-level access permissions: private (restricted), view (read-only), comment (feedback), or edit (collaborative). Defaults to edit on free plans and private on paid plans."),
     team_id: str | None = Field(None, alias="teamId", description="The unique identifier of the team where the new board should be created. If omitted, the board is placed in the default team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a duplicate of an existing board with optional customization of name, description, and access control policies. The new board can be placed in a specific team and configured with granular sharing and permission settings."""
 
     # Construct request model with validation
@@ -3047,7 +3181,7 @@ async def create_board_copy(
 
 # Tags: boards
 @mcp.tool()
-async def get_board(board_id: str = Field(..., description="The unique identifier of the board to retrieve. This is a required string that identifies which board's information should be returned.")) -> dict[str, Any]:
+async def get_board(board_id: str = Field(..., description="The unique identifier of the board to retrieve. This is a required string that identifies which board's information should be returned.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific board by its unique identifier. This operation requires boards:read scope and is rate-limited at Level 1."""
 
     # Construct request model with validation
@@ -3095,7 +3229,7 @@ async def update_board(
     organization_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="organizationAccess", description="Sets organization-level access to the board. Only applies if the board's team belongs to an organization. Defaults to private. Defaults to private if the team is not part of an organization."),
     team_access: Literal["private", "view", "comment", "edit"] | None = Field(None, alias="teamAccess", description="Sets team-level access to the board. Defaults to edit on free plans and private on other plans."),
     team_id: str | None = Field(None, alias="teamId", description="The unique identifier of the team where the board should be moved. On Enterprise plans, Board Owners, Co-Owners, and Content Admins can move boards. On non-Enterprise plans, only Board Owners can move boards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update board settings including name, description, and access control permissions. Requires boards:write scope and is subject to rate limiting at Level 2."""
 
     # Construct request model with validation
@@ -3136,7 +3270,7 @@ async def update_board(
 
 # Tags: boards
 @mcp.tool()
-async def delete_board(board_id: str = Field(..., description="The unique identifier of the board to delete. This is a required string that identifies which board will be removed.")) -> dict[str, Any]:
+async def delete_board(board_id: str = Field(..., description="The unique identifier of the board to delete. This is a required string that identifies which board will be removed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a board, moving it to Trash on paid plans where it can be restored within 90 days. On free plans, deletion may be immediate."""
 
     # Construct request model with validation
@@ -3182,7 +3316,7 @@ async def create_app_card(
     height: float | None = Field(None, description="The height of the app card in pixels."),
     rotation: float | None = Field(None, description="The rotation angle of the app card in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the app card in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new app card item to a board. App cards display custom content with optional preview fields and can be styled with colors, dimensions, and rotation."""
 
     # Construct request model with validation
@@ -3226,7 +3360,7 @@ async def create_app_card(
 async def get_app_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the app card item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific app card item to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific app card item on a board. Use this to fetch properties and content of an individual app card."""
 
     # Construct request model with validation
@@ -3273,7 +3407,7 @@ async def update_app_card_item(
     height: float | None = Field(None, description="The height of the app card in pixels. Specify as a numeric value."),
     rotation: float | None = Field(None, description="The rotation angle of the app card in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the app card in pixels. Specify as a numeric value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an app card item on a board by modifying its content, styling, and metadata. Changes are applied to the specified item and reflected immediately on the board."""
 
     # Construct request model with validation
@@ -3317,7 +3451,7 @@ async def update_app_card_item(
 async def delete_app_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the app card item to delete."),
     item_id: str = Field(..., description="The unique identifier of the app card item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an app card item from a specified board. Requires boards:write scope and is subject to Level 3 rate limiting."""
 
     # Construct request model with validation
@@ -3363,7 +3497,7 @@ async def create_card_item(
     height: float | None = Field(None, description="The height of the card in pixels."),
     rotation: float | None = Field(None, description="The rotation angle of the card in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the card in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new card item on a specified board. Cards can include a title, description, due date, assignee, and visual styling to organize tasks and activities."""
 
     # Construct request model with validation
@@ -3407,7 +3541,7 @@ async def create_card_item(
 async def get_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the card item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the card item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific card item on a board. Use this to fetch card properties, content, and metadata."""
 
     # Construct request model with validation
@@ -3454,7 +3588,7 @@ async def update_card_item(
     height: float | None = Field(None, description="The height of the card in pixels."),
     rotation: float | None = Field(None, description="The rotation angle of the card in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the card in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a card item on a board with new content, styling, and metadata. Modify the card's title, description, due date, assignee, dimensions, rotation, and theme color."""
 
     # Construct request model with validation
@@ -3498,7 +3632,7 @@ async def update_card_item(
 async def delete_card_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the card item to delete."),
     item_id: str = Field(..., description="The unique identifier of the card item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a card item from a board. This action cannot be undone and requires write access to the board."""
 
     # Construct request model with validation
@@ -3537,7 +3671,7 @@ async def delete_card_item(
 async def list_connectors_for_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve connectors."),
     limit: str | None = Field(None, description="The maximum number of connectors to return per request, between 10 and 50. Defaults to 10. If more results exist, the response includes a cursor for fetching the next page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of connectors for a specific board using cursor-based pagination. Use the cursor from the response to fetch subsequent pages of results."""
 
     # Construct request model with validation
@@ -3592,7 +3726,7 @@ async def create_connector(
     stroke_style: Literal["normal", "dotted", "dashed"] | None = Field(None, alias="strokeStyle", description="The stroke pattern of the connector line: 'normal' for solid, 'dotted' for dots, or 'dashed' for dashes. Defaults to 'normal'."),
     stroke_width: str | None = Field(None, alias="strokeWidth", description="The thickness of the connector line in density-independent pixels, ranging from 1 to 24. Defaults to 1.0."),
     text_orientation: Literal["horizontal", "aligned"] | None = Field(None, alias="textOrientation", description="The orientation of captions relative to the connector line: 'horizontal' for fixed horizontal text or 'aligned' to follow the line's curvature. Defaults to 'aligned'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a connector between two items on a board, with customizable styling, line shape, and optional text captions. Connectors can be attached to specific sides of items or automatically positioned."""
 
     # Construct request model with validation
@@ -3637,7 +3771,7 @@ async def create_connector(
 async def get_connector(
     board_id: str = Field(..., description="The unique identifier of the board containing the connector you want to retrieve."),
     connector_id: str = Field(..., description="The unique identifier of the connector whose information you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific connector on a board, including its configuration and properties."""
 
     # Construct request model with validation
@@ -3690,7 +3824,7 @@ async def update_connector(
     stroke_style: Literal["normal", "dotted", "dashed"] | None = Field(None, alias="strokeStyle", description="The line pattern style: normal (solid), dotted, or dashed."),
     stroke_width: str | None = Field(None, alias="strokeWidth", description="Line thickness in density-independent pixels, between 1 and 24."),
     text_orientation: Literal["horizontal", "aligned"] | None = Field(None, alias="textOrientation", description="Caption orientation relative to the connector line: horizontal (fixed orientation) or aligned (follows line curvature)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify a connector's visual styling, path shape, and attachment points on a board. Update properties like line color, stroke style, captions, and connection endpoints to customize how the connector appears and connects items."""
 
     # Construct request model with validation
@@ -3735,7 +3869,7 @@ async def update_connector(
 async def delete_connector(
     board_id: str = Field(..., description="The unique identifier of the board containing the connector to delete."),
     connector_id: str = Field(..., description="The unique identifier of the connector to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a connector from a board. The connector is permanently deleted and cannot be recovered."""
 
     # Construct request model with validation
@@ -3775,7 +3909,7 @@ async def add_document_to_board(
     board_id: str = Field(..., description="The unique identifier of the board where the document item will be created."),
     url: str = Field(..., description="The complete URL where the document is hosted and publicly accessible. Supports standard document formats like PDF."),
     title: str | None = Field(None, description="A short text label to identify the document on the board. If not provided, the document will be added without a custom title."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a document item to a board by hosting it at a specified URL. The document will be displayed on the board with an optional title for identification."""
 
     # Construct request model with validation
@@ -3817,7 +3951,7 @@ async def add_document_to_board(
 async def get_document_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the document item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific document item to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific document item on a board. Use this to fetch properties and metadata for a document you've identified by its ID."""
 
     # Construct request model with validation
@@ -3861,7 +3995,7 @@ async def update_document_item(
     height: float | None = Field(None, description="The height of the item in pixels, specified as a decimal number."),
     width: float | None = Field(None, description="The width of the item in pixels, specified as a decimal number."),
     rotation: float | None = Field(None, description="The rotation angle of the item in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a document item on a board by modifying its properties such as title, URL, dimensions, and rotation angle."""
 
     # Construct request model with validation
@@ -3904,7 +4038,7 @@ async def update_document_item(
 async def delete_document_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the document item to delete."),
     item_id: str = Field(..., description="The unique identifier of the document item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a document item from a board. This action cannot be undone and requires write access to the board."""
 
     # Construct request model with validation
@@ -3947,7 +4081,7 @@ async def add_embed_item_to_board(
     preview_url: str | None = Field(None, alias="previewUrl", description="URL of an image to display as the preview thumbnail for the embed item on the board."),
     height: float | None = Field(None, description="The vertical size of the embed item in pixels. If not specified, a default height will be applied."),
     width: float | None = Field(None, description="The horizontal size of the embed item in pixels. If not specified, a default width will be applied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Embeds external content on a board by creating an embed item. The content can be displayed inline on the board or in a modal overlay, with optional custom preview image and dimensions."""
 
     # Construct request model with validation
@@ -3990,7 +4124,7 @@ async def add_embed_item_to_board(
 async def get_embed_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the embed item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific embed item to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific embed item on a board. Use this to fetch properties and metadata for an embedded content item."""
 
     # Construct request model with validation
@@ -4034,7 +4168,7 @@ async def update_embed_item(
     url: str | None = Field(None, description="A valid URL (HTTP or HTTPS) pointing to the content resource to embed on the board, such as a video or web page."),
     height: float | None = Field(None, description="The height of the embed item in pixels."),
     width: float | None = Field(None, description="The width of the embed item in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an embed item on a board, allowing you to modify its display mode, preview image, source URL, and dimensions. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -4077,7 +4211,7 @@ async def update_embed_item(
 async def delete_embed_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the embed item to delete."),
     item_id: str = Field(..., description="The unique identifier of the embed item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an embed item from a board. The embed item is permanently deleted and cannot be recovered."""
 
     # Construct request model with validation
@@ -4120,7 +4254,7 @@ async def add_image_to_board(
     height: float | None = Field(None, description="The height of the image in pixels. If not specified, the image's original height is used."),
     width: float | None = Field(None, description="The width of the image in pixels. If not specified, the image's original width is used."),
     rotation: float | None = Field(None, description="The rotation angle in degrees. Use positive values to rotate clockwise and negative values to rotate counterclockwise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an image item to a board by URL. Optionally customize the image with a title, dimensions, and rotation angle."""
 
     # Construct request model with validation
@@ -4163,7 +4297,7 @@ async def add_image_to_board(
 async def get_image_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the image item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the image item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific image item on a board, including its properties and metadata."""
 
     # Construct request model with validation
@@ -4207,7 +4341,7 @@ async def update_image_item(
     height: float | None = Field(None, description="The height of the image item in pixels."),
     width: float | None = Field(None, description="The width of the image item in pixels."),
     rotation: float | None = Field(None, description="The rotation angle of the image in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an image item on a board by modifying its URL, title, dimensions, or rotation angle. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -4250,7 +4384,7 @@ async def update_image_item(
 async def delete_image_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the image item to delete."),
     item_id: str = Field(..., description="The unique identifier of the image item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes an image item from a board. Requires boards:write scope and is subject to Level 3 rate limiting."""
 
     # Construct request model with validation
@@ -4290,7 +4424,7 @@ async def list_board_items(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve items."),
     limit: str | None = Field(None, description="The maximum number of items to return per request, between 10 and 50. Defaults to 10. If more items exist, use the cursor from the response to fetch the next batch."),
     type_: Literal["text", "shape", "sticky_note", "image", "document", "card", "app_card", "preview", "frame", "embed", "doc_format", "data_table_format"] | None = Field(None, alias="type", description="Filter results to a specific item type (e.g., cards, sticky notes, shapes). Omit to retrieve all item types on the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of items on a board, with optional filtering by item type. Use cursor-based pagination to navigate through results."""
 
     # Construct request model with validation
@@ -4332,7 +4466,7 @@ async def list_board_items(
 async def get_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the item you want to retrieve from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific item on a board. This operation requires read access to the board and is rate-limited at Level 1."""
 
     # Construct request model with validation
@@ -4374,7 +4508,7 @@ async def update_item_position_or_parent(
     x: float | None = Field(None, description="X-axis coordinate of the location of the item on the board.\nBy default, all items have absolute positioning to the board, not the current viewport. Default: `0`.\nThe center point of the board has `x: 0` and `y: 0` coordinates."),
     y: float | None = Field(None, description="Y-axis coordinate of the location of the item on the board.\nBy default, all items have absolute positioning to the board, not the current viewport. Default: `0`.\nThe center point of the board has `x: 0` and `y: 0` coordinates."),
     id_: str | None = Field(None, alias="id", description="Unique identifier (ID) of the parent frame for the item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reposition an item on a board or move it to a different parent container. Use this operation to reorganize board layout or change item hierarchy."""
 
     # Construct request model with validation
@@ -4417,7 +4551,7 @@ async def update_item_position_or_parent(
 async def delete_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes an item from a board. This action cannot be undone and requires boards:write scope."""
 
     # Construct request model with validation
@@ -4457,7 +4591,7 @@ async def list_board_members(
     board_id: str = Field(..., description="The unique identifier of the board whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of board members to return per request, between 1 and 50. Defaults to 20 if not specified."),
     offset: str | None = Field(None, description="The zero-based starting position for retrieving results, used for pagination. Defaults to 0 to start from the first member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a pageable list of all members assigned to a specific board. Use pagination parameters to control the number of results and navigate through large member lists."""
 
     # Construct request model with validation
@@ -4501,7 +4635,7 @@ async def invite_members_to_board(
     emails: list[str] = Field(..., description="Email addresses of users to invite to the board. You can invite between 1 and 20 members per request.", min_length=1, max_length=20),
     role: Literal["viewer", "commenter", "editor", "coowner", "owner"] | None = Field(None, description="The role assigned to invited members. Defaults to 'commenter' if not specified. Valid roles are: viewer, commenter, editor, coowner, or owner (owner and coowner have equivalent effects)."),
     message: str | None = Field(None, description="Optional custom message to include in the invitation email sent to members."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invite new members to collaborate on a board by sending invitation emails. Membership requirements depend on the board's sharing policy."""
 
     # Construct request model with validation
@@ -4543,7 +4677,7 @@ async def invite_members_to_board(
 async def get_board_member(
     board_id: str = Field(..., description="The unique identifier of the board containing the member you want to retrieve."),
     board_member_id: str = Field(..., description="The unique identifier of the board member whose information you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific member of a board, including their role and permissions."""
 
     # Construct request model with validation
@@ -4583,7 +4717,7 @@ async def update_board_member_role(
     board_id: str = Field(..., description="The unique identifier of the board containing the member whose role you want to update."),
     board_member_id: str = Field(..., description="The unique identifier of the board member whose role you want to change."),
     role: Literal["viewer", "commenter", "editor", "coowner", "owner"] | None = Field(None, description="The new role to assign to the board member. Valid roles are viewer (read-only access), commenter (can view and comment), editor (can view, comment, and edit), coowner (full access with administrative capabilities), or owner (full ownership). Defaults to commenter if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the role assigned to a board member, controlling their access level and permissions on the board."""
 
     # Construct request model with validation
@@ -4625,7 +4759,7 @@ async def update_board_member_role(
 async def remove_board_member(
     board_id: str = Field(..., description="The unique identifier of the board from which you want to remove the member."),
     board_member_id: str = Field(..., description="The unique identifier of the board member you want to remove from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a member from a board. This operation deletes the specified board member's access and role from the board."""
 
     # Construct request model with validation
@@ -4679,7 +4813,7 @@ async def add_shape_to_board(
     height: float | None = Field(None, description="Height of the shape in pixels."),
     rotation: float | None = Field(None, description="Rotation angle in degrees relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="Width of the shape in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a shape item to a board with customizable geometry, styling, and text formatting. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -4723,7 +4857,7 @@ async def add_shape_to_board(
 async def get_shape_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the shape item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific shape item on a board, including its properties and metadata."""
 
     # Construct request model with validation
@@ -4778,7 +4912,7 @@ async def update_shape_item(
     height: float | None = Field(None, description="The height of the shape in pixels."),
     rotation: float | None = Field(None, description="The rotation angle in degrees. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the shape in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify a shape item's geometry, styling, and text content on a board. Updates only the properties you specify; omitted properties remain unchanged."""
 
     # Construct request model with validation
@@ -4822,7 +4956,7 @@ async def update_shape_item(
 async def delete_shape_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item to delete."),
     item_id: str = Field(..., description="The unique identifier of the shape item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a shape item from a board. This action cannot be undone and requires write access to the board."""
 
     # Construct request model with validation
@@ -4867,7 +5001,7 @@ async def add_sticky_note(
     text_align_vertical: Literal["top", "middle", "bottom"] | None = Field(None, alias="textAlignVertical", description="Vertical text alignment within the sticky note: top, middle, or bottom. Defaults to top."),
     height: float | None = Field(None, description="The height of the sticky note in pixels."),
     width: float | None = Field(None, description="The width of the sticky note in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a sticky note item to a board with customizable text content, shape, colors, and alignment. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -4911,7 +5045,7 @@ async def add_sticky_note(
 async def get_sticky_note_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the sticky note item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the sticky note item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific sticky note item on a board. Use this to fetch the content, styling, and metadata of an individual sticky note."""
 
     # Construct request model with validation
@@ -4957,7 +5091,7 @@ async def update_sticky_note(
     text_align_vertical: Literal["top", "middle", "bottom"] | None = Field(None, alias="textAlignVertical", description="The vertical alignment of text within the sticky note: top, middle, or bottom."),
     height: float | None = Field(None, description="The height of the sticky note in pixels."),
     width: float | None = Field(None, description="The width of the sticky note in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify the content, appearance, and layout of a sticky note item on a board. Update text, colors, alignment, shape, and dimensions as needed."""
 
     # Construct request model with validation
@@ -5001,7 +5135,7 @@ async def update_sticky_note(
 async def delete_sticky_note_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the sticky note to delete."),
     item_id: str = Field(..., description="The unique identifier of the sticky note item to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a sticky note item from a board. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5048,7 +5182,7 @@ async def add_text_to_board(
     text_align: Literal["left", "right", "center"] | None = Field(None, alias="textAlign", description="Horizontal text alignment within the item: left, right, or center. Defaults to center."),
     rotation: float | None = Field(None, description="Rotation angle in degrees. Positive values rotate clockwise, negative values rotate counterclockwise."),
     width: float | None = Field(None, description="Width of the item in pixels. Must be at least 1.7 times the font size (e.g., minimum 24 pixels for 14pt font)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a text item to a board with customizable styling, positioning, and formatting options. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -5092,7 +5226,7 @@ async def add_text_to_board(
 async def get_text_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the text item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the text item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific text item from a board by its ID. Returns the text item's properties and content."""
 
     # Construct request model with validation
@@ -5140,7 +5274,7 @@ async def update_text_item(
     text_align: Literal["left", "right", "center"] | None = Field(None, alias="textAlign", description="Horizontal alignment of the text content: left, right, or center."),
     rotation: float | None = Field(None, description="Rotation angle in degrees. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="Width of the item in pixels. Minimum width is 1.7 times the font size (e.g., font size 14 requires minimum width of 24)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify the content, styling, and layout of a text item on a board. Update text content, colors, fonts, alignment, rotation, and dimensions as needed."""
 
     # Construct request model with validation
@@ -5184,7 +5318,7 @@ async def update_text_item(
 async def delete_text_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the text item to delete."),
     item_id: str = Field(..., description="The unique identifier of the text item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a text item from a board. Requires boards:write scope and is subject to Level 3 rate limiting."""
 
     # Construct request model with validation
@@ -5223,7 +5357,7 @@ async def delete_text_item(
 async def create_items_bulk(
     board_id: str = Field(..., description="The unique identifier of the board where items will be created."),
     body: list[_models.ItemCreate] = Field(..., description="Array of item objects to create. Must contain between 1 and 20 items. Items can be of different types (cards, shapes, sticky notes, etc.) and are processed together as a single transaction.", min_length=1, max_length=20),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create multiple items of different types on a board in a single transactional operation. Supports up to 20 items per call (cards, shapes, sticky notes, etc.), and all items are created together or none are created if any item fails."""
 
     # Construct request model with validation
@@ -5272,7 +5406,7 @@ async def add_frame_to_board(
     fill_color: str | None = Field(None, alias="fillColor", description="The background fill color for the frame, specified as a hexadecimal color code. Supports a predefined palette of colors or transparent (default)."),
     height: float | None = Field(None, description="The height of the frame in pixels."),
     width: float | None = Field(None, description="The width of the frame in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new frame to a board. Frames serve as containers for organizing and grouping content on a board, with customizable appearance and dimensions."""
 
     # Construct request model with validation
@@ -5316,7 +5450,7 @@ async def add_frame_to_board(
 async def get_frame(
     board_id: str = Field(..., description="The unique identifier of the board containing the frame you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the frame you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific frame on a board, including its properties and content."""
 
     # Construct request model with validation
@@ -5362,7 +5496,7 @@ async def update_frame(
     fill_color: str | None = Field(None, alias="fillColor", description="The fill color for the frame, specified as a hexadecimal color code. Supported colors include neutral grays, greens, teals, blues, purples, yellows, oranges, reds, and pinks."),
     height: float | None = Field(None, description="The height of the frame in pixels."),
     width: float | None = Field(None, description="The width of the frame in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a frame's properties on a board, including its title, appearance, dimensions, and content visibility. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -5406,7 +5540,7 @@ async def update_frame(
 async def delete_frame(
     board_id: str = Field(..., description="The unique identifier of the board containing the frame to delete."),
     item_id: str = Field(..., description="The unique identifier of the frame to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a frame from a board. The frame and all its contents will be deleted and cannot be recovered."""
 
     # Construct request model with validation
@@ -5447,7 +5581,7 @@ async def list_items_in_frame(
     parent_item_id: str = Field(..., description="The unique identifier of the frame (parent item) whose child items you want to retrieve."),
     limit: str | None = Field(None, description="Maximum number of items to return per request, between 10 and 50. If the total exceeds this limit, use the cursor from the response to fetch the next batch."),
     type_: str | None = Field(None, alias="type", description="Filter results to a specific item type (e.g., cards, shapes, sticky notes, images, text, embeds, documents, frames, or app cards). Omit to retrieve all item types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all child items contained within a specific frame on a board. Results are returned using cursor-based pagination to handle large collections efficiently."""
 
     # Construct request model with validation
@@ -5491,7 +5625,7 @@ async def get_app_metrics(
     start_date: str = Field(..., alias="startDate", description="The start date for the metrics period in UTC format (YYYY-MM-DD). Metrics will be retrieved from this date onwards."),
     end_date: str = Field(..., alias="endDate", description="The end date for the metrics period in UTC format (YYYY-MM-DD). Metrics will be retrieved up to and including this date."),
     period: Literal["DAY", "WEEK", "MONTH"] | None = Field(None, description="The time period to group metrics by. Accepts 'DAY', 'WEEK', or 'MONTH'. Defaults to 'WEEK' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve usage metrics for a specific app over a specified time range, with data grouped by the requested time period (day, week, or month). Requires an app management API token generated from the Developer Hub."""
 
     # Construct request model with validation
@@ -5530,7 +5664,7 @@ async def get_app_metrics(
 
 # Tags: App metrics (experimental)
 @mcp.tool()
-async def get_app_metrics_total(app_id: str = Field(..., description="The unique identifier of the app for which to retrieve total metrics.")) -> dict[str, Any]:
+async def get_app_metrics_total(app_id: str = Field(..., description="The unique identifier of the app for which to retrieve total metrics.")) -> dict[str, Any] | ToolResult:
     """Retrieve cumulative usage metrics for a specific app since its creation. Returns total metrics data for the app identified by the provided app ID."""
 
     # Construct request model with validation
@@ -5569,7 +5703,7 @@ async def get_app_metrics_total(app_id: str = Field(..., description="The unique
 async def get_mindmap_node(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map node you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific mind map node to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific mind map node from a board. Returns detailed information about the node including its content, position, and relationships within the mind map structure."""
 
     # Construct request model with validation
@@ -5608,7 +5742,7 @@ async def get_mindmap_node(
 async def delete_mindmap_node(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map node to delete."),
     item_id: str = Field(..., description="The unique identifier of the mind map node to delete. Deleting a node also removes all of its child nodes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a mind map node and all of its child nodes from a board. This operation requires write access to the board."""
 
     # Construct request model with validation
@@ -5647,7 +5781,7 @@ async def delete_mindmap_node(
 async def list_mindmap_nodes(
     board_id: str = Field(..., description="The unique identifier of the board containing the mind map nodes you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of mind map nodes to return per request. Use this with the cursor parameter to paginate through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves mind map nodes for a specific board using cursor-based pagination. Use the cursor from each response to fetch subsequent pages of results."""
 
     # Construct request model with validation
@@ -5691,7 +5825,7 @@ async def create_mindmap_node(
     type_: str = Field(..., alias="type", description="The type of mind map node. Currently only 'text' is supported."),
     content: str | None = Field(None, description="The text content displayed in the mind map node."),
     width: float | None = Field(None, description="The width of the node in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new mind map node on a board. Nodes can be root nodes (starting points) or child nodes nested under existing nodes. Node positioning uses explicit x, y coordinates; if not provided, nodes default to the board center (0, 0)."""
 
     # Construct request model with validation
@@ -5739,7 +5873,7 @@ async def list_board_items_experimental(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve items."),
     limit: str | None = Field(None, description="The maximum number of items to return per request, between 10 and 50. Defaults to 10 items. Use the cursor from the response to fetch subsequent pages."),
     type_: Literal["shape"] | None = Field(None, alias="type", description="Filter results to return only items of a specific type. Currently supports 'shape' type items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of items on a specific board. Supports filtering by item type and uses cursor-based pagination to handle large result sets efficiently."""
 
     # Construct request model with validation
@@ -5781,7 +5915,7 @@ async def list_board_items_experimental(
 async def get_board_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the specific item you want to retrieve from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific item on a board. Use this to fetch properties and metadata for an individual item by its ID."""
 
     # Construct request model with validation
@@ -5820,7 +5954,7 @@ async def get_board_item(
 async def delete_item_beta(
     board_id: str = Field(..., description="The unique identifier of the board containing the item to delete."),
     item_id: str = Field(..., description="The unique identifier of the item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes an item from a board. This action cannot be undone and requires write access to the board."""
 
     # Construct request model with validation
@@ -5874,7 +6008,7 @@ async def add_shape_to_board_flowchart(
     height: float | None = Field(None, description="Height of the shape in pixels."),
     rotation: float | None = Field(None, description="Rotation angle in degrees. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="Width of the shape in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a flowchart or basic shape item to a board with customizable styling, text, and dimensions. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -5918,7 +6052,7 @@ async def add_shape_to_board_flowchart(
 async def get_shape_item_experimental(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item you want to retrieve."),
     item_id: str = Field(..., description="The unique identifier of the shape item you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific shape item on a board, including its properties and positioning data."""
 
     # Construct request model with validation
@@ -5973,7 +6107,7 @@ async def update_shape_item_flowchart(
     height: float | None = Field(None, description="The height of the shape in pixels."),
     rotation: float | None = Field(None, description="The rotation angle of the shape in degrees, relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
     width: float | None = Field(None, description="The width of the shape in pixels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a flowchart shape item on a board by modifying its geometry, styling, content, and layout properties. Changes are applied immediately to the specified shape."""
 
     # Construct request model with validation
@@ -6017,7 +6151,7 @@ async def update_shape_item_flowchart(
 async def delete_shape_item_experimental(
     board_id: str = Field(..., description="The unique identifier of the board containing the shape item to delete."),
     item_id: str = Field(..., description="The unique identifier of the shape item to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a flowchart shape item from a board. This action cannot be undone."""
 
     # Construct request model with validation
@@ -6060,7 +6194,7 @@ async def create_document_item_from_file(
     height: float | None = Field(None, description="Optional height of the document item on the board, specified in pixels."),
     width: float | None = Field(None, description="Optional width of the document item on the board, specified in pixels."),
     rotation: float | None = Field(None, description="Optional rotation angle of the document item in degrees, relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a document file from your device and adds it as a document item to a board. The file must not exceed 6 MB in size."""
 
     # Construct request model with validation
@@ -6095,6 +6229,7 @@ async def create_document_item_from_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["resource"],
         headers=_http_headers,
     )
 
@@ -6111,7 +6246,7 @@ async def update_document_item_with_file(
     height: float | None = Field(None, description="Optional height of the item in pixels. Specify as a decimal number."),
     width: float | None = Field(None, description="Optional width of the item in pixels. Specify as a decimal number."),
     rotation: float | None = Field(None, description="Optional rotation angle in degrees, relative to the board. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace a document item on a board with a new file uploaded from your device. The file must not exceed 6 MB in size."""
 
     # Construct request model with validation
@@ -6146,6 +6281,7 @@ async def update_document_item_with_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["resource"],
         headers=_http_headers,
     )
 
@@ -6161,7 +6297,7 @@ async def create_image_item_from_local_file(
     height: float | None = Field(None, description="Optional height of the image item in pixels. If not specified, the original image dimensions will be used."),
     width: float | None = Field(None, description="Optional width of the image item in pixels. If not specified, the original image dimensions will be used."),
     rotation: float | None = Field(None, description="Optional rotation angle in degrees. Use positive values for clockwise rotation and negative values for counterclockwise rotation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an image item to a board by uploading a file from your device. Supports images up to 6 MB with optional sizing, rotation, and accessibility metadata."""
 
     # Construct request model with validation
@@ -6196,6 +6332,7 @@ async def create_image_item_from_local_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["resource"],
         headers=_http_headers,
     )
 
@@ -6212,7 +6349,7 @@ async def update_image_item_from_file(
     height: float | None = Field(None, description="Optional height of the image in pixels. Specify as a decimal number to set or adjust the vertical dimension."),
     width: float | None = Field(None, description="Optional width of the image in pixels. Specify as a decimal number to set or adjust the horizontal dimension."),
     rotation: float | None = Field(None, description="Optional rotation angle in degrees. Use positive values to rotate clockwise and negative values to rotate counterclockwise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace an image on a board with a new file from your device. Supports updating the image file itself along with optional metadata like title, alt text, dimensions, and rotation."""
 
     # Construct request model with validation
@@ -6247,6 +6384,7 @@ async def update_image_item_from_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["resource"],
         headers=_http_headers,
     )
 
@@ -6257,7 +6395,7 @@ async def update_image_item_from_file(
 async def list_groups_on_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve groups."),
     limit: str | None = Field(None, description="The maximum number of groups to return per request, between 10 and 50 items (defaults to 10). Use this with the cursor parameter to paginate through results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all groups and their items from a specific board using cursor-based pagination. Results are returned in batches with a cursor for fetching subsequent pages."""
 
     _limit = _parse_int(limit)
@@ -6302,7 +6440,7 @@ async def list_items_in_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group."),
     group_item_id: str = Field(..., description="The unique identifier of the group whose items you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of items to return per request, between 10 and 50 items (defaults to 10)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all items belonging to a specific group within a board using cursor-based pagination. Results are returned in batches with a cursor for fetching subsequent pages."""
 
     _limit = _parse_int(limit)
@@ -6346,7 +6484,7 @@ async def list_items_in_group(
 async def get_group_by_id(
     board_id: str = Field(..., description="The unique identifier of the board containing the group. This is a required string ID that identifies which board to query."),
     group_id: str = Field(..., description="The unique identifier of the group to retrieve. This is a required numeric ID that specifies which group's items should be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific group and its contained items from a board. Requires boards:read scope and is subject to Level 2 rate limiting."""
 
     # Construct request model with validation
@@ -6389,7 +6527,7 @@ async def update_group(
     name: str = Field(..., description="The name of the user group."),
     type_: str = Field(..., alias="type", description="The object type, which must be set to 'user-group'."),
     description: str | None = Field(None, description="Optional description providing additional context about the user group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replaces an existing group on a board with new content. The original group is completely replaced and assigned a new ID."""
 
     # Construct request model with validation
@@ -6432,7 +6570,7 @@ async def remove_items_from_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group."),
     group_id: str = Field(..., description="The unique identifier of the group to ungroup items from."),
     delete_items: bool | None = Field(None, description="When true, removes the ungrouped items from the board entirely. When false (default), items remain on the board but are no longer grouped."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Ungroups items from a group on a board, optionally removing them entirely. Requires boards:write scope."""
 
     # Construct request model with validation
@@ -6475,7 +6613,7 @@ async def delete_group(
     board_id: str = Field(..., description="The unique identifier of the board containing the group to delete."),
     group_id: str = Field(..., description="The unique identifier of the group to delete."),
     delete_items: bool = Field(..., description="Set to true to remove all items in the group along with the group itself. Set to false to preserve items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group from a board, including all items contained within it. Note that this operation will delete locked items as well."""
 
     # Construct request model with validation
@@ -6517,7 +6655,7 @@ async def delete_group(
 async def list_tags_for_item(
     board_id: str = Field(..., description="The unique identifier of the board containing the item. This ID is required to locate the correct board context."),
     item_id: str = Field(..., description="The unique identifier of the item whose tags you want to retrieve. This ID must correspond to an item that exists on the specified board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tags associated with a specific item on a board. Use this to view the complete set of tags currently applied to an item."""
 
     # Construct request model with validation
@@ -6557,7 +6695,7 @@ async def list_tags_from_board(
     board_id: str = Field(..., description="The unique identifier of the board from which to retrieve tags."),
     limit: str | None = Field(None, description="The maximum number of tags to return in a single request. Must be between 1 and 50 items. Defaults to 20 if not specified."),
     offset: str | None = Field(None, description="The number of tags to skip before returning results, used for pagination. Defaults to 0 (starting from the first tag)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tags associated with a specified board. Supports pagination to control the number of results returned."""
 
     # Construct request model with validation
@@ -6600,7 +6738,7 @@ async def create_tag(
     board_id: str = Field(..., description="The unique identifier of the board where the tag will be created."),
     title: str = Field(..., description="The display text for the tag, case-sensitive and must be unique within the board. Can be up to 120 characters long.", min_length=0, max_length=120),
     fill_color: Literal["red", "light_green", "cyan", "yellow", "magenta", "green", "blue", "gray", "violet", "dark_green", "dark_blue", "black"] | None = Field(None, alias="fillColor", description="The visual color for the tag. Choose from a predefined palette of 12 colors including red, green, blue, cyan, yellow, magenta, violet, gray, black, and their variants. Defaults to red if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new tag on a board to organize and categorize board items. Tag titles must be unique within the board and can be assigned a color for visual distinction."""
 
     # Construct request model with validation
@@ -6642,7 +6780,7 @@ async def create_tag(
 async def get_tag(
     board_id: str = Field(..., description="The unique identifier of the board containing the tag you want to retrieve."),
     tag_id: str = Field(..., description="The unique identifier of the tag whose information you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific tag on a board. Use this to fetch tag properties and metadata by providing the board and tag identifiers."""
 
     # Construct request model with validation
@@ -6683,7 +6821,7 @@ async def update_tag(
     tag_id: str = Field(..., description="The unique identifier of the tag you want to update."),
     fill_color: Literal["red", "light_green", "cyan", "yellow", "magenta", "green", "blue", "gray", "violet", "dark_green", "dark_blue", "black"] | None = Field(None, alias="fillColor", description="The fill color for the tag. Choose from: red, light_green, cyan, yellow, magenta, green, blue, gray, violet, dark_green, dark_blue, or black."),
     title: str | None = Field(None, description="The text label for the tag, case-sensitive and must be unique within the board. Maximum 120 characters.", min_length=0, max_length=120),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing tag on a board by modifying its title and/or fill color. Note that changes made via the REST API will not appear in real-time on the board; you must refresh the board to see updates."""
 
     # Construct request model with validation
@@ -6725,7 +6863,7 @@ async def update_tag(
 async def delete_tag(
     board_id: str = Field(..., description="The unique identifier of the board containing the tag to delete."),
     tag_id: str = Field(..., description="The unique identifier of the tag to delete from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a tag from the board and removes it from all associated cards and sticky notes. Note: Changes made via REST API may not appear in real-time on the board; refresh the board to see updates."""
 
     # Construct request model with validation
@@ -6766,7 +6904,7 @@ async def list_items_by_tag(
     tag_id: str = Field(..., description="The unique identifier of the tag used to filter items. Only items with this tag will be returned."),
     limit: str | None = Field(None, description="The maximum number of items to return in a single request. Must be between 1 and 50 items. Defaults to 20 if not specified."),
     offset: str | None = Field(None, description="The number of items to skip from the beginning of the result set, used for pagination. Defaults to 0 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all items on a board that have been assigned a specific tag. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -6809,7 +6947,7 @@ async def add_tag_to_item(
     board_id_platform_tags: str = Field(..., alias="board_id_PlatformTags", description="The unique identifier of the board containing the item you want to tag."),
     item_id: str = Field(..., description="The unique identifier of the item (card or sticky note) to which you want to attach the tag."),
     tag_id: str = Field(..., description="The unique identifier of the existing tag you want to attach to the item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach an existing tag to an item on a board. Cards and sticky notes support up to 8 tags each. Note: Tag changes via REST API require a board refresh to appear in real-time."""
 
     # Construct request model with validation
@@ -6852,7 +6990,7 @@ async def remove_tag_from_item(
     board_id_platform_tags: str = Field(..., alias="board_id_PlatformTags", description="The unique identifier of the board containing the item from which you want to remove the tag."),
     item_id: str = Field(..., description="The unique identifier of the item from which you want to remove the tag."),
     tag_id: str = Field(..., description="The unique identifier of the tag to remove from the item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a tag from an item on a board. The tag remains available on the board for use with other items. Note: Tag changes via REST API require a board refresh to appear in the UI."""
 
     # Construct request model with validation
@@ -6895,7 +7033,7 @@ async def list_projects_in_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team. Required to scope the request to the correct organization."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization. Required to retrieve projects from the specific team."),
     limit: str | None = Field(None, description="The maximum number of projects to return in a single response, between 1 and 100. Defaults to 100. If more projects exist than the limit, the response includes a cursor for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all projects (also called Spaces) within a specific team of an organization. With Content Admin permissions, you can access all projects including private ones not explicitly shared with you."""
 
     _limit = _parse_int(limit)
@@ -6940,7 +7078,7 @@ async def create_project_in_team(
     org_id: str = Field(..., description="The unique identifier of the organization where you want to create the project."),
     team_id: str = Field(..., description="The unique identifier of the team within the organization where you want to create the project."),
     name: str = Field(..., description="The name for the new project. Must be between 1 and 60 characters.", min_length=1, max_length=60),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new project (Space) within an existing team in your organization. Projects are organizational folders for boards that allow you to manage access and share multiple boards with a subset of team members."""
 
     # Construct request model with validation
@@ -6983,7 +7121,7 @@ async def get_project_in_team(
     org_id: str = Field(..., description="The organization ID that contains the team and project. Use the numeric organization identifier provided in your Enterprise account."),
     team_id: str = Field(..., description="The team ID that contains the project. Use the numeric team identifier within the organization."),
     project_id: str = Field(..., description="The project ID to retrieve information for. Use the numeric project identifier within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project (Space) within a team, including its name and metadata. Enterprise-only endpoint requiring Company Admin role."""
 
     # Construct request model with validation
@@ -7024,7 +7162,7 @@ async def update_project(
     team_id: str = Field(..., description="The unique identifier of the team that owns the project."),
     project_id: str = Field(..., description="The unique identifier of the project to update."),
     name: str = Field(..., description="The new name for the project. Must be between 1 and 60 characters.", min_length=1, max_length=60),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update project details such as the project name. This operation is available only for Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -7067,7 +7205,7 @@ async def delete_project_in_team(
     org_id: str = Field(..., description="The organization ID from which the project will be deleted. Use the numeric organization identifier."),
     team_id: str = Field(..., description="The team ID from which the project will be deleted. Use the numeric team identifier."),
     project_id: str = Field(..., description="The project ID to delete. Use the numeric project identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project (Space) from a team within an organization. Boards and users associated with the project remain in the team after deletion. Requires Enterprise plan and Company Admin role."""
 
     # Construct request model with validation
@@ -7108,7 +7246,7 @@ async def list_project_members(
     team_id: str = Field(..., description="The unique identifier of the team that contains the project."),
     project_id: str = Field(..., description="The unique identifier of the project for which to retrieve members."),
     limit: str | None = Field(None, description="Maximum number of members to return per request, between 1 and 100. Defaults to 100. If the total exceeds this limit, use the cursor in the response to fetch additional results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all members assigned to a specific project (also called a Space) within an organization and team. Requires Enterprise plan access and Company Admin role."""
 
     _limit = _parse_int(limit)
@@ -7155,7 +7293,7 @@ async def add_project_member(
     project_id: str = Field(..., description="The unique identifier of the project (Space) to which you want to add the user."),
     email: str = Field(..., description="The email address of the Miro user to add to the project."),
     role: Literal["owner", "editor", "viewer", "commentator", "coowner"] = Field(..., description="The access level for the project member. Choose from: owner, coowner, editor, commentator, or viewer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a Miro user to a project (Space) with a specified role. This enterprise-only operation requires Company Admin privileges and the projects:write scope."""
 
     # Construct request model with validation
@@ -7199,7 +7337,7 @@ async def get_project_member(
     team_id: str = Field(..., description="The unique identifier of the team that owns the project. Use the team ID associated with your organization."),
     project_id: str = Field(..., description="The unique identifier of the project (Space) from which you want to retrieve member information."),
     member_id: str = Field(..., description="The unique identifier of the specific member whose information you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific member within a project (Space). This enterprise-only endpoint requires Company Admin role and the projects:read scope."""
 
     # Construct request model with validation
@@ -7241,7 +7379,7 @@ async def update_project_member_role(
     project_id: str = Field(..., description="The project (Space) ID where the member's role will be updated. Use the numeric project identifier (e.g., 3074457345618265000)."),
     member_id: str = Field(..., description="The member ID whose role you want to update. Use the numeric member identifier (e.g., 307445734562315000)."),
     role: Literal["owner", "editor", "viewer", "commentator", "coowner"] | None = Field(None, description="The new role to assign to the project member. Valid roles are: owner, coowner, editor, commentator, or viewer. Determines the member's access level and permissions within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a project member's role within a team's project space. This enterprise-only operation allows Company Admins to modify member permissions such as changing them from viewer to editor or assigning ownership roles."""
 
     # Construct request model with validation
@@ -7285,7 +7423,7 @@ async def remove_project_member(
     team_id: str = Field(..., description="The unique identifier of the team that contains the project."),
     project_id: str = Field(..., description="The unique identifier of the project from which the member will be removed."),
     member_id: str = Field(..., description="The unique identifier of the member to remove from the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a member from a project within a team. The member will no longer have access to the project, but remains part of the team. This operation is available only to Company Admins on Enterprise plans."""
 
     # Construct request model with validation
@@ -7325,7 +7463,7 @@ async def list_organization_teams(
     org_id: str = Field(..., description="The unique identifier of the organization whose teams you want to retrieve."),
     limit: str | None = Field(None, description="Maximum number of teams to return per request. Accepts values between 1 and 100, defaults to 100 if not specified."),
     name: str | None = Field(None, description="Filters teams by name using case-insensitive partial matching. For example, 'dev' will match both 'Developer's team' and 'Team for developers'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all teams within an organization. Supports filtering by team name and pagination. Available only to Company Admins on Enterprise plans."""
 
     _limit = _parse_int(limit)
@@ -7369,7 +7507,7 @@ async def list_organization_teams(
 async def create_team(
     org_id: str = Field(..., description="The unique identifier of the organization where the team will be created."),
     name: str = Field(..., description="The name for the new team. Must be between 1 and 60 characters long.", min_length=1, max_length=60),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new team within an existing organization. This enterprise-only operation requires Company Admin role and the organizations:teams:write scope."""
 
     # Construct request model with validation
@@ -7411,7 +7549,7 @@ async def create_team(
 async def get_team(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the team. Use the organization ID provided during enterprise setup."),
     team_id: str = Field(..., description="The unique identifier of the team to retrieve. This must be a valid team ID within the specified organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific team within an organization. This enterprise-only endpoint requires Company Admin role and the organizations:teams:read scope."""
 
     # Construct request model with validation
@@ -7451,7 +7589,7 @@ async def update_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team to update."),
     name: str | None = Field(None, description="The new name for the team. Must be between 1 and 60 characters long.", min_length=1, max_length=60),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing team's properties within an organization. Requires Enterprise plan access and Company Admin role."""
 
     # Construct request model with validation
@@ -7493,7 +7631,7 @@ async def update_team(
 async def delete_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team to delete."),
     team_id: str = Field(..., description="The unique identifier of the team to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing team from an organization. This operation is restricted to Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -7534,7 +7672,7 @@ async def list_team_members(
     team_id: str = Field(..., description="The unique identifier of the team whose members you want to retrieve."),
     limit: str | None = Field(None, description="Maximum number of team members to return per request. Must be between 1 and 100; defaults to 100 if not specified."),
     role: str | None = Field(None, description="Filter results by member role using exact matching. Valid values are: 'member' (standard team member), 'admin' (team administrator), 'non_team' (external user without team access), or 'team_guest' (deprecated legacy guest access)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of members in a team within an organization. Supports filtering by member role and pagination via cursor-based limits."""
 
     _limit = _parse_int(limit)
@@ -7580,7 +7718,7 @@ async def add_team_member(
     team_id: str = Field(..., description="The unique identifier of the team to which the user will be invited."),
     email: str = Field(..., description="The email address of the existing Miro organization user to invite to the team."),
     role: Literal["member", "admin"] | None = Field(None, description="The role to assign to the team member. Use 'member' for standard team member permissions or 'admin' to grant team management capabilities. Defaults to 'member' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invite an existing Miro organization user to join a team. The user must already exist in your Miro organization; new users can be provisioned via SCIM and external identity providers like Okta or Azure Active Directory."""
 
     # Construct request model with validation
@@ -7623,7 +7761,7 @@ async def get_team_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team containing the member."),
     member_id: str = Field(..., description="The unique identifier of the team member to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific team member by their ID within an organization and team. This enterprise-only operation requires Company Admin role and the organizations:teams:read scope."""
 
     # Construct request model with validation
@@ -7664,7 +7802,7 @@ async def update_team_member_role(
     team_id: str = Field(..., description="The unique identifier of the team containing the member to update."),
     member_id: str = Field(..., description="The unique identifier of the team member whose role should be updated."),
     role: Literal["member", "admin"] | None = Field(None, description="The new role to assign to the team member. Choose 'member' for standard team member permissions or 'admin' to grant team management capabilities."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a team member's role within a team. This operation allows Company Admins to change a team member's permissions between standard member and admin roles. Available only for Enterprise plan users."""
 
     # Construct request model with validation
@@ -7707,7 +7845,7 @@ async def remove_team_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team from which the member will be removed."),
     member_id: str = Field(..., description="The unique identifier of the team member to be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a team member from a team by their ID. This operation is only available for Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -7746,7 +7884,7 @@ async def remove_team_member(
 async def list_groups_enterprise(
     org_id: str = Field(..., description="The unique identifier of the organization whose groups you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of groups to return in a single response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all user groups within an organization. This operation is available only to Company Admins on Enterprise plans."""
 
     _limit = _parse_int(limit)
@@ -7791,7 +7929,7 @@ async def create_group_organization(
     org_id: str = Field(..., description="The unique identifier of the organization where the group will be created."),
     name: str = Field(..., description="The name of the user group. Must be between 1 and 60 characters.", min_length=1, max_length=60),
     description: str | None = Field(None, description="An optional description of the user group's purpose or membership. Can be up to 300 characters.", min_length=0, max_length=300),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new user group within an organization. This enterprise-only operation requires Company Admin role and the organizations:groups:write scope."""
 
     # Construct request model with validation
@@ -7833,7 +7971,7 @@ async def create_group_organization(
 async def get_group_enterprise(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific user group within an organization. This enterprise-only endpoint requires Company Admin role and the organizations:groups:read scope."""
 
     # Construct request model with validation
@@ -7874,7 +8012,7 @@ async def update_group_org(
     group_id: str = Field(..., description="The unique identifier of the user group to update."),
     name: str | None = Field(None, description="The new name for the group. Must be between 1 and 60 characters long.", min_length=1, max_length=60),
     description: str | None = Field(None, description="The new description for the group. Can be empty or up to 300 characters long.", min_length=0, max_length=300),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the name and/or description of a user group within an organization. This operation is restricted to Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -7916,7 +8054,7 @@ async def update_group_org(
 async def delete_group_organization(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group to delete."),
     group_id: str = Field(..., description="The unique identifier of the user group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a user group from an organization. This operation is restricted to Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -7956,7 +8094,7 @@ async def list_group_members(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of members to return in the response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all members belonging to a specific user group within an organization. This enterprise-only operation requires Company Admin role and the organizations:groups:read scope."""
 
     _limit = _parse_int(limit)
@@ -8001,7 +8139,7 @@ async def add_member_to_group(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group. Use the organization ID provided in your enterprise account."),
     group_id: str = Field(..., description="The unique identifier of the user group to which the member will be added."),
     email: str = Field(..., description="The email address of the user to add to the group. Must be a valid email format associated with an existing user in the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user to a group within an organization. This enterprise-only operation requires Company Admin role and the organizations:groups:write scope."""
 
     # Construct request model with validation
@@ -8045,7 +8183,7 @@ async def update_group_members(
     group_id: str = Field(..., description="The unique identifier of the user group to modify."),
     members_to_add: list[str] | None = Field(None, alias="membersToAdd", description="List of user email addresses to add to the group. Each email must correspond to an existing user in the organization."),
     members_to_remove: list[str] | None = Field(None, alias="membersToRemove", description="List of user email addresses to remove from the group. Each email must correspond to a current member of the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk add and remove members from a user group in a single request. Specify users to add and/or remove by email address."""
 
     # Construct request model with validation
@@ -8088,7 +8226,7 @@ async def get_group_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group from which to retrieve the member."),
     member_id: str = Field(..., description="The unique identifier of the group member whose information should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific user within a group in an organization. This operation requires Enterprise plan access and Company Admin role."""
 
     # Construct request model with validation
@@ -8128,7 +8266,7 @@ async def remove_group_member(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group from which the member will be removed."),
     member_id: str = Field(..., description="The unique identifier of the group member to be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a member from a user group within an organization. This operation is restricted to Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -8168,7 +8306,7 @@ async def list_teams_for_group(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group."),
     group_id: str = Field(..., description="The unique identifier of the user group whose team memberships you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of teams to return in the response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all teams that a user group is a member of within an organization. This operation is available only to Company Admins on Enterprise plans."""
 
     _limit = _parse_int(limit)
@@ -8213,7 +8351,7 @@ async def get_group_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the group and team."),
     group_id: str = Field(..., description="The unique identifier of the user group within the organization."),
     team_id: str = Field(..., description="The unique identifier of the team to retrieve information for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific team that a user group belongs to within an organization. This enterprise-only operation requires Company Admin role and appropriate organizational scopes."""
 
     # Construct request model with validation
@@ -8253,7 +8391,7 @@ async def list_groups_for_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team."),
     team_id: str = Field(..., description="The unique identifier of the team whose connected groups you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of user groups to return in the response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all user groups that are connected to a specific team within an organization. This operation is available only for Enterprise plan users with Company Admin role."""
 
     _limit = _parse_int(limit)
@@ -8299,7 +8437,7 @@ async def add_user_group_to_team(
     team_id: str = Field(..., description="The unique identifier of the team to which the user group will be added."),
     user_group_id: str = Field(..., alias="userGroupId", description="The unique identifier of the user group to be added to the team."),
     role: Literal["member"] = Field(..., description="The role assigned to the user group within the team. Currently supports member role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user group to a team within an organization, establishing the group's membership and role. This enterprise-only operation requires Company Admin privileges."""
 
     # Construct request model with validation
@@ -8342,7 +8480,7 @@ async def get_team_group(
     org_id: str = Field(..., description="The unique identifier of the organization. Use the organization ID provided in your Enterprise account."),
     team_id: str = Field(..., description="The unique identifier of the team. Use the team ID to scope the group lookup within a specific team."),
     group_id: str = Field(..., description="The unique identifier of the user group. Use the group ID to retrieve information about a specific group within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific user group within a team. This operation requires Enterprise plan access and Company Admin role."""
 
     # Construct request model with validation
@@ -8382,7 +8520,7 @@ async def remove_group_from_team(
     org_id: str = Field(..., description="The unique identifier of the organization containing the team. Use the organization ID provided during setup (a numeric string)."),
     team_id: str = Field(..., description="The unique identifier of the team from which the group will be removed. Use the team ID provided during setup (a numeric string)."),
     group_id: str = Field(..., description="The unique identifier of the user group to remove from the team. Use the group ID provided during setup (a numeric string)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user group from a team within an organization. This operation disconnects the group's access to the team and is only available for Enterprise plan users with Company Admin role."""
 
     # Construct request model with validation
@@ -8422,7 +8560,7 @@ async def list_board_groups(
     org_id: str = Field(..., description="The unique identifier of the organization containing the board."),
     board_id: str = Field(..., description="The unique identifier of the board for which to retrieve group assignments."),
     limit: str | None = Field(None, description="The maximum number of user groups to return in the response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all user groups that have been invited to a specific board. This operation is available only for Enterprise plan users with Company Admin role."""
 
     _limit = _parse_int(limit)
@@ -8468,7 +8606,7 @@ async def share_board_with_groups(
     board_id: str = Field(..., description="The unique identifier of the board to share. Format: alphanumeric string (e.g., 'uXjVOfjm6tI=')."),
     user_group_ids: list[str] = Field(..., alias="userGroupIds", description="One or more user group IDs to grant access to the board. Provide as an array of group identifiers."),
     role: Literal["VIEWER", "COMMENTER", "EDITOR"] = Field(..., description="The permission level for the user groups on the board. Choose from: VIEWER (read-only access), COMMENTER (can view and comment), or EDITOR (full editing access). Defaults to VIEWER if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant user groups access to a board with a specified role. If a group already has access, this operation updates their role. Enterprise-only operation requiring Company Admin privileges."""
 
     # Construct request model with validation
@@ -8511,7 +8649,7 @@ async def remove_group_from_board(
     org_id: str = Field(..., description="The unique identifier of the organization that contains the board."),
     board_id: str = Field(..., description="The unique identifier of the board from which the user group will be removed."),
     group_id: str = Field(..., description="The unique identifier of the user group to be removed from the board."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user group's access from a board. This operation revokes the specified user group's assignment to the board within an organization."""
 
     # Construct request model with validation
@@ -8551,7 +8689,7 @@ async def list_project_groups(
     org_id: str = Field(..., description="The unique identifier of the organization containing the project."),
     project_id: str = Field(..., description="The unique identifier of the project for which to retrieve group assignments."),
     limit: str | None = Field(None, description="Maximum number of groups to return in the response, between 1 and 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve user groups that have been invited to a specific project. Returns a paginated list of group assignments within the project."""
 
     _limit = _parse_int(limit)
@@ -8597,7 +8735,7 @@ async def share_project_with_groups(
     project_id: str = Field(..., description="The unique identifier of the project to share with user groups."),
     user_group_ids: list[str] = Field(..., alias="userGroupIds", description="List of user group identifiers to grant or update access for. Each ID must be a valid group within the organization."),
     role: Literal["VIEWER", "COMMENTER", "EDITOR"] = Field(..., description="The access level to assign to the user groups. Choose from: VIEWER (read-only access), COMMENTER (read and comment), or EDITOR (full edit access). Defaults to VIEWER if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant user groups access to a project with a specified role. If a group already has access, this operation updates their role assignment."""
 
     # Construct request model with validation
@@ -8640,7 +8778,7 @@ async def remove_group_from_project(
     org_id: str = Field(..., description="The organization ID that contains the project. Use the numeric organization identifier."),
     project_id: str = Field(..., description="The project ID from which to remove the group. Use the numeric project identifier."),
     group_id: str = Field(..., description="The user group ID to remove from the project. Use the numeric group identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user group from a project. This operation unassigns the specified group from the project, revoking group members' access to the project resources."""
 
     # Construct request model with validation
