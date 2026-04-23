@@ -5,7 +5,7 @@ Parallel API MCP Server
 API Info:
 - Contact: Parallel Support <support@parallel.ai> (https://parallel.ai)
 
-Generated: 2026-04-14 18:30:00 UTC
+Generated: 2026-04-23 21:35:26 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.parallel.ai")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -826,16 +944,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -849,6 +968,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -891,6 +1011,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -902,7 +1037,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1053,7 +1187,7 @@ async def search_web(
     include_domains: list[str] | None = Field(None, description="List of domains to restrict results to. Accepts full domains (e.g., example.com, subdomain.example.gov) or domain extensions with leading period (e.g., .gov, .edu). Only sources from specified domains will be included."),
     exclude_domains: list[str] | None = Field(None, description="List of domains to exclude from results. Accepts full domains (e.g., example.com, subdomain.example.gov) or domain extensions with leading period (e.g., .gov, .edu). Sources from specified domains will be filtered out."),
     after_date: str | None = Field(None, description="Start date for filtering results, provided as an RFC 3339 date string. Only content published on or after this date will be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search the web for information based on natural language objectives or keyword queries. Returns relevant results with excerpts optimized for the specified use case."""
 
     # Construct request model with validation
@@ -1099,7 +1233,7 @@ async def extract_content_from_urls(
     search_queries: list[str] | None = Field(None, description="Optional list of keyword search queries to focus extraction. When provided, extracted content will prioritize sections matching these queries."),
     excerpts: bool | _models.ExcerptSettings | None = Field(None, description="Whether to include excerpts from each URL relevant to the search objective and queries. Enabled by default. Most useful when objective or search_queries are specified; redundant if neither is provided."),
     full_content: bool | _models.FullContentSettings | None = Field(None, description="Whether to include the complete content from each URL. Disabled by default. Enable to retrieve full page content; useful when objective and search_queries are not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extracts relevant content from specified web URLs, optionally focused on a search objective or keyword queries."""
 
     # Construct request model with validation
@@ -1151,7 +1285,7 @@ async def create_task_run(
     mcp_servers: list[_models.McpServer] | None = Field(None, description="Optional list of MCP servers to use for this run. Requires 'mcp-server-2025-07-17' in the parallel-beta header to enable."),
     enable_events: bool | None = Field(None, description="Enable or disable progress event tracking for this run. When true, execution progress events are recorded and accessible via the Task Run events endpoint. Defaults to true for premium processors. Requires 'events-sse-2025-07-24' in the parallel-beta header to enable."),
     event_types: list[Literal["task_run.status"]] | None = Field(None, description="List of event types that trigger webhook notifications. Defaults to empty array (no notifications sent)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a new task run that processes input according to a specified processor and output schema. Returns immediately with a run object in 'queued' status. Supports optional filtering by domain, date range, and webhook notifications."""
 
     # Construct request model with validation
@@ -1192,7 +1326,7 @@ async def create_task_run(
 
 # Tags: Tasks v1
 @mcp.tool()
-async def get_task_run(run_id: str = Field(..., description="The unique identifier of the task run to retrieve.")) -> dict[str, Any]:
+async def get_task_run(run_id: str = Field(..., description="The unique identifier of the task run to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and details of a specific task run by its ID. Use the `/result` endpoint to access the run's output results."""
 
     # Construct request model with validation
@@ -1228,7 +1362,7 @@ async def get_task_run(run_id: str = Field(..., description="The unique identifi
 
 # Tags: Tasks v1
 @mcp.tool()
-async def get_task_run_input(run_id: str = Field(..., description="The unique identifier of the task run whose input you want to retrieve.")) -> dict[str, Any]:
+async def get_task_run_input(run_id: str = Field(..., description="The unique identifier of the task run whose input you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the input data that was provided to a specific task run. Use this to inspect what parameters or data were passed when the task run was executed."""
 
     # Construct request model with validation
@@ -1264,7 +1398,7 @@ async def get_task_run_input(run_id: str = Field(..., description="The unique id
 
 # Tags: Tasks v1
 @mcp.tool()
-async def get_task_run_result(run_id: str = Field(..., description="The unique identifier of the task run whose result you want to retrieve.")) -> dict[str, Any]:
+async def get_task_run_result(run_id: str = Field(..., description="The unique identifier of the task run whose result you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the result of a completed task run by its ID. This operation blocks until the task run finishes executing, then returns the final result."""
 
     # Construct request model with validation
@@ -1300,7 +1434,7 @@ async def get_task_run_result(run_id: str = Field(..., description="The unique i
 
 # Tags: Tasks v1
 @mcp.tool()
-async def stream_task_run_events(run_id: str = Field(..., description="The unique identifier of the task run for which to retrieve events.")) -> dict[str, Any]:
+async def stream_task_run_events(run_id: str = Field(..., description="The unique identifier of the task run for which to retrieve events.")) -> dict[str, Any] | ToolResult:
     """Stream events for a specific task run, including progress updates and state changes. Event frequency is reduced for task runs created without event streaming enabled."""
 
     # Construct request model with validation
@@ -1336,7 +1470,7 @@ async def stream_task_run_events(run_id: str = Field(..., description="The uniqu
 
 # Tags: Tasks (Beta)
 @mcp.tool()
-async def create_task_group(metadata: dict[str, str | int | float | bool] | None = Field(None, description="Optional custom metadata to attach to the task group for organizational or tracking purposes. This metadata is stored with the group and can be used to add context or labels relevant to your use case.")) -> dict[str, Any]:
+async def create_task_group(metadata: dict[str, str | int | float | bool] | None = Field(None, description="Optional custom metadata to attach to the task group for organizational or tracking purposes. This metadata is stored with the group and can be used to add context or labels relevant to your use case.")) -> dict[str, Any] | ToolResult:
     """Creates a new TaskGroup to organize and monitor multiple task runs together. Use this to establish a logical grouping for related tasks that should be tracked as a unit."""
 
     # Construct request model with validation
@@ -1374,7 +1508,7 @@ async def create_task_group(metadata: dict[str, str | int | float | bool] | None
 
 # Tags: Tasks (Beta)
 @mcp.tool()
-async def get_taskgroup(taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup to retrieve.")) -> dict[str, Any]:
+async def get_taskgroup(taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a TaskGroup and its aggregated status across all runs, providing a summary view of the group's execution state."""
 
     # Construct request model with validation
@@ -1413,7 +1547,7 @@ async def get_taskgroup(taskgroup_id: str = Field(..., description="The unique i
 async def stream_task_group_events(
     taskgroup_id: str = Field(..., description="The unique identifier of the TaskGroup whose events should be streamed."),
     last_event_id: str | None = Field(None, description="Optional event ID to resume streaming from a specific point, useful for recovering from connection interruptions without missing events."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Streams real-time events from a TaskGroup, including status updates and run completions. The connection remains open for up to one hour while at least one run in the group is active."""
 
     # Construct request model with validation
@@ -1458,7 +1592,7 @@ async def list_task_group_runs(
     status: Literal["queued", "action_required", "running", "completed", "failed", "cancelling", "cancelled"] | None = Field(None, description="Filter runs by their current status: queued (waiting to start), action_required (awaiting user input), running (in progress), completed (finished successfully), failed (encountered an error), cancelling (cancellation in progress), or cancelled (cancellation completed)."),
     include_input: bool | None = Field(None, description="Include the input data for each run in the stream response. Defaults to false."),
     include_output: bool | None = Field(None, description="Include the output data for each run in the stream response. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all task runs within a TaskGroup as a resumable stream, with optional inclusion of run inputs and outputs."""
 
     # Construct request model with validation
@@ -1502,7 +1636,7 @@ async def add_runs_to_task_group(
     output_schema: Any | _models.TextSchema | _models.AutoSchema | str = Field(..., description="JSON schema or text description defining the desired output structure from each task. Field descriptions in the schema will determine the form and content of task responses. A plain string is treated as a text schema with that description."),
     inputs: list[_models.BetaTaskRunInput] = Field(..., description="Array of task run configurations to execute. Each item represents a single task run with its input parameters. Up to 1,000 runs can be added per request; for larger batches, split across multiple requests."),
     input_schema: str | Any | _models.TextSchema | None = Field(None, description="Optional JSON schema or text description specifying the expected input structure for tasks. A plain string is treated as a text schema with that description."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates multiple task runs within a TaskGroup, allowing batch execution of tasks with specified inputs and output requirements."""
 
     # Construct request model with validation
@@ -1545,7 +1679,7 @@ async def add_runs_to_task_group(
 async def get_task_group_run(
     taskgroup_id: str = Field(..., description="The unique identifier of the task group containing the run."),
     run_id: str = Field(..., description="The unique identifier of the run whose status and details should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the status and details of a specific task group run by its run ID. The run result data is available separately via the `/result` endpoint."""
 
     # Construct request model with validation
@@ -1581,7 +1715,7 @@ async def get_task_group_run(
 
 # Tags: FindAll API (Beta)
 @mcp.tool()
-async def create_findall_spec_from_objective(objective: str = Field(..., description="A natural language description of what you want to find. Describe your search goal in plain English, such as company characteristics, funding criteria, or other business attributes you're looking for.")) -> dict[str, Any]:
+async def create_findall_spec_from_objective(objective: str = Field(..., description="A natural language description of what you want to find. Describe your search goal in plain English, such as company characteristics, funding criteria, or other business attributes you're looking for.")) -> dict[str, Any] | ToolResult:
     """Converts a natural language search objective into a structured FindAll specification that can be used to execute targeted searches. The generated spec serves as a customizable starting point and can be further refined by the user."""
 
     # Construct request model with validation
@@ -1629,7 +1763,7 @@ async def create_findall_run(
     match_limit: int = Field(..., description="Maximum number of matching entities to return, between 5 and 1000 inclusive."),
     exclude_list: list[_models.ExcludeCandidate] | None = Field(None, description="Optional list of entity names or IDs to exclude from the search results."),
     metadata: dict[str, str | int | float | bool] | None = Field(None, description="Optional custom metadata object to attach to the FindAll run for tracking or reference purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a FindAll run to search for entities matching specified criteria. Returns immediately with a queued run object; use the returned run ID to poll status, stream events, or receive webhook notifications as the search progresses."""
 
     # Construct request model with validation
@@ -1672,7 +1806,7 @@ async def create_findall_run(
 async def list_monitors(
     monitor_id: str | None = Field(None, description="Cursor for pagination—specify a monitor ID to start listing after that point in lexicographic order. Useful for fetching subsequent pages of results."),
     limit: int | None = Field(None, description="Maximum number of monitors to return per request, between 1 and 10,000. Omit to retrieve all monitors at once.", ge=1, le=10000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all active monitors for the user with their current configuration and status. Supports cursor-based pagination to efficiently browse large monitor lists."""
 
     # Construct request model with validation
@@ -1717,7 +1851,7 @@ async def create_monitor(
     output_schema: Any | None = Field(None, description="Optional schema definition for structuring the monitor's output events. Defines how results should be formatted in webhook notifications."),
     frequency: str | None = Field(None, description="How often the monitor should execute, specified as a number followed by a time unit: 'h' for hours, 'd' for days, or 'w' for weeks (e.g., '1h', '2d', '1w'). Must be between 1 hour and 30 days inclusive."),
     cadence: Literal["daily", "every_two_weeks", "hourly", "weekly"] | None = Field(None, description="Deprecated: use the 'frequency' field instead. Predefined execution cadence options: hourly, daily, weekly, or every two weeks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a web monitor that periodically executes a search query at a specified frequency and sends updates to an optional webhook. The monitor runs immediately upon creation and then continues according to the configured schedule."""
 
     # Construct request model with validation
@@ -1758,7 +1892,7 @@ async def create_monitor(
 async def list_monitors_paginated(
     cursor: str | None = Field(None, description="Opaque token for cursor-based pagination. Omit this parameter to start from the most recently created monitor, or provide the `next_cursor` value from a previous response to fetch the next page of results."),
     limit: int | None = Field(None, description="Maximum number of monitors to return per page. Must be between 1 and 10,000, defaults to 100 if not specified.", ge=1, le=10000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of active monitors ordered by creation time, newest first. Use cursor-based pagination to navigate through results."""
 
     # Construct request model with validation
@@ -1796,7 +1930,7 @@ async def list_monitors_paginated(
 
 # Tags: Monitor
 @mcp.tool()
-async def get_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to retrieve.")) -> dict[str, Any]:
+async def get_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific monitor by its ID. Returns the complete monitor configuration including status, cadence, input settings, and webhook configuration."""
 
     # Construct request model with validation
@@ -1839,7 +1973,7 @@ async def update_monitor(
     frequency: str | None = Field(None, description="Updated check frequency for the monitor. Specify as a number followed by a unit: 'h' for hours, 'd' for days, or 'w' for weeks. Must be between 1 hour and 30 days inclusive."),
     event_types: list[Literal["monitor.event.detected", "monitor.execution.completed", "monitor.execution.failed"]] | None = Field(None, description="Event types that should trigger webhook notifications. Specify as an array of event type identifiers."),
     metadata: dict[str, str] | None = Field(None, description="Custom metadata object to associate with the monitor. This metadata is included in all webhook notifications, allowing you to correlate monitor events with corresponding objects in your application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing monitor's configuration, including its search query, check frequency, webhook URL, and associated metadata. At least one field must be provided to apply changes."""
 
     # Construct request model with validation
@@ -1879,7 +2013,7 @@ async def update_monitor(
 
 # Tags: Monitor
 @mcp.tool()
-async def delete_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to delete.")) -> dict[str, Any]:
+async def delete_monitor(monitor_id: str = Field(..., description="The unique identifier of the monitor to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a monitor and stop all its future executions. Deleted monitors cannot be updated or retrieved."""
 
     # Construct request model with validation
@@ -1918,7 +2052,7 @@ async def delete_monitor(monitor_id: str = Field(..., description="The unique id
 async def get_event_group(
     monitor_id: str = Field(..., description="The unique identifier of the monitor that contains the event group."),
     event_group_id: str = Field(..., description="The unique identifier of the event group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific event group associated with a monitor. The response contains event items that represent individual events within the group."""
 
     # Construct request model with validation
@@ -1957,7 +2091,7 @@ async def get_event_group(
 async def list_monitor_events(
     monitor_id: str = Field(..., description="The unique identifier of the monitor for which to retrieve events."),
     lookback_period: str | None = Field(None, description="The time window to search for events, specified as a duration (e.g., '10d' for 10 days, '1w' for 1 week). Supports day and week increments with a minimum of 1 day. Defaults to 10 days if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve events for a specific monitor, including errors and material changes from up to the last 300 event groups. Events are returned in reverse chronological order with the most recent first."""
 
     # Construct request model with validation
@@ -2000,7 +2134,7 @@ async def simulate_monitor_event(
     monitor_id: str = Field(..., description="The unique identifier of the monitor to simulate an event for."),
     event_type: Literal["monitor.event.detected", "monitor.execution.completed", "monitor.execution.failed"] | None = Field(None, description="The type of event to simulate. Defaults to `monitor.event.detected` if not specified. Valid options are: `monitor.event.detected` (standard event detection), `monitor.execution.completed` (successful execution), or `monitor.execution.failed` (execution failure)."),
     body: str | None = Field(None, description="Optional binary payload data to include with the simulated event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Simulate sending an event to a monitor to test its event handling and triggering behavior. Useful for validating monitor configurations without waiting for real events."""
 
     # Construct request model with validation
