@@ -7,7 +7,7 @@ API Info:
 - Contact: Support (https://support.github.com/contact?tags=dotcom-rest-api)
 - Terms of Service: https://docs.github.com/articles/github-terms-of-service
 
-Generated: 2026-04-14 18:22:40 UTC
+Generated: 2026-04-23 21:18:08 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     import nacl.public
@@ -48,6 +49,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.github.com")
@@ -482,12 +484,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -509,7 +536,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
     # Per-operation URL override (OAS 3.0 path/operation-level servers)
@@ -555,18 +586,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -638,7 +733,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -686,6 +789,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -748,7 +855,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -774,10 +889,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -981,16 +1094,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -1004,6 +1118,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1046,6 +1161,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1057,44 +1187,34 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'jwt_bearer',
-    'oauth2',
-    'bearer_token',
+    'OAuth2',
+    'PersonalAccessToken',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["jwt_bearer"] = _auth.JWTBearerAuth()
-    logging.info("Authentication configured: jwt_bearer")
+    _auth_handlers["OAuth2"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: OAuth2")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for jwt_bearer not configured: {error_msg}")
-    _auth_handlers["jwt_bearer"] = None
+    logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
+    _auth_handlers["OAuth2"] = None
 try:
-    _auth_handlers["oauth2"] = _auth.OAuth2Auth()
-    logging.info("Authentication configured: oauth2")
+    _auth_handlers["PersonalAccessToken"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
+    logging.info("Authentication configured: PersonalAccessToken")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for oauth2 not configured: {error_msg}")
-    _auth_handlers["oauth2"] = None
-try:
-    _auth_handlers["bearer_token"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
-    logging.info("Authentication configured: bearer_token")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for bearer_token not configured: {error_msg}")
-    _auth_handlers["bearer_token"] = None
+    logging.warning(f"Credentials for PersonalAccessToken not configured: {error_msg}")
+    _auth_handlers["PersonalAccessToken"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1228,7 +1348,7 @@ async def list_advisories(
     epss_percentage: str | None = Field(None, description="Filter results to advisories with an Exploit Prediction Scoring System (EPSS) percentage score matching the specified value, representing the likelihood of exploitation."),
     epss_percentile: str | None = Field(None, description="Filter results to advisories with an EPSS percentile score matching the specified value, representing the relative rank of exploitation likelihood compared to other CVEs."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve global security advisories filtered by various criteria such as identifier, type, ecosystem, and vulnerability metrics. By default, returns only GitHub-reviewed advisories excluding malware."""
 
     # Construct request model with validation
@@ -1266,7 +1386,7 @@ async def list_advisories(
 
 # Tags: apps
 @mcp.tool()
-async def get_authenticated_app() -> dict[str, Any]:
+async def get_authenticated_app() -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub App associated with the current authentication credentials. Requires JWT authentication and returns app details including the count of associated installations."""
 
     # Extract parameters for API call
@@ -1293,7 +1413,7 @@ async def get_authenticated_app() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def get_webhook_config() -> dict[str, Any]:
+async def get_webhook_config() -> dict[str, Any] | ToolResult:
     """Retrieve the webhook configuration for a GitHub App. Requires JWT authentication as the GitHub App to access this endpoint."""
 
     # Extract parameters for API call
@@ -1320,7 +1440,7 @@ async def get_webhook_config() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def list_webhook_deliveries_app() -> dict[str, Any]:
+async def list_webhook_deliveries_app() -> dict[str, Any] | ToolResult:
     """Retrieve a list of webhook deliveries for a GitHub App's configured webhook. Requires JWT authentication as a GitHub App."""
 
     # Extract parameters for API call
@@ -1347,7 +1467,7 @@ async def list_webhook_deliveries_app() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def get_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery to retrieve.")) -> dict[str, Any]:
+async def get_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook delivery record for a GitHub App. Requires JWT authentication as the GitHub App."""
 
     # Construct request model with validation
@@ -1383,7 +1503,7 @@ async def get_webhook_delivery_app(delivery_id: str = Field(..., description="Th
 
 # Tags: apps
 @mcp.tool()
-async def redeliver_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery attempt to redeliver.")) -> dict[str, Any]:
+async def redeliver_webhook_delivery_app(delivery_id: str = Field(..., description="The unique identifier of the webhook delivery attempt to redeliver.")) -> dict[str, Any] | ToolResult:
     """Redeliver a previously failed webhook delivery for a GitHub App. Requires JWT authentication as a GitHub App."""
 
     # Construct request model with validation
@@ -1419,7 +1539,7 @@ async def redeliver_webhook_delivery_app(delivery_id: str = Field(..., descripti
 
 # Tags: apps
 @mcp.tool()
-async def list_installation_requests() -> dict[str, Any]:
+async def list_installation_requests() -> dict[str, Any] | ToolResult:
     """Retrieves all pending installation requests for the authenticated GitHub App. This allows you to see which organizations or users have requested to install your app but haven't completed the installation yet."""
 
     # Extract parameters for API call
@@ -1446,7 +1566,7 @@ async def list_installation_requests() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def list_app_installations(since: str | None = Field(None, description="Filter results to show only installations updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any]:
+async def list_app_installations(since: str | None = Field(None, description="Filter results to show only installations updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve all installations of the authenticated GitHub App, including their assigned permissions. Requires JWT authentication as the GitHub App."""
 
     # Construct request model with validation
@@ -1484,7 +1604,7 @@ async def list_app_installations(since: str | None = Field(None, description="Fi
 
 # Tags: apps
 @mcp.tool()
-async def get_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to retrieve.")) -> dict[str, Any]:
+async def get_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve installation details for an authenticated GitHub App using the installation ID. Requires JWT authentication."""
 
     # Construct request model with validation
@@ -1520,7 +1640,7 @@ async def get_app_installation(installation_id: int = Field(..., description="Th
 
 # Tags: apps
 @mcp.tool()
-async def uninstall_app(installation_id: int = Field(..., description="The unique identifier of the app installation to uninstall.")) -> dict[str, Any]:
+async def uninstall_app(installation_id: int = Field(..., description="The unique identifier of the app installation to uninstall.")) -> dict[str, Any] | ToolResult:
     """Uninstall a GitHub App from a user, organization, or enterprise account. Requires JWT authentication as the GitHub App."""
 
     # Construct request model with validation
@@ -1556,7 +1676,7 @@ async def uninstall_app(installation_id: int = Field(..., description="The uniqu
 
 # Tags: apps
 @mcp.tool()
-async def suspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the app installation to suspend.")) -> dict[str, Any]:
+async def suspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the app installation to suspend.")) -> dict[str, Any] | ToolResult:
     """Suspend a GitHub App installation on a user, organization, or enterprise account, blocking the app from accessing that account's resources and API/webhook events. Requires JWT authentication as the GitHub App."""
 
     # Construct request model with validation
@@ -1592,7 +1712,7 @@ async def suspend_app_installation(installation_id: int = Field(..., description
 
 # Tags: apps
 @mcp.tool()
-async def unsuspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to unsuspend.")) -> dict[str, Any]:
+async def unsuspend_app_installation(installation_id: int = Field(..., description="The unique identifier of the GitHub App installation to unsuspend.")) -> dict[str, Any] | ToolResult:
     """Removes a suspension on a GitHub App installation, allowing it to resume normal operation. Requires JWT authentication as a GitHub App."""
 
     # Construct request model with validation
@@ -1631,7 +1751,7 @@ async def unsuspend_app_installation(installation_id: int = Field(..., descripti
 async def revoke_app_authorization(
     client_id: str = Field(..., description="The client ID of the GitHub application whose authorization should be revoked."),
     access_token: str = Field(..., description="The OAuth access token for the user whose authorization is being revoked. The grant associated with this token's owner will be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke an OAuth or GitHub application's authorization for a specific user. This permanently deletes the application grant and all associated OAuth tokens, removing the application's access to the user's account."""
 
     # Construct request model with validation
@@ -1673,7 +1793,7 @@ async def revoke_app_authorization(
 async def revoke_application_token(
     client_id: str = Field(..., description="The client ID of the GitHub application whose token should be revoked."),
     access_token: str = Field(..., description="The OAuth access token to be revoked. This token must be valid and associated with the specified application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a single OAuth access token for a GitHub application. Only the application owner or the token holder can perform this action."""
 
     # Construct request model with validation
@@ -1717,7 +1837,7 @@ async def create_scoped_token(
     access_token: str = Field(..., description="The non-scoped user access token to exchange for a scoped token."),
     target_id: int | None = Field(None, description="The ID of the user or organization to scope the token to. Required unless target is specified."),
     permissions: _models.AppPermissions | None = Field(None, description="GitHub App permissions to scope the token to. Each key is a permission scope (e.g. actions, contents, issues) with value 'read' or 'write'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a repository-scoped and/or permission-scoped access token from an existing non-scoped user access token. Specify which repositories the token can access and which permissions are granted."""
 
     # Construct request model with validation
@@ -1756,7 +1876,7 @@ async def create_scoped_token(
 
 # Tags: classroom
 @mcp.tool()
-async def get_assignment(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment to retrieve.")) -> dict[str, Any]:
+async def get_assignment(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific GitHub Classroom assignment by its ID. Only administrators of the classroom containing the assignment can access this operation."""
 
     # Construct request model with validation
@@ -1792,7 +1912,7 @@ async def get_assignment(assignment_id: int = Field(..., description="The unique
 
 # Tags: classroom
 @mcp.tool()
-async def list_accepted_assignments(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to list accepted student repositories.")) -> dict[str, Any]:
+async def list_accepted_assignments(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to list accepted student repositories.")) -> dict[str, Any] | ToolResult:
     """Retrieves all student assignment repositories created by accepting a GitHub Classroom assignment. Only accessible to administrators of the GitHub Classroom."""
 
     # Construct request model with validation
@@ -1828,7 +1948,7 @@ async def list_accepted_assignments(assignment_id: int = Field(..., description=
 
 # Tags: classroom
 @mcp.tool()
-async def list_assignment_grades(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to retrieve grades.")) -> dict[str, Any]:
+async def list_assignment_grades(assignment_id: int = Field(..., description="The unique identifier of the classroom assignment for which to retrieve grades.")) -> dict[str, Any] | ToolResult:
     """Retrieve all grades for a GitHub Classroom assignment. Only accessible to administrators of the GitHub Classroom that owns the assignment."""
 
     # Construct request model with validation
@@ -1864,7 +1984,7 @@ async def list_assignment_grades(assignment_id: int = Field(..., description="Th
 
 # Tags: classroom
 @mcp.tool()
-async def list_classrooms() -> dict[str, Any]:
+async def list_classrooms() -> dict[str, Any] | ToolResult:
     """Retrieve all GitHub Classroom classrooms where the current user is an administrator. Only classrooms for which the user has admin privileges will be returned."""
 
     # Extract parameters for API call
@@ -1891,7 +2011,7 @@ async def list_classrooms() -> dict[str, Any]:
 
 # Tags: classroom
 @mcp.tool()
-async def get_classroom(classroom_id: int = Field(..., description="The unique identifier of the classroom to retrieve.")) -> dict[str, Any]:
+async def get_classroom(classroom_id: int = Field(..., description="The unique identifier of the classroom to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific GitHub Classroom by ID. Only returns the classroom if the authenticated user is an administrator of that classroom."""
 
     # Construct request model with validation
@@ -1927,7 +2047,7 @@ async def get_classroom(classroom_id: int = Field(..., description="The unique i
 
 # Tags: classroom
 @mcp.tool()
-async def list_assignments(classroom_id: int = Field(..., description="The unique identifier of the classroom for which to retrieve assignments.")) -> dict[str, Any]:
+async def list_assignments(classroom_id: int = Field(..., description="The unique identifier of the classroom for which to retrieve assignments.")) -> dict[str, Any] | ToolResult:
     """Retrieve all GitHub Classroom assignments for a specified classroom. Only administrators of the classroom can access this list."""
 
     # Construct request model with validation
@@ -1963,7 +2083,7 @@ async def list_assignments(classroom_id: int = Field(..., description="The uniqu
 
 # Tags: codes-of-conduct
 @mcp.tool()
-async def list_codes_of_conduct() -> dict[str, Any]:
+async def list_codes_of_conduct() -> dict[str, Any] | ToolResult:
     """Retrieve all available GitHub codes of conduct. Returns a comprehensive array of conduct guidelines that can be applied to repositories."""
 
     # Extract parameters for API call
@@ -1990,7 +2110,7 @@ async def list_codes_of_conduct() -> dict[str, Any]:
 
 # Tags: codes-of-conduct
 @mcp.tool()
-async def get_conduct_code(key: str = Field(..., description="The unique identifier or key of the code of conduct to retrieve.")) -> dict[str, Any]:
+async def get_conduct_code(key: str = Field(..., description="The unique identifier or key of the code of conduct to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific GitHub code of conduct. Use this to fetch the full content and metadata for a code of conduct by its unique identifier."""
 
     # Construct request model with validation
@@ -2026,7 +2146,7 @@ async def get_conduct_code(key: str = Field(..., description="The unique identif
 
 # Tags: actions
 @mcp.tool()
-async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier used to reference the enterprise in API requests.")) -> dict[str, Any]:
+async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier used to reference the enterprise in API requests.")) -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub Actions cache storage limit for an enterprise. This limit applies to all organizations and repositories within the enterprise and cannot be exceeded by their individual cache storage configurations."""
 
     # Construct request model with validation
@@ -2062,7 +2182,7 @@ async def get_enterprise_actions_cache_storage_limit(enterprise: str = Field(...
 
 # Tags: oidc
 @mcp.tool()
-async def list_oidc_custom_property_inclusions(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any]:
+async def list_oidc_custom_property_inclusions(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any] | ToolResult:
     """Lists the repository custom properties that are included in OIDC tokens for repository actions within an enterprise. Requires admin:enterprise scope for authentication."""
 
     # Construct request model with validation
@@ -2101,7 +2221,7 @@ async def list_oidc_custom_property_inclusions(enterprise: str = Field(..., desc
 async def add_oidc_custom_property(
     enterprise: str = Field(..., description="The enterprise slug identifier (URL-friendly name) for which to configure the OIDC custom property inclusion."),
     custom_property_name: str = Field(..., description="The name of the repository custom property to include in the OIDC token for repository actions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a repository custom property to be included in OIDC tokens issued for repository actions within an enterprise. Requires `admin:enterprise` scope."""
 
     # Construct request model with validation
@@ -2140,7 +2260,7 @@ async def add_oidc_custom_property(
 
 # Tags: code-security
 @mcp.tool()
-async def list_code_security_configurations(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any]:
+async def list_code_security_configurations(enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise.")) -> dict[str, Any] | ToolResult:
     """Lists all code security configurations available in an enterprise. The authenticated user must be an administrator of the enterprise to access this endpoint."""
 
     # Construct request model with validation
@@ -2176,7 +2296,7 @@ async def list_code_security_configurations(enterprise: str = Field(..., descrip
 
 # Tags: code-security
 @mcp.tool()
-async def list_enterprise_code_security_default_configurations(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens). This is the URL-friendly version of the enterprise name.")) -> dict[str, Any]:
+async def list_enterprise_code_security_default_configurations(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens). This is the URL-friendly version of the enterprise name.")) -> dict[str, Any] | ToolResult:
     """Retrieves the default code security configurations for an enterprise. The authenticated user must be an administrator of the enterprise to access this endpoint."""
 
     # Construct request model with validation
@@ -2215,7 +2335,7 @@ async def list_enterprise_code_security_default_configurations(enterprise: str =
 async def get_code_security_configuration_enterprise(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens)."),
     configuration_id: int = Field(..., description="The unique numeric identifier of the code security configuration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific code security configuration for an enterprise. The authenticated user must be an enterprise administrator to access this endpoint."""
 
     # Construct request model with validation
@@ -2254,7 +2374,7 @@ async def get_code_security_configuration_enterprise(
 async def delete_code_security_configuration_enterprise(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a code security configuration from an enterprise. Repositories attached to the configuration will retain their settings but will no longer be associated with the configuration."""
 
     # Construct request model with validation
@@ -2294,7 +2414,7 @@ async def attach_code_security_configuration(
     enterprise: str = Field(..., description="The slug version of the enterprise name."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to attach."),
     scope: Literal["all", "all_without_configurations"] = Field(..., description="The scope of repositories to attach the configuration to. Use 'all' to attach to all repositories, or 'all_without_configurations' to attach only to repositories not yet attached to any configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach an enterprise code security configuration to repositories within the specified scope. Repositories already attached to a configuration will be re-attached to the provided configuration, with free features enabled if insufficient GHAS licenses are available."""
 
     # Construct request model with validation
@@ -2336,7 +2456,7 @@ async def attach_code_security_configuration(
 async def list_code_security_configuration_repositories(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration. This ID specifies which configuration's associated repositories to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories associated with a specific enterprise code security configuration. The authenticated user must be an enterprise administrator to access this endpoint."""
 
     # Construct request model with validation
@@ -2381,7 +2501,7 @@ async def list_dependabot_alerts(
     has: str | list[Literal["patch"]] | None = Field(None, description="Filter alerts by presence of specific attributes. Currently supports 'patch' to filter for alerts with available patches. Multiple filters can be combined to match all criteria."),
     scope: Literal["development", "runtime"] | None = Field(None, description="Filter alerts by dependency scope within the project."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists Dependabot security alerts across repositories in an enterprise. Returns alerts only for organizations where you have owner or security manager permissions."""
 
     # Construct request model with validation
@@ -2420,7 +2540,7 @@ async def list_dependabot_alerts(
 
 # Tags: enterprise-teams
 @mcp.tool()
-async def list_teams_enterprise(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated). This uniquely identifies the enterprise whose teams should be listed.")) -> dict[str, Any]:
+async def list_teams_enterprise(enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated). This uniquely identifies the enterprise whose teams should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve all teams within an enterprise that the authenticated user has access to. This operation returns a complete list of teams for the specified enterprise."""
 
     # Construct request model with validation
@@ -2462,7 +2582,7 @@ async def create_enterprise_team(
     description: str | None = Field(None, description="An optional description providing details about the team's purpose or scope."),
     organization_selection_type: Literal["disabled", "selected", "all"] | None = Field(None, description="Specifies which organizations in the enterprise should have access to this team. Use 'disabled' to exclude the team from all organizations, 'selected' to assign it to specific organizations, or 'all' to assign it to all current and future organizations."),
     group_id: str | None = Field(None, description="The ID of the IdP group to assign team membership with. This enables automatic team membership provisioning through your identity provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new team within an enterprise. The authenticated user must be an owner of the enterprise to perform this action."""
 
     # Construct request model with validation
@@ -2504,7 +2624,7 @@ async def create_enterprise_team(
 async def list_enterprise_team_members(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly lowercase name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format (URL-friendly lowercase name) or the numeric team ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all members belonging to a specific enterprise team. Use this to view the complete roster of team members within an enterprise."""
 
     # Construct request model with validation
@@ -2544,7 +2664,7 @@ async def add_team_members(
     enterprise: str = Field(..., description="The enterprise identifier as a slug (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier as a slug or numeric ID."),
     usernames: list[str] = Field(..., description="List of GitHub user handles to add to the team. Order is not significant. Each item should be a valid GitHub username."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add multiple GitHub users to an enterprise team in bulk. Specify the enterprise and team by their slug identifiers, and provide a list of GitHub usernames to add."""
 
     # Construct request model with validation
@@ -2587,7 +2707,7 @@ async def remove_team_members(
     enterprise: str = Field(..., description="The enterprise identifier as a URL-friendly slug (lowercase, hyphens allowed)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier as a URL-friendly slug or numeric team ID."),
     usernames: list[str] = Field(..., description="Array of GitHub user handles to remove from the team. Order is not significant. Each username should be a valid GitHub account handle."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove multiple members from an enterprise team in a single operation. Specify the enterprise, team, and list of GitHub usernames to be removed."""
 
     # Construct request model with validation
@@ -2630,7 +2750,7 @@ async def check_enterprise_team_membership(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the URL-friendly identifier for the enterprise."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The slug version of the enterprise team name, or alternatively the enterprise team ID. This uniquely identifies the team within the enterprise."),
     username: str = Field(..., description="The GitHub username (handle) of the user to check membership for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a user is a member of an enterprise team. Returns membership status for the specified user within the enterprise team."""
 
     # Construct request model with validation
@@ -2670,7 +2790,7 @@ async def add_team_member(
     enterprise: str = Field(..., description="The slug identifier for the enterprise organization."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The slug identifier or numeric ID for the enterprise team."),
     username: str = Field(..., description="The GitHub username handle for the user to add to the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to an enterprise team. The user will gain access to the team's resources and permissions within the enterprise."""
 
     # Construct request model with validation
@@ -2710,7 +2830,7 @@ async def remove_team_member(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase with hyphens)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or numeric team ID."),
     username: str = Field(..., description="The GitHub username of the user whose team membership should be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user's membership from an enterprise team. This operation revokes the user's access to the team and its associated resources."""
 
     # Construct request model with validation
@@ -2749,7 +2869,7 @@ async def remove_team_member(
 async def list_organization_assignments(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all organizations assigned to a specific enterprise team. Use this to view which organizations are linked to a team within an enterprise."""
 
     # Construct request model with validation
@@ -2789,7 +2909,7 @@ async def assign_team_to_organizations(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
     organization_slugs: list[str] = Field(..., description="List of organization slugs to assign the team to. Each slug should be the URL-friendly identifier for the target organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign an enterprise team to multiple organizations. This operation enables bulk assignment of a single team across multiple organizations within an enterprise."""
 
     # Construct request model with validation
@@ -2832,7 +2952,7 @@ async def unassign_team_from_organizations(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
     organization_slugs: list[str] = Field(..., description="List of organization slugs to unassign the team from. Order is not significant. Each item should be the organization's slug identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an enterprise team's assignments from multiple organizations. This operation unassigns the specified team from all provided organizations."""
 
     # Construct request model with validation
@@ -2875,7 +2995,7 @@ async def verify_team_organization_assignment(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated). This identifies the parent enterprise context."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or UUID. Can be provided as either the team's slug name or its unique identifier."),
     org: str = Field(..., description="The organization name to check for team assignment. The lookup is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether an enterprise team is assigned to a specific organization. Use this to check team-organization relationships within your enterprise."""
 
     # Construct request model with validation
@@ -2915,7 +3035,7 @@ async def assign_team_to_organization(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (lowercase, hyphen-separated name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or numeric ID. The slug is the lowercase, hyphen-separated team name."),
     org: str = Field(..., description="The organization name to assign the team to. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign an enterprise team to an organization, enabling the team to access and manage resources within that organization."""
 
     # Construct request model with validation
@@ -2955,7 +3075,7 @@ async def unassign_team_from_organization(
     enterprise: str = Field(..., description="The enterprise identifier in slug format (URL-friendly name)."),
     enterprise_team: str = Field(..., alias="enterprise-team", description="The enterprise team identifier in slug format or the numeric team ID."),
     org: str = Field(..., description="The organization name to unassign the team from. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an enterprise team's assignment from an organization. This operation unlinks the team from the specified organization within the enterprise."""
 
     # Construct request model with validation
@@ -2994,7 +3114,7 @@ async def unassign_team_from_organization(
 async def get_enterprise_team(
     enterprise: str = Field(..., description="The slug version of the enterprise name. This is the normalized identifier used in the enterprise URL."),
     team_slug: str = Field(..., description="The slug of the team name. GitHub generates this by normalizing the team name: converting to lowercase, replacing spaces with hyphens, removing special characters, and prefixing with 'ent:'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific team within an enterprise using its slug identifier. The team slug is a normalized version of the team name with special characters removed, lowercase conversion, spaces replaced with hyphens, and prefixed with 'ent:'."""
 
     # Construct request model with validation
@@ -3036,7 +3156,7 @@ async def update_enterprise_team(
     description: str | None = Field(None, description="A new description for the team."),
     organization_selection_type: Literal["disabled", "selected", "all"] | None = Field(None, description="Specifies which organizations in the enterprise should have access to this team. Use `disabled` to unassign from all organizations, `selected` to assign to specific organizations, or `all` to assign to all current and future organizations."),
     group_id: str | None = Field(None, description="The ID of the IdP group to assign team membership with. Replaces any existing IdP group assignment or direct members if the team is not currently linked to an IdP group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an enterprise team's configuration including description, organization access scope, and IdP group assignment. Requires enterprise owner authentication."""
 
     # Construct request model with validation
@@ -3078,7 +3198,7 @@ async def update_enterprise_team(
 async def delete_enterprise_team(
     enterprise: str = Field(..., description="The slug identifier for the enterprise containing the team to be deleted."),
     team_slug: str = Field(..., description="The slug identifier for the team to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an enterprise team and all associated IdP mappings. The authenticated user must be an enterprise owner to perform this action."""
 
     # Construct request model with validation
@@ -3114,7 +3234,7 @@ async def delete_enterprise_team(
 
 # Tags: activity
 @mcp.tool()
-async def list_events() -> dict[str, Any]:
+async def list_events() -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events. Note: This API is not optimized for real-time use cases; event data latency can range from 30 seconds to 6 hours depending on the time of day."""
 
     # Extract parameters for API call
@@ -3141,7 +3261,7 @@ async def list_events() -> dict[str, Any]:
 
 # Tags: activity
 @mcp.tool()
-async def list_feeds() -> dict[str, Any]:
+async def list_feeds() -> dict[str, Any] | ToolResult:
     """Retrieve all available feeds for the authenticated user, including timeline feeds (global, user, organization) and security advisories. Each feed includes a URL that can be used to fetch its contents in JSON or Atom format."""
 
     # Extract parameters for API call
@@ -3168,7 +3288,7 @@ async def list_feeds() -> dict[str, Any]:
 
 # Tags: gists
 @mcp.tool()
-async def list_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any]:
+async def list_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve gists for the authenticated user, or all public gists if called anonymously. Results can be filtered by last update time."""
 
     # Construct request model with validation
@@ -3210,7 +3330,7 @@ async def create_gist(
     files: dict[str, _models.GistsCreateBodyFilesValue] = Field(..., description="An object mapping file names to their content. Each file must have a unique name and contain the file content as a string."),
     description: str | None = Field(None, description="A brief description of the gist's purpose or content."),
     public: str | None = Field(None, description="Whether the gist should be publicly accessible. Accepts boolean values or string representations of boolean values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new gist with one or more files. A gist is a simple way to share code snippets and text with others."""
 
     # Construct request model with validation
@@ -3248,7 +3368,7 @@ async def create_gist(
 
 # Tags: gists
 @mcp.tool()
-async def list_public_gists(since: str | None = Field(None, description="Filter results to show only gists updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any]:
+async def list_public_gists(since: str | None = Field(None, description="Filter results to show only gists updated after the specified timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public gists sorted by most recently updated first. Supports pagination to fetch up to 3000 gists total."""
 
     # Construct request model with validation
@@ -3286,7 +3406,7 @@ async def list_public_gists(since: str | None = Field(None, description="Filter 
 
 # Tags: gists
 @mcp.tool()
-async def list_starred_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any]:
+async def list_starred_gists(since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Retrieve all gists starred by the authenticated user. Results can be filtered to show only gists updated after a specified timestamp."""
 
     # Construct request model with validation
@@ -3324,7 +3444,7 @@ async def list_starred_gists(since: str | None = Field(None, description="Filter
 
 # Tags: gists
 @mcp.tool()
-async def get_gist(gist_id: str = Field(..., description="The unique identifier of the gist to retrieve.")) -> dict[str, Any]:
+async def get_gist(gist_id: str = Field(..., description="The unique identifier of the gist to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific gist by its unique identifier. Supports multiple response formats including raw markdown and base64-encoded content."""
 
     # Construct request model with validation
@@ -3364,7 +3484,7 @@ async def update_gist(
     gist_id: str = Field(..., description="The unique identifier of the gist to update."),
     description: str | None = Field(None, description="A new description for the gist."),
     files: dict[str, _models.GistsUpdateBodyFilesValue] | None = Field(None, description="A mapping of gist files to update, rename, or delete. Each key must match the current filename including extension. To delete a file, set its value to null. To rename a file, include a new filename in the file object. Files not included in this object remain unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a gist's description and manage its files by updating content, renaming, or deleting files. At least one of description or files must be provided."""
 
     # Construct request model with validation
@@ -3403,7 +3523,7 @@ async def update_gist(
 
 # Tags: gists
 @mcp.tool()
-async def delete_gist(gist_id: str = Field(..., description="The unique identifier of the gist to delete.")) -> dict[str, Any]:
+async def delete_gist(gist_id: str = Field(..., description="The unique identifier of the gist to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a gist by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3439,7 +3559,7 @@ async def delete_gist(gist_id: str = Field(..., description="The unique identifi
 
 # Tags: gists
 @mcp.tool()
-async def list_gist_comments(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve comments.")) -> dict[str, Any]:
+async def list_gist_comments(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve comments.")) -> dict[str, Any] | ToolResult:
     """Retrieves all comments posted on a specific gist. Supports multiple response formats including raw markdown and base64-encoded content."""
 
     # Construct request model with validation
@@ -3478,7 +3598,7 @@ async def list_gist_comments(gist_id: str = Field(..., description="The unique i
 async def create_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist to comment on."),
     body: str = Field(..., description="The comment text content. Supports markdown formatting.", max_length=65535),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a comment to a gist. The comment text supports markdown formatting and can be up to 65,535 characters."""
 
     # Construct request model with validation
@@ -3520,7 +3640,7 @@ async def create_gist_comment(
 async def get_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment."),
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific comment from a gist. Supports multiple media types including raw markdown and base64-encoded content for handling special characters."""
 
     _comment_id = _parse_int(comment_id)
@@ -3562,7 +3682,7 @@ async def update_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment to update."),
     comment_id: str = Field(..., description="The unique identifier of the comment to update."),
     body: str = Field(..., description="The updated comment text. Supports markdown formatting and can be up to 65,535 characters.", max_length=65535),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing comment on a gist. The comment text can be up to 65,535 characters and supports markdown formatting."""
 
     _comment_id = _parse_int(comment_id)
@@ -3606,7 +3726,7 @@ async def update_gist_comment(
 async def delete_gist_comment(
     gist_id: str = Field(..., description="The unique identifier of the gist containing the comment to delete."),
     comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific comment from a gist. The authenticated user must have permission to delete the comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -3644,7 +3764,7 @@ async def delete_gist_comment(
 
 # Tags: gists
 @mcp.tool()
-async def list_gist_commits(gist_id: str = Field(..., description="The unique identifier of the gist whose commit history you want to retrieve.")) -> dict[str, Any]:
+async def list_gist_commits(gist_id: str = Field(..., description="The unique identifier of the gist whose commit history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the commit history for a specific gist, showing all revisions and changes made to the gist over time."""
 
     # Construct request model with validation
@@ -3680,7 +3800,7 @@ async def list_gist_commits(gist_id: str = Field(..., description="The unique id
 
 # Tags: gists
 @mcp.tool()
-async def list_gist_forks(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve forks.")) -> dict[str, Any]:
+async def list_gist_forks(gist_id: str = Field(..., description="The unique identifier of the gist for which to retrieve forks.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all forks created from a specific gist. This allows you to discover derivative versions and track how a gist has been adapted by other users."""
 
     # Construct request model with validation
@@ -3716,7 +3836,7 @@ async def list_gist_forks(gist_id: str = Field(..., description="The unique iden
 
 # Tags: gists
 @mcp.tool()
-async def fork_gist(gist_id: str = Field(..., description="The unique identifier of the gist to fork.")) -> dict[str, Any]:
+async def fork_gist(gist_id: str = Field(..., description="The unique identifier of the gist to fork.")) -> dict[str, Any] | ToolResult:
     """Create a fork of an existing gist under your account. The forked gist will be an independent copy that you can modify without affecting the original."""
 
     # Construct request model with validation
@@ -3752,7 +3872,7 @@ async def fork_gist(gist_id: str = Field(..., description="The unique identifier
 
 # Tags: gists
 @mcp.tool()
-async def check_gist_starred(gist_id: str = Field(..., description="The unique identifier of the gist to check for starred status.")) -> dict[str, Any]:
+async def check_gist_starred(gist_id: str = Field(..., description="The unique identifier of the gist to check for starred status.")) -> dict[str, Any] | ToolResult:
     """Check whether a specific gist has been starred by the authenticated user. Returns a 204 status if starred, or 404 if not starred."""
 
     # Construct request model with validation
@@ -3788,7 +3908,7 @@ async def check_gist_starred(gist_id: str = Field(..., description="The unique i
 
 # Tags: gists
 @mcp.tool()
-async def star_gist(gist_id: str = Field(..., description="The unique identifier of the gist to star.")) -> dict[str, Any]:
+async def star_gist(gist_id: str = Field(..., description="The unique identifier of the gist to star.")) -> dict[str, Any] | ToolResult:
     """Star a gist to save it for quick access. Requires setting the Content-Length header to zero."""
 
     # Construct request model with validation
@@ -3824,7 +3944,7 @@ async def star_gist(gist_id: str = Field(..., description="The unique identifier
 
 # Tags: gists
 @mcp.tool()
-async def remove_gist_star(gist_id: str = Field(..., description="The unique identifier of the gist to unstar.")) -> dict[str, Any]:
+async def remove_gist_star(gist_id: str = Field(..., description="The unique identifier of the gist to unstar.")) -> dict[str, Any] | ToolResult:
     """Remove a star from a gist, indicating you no longer want to mark it as a favorite. This action is only available for gists you have previously starred."""
 
     # Construct request model with validation
@@ -3863,7 +3983,7 @@ async def remove_gist_star(gist_id: str = Field(..., description="The unique ide
 async def get_gist_revision(
     gist_id: str = Field(..., description="The unique identifier of the gist to retrieve a revision from."),
     sha: str = Field(..., description="The commit SHA that identifies the specific revision of the gist to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific revision of a gist by its SHA identifier. Supports multiple media types including raw markdown and base64-encoded content for handling special characters."""
 
     # Construct request model with validation
@@ -3899,7 +4019,7 @@ async def get_gist_revision(
 
 # Tags: gitignore
 @mcp.tool()
-async def list_gitignore_templates() -> dict[str, Any]:
+async def list_gitignore_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available gitignore templates that can be used when creating a new repository. These templates provide pre-configured ignore patterns for common development environments and frameworks."""
 
     # Extract parameters for API call
@@ -3926,7 +4046,7 @@ async def list_gitignore_templates() -> dict[str, Any]:
 
 # Tags: gitignore
 @mcp.tool()
-async def get_gitignore_template(name: str = Field(..., description="The name of the gitignore template to retrieve (e.g., 'Python', 'Node', 'Java'). Template names are case-sensitive.")) -> dict[str, Any]:
+async def get_gitignore_template(name: str = Field(..., description="The name of the gitignore template to retrieve (e.g., 'Python', 'Node', 'Java'). Template names are case-sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the content of a gitignore template by name. Supports raw content retrieval via custom media type."""
 
     # Construct request model with validation
@@ -3962,7 +4082,7 @@ async def get_gitignore_template(name: str = Field(..., description="The name of
 
 # Tags: apps
 @mcp.tool()
-async def list_installation_repositories() -> dict[str, Any]:
+async def list_installation_repositories() -> dict[str, Any] | ToolResult:
     """List all repositories that this app installation has access to. Returns repositories the authenticated app can interact with based on its installation permissions."""
 
     # Extract parameters for API call
@@ -3999,7 +4119,7 @@ async def list_issues(
     orgs: bool | None = Field(None, description="When enabled, includes issues from organization repositories."),
     owned: bool | None = Field(None, description="When enabled, includes issues from repositories you own."),
     pulls: bool | None = Field(None, description="When enabled, includes pull requests in the results. Note that GitHub treats pull requests as issues in this endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve issues assigned to the authenticated user across all visible repositories, including owned, member, and organization repositories. Use the filter parameter to customize which issues are returned."""
 
     # Construct request model with validation
@@ -4037,7 +4157,7 @@ async def list_issues(
 
 # Tags: licenses
 @mcp.tool()
-async def list_licenses(featured: bool | None = Field(None, description="Filter results to show only featured licenses. When enabled, returns a curated subset of the most popular licenses.")) -> dict[str, Any]:
+async def list_licenses(featured: bool | None = Field(None, description="Filter results to show only featured licenses. When enabled, returns a curated subset of the most popular licenses.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most commonly used open source licenses on GitHub. This helps developers quickly find and apply standard licenses to their repositories."""
 
     # Construct request model with validation
@@ -4075,7 +4195,7 @@ async def list_licenses(featured: bool | None = Field(None, description="Filter 
 
 # Tags: licenses
 @mcp.tool()
-async def get_license(license_: str = Field(..., alias="license", description="The license identifier or SPDX license identifier to retrieve information for.")) -> dict[str, Any]:
+async def get_license(license_: str = Field(..., alias="license", description="The license identifier or SPDX license identifier to retrieve information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific open source license. This is useful for understanding license terms and requirements when licensing a repository."""
 
     # Construct request model with validation
@@ -4111,7 +4231,7 @@ async def get_license(license_: str = Field(..., alias="license", description="T
 
 # Tags: apps
 @mcp.tool()
-async def get_subscription_plan(account_id: int = Field(..., description="The unique identifier of the user or organization account to retrieve subscription information for.")) -> dict[str, Any]:
+async def get_subscription_plan(account_id: int = Field(..., description="The unique identifier of the user or organization account to retrieve subscription information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the active subscription plan for a user or organization account on a GitHub App marketplace listing. Returns current subscription status and any pending plan changes scheduled for the next billing cycle."""
 
     # Construct request model with validation
@@ -4147,7 +4267,7 @@ async def get_subscription_plan(account_id: int = Field(..., description="The un
 
 # Tags: apps
 @mcp.tool()
-async def list_marketplace_plans() -> dict[str, Any]:
+async def list_marketplace_plans() -> dict[str, Any] | ToolResult:
     """Retrieve all plans associated with your GitHub Marketplace listing. Requires JWT authentication for GitHub Apps or basic authentication for OAuth apps."""
 
     # Extract parameters for API call
@@ -4174,7 +4294,7 @@ async def list_marketplace_plans() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def get_subscription_plan_stubbed(account_id: int = Field(..., description="The unique identifier of the account (user or organization) to check subscription status for.")) -> dict[str, Any]:
+async def get_subscription_plan_stubbed(account_id: int = Field(..., description="The unique identifier of the account (user or organization) to check subscription status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the active subscription plan for a GitHub account. Returns the current subscription status and any pending plan changes scheduled for the next billing cycle."""
 
     # Construct request model with validation
@@ -4210,7 +4330,7 @@ async def get_subscription_plan_stubbed(account_id: int = Field(..., description
 
 # Tags: apps
 @mcp.tool()
-async def list_marketplace_plans_stubbed() -> dict[str, Any]:
+async def list_marketplace_plans_stubbed() -> dict[str, Any] | ToolResult:
     """Retrieve all plans associated with your GitHub Marketplace listing. Requires JWT authentication for GitHub Apps or basic authentication with client credentials for OAuth apps."""
 
     # Extract parameters for API call
@@ -4240,7 +4360,7 @@ async def list_marketplace_plans_stubbed() -> dict[str, Any]:
 async def list_network_events(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List public events for a network of repositories. Note: This API is not built to serve real-time use cases; event latency can range from 30 seconds to 6 hours depending on the time of day."""
 
     # Construct request model with validation
@@ -4280,7 +4400,7 @@ async def list_notifications(
     all_: bool | None = Field(None, alias="all", description="Include notifications marked as read in the results. By default, only unread notifications are returned."),
     participating: bool | None = Field(None, description="Show only notifications where you are directly participating or mentioned, excluding notifications you're merely watching."),
     since: str | None = Field(None, description="Return only notifications last updated after this timestamp. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all notifications for the authenticated user, sorted by most recent update. Use filters to show only unread notifications or those where you're directly participating."""
 
     # Construct request model with validation
@@ -4318,7 +4438,7 @@ async def list_notifications(
 
 # Tags: activity
 @mcp.tool()
-async def mark_notifications_as_read(last_read_at: str | None = Field(None, description="Timestamp marking the last point notifications were checked. Notifications updated after this time will not be marked as read. Omit to mark all notifications as read. Use ISO 8601 format.")) -> dict[str, Any]:
+async def mark_notifications_as_read(last_read_at: str | None = Field(None, description="Timestamp marking the last point notifications were checked. Notifications updated after this time will not be marked as read. Omit to mark all notifications as read. Use ISO 8601 format.")) -> dict[str, Any] | ToolResult:
     """Mark all notifications as read for the authenticated user. For large notification volumes, returns a 202 status and processes asynchronously; use the list notifications endpoint with `all=false` to verify completion."""
 
     # Construct request model with validation
@@ -4356,7 +4476,7 @@ async def mark_notifications_as_read(last_read_at: str | None = Field(None, desc
 
 # Tags: activity
 @mcp.tool()
-async def get_notification_thread(thread_id: int = Field(..., description="The unique identifier of the notification thread to retrieve. This ID is returned in the `id` field when listing notifications.")) -> dict[str, Any]:
+async def get_notification_thread(thread_id: int = Field(..., description="The unique identifier of the notification thread to retrieve. This ID is returned in the `id` field when listing notifications.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific notification thread. Use the thread ID from notification list operations to fetch thread-specific data."""
 
     # Construct request model with validation
@@ -4392,7 +4512,7 @@ async def get_notification_thread(thread_id: int = Field(..., description="The u
 
 # Tags: activity
 @mcp.tool()
-async def mark_notification_thread_as_read(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as read. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any]:
+async def mark_notification_thread_as_read(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as read. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mark a notification thread as read, equivalent to dismissing a notification in your GitHub notification inbox. This updates the thread's read status without deleting it."""
 
     # Construct request model with validation
@@ -4428,7 +4548,7 @@ async def mark_notification_thread_as_read(thread_id: int = Field(..., descripti
 
 # Tags: activity
 @mcp.tool()
-async def mark_notification_thread_as_done(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as done. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any]:
+async def mark_notification_thread_as_done(thread_id: int = Field(..., description="The unique identifier of the notification thread to mark as done. This ID corresponds to the `id` field returned when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mark a notification thread as done, equivalent to archiving a notification in your GitHub notification inbox. This removes the thread from your active notifications."""
 
     # Construct request model with validation
@@ -4464,7 +4584,7 @@ async def mark_notification_thread_as_done(thread_id: int = Field(..., descripti
 
 # Tags: activity
 @mcp.tool()
-async def get_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread to check subscription status for.")) -> dict[str, Any]:
+async def get_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread to check subscription status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the subscription status of the authenticated user for a specific notification thread. Returns subscription details if the user is subscribed (e.g., through participation, mentions, or manual subscription)."""
 
     # Construct request model with validation
@@ -4503,7 +4623,7 @@ async def get_thread_subscription(thread_id: int = Field(..., description="The u
 async def configure_thread_notification(
     thread_id: int = Field(..., description="The unique identifier of the notification thread returned in the `id` field from notification list operations."),
     ignored: bool | None = Field(None, description="Set to true to block all notifications from this thread, or false to receive notifications normally."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure notification settings for a specific thread. Use this to ignore future notifications, subscribe to threads you're not currently watching, or unsubscribe from previously ignored threads."""
 
     # Construct request model with validation
@@ -4542,7 +4662,7 @@ async def configure_thread_notification(
 
 # Tags: activity
 @mcp.tool()
-async def mute_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread, obtained from the `id` field when retrieving notifications.")) -> dict[str, Any]:
+async def mute_thread_subscription(thread_id: int = Field(..., description="The unique identifier of the notification thread, obtained from the `id` field when retrieving notifications.")) -> dict[str, Any] | ToolResult:
     """Mute all future notifications for a thread until you comment or receive an @mention. Repository watching settings remain unaffected by this operation."""
 
     # Construct request model with validation
@@ -4578,7 +4698,7 @@ async def mute_thread_subscription(thread_id: int = Field(..., description="The 
 
 # Tags: orgs
 @mcp.tool()
-async def list_organizations(since: int | None = Field(None, description="Organization ID cursor for pagination. Returns only organizations with an ID greater than this value to fetch the next page of results.")) -> dict[str, Any]:
+async def list_organizations(since: int | None = Field(None, description="Organization ID cursor for pagination. Returns only organizations with an ID greater than this value to fetch the next page of results.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organizations ordered by creation date. Pagination is cursor-based using the `since` parameter to fetch subsequent pages via Link headers."""
 
     # Construct request model with validation
@@ -4616,7 +4736,7 @@ async def list_organizations(since: int | None = Field(None, description="Organi
 
 # Tags: actions
 @mcp.tool()
-async def get_actions_cache_storage_limit(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def get_actions_cache_storage_limit(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub Actions cache storage limit for an organization. This limit applies to all repositories within the organization and cannot be exceeded by individual repository settings."""
 
     # Construct request model with validation
@@ -4652,7 +4772,7 @@ async def get_actions_cache_storage_limit(org: str = Field(..., description="The
 
 # Tags: dependabot
 @mcp.tool()
-async def list_dependabot_repository_access(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_dependabot_repository_access(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists repositories that Dependabot has been granted access to within an organization. This allows organization admins to view which repositories Dependabot can access when updating dependencies."""
 
     # Construct request model with validation
@@ -4692,7 +4812,7 @@ async def update_dependabot_repository_access(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     repository_ids_to_add: list[int] | None = Field(None, description="List of repository IDs to grant Dependabot access to. Each ID should be a valid repository identifier for the organization."),
     repository_ids_to_remove: list[int] | None = Field(None, description="List of repository IDs to revoke Dependabot access from. Each ID should be a valid repository identifier currently in the access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates Dependabot's repository access permissions for an organization by adding and removing repositories from its authorized list. This operation allows organization admins to control which repositories Dependabot can access when managing dependencies."""
 
     # Construct request model with validation
@@ -4734,7 +4854,7 @@ async def update_dependabot_repository_access(
 async def list_organization_budgets(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     scope: Literal["enterprise", "organization", "repository", "cost_center"] | None = Field(None, description="Filter budgets by their scope type to narrow results to a specific budget category."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all budgets configured for an organization. The authenticated user must have organization admin or billing manager permissions. Results are paginated with up to 10 budgets per page."""
 
     # Construct request model with validation
@@ -4776,7 +4896,7 @@ async def list_organization_budgets(
 async def get_budget(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     budget_id: str = Field(..., description="The unique identifier of the budget to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific budget for an organization by its ID. The authenticated user must have organization admin or billing manager permissions."""
 
     # Construct request model with validation
@@ -4821,7 +4941,7 @@ async def update_budget(
     budget_entity_name: str | None = Field(None, description="The name of the specific entity (organization, repository, or cost center) to which the budget applies."),
     budget_type: str | None = Field(None, description="The pricing model type covered by this budget."),
     budget_product_sku: str | None = Field(None, description="A specific product or SKU identifier to include in the budget scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing budget for an organization. The authenticated user must have organization admin or billing manager permissions."""
 
     # Construct request model with validation
@@ -4863,7 +4983,7 @@ async def update_budget(
 async def delete_budget(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     budget_id: str = Field(..., description="The unique identifier of the budget to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a budget for an organization. The authenticated user must have organization admin or billing manager permissions."""
 
     # Construct request model with validation
@@ -4907,7 +5027,7 @@ async def get_premium_request_usage_report(
     user: str | None = Field(None, description="Filter usage results for a specific user. Case-insensitive."),
     model: str | None = Field(None, description="Filter usage results for a specific model. Case-insensitive."),
     product: str | None = Field(None, description="Filter usage results for a specific product. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a premium request usage report for an organization, with optional filtering by time period, user, model, or product. Requires organization administrator privileges and only returns data from the past 24 months."""
 
     # Construct request model with validation
@@ -4951,7 +5071,7 @@ async def get_organization_billing_usage(
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit integer representing the year. Defaults to the current year if not provided."),
     month: int | None = Field(None, description="Filter results to a specific month within the specified or default year. Valid range is 1-12, where 1 represents January and 12 represents December."),
     day: int | None = Field(None, description="Filter results to a specific day within the specified or default year and month. Valid range is 1-31."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a detailed billing usage report for an organization. This endpoint requires administrator access and is only available to organizations with the enhanced billing platform enabled."""
 
     # Construct request model with validation
@@ -4997,7 +5117,7 @@ async def get_billing_usage_summary(
     day: int | None = Field(None, description="Filter results to a specific day. Valid range is 1-31. Requires year and month to be specified or uses the default year and month."),
     product: str | None = Field(None, description="Filter results by product name. Case-insensitive."),
     sku: str | None = Field(None, description="Filter results by SKU identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a summary report of billing usage for an organization. This endpoint requires administrator privileges and provides access to usage data from the past 24 months."""
 
     # Construct request model with validation
@@ -5036,7 +5156,7 @@ async def get_billing_usage_summary(
 
 # Tags: orgs
 @mcp.tool()
-async def get_organization(org: str = Field(..., description="The organization name to retrieve. The name is case-insensitive.")) -> dict[str, Any]:
+async def get_organization(org: str = Field(..., description="The organization name to retrieve. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about an organization, including its plan and security settings. Full details require organization owner privileges or appropriate OAuth/PAT scopes."""
 
     # Construct request model with validation
@@ -5091,7 +5211,7 @@ async def update_organization(
     blog: str | None = Field(None, description="The organization's blog or website URL."),
     secret_scanning_push_protection_custom_link: str | None = Field(None, description="The URL displayed to contributors who are blocked from pushing a secret, when secret scanning push protection is enabled."),
     deploy_keys_enabled_for_repositories: bool | None = Field(None, description="Whether deploy keys can be added and used for repositories in the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an organization's profile, settings, and member permissions. The authenticated user must be an organization owner. Requires `admin:org` or `repo` scope."""
 
     # Construct request model with validation
@@ -5130,7 +5250,7 @@ async def update_organization(
 
 # Tags: orgs
 @mcp.tool()
-async def delete_organization(org: str = Field(..., description="The organization name to delete. The name is case-insensitive.")) -> dict[str, Any]:
+async def delete_organization(org: str = Field(..., description="The organization name to delete. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an organization and all its associated repositories. The organization name will be unavailable for 90 days following deletion."""
 
     # Construct request model with validation
@@ -5166,7 +5286,7 @@ async def delete_organization(org: str = Field(..., description="The organizatio
 
 # Tags: actions
 @mcp.tool()
-async def get_actions_cache_usage_for_org(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def get_actions_cache_usage_for_org(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the total GitHub Actions cache usage for an organization. Cache usage data is refreshed approximately every 5 minutes, so values may take at least 5 minutes to reflect recent changes."""
 
     # Construct request model with validation
@@ -5202,7 +5322,7 @@ async def get_actions_cache_usage_for_org(org: str = Field(..., description="The
 
 # Tags: actions
 @mcp.tool()
-async def list_actions_cache_usage_by_repository(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def list_actions_cache_usage_by_repository(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve GitHub Actions cache usage statistics for all repositories within an organization. Cache usage data is refreshed approximately every 5 minutes."""
 
     # Construct request model with validation
@@ -5238,7 +5358,7 @@ async def list_actions_cache_usage_by_repository(org: str = Field(..., descripti
 
 # Tags: actions
 @mcp.tool()
-async def list_hosted_runners(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_hosted_runners(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all GitHub-hosted runners configured in an organization. Requires `manage_runner:org` scope for authentication."""
 
     # Construct request model with validation
@@ -5282,7 +5402,7 @@ async def create_hosted_runner(
     maximum_runners: int | None = Field(None, description="The maximum number of runners to scale up to. Prevents auto-scaling beyond this limit to control costs."),
     enable_static_ip: bool | None = Field(None, description="Whether to assign a static public IP to this runner. Note that account-level limits apply; check account limits via the get hosted runner limits operation."),
     image_gen: bool | None = Field(None, description="Whether this runner should be used to generate custom images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a GitHub-hosted runner for an organization with configurable machine size, scaling limits, and optional static IP assignment. Requires `manage_runners:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -5321,7 +5441,7 @@ async def create_hosted_runner(
 
 # Tags: actions
 @mcp.tool()
-async def list_custom_runner_images(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom images to a specific organization.")) -> dict[str, Any]:
+async def list_custom_runner_images(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom images to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom images available for GitHub Actions hosted runners in an organization. Requires `manage_runners:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -5360,7 +5480,7 @@ async def list_custom_runner_images(org: str = Field(..., description="The organ
 async def get_custom_runner_image(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a custom image definition for GitHub Actions Hosted Runners. Requires `manage_runners:org` scope for authentication."""
 
     # Construct request model with validation
@@ -5399,7 +5519,7 @@ async def get_custom_runner_image(
 async def delete_custom_runner_image(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a custom image from the organization's hosted runners. Requires `manage_runners:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -5438,7 +5558,7 @@ async def delete_custom_runner_image(
 async def list_custom_image_versions(
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition whose versions you want to list."),
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a custom image for an organization. Requires `manage_runners:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -5478,7 +5598,7 @@ async def get_custom_runner_image_version(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition."),
     version: str = Field(..., description="The semantic version of the custom image in major.minor.patch format.", pattern="^\\d+\\.\\d+\\.\\d+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific version of a custom image for GitHub Actions Hosted Runners. Requires the `manage_runners:org` scope for authentication."""
 
     # Construct request model with validation
@@ -5518,7 +5638,7 @@ async def delete_custom_image_version(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     image_definition_id: int = Field(..., description="The unique identifier of the custom image definition."),
     version: str = Field(..., description="The version of the custom image to delete, specified in semantic versioning format (major.minor.patch).", pattern="^\\d+\\.\\d+\\.\\d+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific version of a custom image from an organization's hosted runners. Requires the `manage_runners:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -5554,7 +5674,7 @@ async def delete_custom_image_version(
 
 # Tags: actions
 @mcp.tool()
-async def list_github_owned_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_github_owned_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of GitHub-owned images available for GitHub-hosted runners in an organization. Use this to see which runner images can be used for workflows in the organization."""
 
     # Construct request model with validation
@@ -5590,7 +5710,7 @@ async def list_github_owned_runner_images(org: str = Field(..., description="The
 
 # Tags: actions
 @mcp.tool()
-async def list_partner_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_partner_runner_images(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of partner images available for GitHub-hosted runners in an organization. This allows you to see which pre-configured runner images are available for use."""
 
     # Construct request model with validation
@@ -5626,7 +5746,7 @@ async def list_partner_runner_images(org: str = Field(..., description="The orga
 
 # Tags: actions
 @mcp.tool()
-async def get_hosted_runners_limits(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def get_hosted_runners_limits(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the usage limits and quotas for GitHub-hosted runners available to an organization. This includes information about concurrent runner usage and other resource constraints."""
 
     # Construct request model with validation
@@ -5662,7 +5782,7 @@ async def get_hosted_runners_limits(org: str = Field(..., description="The organ
 
 # Tags: actions
 @mcp.tool()
-async def list_hosted_runner_machine_specs(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_hosted_runner_machine_specs(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the available machine specifications for GitHub-hosted runners in an organization. This includes details about CPU, memory, and other hardware configurations supported for workflow runs."""
 
     # Construct request model with validation
@@ -5698,7 +5818,7 @@ async def list_hosted_runner_machine_specs(org: str = Field(..., description="Th
 
 # Tags: actions
 @mcp.tool()
-async def list_hosted_runner_platforms(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def list_hosted_runner_platforms(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of available platforms for GitHub-hosted runners in an organization. Use this to determine which runner platforms can be used for workflows."""
 
     # Construct request model with validation
@@ -5737,7 +5857,7 @@ async def list_hosted_runner_platforms(org: str = Field(..., description="The or
 async def get_hosted_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     hosted_runner_id: int = Field(..., description="The unique identifier of the GitHub-hosted runner to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific GitHub-hosted runner configured in an organization. Requires the `manage_runners:org` scope for authentication."""
 
     # Construct request model with validation
@@ -5782,7 +5902,7 @@ async def update_hosted_runner(
     size: str | None = Field(None, description="The machine size for the runner. Available sizes can be retrieved from the hosted-runners machine-sizes endpoint."),
     image_id: str | None = Field(None, description="The unique identifier of the runner image to deploy. Available images include GitHub-owned, partner, and custom images."),
     image_version: str | None = Field(None, description="The version of the runner image to deploy. Only applicable when using custom images."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates configuration for a GitHub-hosted runner in an organization, including runner group assignment, scaling limits, static IP settings, and machine image specifications. Requires `manage_runners:org` OAuth scope."""
 
     # Construct request model with validation
@@ -5824,7 +5944,7 @@ async def update_hosted_runner(
 async def delete_hosted_runner(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     hosted_runner_id: int = Field(..., description="The unique identifier of the GitHub-hosted runner to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a GitHub-hosted runner from an organization. This action removes the runner and prevents it from accepting new jobs."""
 
     # Construct request model with validation
@@ -5860,7 +5980,7 @@ async def delete_hosted_runner(
 
 # Tags: oidc
 @mcp.tool()
-async def list_oidc_custom_property_inclusions_for_org(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the OIDC custom property inclusions.")) -> dict[str, Any]:
+async def list_oidc_custom_property_inclusions_for_org(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the OIDC custom property inclusions.")) -> dict[str, Any] | ToolResult:
     """Lists the repository custom properties that are included in the OIDC token issued for repository actions within an organization. Requires `read:org` scope for authentication."""
 
     # Construct request model with validation
@@ -5899,7 +6019,7 @@ async def list_oidc_custom_property_inclusions_for_org(org: str = Field(..., des
 async def add_oidc_custom_property_org(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     custom_property_name: str = Field(..., description="The name of the custom property to include in the OIDC token for repository actions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a repository custom property to be included in OIDC tokens issued for repository actions within an organization. Requires `admin:org` scope."""
 
     # Construct request model with validation
@@ -5938,7 +6058,7 @@ async def add_oidc_custom_property_org(
 
 # Tags: actions
 @mcp.tool()
-async def list_organization_github_actions_repositories(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_organization_github_actions_repositories(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists the selected repositories that are enabled for GitHub Actions within an organization. This endpoint requires the organization's GitHub Actions permission policy to be configured for selected repositories."""
 
     # Construct request model with validation
@@ -5974,7 +6094,7 @@ async def list_organization_github_actions_repositories(org: str = Field(..., de
 
 # Tags: actions
 @mcp.tool()
-async def list_organization_self_hosted_runner_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any]:
+async def list_organization_self_hosted_runner_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Lists all repositories within an organization that are permitted to use self-hosted runners. Requires admin:org scope or Actions policies fine-grained permission."""
 
     # Construct request model with validation
@@ -6013,7 +6133,7 @@ async def list_organization_self_hosted_runner_repositories(org: str = Field(...
 async def remove_repository_from_self_hosted_runners(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     repository_id: int = Field(..., description="The unique numeric identifier of the repository to remove from self-hosted runner access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from the list of repositories allowed to use self-hosted runners in an organization. This prevents the specified repository from accessing organization-level self-hosted runners."""
 
     # Construct request model with validation
@@ -6052,7 +6172,7 @@ async def remove_repository_from_self_hosted_runners(
 async def list_runner_groups(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     visible_to_repository: str | None = Field(None, description="Filter to return only runner groups that are allowed to be used by a specific repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all self-hosted runner groups configured in an organization, including those inherited from an enterprise. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6099,7 +6219,7 @@ async def create_runner_group(
     runners: list[int] | None = Field(None, description="List of runner IDs to add to this runner group upon creation."),
     allows_public_repositories: bool | None = Field(None, description="Whether public repositories can use runners in this group."),
     network_configuration_id: str | None = Field(None, description="The identifier of a hosted compute network configuration to associate with this runner group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new self-hosted runner group for an organization, allowing you to manage access to runners across repositories. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6141,7 +6261,7 @@ async def create_runner_group(
 async def get_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific self-hosted runner group for an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6184,7 +6304,7 @@ async def update_runner_group(
     visibility: Literal["selected", "all", "private"] | None = Field(None, description="The visibility level of the runner group, determining which repositories can access it."),
     allows_public_repositories: bool | None = Field(None, description="Whether the runner group can be used by public repositories."),
     network_configuration_id: str | None = Field(None, description="The identifier of a hosted compute network configuration to associate with this runner group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the name and visibility settings of a self-hosted runner group in an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6226,7 +6346,7 @@ async def update_runner_group(
 async def delete_runner_group(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner group."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a self-hosted runner group from an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6265,7 +6385,7 @@ async def delete_runner_group(
 async def list_github_hosted_runners_in_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the runner group to retrieve hosted runners from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all GitHub-hosted runners assigned to a specific runner group within an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6304,7 +6424,7 @@ async def list_github_hosted_runners_in_group(
 async def list_runner_group_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that have access to a self-hosted runner group within an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6344,7 +6464,7 @@ async def update_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to update."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that should have access to this runner group. Providing an empty array removes access for all repositories. The order of IDs in the array is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates which repositories in an organization can access a self-hosted runner group. This replaces the entire list of authorized repositories for the specified runner group."""
 
     # Construct request model with validation
@@ -6387,7 +6507,7 @@ async def grant_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
     repository_id: int = Field(..., description="The unique identifier of the repository to grant access to the runner group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a repository access to a self-hosted runner group in an organization. The runner group must have visibility set to 'selected'. Requires `admin:org` scope."""
 
     # Construct request model with validation
@@ -6427,7 +6547,7 @@ async def revoke_runner_group_repository_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the runner group's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from a self-hosted runner group's access list in an organization. The runner group must have visibility set to 'selected'. Requires `admin:org` scope."""
 
     # Construct request model with validation
@@ -6466,7 +6586,7 @@ async def revoke_runner_group_repository_access(
 async def list_runners_in_group(
     org: str = Field(..., description="The organization name. This value is case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all self-hosted runners that belong to a specific runner group within an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6506,7 +6626,7 @@ async def update_runner_group_runners(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to update."),
     runners: list[int] = Field(..., description="List of self-hosted runner IDs to assign to the runner group. This replaces any previously assigned runners. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace the list of self-hosted runners assigned to an organization runner group. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -6549,7 +6669,7 @@ async def add_runner_to_group(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group to which the runner will be added."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to add to the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a self-hosted runner to a runner group within an organization. Requires `admin:org` scope for authentication."""
 
     # Construct request model with validation
@@ -6589,7 +6709,7 @@ async def remove_runner_from_group(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_group_id: int = Field(..., description="The unique identifier of the self-hosted runner group."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to remove from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a self-hosted runner from an organization's runner group, returning it to the default group. Requires `admin:org` scope."""
 
     # Construct request model with validation
@@ -6625,7 +6745,7 @@ async def remove_runner_from_group(
 
 # Tags: actions
 @mcp.tool()
-async def list_organization_runners(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner list to a specific organization.")) -> dict[str, Any]:
+async def list_organization_runners(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner list to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all self-hosted runners configured for an organization. Requires admin access to the organization and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -6661,7 +6781,7 @@ async def list_organization_runners(org: str = Field(..., description="The organ
 
 # Tags: actions
 @mcp.tool()
-async def list_runner_applications(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner applications to a specific organization.")) -> dict[str, Any]:
+async def list_runner_applications(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the runner applications to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Lists available runner application binaries that can be downloaded and executed for an organization. Requires admin access to the organization."""
 
     # Construct request model with validation
@@ -6697,7 +6817,7 @@ async def list_runner_applications(org: str = Field(..., description="The organi
 
 # Tags: actions
 @mcp.tool()
-async def generate_runner_registration_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization.")) -> dict[str, Any]:
+async def generate_runner_registration_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization.")) -> dict[str, Any] | ToolResult:
     """Generate a registration token for self-hosted runners in an organization. The token expires after one hour and is used to configure new runners via the config script."""
 
     # Construct request model with validation
@@ -6733,7 +6853,7 @@ async def generate_runner_registration_token(org: str = Field(..., description="
 
 # Tags: actions
 @mcp.tool()
-async def generate_runner_removal_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization where the runner will be removed.")) -> dict[str, Any]:
+async def generate_runner_removal_token(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization where the runner will be removed.")) -> dict[str, Any] | ToolResult:
     """Generate a short-lived token for removing a self-hosted runner from an organization. The token expires after one hour and is used with the config script to deregister the runner."""
 
     # Construct request model with validation
@@ -6772,7 +6892,7 @@ async def generate_runner_removal_token(org: str = Field(..., description="The o
 async def get_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific self-hosted runner in an organization. Requires admin access to the organization."""
 
     # Construct request model with validation
@@ -6811,7 +6931,7 @@ async def get_runner(
 async def remove_runner_from_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to remove from the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently remove a self-hosted runner from an organization. Use this endpoint when the runner machine no longer exists or you need to completely deregister it from the organization."""
 
     # Construct request model with validation
@@ -6850,7 +6970,7 @@ async def remove_runner_from_organization(
 async def list_runner_labels(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all labels assigned to a self-hosted runner in an organization. Requires admin access to the organization."""
 
     # Construct request model with validation
@@ -6890,7 +7010,7 @@ async def add_labels_to_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to label."),
     labels: list[str] = Field(..., description="An array of custom label names to add to the runner. Labels must be unique and non-empty.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add custom labels to a self-hosted runner in an organization. Requires admin access to the organization and the `admin:org` OAuth scope."""
 
     # Construct request model with validation
@@ -6933,7 +7053,7 @@ async def update_runner_labels(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to update."),
     labels: list[str] = Field(..., description="An array of custom label names to assign to the runner. All previous labels will be replaced. Pass an empty array to remove all custom labels.", min_length=0, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all custom labels for a self-hosted runner in an organization. Requires admin access to the organization and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -6975,7 +7095,7 @@ async def update_runner_labels(
 async def remove_all_custom_labels_from_runner(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the runner."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner from which to remove all custom labels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all custom labels from a self-hosted runner in an organization. The runner will retain its read-only labels after this operation. Requires admin access to the organization."""
 
     # Construct request model with validation
@@ -7015,7 +7135,7 @@ async def remove_custom_label_from_runner(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
     name: str = Field(..., description="The name of the custom label to remove from the runner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom label from a self-hosted runner in an organization. Returns the remaining labels on the runner after removal. Requires admin access to the organization."""
 
     # Construct request model with validation
@@ -7051,7 +7171,7 @@ async def remove_custom_label_from_runner(
 
 # Tags: actions
 @mcp.tool()
-async def list_organization_secrets(org: str = Field(..., description="The organization name. This value is case-insensitive.")) -> dict[str, Any]:
+async def list_organization_secrets(org: str = Field(..., description="The organization name. This value is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve all secrets configured at the organization level without exposing their encrypted values. Requires appropriate authentication scopes and collaborator access to the repository."""
 
     # Construct request model with validation
@@ -7087,7 +7207,7 @@ async def list_organization_secrets(org: str = Field(..., description="The organ
 
 # Tags: actions
 @mcp.tool()
-async def get_organization_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def get_organization_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization, which is required to encrypt secrets before creating or updating them. The authenticated user must have the appropriate permissions (admin:org scope for OAuth/PAT, or repo scope for private repositories)."""
 
     # Construct request model with validation
@@ -7126,7 +7246,7 @@ async def get_organization_public_key(org: str = Field(..., description="The org
 async def get_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single organization secret without revealing its encrypted value. The authenticated user must have collaborator access to the repository and appropriate OAuth scopes (admin:org for public repositories, repo for private repositories)."""
 
     # Construct request model with validation
@@ -7170,7 +7290,7 @@ async def create_or_update_organization_secret(
     selected_repository_ids: list[int] | None = Field(None, description="Array of repository IDs that can access the secret. Only applicable when visibility is set to 'selected'. Manage this list using the dedicated repository selection endpoints."),
     secret_value: str | None = Field(None, description="The plaintext secret value to be encrypted"),
     public_key: str | None = Field(None, description="The base64-encoded public key retrieved from the Get a repository public key endpoint"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update an encrypted secret at the organization level, controlling which repositories can access it. The secret value must be encrypted using LibSodium before submission."""
 
     # Call helper functions
@@ -7215,7 +7335,7 @@ async def create_or_update_organization_secret(
 async def delete_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a secret from an organization by its name. Requires admin:org scope for OAuth/PAT, or repo scope if the repository is private."""
 
     # Construct request model with validation
@@ -7254,7 +7374,7 @@ async def delete_organization_secret(
 async def list_organization_secret_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve repository access for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that have been granted access to an organization secret when visibility is set to selected. Requires collaborator access to the repository and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -7294,7 +7414,7 @@ async def update_organization_secret_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to update repository access for."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that will have access to the organization secret. This replaces all previously selected repositories. Only applicable when the secret's visibility is set to selected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all repositories that can access an organization secret when visibility is set to selected. This operation completely overwrites the existing repository list for the secret."""
 
     # Construct request model with validation
@@ -7337,7 +7457,7 @@ async def grant_repository_access_to_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to grant access to."),
     repository_id: int = Field(..., description="The unique identifier of the repository to grant access to the secret."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a repository access to an organization secret that is configured with selected repository visibility. This operation is used to expand which repositories can access a specific organization secret."""
 
     # Construct request model with validation
@@ -7377,7 +7497,7 @@ async def remove_repository_from_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to modify."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the secret's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from an organization secret that has visibility restricted to selected repositories. This operation is used to revoke a repository's access to a shared organization secret."""
 
     # Construct request model with validation
@@ -7413,7 +7533,7 @@ async def remove_repository_from_organization_secret(
 
 # Tags: actions
 @mcp.tool()
-async def list_organization_variables(org: str = Field(..., description="The organization name. The name is case-insensitive.")) -> dict[str, Any]:
+async def list_organization_variables(org: str = Field(..., description="The organization name. The name is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve all variables defined at the organization level. Authenticated users need collaborator access to manage variables, and the request requires appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -7455,7 +7575,7 @@ async def create_organization_variable(
     value: str = Field(..., description="The value assigned to the variable. This can be any string content needed by your workflows."),
     visibility: Literal["all", "private", "selected"] = Field(..., description="Controls which repositories in the organization can access this variable. Use 'all' for all repositories, 'private' for private repositories only, or 'selected' to restrict access to specific repositories listed in selected_repository_ids."),
     selected_repository_ids: list[int] | None = Field(None, description="An array of repository IDs that can access this variable. Only applicable when visibility is set to 'selected'. Omit this field for 'all' or 'private' visibility settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an organization-level variable for use in GitHub Actions workflows. The variable's accessibility is controlled by visibility settings, allowing it to be shared across all repositories, private repositories only, or a specific subset of repositories."""
 
     # Construct request model with validation
@@ -7497,7 +7617,7 @@ async def create_organization_variable(
 async def get_organization_variable(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the variable to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific variable from an organization. The authenticated user must have collaborator access to the repository, and appropriate OAuth scopes (admin:org for public repositories, repo for private repositories) are required."""
 
     # Construct request model with validation
@@ -7539,7 +7659,7 @@ async def update_organization_variable(
     value: str | None = Field(None, description="The new value for the variable."),
     visibility: Literal["all", "private", "selected"] | None = Field(None, description="The visibility scope for the variable. Use 'all' for all repositories, 'private' for private repositories only, or 'selected' to restrict access to specific repositories."),
     selected_repository_ids: list[int] | None = Field(None, description="An array of repository IDs that can access the variable. Only applicable when visibility is set to 'selected'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an organization variable that can be referenced in GitHub Actions workflows. Requires collaborator access to the repository and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -7581,7 +7701,7 @@ async def update_organization_variable(
 async def delete_organization_variable(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an organization variable by name. Requires collaborator access to the organization and appropriate OAuth scopes (admin:org for public repositories, repo for private repositories)."""
 
     # Construct request model with validation
@@ -7620,7 +7740,7 @@ async def delete_organization_variable(
 async def list_organization_variable_repositories(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable. Variable names are case-sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that have access to a specific organization variable. Use this to view which repositories can use a selected-repository organization variable."""
 
     # Construct request model with validation
@@ -7660,7 +7780,7 @@ async def update_org_variable_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to update."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that will have access to this organization variable. The order of IDs is not significant. Replaces all previously selected repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all repositories that have access to an organization variable. This operation applies only to organization variables with visibility set to `selected`."""
 
     # Construct request model with validation
@@ -7703,7 +7823,7 @@ async def add_repository_to_org_variable(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     name: str = Field(..., description="The name of the organization variable to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the organization variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a repository to an organization variable that is available to selected repositories. The variable must have its visibility set to 'selected' to use this endpoint."""
 
     # Construct request model with validation
@@ -7743,7 +7863,7 @@ async def remove_repository_from_org_variable(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     name: str = Field(..., description="The name of the organization variable from which to remove the repository."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the organization variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from an organization variable that is available to selected repositories. This operation is used to restrict variable access by removing a specific repository from the variable's selected repositories list."""
 
     # Construct request model with validation
@@ -7791,7 +7911,7 @@ async def record_artifact_deployment(
     tags: dict[str, str] | None = Field(None, description="Key-value pairs for labeling and organizing the deployment record.", max_length=5),
     runtime_risks: Annotated[list[Literal["critical-resource", "internet-exposed", "lateral-movement", "sensitive-data"]], AfterValidator(_check_unique_items)] | None = Field(None, description="A list of identified runtime risks or vulnerabilities associated with this deployment.", max_length=4),
     github_repository: str | None = Field(None, description="The GitHub repository name associated with the artifact. Used only when provenance attestations are unavailable; if attestations exist, repository information from the attestation takes precedence.", min_length=1, max_length=100, pattern="^[A-Za-z0-9.\\-_]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record or update deployment information for an artifact within an organization. Deployment records are uniquely identified by the combination of logical environment, physical environment, cluster, and deployment name—successive requests with identical identifiers will update the existing record rather than create duplicates."""
 
     # Construct request model with validation
@@ -7836,7 +7956,7 @@ async def record_cluster_deployments(
     logical_environment: str = Field(..., description="The deployment stage or environment tier (e.g., development, staging, production).", min_length=1, max_length=128),
     deployments: list[_models.OrgsSetClusterDeploymentRecordsBodyDeploymentsItem] = Field(..., description="An ordered list of deployment records to create or update. Each deployment must include cluster, logical_environment, physical_environment, and deployment_name fields for matching and identification.", max_length=1000),
     physical_environment: str | None = Field(None, description="The geographic region or physical location where the deployment resides.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record or update deployment information for a cluster across logical and physical environments. Existing records matching the cluster, logical environment, physical environment, and deployment name are updated; non-matching records are created as new."""
 
     # Construct request model with validation
@@ -7881,7 +8001,7 @@ async def register_artifact_storage(
     digest: str = Field(..., description="The digest of the artifact in the format algorithm:hex-encoded-digest (SHA256 only).", min_length=71, max_length=71, pattern="^sha256:[a-f0-9]{64}$"),
     registry_url: str = Field(..., description="The base URL of the artifact registry (must use HTTPS).", min_length=1, pattern="^https://"),
     github_repository: str | None = Field(None, description="The GitHub repository name associated with the artifact. Use this when provenance attestations are unavailable. The repository must belong to the specified organization. If a provenance attestation exists, it takes precedence over this value.", min_length=1, max_length=100, pattern="^[A-Za-z0-9.\\-_]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register a metadata storage record for an artifact in an organization's registry. This creates a new storage record for artifacts matching the provided digest and associated with a repository owned by the organization."""
 
     # Construct request model with validation
@@ -7923,7 +8043,7 @@ async def register_artifact_storage(
 async def list_artifact_deployment_records(
     org: str = Field(..., description="The organization name (case-insensitive). This identifies which organization's artifact metadata to query."),
     subject_digest: str = Field(..., description="The SHA256 digest of the artifact in the format `sha256:HEX_DIGEST`, where HEX_DIGEST is a 64-character hexadecimal string.", min_length=71, max_length=71, pattern="^sha256:[a-f0-9]{64}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve deployment records for an artifact's metadata within an organization. This shows the history of where and when the artifact has been deployed."""
 
     # Construct request model with validation
@@ -7962,7 +8082,7 @@ async def list_artifact_deployment_records(
 async def list_artifact_storage_records(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     subject_digest: str = Field(..., description="The SHA256 digest of the artifact's subject in the format sha256:HEX_DIGEST, where HEX_DIGEST is a 64-character hexadecimal string.", min_length=71, max_length=71, pattern="^sha256:[a-f0-9]{64}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve storage records for an artifact by its subject digest within an organization. Results are filtered based on the authenticated user's repository access permissions."""
 
     # Construct request model with validation
@@ -8002,7 +8122,7 @@ async def list_attestations_by_digests(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     subject_digests: list[str] = Field(..., description="List of subject digests to fetch attestations for. Each digest identifies an artifact for which attestations will be retrieved.", min_length=1, max_length=1024),
     predicate_type: str | None = Field(None, description="Optional filter to retrieve attestations matching a specific predicate type. Supports standard types (provenance, sbom, release) or custom freeform text for custom predicate types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve artifact attestations for multiple subject digests owned by an organization. Results are filtered based on the authenticated user's repository permissions and require the `attestations:read` permission for fine-grained access tokens."""
 
     # Construct request model with validation
@@ -8044,7 +8164,7 @@ async def list_attestations_by_digests(
 async def delete_attestations(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the attestations."),
     body: _models.OrgsDeleteAttestationsBulkBodyV0 | _models.OrgsDeleteAttestationsBulkBodyV1 = Field(..., description="Request payload containing deletion criteria. Provide either subject_digests (array of digest strings in algorithm:hash format) or attestation_ids (array of numeric identifiers), but not both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete artifact attestations in bulk by specifying either subject digests or attestation IDs. Exactly one of these criteria must be provided in the request."""
 
     # Construct request model with validation
@@ -8087,7 +8207,7 @@ async def delete_attestations(
 async def delete_attestation_by_subject_digest(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     subject_digest: str = Field(..., description="The subject digest that uniquely identifies the artifact attestation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an artifact attestation by its subject digest. This operation removes attestation records associated with a specific artifact digest within an organization."""
 
     # Construct request model with validation
@@ -8126,7 +8246,7 @@ async def delete_attestation_by_subject_digest(
 async def list_attestation_repositories(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     predicate_type: str | None = Field(None, description="Filter repositories by attestation predicate type. Accepts standard types (provenance, sbom, release) or custom freeform text for specialized predicate types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List repositories in an organization that have created at least one attested artifact. Results are sorted in ascending order by repository ID."""
 
     # Construct request model with validation
@@ -8168,7 +8288,7 @@ async def list_attestation_repositories(
 async def delete_attestation(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     attestation_id: int = Field(..., description="The unique identifier of the attestation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an artifact attestation by ID from an organization's repository. This operation removes the attestation record permanently."""
 
     # Construct request model with validation
@@ -8208,7 +8328,7 @@ async def list_attestations_organization(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     subject_digest: str = Field(..., description="The attestation subject's SHA256 digest in the format `sha256:HEX_DIGEST`."),
     predicate_type: str | None = Field(None, description="Filter attestations by predicate type. Accepts standard types (provenance, sbom, release) or custom freeform text."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve artifact attestations for a given subject digest across repositories owned by an organization. Results are filtered based on the authenticated user's repository access permissions."""
 
     # Construct request model with validation
@@ -8247,7 +8367,7 @@ async def list_attestations_organization(
 
 # Tags: orgs
 @mcp.tool()
-async def list_blocked_users(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_blocked_users(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users blocked by an organization. This helps manage organization security and access control policies."""
 
     # Construct request model with validation
@@ -8286,7 +8406,7 @@ async def list_blocked_users(org: str = Field(..., description="The organization
 async def check_blocked_user(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle to check for blocking status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check if a user is blocked by an organization. Returns a 204 status if the user is blocked, or 404 if the user is not blocked or has been identified as spam."""
 
     # Construct request model with validation
@@ -8325,7 +8445,7 @@ async def check_blocked_user(
 async def unblock_user_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     username: str = Field(..., description="The GitHub username handle to unblock from the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unblock a user from an organization, restoring their access and permissions within that organization."""
 
     # Construct request model with validation
@@ -8365,7 +8485,7 @@ async def list_campaigns(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort direction for the returned campaigns."),
     state: Literal["open", "closed"] | None = Field(None, description="Filter campaigns by their current state. If omitted, campaigns in all states are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all campaigns for an organization. The authenticated user must be an owner or security manager to access this endpoint."""
 
     # Construct request model with validation
@@ -8412,7 +8532,7 @@ async def create_campaign(
     contact_link: str | None = Field(None, description="A URI for users to contact regarding the campaign or request assistance."),
     code_scanning_alerts: list[_models.CampaignsCreateCampaignBodyCodeScanningAlertsItem] | None = Field(None, description="An array of code scanning alert identifiers to include in this campaign. At least one alert is required if this field is provided.", min_length=1),
     generate_issues: bool | None = Field(None, description="Whether to automatically generate issues for each code scanning alert included in the campaign."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a security campaign for an organization to track and remediate code scanning alerts. The authenticated user must be an owner or security manager for the organization."""
 
     # Construct request model with validation
@@ -8454,7 +8574,7 @@ async def create_campaign(
 async def get_campaign(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     campaign_number: int = Field(..., description="The numeric identifier for the campaign to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific campaign for an organization. The authenticated user must be an owner or security manager for the organization."""
 
     # Construct request model with validation
@@ -8497,7 +8617,7 @@ async def update_campaign(
     ends_at: str | None = Field(None, description="The end date and time of the campaign in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)."),
     contact_link: str | None = Field(None, description="A URI pointing to contact information or resources related to the campaign."),
     state: Literal["open", "closed"] | None = Field(None, description="The campaign status indicating whether it is actively accepting reports or closed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing campaign within an organization. Requires owner or security manager permissions."""
 
     # Construct request model with validation
@@ -8539,7 +8659,7 @@ async def update_campaign(
 async def delete_campaign(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the campaign."),
     campaign_number: int = Field(..., description="The numeric identifier of the campaign to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a campaign from an organization. The authenticated user must have owner or security manager permissions for the organization."""
 
     # Construct request model with validation
@@ -8580,7 +8700,7 @@ async def list_code_scanning_alerts(
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort results by."),
     state: Literal["open", "closed", "dismissed", "fixed"] | None = Field(None, description="Filter alerts by their current state. Returns only alerts matching the specified state."),
     assignees: str | None = Field(None, description="Filter alerts by assignees using a comma-separated list of user handles. Use `*` to include alerts with at least one assignee, or `none` for unassigned alerts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists code scanning alerts for the default branch across all eligible repositories in an organization. Only organization owners and security managers can access this endpoint."""
 
     # Construct request model with validation
@@ -8622,7 +8742,7 @@ async def list_code_scanning_alerts(
 async def list_code_security_configurations_for_org(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     target_type: Literal["global", "all"] | None = Field(None, description="Filter configurations by target type. Use 'global' for organization-wide configurations or 'all' to include all configuration types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all code security configurations available in an organization. The authenticated user must be an administrator or security manager for the organization to use this endpoint."""
 
     # Construct request model with validation
@@ -8661,7 +8781,7 @@ async def list_code_security_configurations_for_org(
 
 # Tags: code-security
 @mcp.tool()
-async def list_default_code_security_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the request to a specific organization.")) -> dict[str, Any]:
+async def list_default_code_security_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the request to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieves the default code security configurations for an organization. The authenticated user must be an administrator or security manager to access this endpoint."""
 
     # Construct request model with validation
@@ -8700,7 +8820,7 @@ async def list_default_code_security_configurations(org: str = Field(..., descri
 async def detach_security_configurations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_repository_ids: list[int] | None = Field(None, description="Repository IDs to detach from configurations. Provide an array of up to 250 repository IDs.", min_length=1, max_length=250),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Detach code security configurations from specified repositories. Repositories retain their current settings but are no longer managed by the configuration."""
 
     # Construct request model with validation
@@ -8742,7 +8862,7 @@ async def detach_security_configurations(
 async def get_code_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the code security configuration."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific code security configuration from an organization. The authenticated user must be an administrator or security manager for the organization."""
 
     # Construct request model with validation
@@ -8801,7 +8921,7 @@ async def update_code_security_configuration(
     secret_scanning_extended_metadata: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of secret scanning extended metadata."),
     private_vulnerability_reporting: Literal["enabled", "disabled", "not_set"] | None = Field(None, description="The enablement status of private vulnerability reporting."),
     enforcement: Literal["enforced", "unenforced"] | None = Field(None, description="The enforcement status for the security configuration. Enforced configurations are applied to all repositories in the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a code security configuration for an organization. Allows administrators and security managers to modify enablement status of various security features and enforcement policies."""
 
     # Construct request model with validation
@@ -8844,7 +8964,7 @@ async def update_code_security_configuration(
 async def delete_code_security_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the configuration."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a code security configuration from an organization. Repositories currently attached to the configuration will retain their settings but will no longer be associated with it."""
 
     # Construct request model with validation
@@ -8885,7 +9005,7 @@ async def attach_security_configuration(
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to attach."),
     scope: Literal["all", "all_without_configurations", "public", "private_or_internal", "selected"] = Field(..., description="The scope of repositories to attach the configuration to. Use 'selected' to attach only to specific repositories identified by their IDs."),
     selected_repository_ids: list[int] | None = Field(None, description="An array of repository IDs to attach the configuration to. Required only when scope is set to 'selected'. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach a code security configuration to repositories in an organization. Repositories already attached to a configuration will be re-attached to the specified configuration, with only free features enabled if insufficient GHAS licenses are available."""
 
     # Construct request model with validation
@@ -8927,7 +9047,7 @@ async def attach_security_configuration(
 async def list_security_configuration_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     configuration_id: int = Field(..., description="The unique identifier of the code security configuration to retrieve associated repositories for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories associated with a code security configuration within an organization. The authenticated user must have administrator or security manager permissions for the organization."""
 
     # Construct request model with validation
@@ -8963,7 +9083,7 @@ async def list_security_configuration_repositories(
 
 # Tags: codespaces
 @mcp.tool()
-async def list_organization_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_organization_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all codespaces associated with a specified organization. Requires admin:org scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -8999,7 +9119,7 @@ async def list_organization_codespaces(org: str = Field(..., description="The or
 
 # Tags: codespaces
 @mcp.tool()
-async def list_organization_secrets_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_organization_secrets_codespaces(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all Codespaces development environment secrets available at the organization level without revealing their encrypted values. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9038,7 +9158,7 @@ async def list_organization_secrets_codespaces(org: str = Field(..., description
 async def get_organization_secret_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve an organization development environment secret without revealing its encrypted value. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9081,7 +9201,7 @@ async def create_or_update_organization_secret_codespaces(
     encrypted_value: str | None = Field(None, description="The encrypted secret value, encrypted using LibSodium with the public key from the Get organization public key endpoint. Must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
     key_id: str | None = Field(None, description="The ID of the public key used to encrypt the secret value."),
     selected_repository_ids: list[int] | None = Field(None, description="An array of repository IDs that can access the secret. Only applicable when visibility is set to 'selected'. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates an organization development environment secret with an encrypted value. The secret value must be encrypted using LibSodium with the organization's public key before submission."""
 
     # Construct request model with validation
@@ -9123,7 +9243,7 @@ async def create_or_update_organization_secret_codespaces(
 async def delete_organization_secret_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a development environment secret from an organization by name. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9162,7 +9282,7 @@ async def delete_organization_secret_codespace(
 async def list_organization_secret_repositories_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret for which to list authorized repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that have been granted access to an organization secret when visibility is restricted to selected repositories. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -9202,7 +9322,7 @@ async def update_organization_secret_repositories_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to configure repository access for."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that should have access to this organization secret. Only applicable when the secret's visibility is set to 'selected'. This replaces all previously authorized repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all repositories that can access an organization development environment secret. This operation applies only when the secret's visibility is set to 'selected'."""
 
     # Construct request model with validation
@@ -9245,7 +9365,7 @@ async def add_repository_to_organization_secret(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to which the repository will be granted access."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the secret's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a repository access to an organization development environment secret when the secret's visibility is restricted to selected repositories. The repository must be within the organization."""
 
     # Construct request model with validation
@@ -9285,7 +9405,7 @@ async def remove_repository_from_organization_secret_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to modify."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the secret's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a repository from an organization Codespaces secret when repository access is restricted to selected repositories. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -9321,7 +9441,7 @@ async def remove_repository_from_organization_secret_codespaces(
 
 # Tags: copilot
 @mcp.tool()
-async def get_copilot_billing(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def get_copilot_billing(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve Copilot subscription details for an organization, including seat allocation and feature policies. Only organization owners can access this information."""
 
     # Construct request model with validation
@@ -9357,7 +9477,7 @@ async def get_copilot_billing(org: str = Field(..., description="The organizatio
 
 # Tags: copilot
 @mcp.tool()
-async def list_copilot_seats(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the seat billing query to a specific organization.")) -> dict[str, Any]:
+async def list_copilot_seats(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the seat billing query to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Copilot seat assignments currently being billed for an organization with a Copilot Business or Copilot Enterprise subscription. Only organization owners can access this information, which includes each user's most recent Copilot activity data."""
 
     # Construct request model with validation
@@ -9396,7 +9516,7 @@ async def list_copilot_seats(org: str = Field(..., description="The organization
 async def grant_copilot_seats_to_teams(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     selected_teams: list[str] = Field(..., description="List of team names within the organization to grant Copilot access to. Teams are processed in the order provided.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Purchases GitHub Copilot seats for all users within specified teams in an organization. The organization will be billed per seat based on its Copilot plan."""
 
     # Construct request model with validation
@@ -9438,7 +9558,7 @@ async def grant_copilot_seats_to_teams(
 async def revoke_copilot_access_from_teams(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_teams: list[str] = Field(..., description="The names of teams to revoke Copilot access from. Provide at least one team name.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove teams from an organization's Copilot subscription, setting their members' seats to pending cancellation. Members will lose Copilot access at the end of the current billing cycle unless they retain access through another team."""
 
     # Construct request model with validation
@@ -9480,7 +9600,7 @@ async def revoke_copilot_access_from_teams(
 async def grant_copilot_seats_to_users(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_usernames: list[str] = Field(..., description="The usernames of organization members to grant Copilot access to. Provide at least one username.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Purchases GitHub Copilot seats for specified organization members. The organization will be billed based on its Copilot plan and must have a Business or Enterprise subscription with a configured suggestion matching policy."""
 
     # Construct request model with validation
@@ -9522,7 +9642,7 @@ async def grant_copilot_seats_to_users(
 async def revoke_copilot_seat_assignments(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     selected_usernames: list[str] = Field(..., description="The usernames of organization members whose Copilot access should be revoked. Provide at least one username.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove specified users from the organization's Copilot subscription by setting their seats to pending cancellation. Users will lose Copilot access at the end of the current billing cycle unless they retain access through team membership."""
 
     # Construct request model with validation
@@ -9561,7 +9681,7 @@ async def revoke_copilot_seat_assignments(
 
 # Tags: copilot
 @mcp.tool()
-async def list_copilot_coding_agent_permissions(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def list_copilot_coding_agent_permissions(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the Copilot coding agent permission settings for an organization, showing which repositories have the agent enabled or disabled. Organization owners use this to view their current Copilot coding agent configuration across repositories."""
 
     # Construct request model with validation
@@ -9597,7 +9717,7 @@ async def list_copilot_coding_agent_permissions(org: str = Field(..., descriptio
 
 # Tags: copilot
 @mcp.tool()
-async def list_copilot_coding_agent_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any]:
+async def list_copilot_coding_agent_repositories(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Lists repositories enabled for Copilot coding agent in an organization when the repository policy is set to selected. Organization owners can use this endpoint to view which repositories have Copilot coding agent access enabled."""
 
     # Construct request model with validation
@@ -9636,7 +9756,7 @@ async def list_copilot_coding_agent_repositories(org: str = Field(..., descripti
 async def enable_copilot_coding_agent_for_repository(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     repository_id: int = Field(..., description="The unique identifier of the repository to enable for Copilot coding agent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable a repository for Copilot coding agent in an organization. This operation adds a repository to the list of selected repositories when the organization's coding agent repository policy is set to 'selected'."""
 
     # Construct request model with validation
@@ -9672,7 +9792,7 @@ async def enable_copilot_coding_agent_for_repository(
 
 # Tags: copilot
 @mcp.tool()
-async def list_copilot_content_exclusions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the content exclusion rules to a specific organization.")) -> dict[str, Any]:
+async def list_copilot_content_exclusions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the content exclusion rules to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve Copilot content exclusion path rules configured for an organization. This endpoint allows organization owners to view which paths are excluded from GitHub Copilot."""
 
     # Construct request model with validation
@@ -9712,7 +9832,7 @@ async def get_copilot_metrics(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     since: str | None = Field(None, description="Start date for the metrics query in ISO 8601 format. Maximum lookback is 100 days ago."),
     until: str | None = Field(None, description="End date for the metrics query in ISO 8601 format. Must not precede the start date if provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated GitHub Copilot usage metrics for an organization over a specified date range. Metrics are available for up to 100 days prior and only include data when the organization had five or more active Copilot license holders."""
 
     # Construct request model with validation
@@ -9761,7 +9881,7 @@ async def list_organization_dependabot_alerts(
     runtime_risk: str | None = Field(None, description="Filter alerts by runtime risk level. Specify as comma-separated values to return alerts for repositories with deployment records matching any of the provided risk types."),
     scope: Literal["development", "runtime"] | None = Field(None, description="Filter alerts by the scope of the vulnerable dependency (development or runtime dependencies)."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Dependabot security alerts for an organization with filtering options by state, ecosystem, package, and risk factors. Requires organization owner or security manager permissions."""
 
     # Construct request model with validation
@@ -9800,7 +9920,7 @@ async def list_organization_dependabot_alerts(
 
 # Tags: dependabot
 @mcp.tool()
-async def list_organization_secrets_dependabot(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_organization_secrets_dependabot(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all secrets available in an organization without revealing their encrypted values. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9836,7 +9956,7 @@ async def list_organization_secrets_dependabot(org: str = Field(..., description
 
 # Tags: dependabot
 @mcp.tool()
-async def get_organization_dependabot_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def get_organization_dependabot_public_key(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization's Dependabot secrets. This key is required to encrypt secrets before creating or updating them in Dependabot configuration."""
 
     # Construct request model with validation
@@ -9875,7 +9995,7 @@ async def get_organization_dependabot_public_key(org: str = Field(..., descripti
 async def get_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single organization secret without revealing its encrypted value. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9918,7 +10038,7 @@ async def create_or_update_organization_secret_dependabot(
     encrypted_value: str | None = Field(None, description="The encrypted secret value, encrypted using LibSodium with the public key from the Get organization public key endpoint. Must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
     key_id: str | None = Field(None, description="The ID of the public key used to encrypt the secret value."),
     selected_repository_ids: list[int | str] | None = Field(None, description="An array of repository IDs that can access the secret. Only applicable when visibility is set to 'selected'. Manage this list using the related repository selection endpoints."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates an organization secret for Dependabot with an encrypted value. The secret value must be encrypted using LibSodium with the organization's public key before submission."""
 
     # Construct request model with validation
@@ -9960,7 +10080,7 @@ async def create_or_update_organization_secret_dependabot(
 async def delete_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a Dependabot secret from an organization by its name. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -9999,7 +10119,7 @@ async def delete_organization_secret_dependabot(
 async def list_organization_secret_repositories_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret for which to list authorized repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that have been granted access to an organization secret when visibility is set to selected. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -10039,7 +10159,7 @@ async def update_organization_secret_repositories_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to configure repository access for."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that should have access to this organization secret. Only applicable when secret visibility is set to 'selected'. This list completely replaces any previously configured repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all repositories that can access an organization Dependabot secret. This operation applies only when the secret's visibility is set to 'selected'. Requires admin:org scope."""
 
     # Construct request model with validation
@@ -10082,7 +10202,7 @@ async def add_repository_to_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the organization secret to grant repository access to."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the organization secret."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a repository access to an organization secret when the secret's visibility is restricted to selected repositories. The repository must be granted access before it can use the secret in workflows."""
 
     # Construct request model with validation
@@ -10122,7 +10242,7 @@ async def remove_repository_from_organization_secret_dependabot(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to modify."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the secret's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from an organization Dependabot secret when visibility is set to selected repositories. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -10158,7 +10278,7 @@ async def remove_repository_from_organization_secret_dependabot(
 
 # Tags: packages
 @mcp.tool()
-async def list_docker_migration_conflicts(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization whose conflicting packages should be listed.")) -> dict[str, Any]:
+async def list_docker_migration_conflicts(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization whose conflicting packages should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves all packages in an organization that encountered conflicts during Docker migration and are readable by the requesting user. Requires `read:packages` OAuth scope."""
 
     # Construct request model with validation
@@ -10194,7 +10314,7 @@ async def list_docker_migration_conflicts(org: str = Field(..., description="The
 
 # Tags: activity
 @mcp.tool()
-async def list_organization_events(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any]:
+async def list_organization_events(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events for an organization. Note: This API is not optimized for real-time use cases and may have latency ranging from 30 seconds to 6 hours depending on the time of day."""
 
     # Construct request model with validation
@@ -10230,7 +10350,7 @@ async def list_organization_events(org: str = Field(..., description="The organi
 
 # Tags: orgs
 @mcp.tool()
-async def list_failed_invitations(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def list_failed_invitations(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of failed organization invitations with details about when and why each invitation failed. Each result includes the failure timestamp and reason."""
 
     # Construct request model with validation
@@ -10266,7 +10386,7 @@ async def list_failed_invitations(org: str = Field(..., description="The organiz
 
 # Tags: orgs
 @mcp.tool()
-async def list_webhooks(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook list to a specific organization.")) -> dict[str, Any]:
+async def list_webhooks(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook list to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhooks configured for an organization. The authenticated user must be an organization owner, and OAuth tokens require the `admin:org_hook` scope."""
 
     # Construct request model with validation
@@ -10309,7 +10429,7 @@ async def create_webhook(
     content_type: str | None = Field(None, description="The serialization format for webhook payloads. Defaults to 'form' if not specified."),
     secret: str | None = Field(None, description="An optional secret used to generate HMAC signatures for verifying webhook authenticity in delivery headers."),
     active: bool | None = Field(None, description="Whether the webhook is active and will send notifications when triggered. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a webhook for an organization that delivers JSON payloads to a specified URL. Requires organization owner permissions and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -10352,7 +10472,7 @@ async def create_webhook(
 async def get_organization_webhook(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook lookup."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook delivery payloads."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook configured in an organization. Requires organization owner permissions and appropriate OAuth scopes to access webhook details."""
 
     # Construct request model with validation
@@ -10395,7 +10515,7 @@ async def update_webhook(
     content_type: str | None = Field(None, description="The media type for serializing payloads. Supported values are `json` and `form`. Defaults to `form`."),
     secret: str | None = Field(None, description="An optional secret used to generate HMAC hex digest values for delivery signature headers, enabling payload verification."),
     active: bool | None = Field(None, description="Whether to send notifications when the webhook is triggered. Set to `true` to enable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an organization webhook's configuration, including URL, content type, secret, and active status. The secret will be overwritten if provided; you must resubmit the existing secret or set a new one to avoid removal."""
 
     # Construct request model with validation
@@ -10438,7 +10558,7 @@ async def update_webhook(
 async def delete_webhook(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook to delete. This value can be found in the `X-GitHub-Hook-ID` header of webhook delivery events."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a webhook from an organization. The authenticated user must be an organization owner, and the request requires `admin:org_hook` scope."""
 
     # Construct request model with validation
@@ -10477,7 +10597,7 @@ async def delete_webhook(
 async def get_webhook_config_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook configuration lookup."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of webhook delivery payloads."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the webhook configuration for an organization, including URL, content type, and SSL verification settings. Requires organization owner permissions and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -10519,7 +10639,7 @@ async def update_webhook_config(
     url: str | None = Field(None, description="The URL where webhook payloads will be delivered."),
     content_type: str | None = Field(None, description="The media type for serializing payloads. Supported values are json and form, with form as the default."),
     secret: str | None = Field(None, description="A secret key used to generate HMAC hex digest values for delivery signature headers, enabling payload verification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the webhook configuration for an organization, including the delivery URL, payload format, and signature secret. Only organization owners can perform this operation."""
 
     # Construct request model with validation
@@ -10561,7 +10681,7 @@ async def update_webhook_config(
 async def list_webhook_deliveries_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the webhook to a specific organization."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of webhook deliveries for an organization webhook. Returns delivery records including status, timestamps, and payload information for debugging webhook integrations."""
 
     # Construct request model with validation
@@ -10601,7 +10721,7 @@ async def get_webhook_delivery_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
     delivery_id: str = Field(..., description="The unique identifier of the specific webhook delivery to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific webhook delivery for an organization webhook. Returns detailed information about a single webhook delivery event, including request and response data."""
 
     # Construct request model with validation
@@ -10641,7 +10761,7 @@ async def redeliver_webhook_delivery_organization(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the webhook."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the X-GitHub-Hook-ID header of any webhook delivery from this hook."),
     delivery_id: str = Field(..., description="The unique identifier of the specific webhook delivery to redeliver."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Redeliver a previously failed or missed webhook delivery for an organization webhook. Requires organization owner permissions and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -10683,7 +10803,7 @@ async def list_api_request_stats(
     max_timestamp: str | None = Field(None, description="The end of the time range for statistics. Specify as an ISO 8601 timestamp. If not provided, defaults to 30 days before the minimum timestamp."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort order for results."),
     subject_name_substring: str | None = Field(None, description="Filter results to subjects whose names contain this substring. The search is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API request statistics for all subjects (users or GitHub Apps) within an organization during a specified time period. Use this to analyze API usage patterns and identify top consumers."""
 
     # Construct request model with validation
@@ -10726,7 +10846,7 @@ async def get_api_summary_stats(
     org: str = Field(..., description="The organization identifier. Organization names are case-insensitive."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics retrieval. Specify as an ISO 8601 formatted timestamp."),
     max_timestamp: str | None = Field(None, description="The end of the time range for statistics retrieval. Specify as an ISO 8601 formatted timestamp. If omitted, defaults to 30 days before the minimum timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated API request statistics for an organization across all users and applications within a specified time period."""
 
     # Construct request model with validation
@@ -10771,7 +10891,7 @@ async def get_api_stats_by_actor(
     actor_id: int = Field(..., description="The unique identifier of the actor."),
     min_timestamp: str = Field(..., description="The start of the time range for statistics. Use ISO 8601 format."),
     max_timestamp: str | None = Field(None, description="The end of the time range for statistics. Use ISO 8601 format. If not provided, defaults to 30 days before the minimum timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API request statistics for a specific actor within an organization over a specified time period. Actors can be GitHub App installations, OAuth apps, or tokens acting on behalf of a user."""
 
     # Construct request model with validation
@@ -10815,7 +10935,7 @@ async def get_api_request_stats(
     min_timestamp: str = Field(..., description="The start of the time range for statistics retrieval in ISO 8601 format."),
     timestamp_increment: str = Field(..., description="The time interval used to aggregate statistics (e.g., 5m, 10m, 1h). Determines the granularity of the returned data."),
     max_timestamp: str | None = Field(None, description="The end of the time range for statistics retrieval in ISO 8601 format. Defaults to 30 days before min_timestamp if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API request and rate-limit statistics for an organization over a specified time period, broken down by configurable time intervals."""
 
     # Construct request model with validation
@@ -10860,7 +10980,7 @@ async def get_user_api_time_stats(
     min_timestamp: str = Field(..., description="The start of the time range for querying statistics. Must be in ISO 8601 format."),
     timestamp_increment: str = Field(..., description="The time interval used to aggregate statistics in the results (e.g., 5m, 10m, 1h). Determines the granularity of the breakdown."),
     max_timestamp: str | None = Field(None, description="The end of the time range for querying statistics. Defaults to 30 days before min_timestamp if not provided. Must be in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API request and rate-limit statistics for a specific user within an organization over a specified time period, broken down by configurable time increments."""
 
     # Construct request model with validation
@@ -10906,7 +11026,7 @@ async def get_api_request_stats_by_actor(
     min_timestamp: str = Field(..., description="The start of the time range for querying statistics. Must be in ISO 8601 format."),
     timestamp_increment: str = Field(..., description="The time interval used to aggregate statistics in the results (e.g., 5m, 10m, 1h). Determines the granularity of the breakdown."),
     max_timestamp: str | None = Field(None, description="The end of the time range for querying statistics. Defaults to 30 days before min_timestamp if not provided. Must be in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API request and rate-limit statistics for a specific actor within an organization over a specified time period. Results can be broken down into configurable time intervals."""
 
     # Construct request model with validation
@@ -10952,7 +11072,7 @@ async def get_user_api_stats_by_access_type(
     max_timestamp: str | None = Field(None, description="The end of the time range for which to retrieve statistics. Defaults to 30 days before the current time if not provided. Must be in ISO 8601 format."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort order for results."),
     actor_name_substring: str | None = Field(None, description="Filter results to include only records where the actor name contains this substring. The search is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve API usage statistics for a specific user within an organization, broken down by access type over a specified time period."""
 
     # Construct request model with validation
@@ -10991,7 +11111,7 @@ async def get_user_api_stats_by_access_type(
 
 # Tags: apps
 @mcp.tool()
-async def get_app_organization_installation(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def get_app_organization_installation(org: str = Field(..., description="The organization name. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the installation details of an authenticated GitHub App within a specific organization. Requires JWT authentication as a GitHub App."""
 
     # Construct request model with validation
@@ -11027,7 +11147,7 @@ async def get_app_organization_installation(org: str = Field(..., description="T
 
 # Tags: orgs
 @mcp.tool()
-async def list_app_installations_organization(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def list_app_installations_organization(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all GitHub Apps installed in an organization, including those installed on repositories within the organization. The authenticated user must be an organization owner, and requires admin:read scope for OAuth or classic personal access tokens."""
 
     # Construct request model with validation
@@ -11063,7 +11183,7 @@ async def list_app_installations_organization(org: str = Field(..., description=
 
 # Tags: interactions
 @mcp.tool()
-async def get_organization_interaction_restrictions(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def get_organization_interaction_restrictions(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current interaction restrictions for an organization, including which types of GitHub users can interact and when the restriction expires. Returns an empty response if no restrictions are active."""
 
     # Construct request model with validation
@@ -11103,7 +11223,7 @@ async def list_pending_invitations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role: Literal["all", "admin", "direct_member", "billing_manager", "hiring_manager"] | None = Field(None, description="Filter invitations by the member role they were invited as."),
     invitation_source: Literal["all", "member", "scim"] | None = Field(None, description="Filter invitations by their source (member-initiated or SCIM-provisioned)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all pending organization invitations with optional filtering by member role or invitation source. The response includes role information (direct_member, admin, billing_manager, or hiring_manager) and login details, which may be null for non-GitHub members."""
 
     # Construct request model with validation
@@ -11146,7 +11266,7 @@ async def invite_organization_member(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     role: Literal["admin", "direct_member", "billing_manager", "reinstate"] | None = Field(None, description="The role to assign to the invited member. Use 'admin' for full administrative access, 'direct_member' for standard membership, 'billing_manager' for billing-only access, or 'reinstate' to restore a previously held role."),
     team_ids: list[int] | None = Field(None, description="An array of team IDs to automatically add the invited member to upon acceptance. The order of IDs is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invite a person to join an organization by their GitHub user ID or email address. Only organization owners can create invitations. Note that this operation triggers notifications and is subject to secondary rate limiting."""
 
     # Construct request model with validation
@@ -11188,7 +11308,7 @@ async def invite_organization_member(
 async def cancel_invitation(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to cancel."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel a pending organization invitation. The authenticated user must be an organization owner to perform this action. This operation triggers notifications to relevant users."""
 
     # Construct request model with validation
@@ -11227,7 +11347,7 @@ async def cancel_invitation(
 async def list_invitation_teams(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to retrieve associated teams for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all teams associated with an organization invitation. The authenticated user must be an organization owner to view invitation details."""
 
     # Construct request model with validation
@@ -11263,7 +11383,7 @@ async def list_invitation_teams(
 
 # Tags: orgs
 @mcp.tool()
-async def list_issue_fields(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def list_issue_fields(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves all issue fields configured for an organization. Requires read:org scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -11306,7 +11426,7 @@ async def create_issue_field(
     description: str | None = Field(None, description="A description of the issue field's purpose and usage."),
     visibility: Literal["organization_members_only", "all"] | None = Field(None, description="Controls who can see this field. Defaults to `organization_members_only` if not specified."),
     options: list[_models.OrgsCreateIssueFieldBodyOptionsItem] | None = Field(None, description="An array of predefined options for single select fields. Required when `data_type` is `single_select`. Each option should be a distinct value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new custom issue field for an organization. The authenticated user must be an organization administrator with the `admin:org` scope."""
 
     # Construct request model with validation
@@ -11348,7 +11468,7 @@ async def create_issue_field(
 async def delete_issue_field(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     issue_field_id: int = Field(..., description="The unique identifier of the issue field to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a custom issue field from an organization. The authenticated user must be an organization administrator with the `admin:org` scope to perform this action."""
 
     # Construct request model with validation
@@ -11384,7 +11504,7 @@ async def delete_issue_field(
 
 # Tags: orgs
 @mcp.tool()
-async def list_issue_types(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any]:
+async def list_issue_types(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves all issue types configured for a specified organization. Requires read:org scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -11426,7 +11546,7 @@ async def create_issue_type(
     is_enabled: bool = Field(..., description="Whether the issue type is enabled and available for use at the organization level."),
     description: str | None = Field(None, description="An optional description explaining the purpose or usage of the issue type."),
     color: Literal["gray", "blue", "green", "yellow", "orange", "red", "pink", "purple"] | None = Field(None, description="An optional color label for visual identification of the issue type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new issue type for an organization. The authenticated user must be an organization administrator with the `admin:org` scope to use this endpoint."""
 
     # Construct request model with validation
@@ -11468,7 +11588,7 @@ async def create_issue_type(
 async def delete_issue_type(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     issue_type_id: int = Field(..., description="The unique identifier of the issue type to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes an issue type from an organization. The authenticated user must be an organization administrator with the `admin:org` scope to perform this action."""
 
     # Construct request model with validation
@@ -11512,7 +11632,7 @@ async def list_organization_issues(
     type_: str | None = Field(None, alias="type", description="Filter by issue type name."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order."),
     since: str | None = Field(None, description="Only return issues last updated after this timestamp in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List issues and pull requests in an organization that are assigned to the authenticated user. Note that GitHub's REST API treats pull requests as issues; use the `pull_request` key to distinguish them."""
 
     # Construct request model with validation
@@ -11555,7 +11675,7 @@ async def list_organization_members(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     filter_: Literal["2fa_disabled", "2fa_insecure", "all"] | None = Field(None, alias="filter", description="Filter members by two-factor authentication status. Use '2fa_disabled' to show members without 2FA enabled, '2fa_insecure' to show members with insecure 2FA methods, or 'all' for no filtering. Only available to organization owners."),
     role: Literal["all", "admin", "member"] | None = Field(None, description="Filter members by their role within the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all members of an organization. Authenticated members can see both public and concealed members, while others see only public members. Results can be filtered by security status or role."""
 
     # Construct request model with validation
@@ -11597,7 +11717,7 @@ async def list_organization_members(
 async def check_organization_membership(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub username handle to check for membership."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a user is a member of an organization, including both public and private membership status."""
 
     # Construct request model with validation
@@ -11636,7 +11756,7 @@ async def check_organization_membership(
 async def list_organization_member_codespaces(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle for the organization member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all codespaces that a member of an organization has for repositories within that organization. Requires admin:org scope for authentication."""
 
     # Construct request model with validation
@@ -11676,7 +11796,7 @@ async def delete_codespace_from_organization(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle whose codespace will be deleted."),
     codespace_name: str = Field(..., description="The name of the codespace to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a user's codespace from the organization. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -11716,7 +11836,7 @@ async def stop_codespace(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle."),
     codespace_name: str = Field(..., description="The name of the codespace to stop."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stop a running codespace for an organization member. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -11755,7 +11875,7 @@ async def stop_codespace(
 async def get_copilot_seat_details(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     username: str = Field(..., description="The GitHub user account handle. Identifies the organization member whose Copilot seat details should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve GitHub Copilot seat assignment details for an organization member, including their most recent activity data. Only organization owners can access this information."""
 
     # Construct request model with validation
@@ -11794,7 +11914,7 @@ async def get_copilot_seat_details(
 async def get_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username (handle) of the user whose membership to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a user's membership status within an organization. The authenticated user must be an organization member to access this information. The response includes the membership state (active, pending, etc.) to identify the user's current status."""
 
     # Construct request model with validation
@@ -11834,7 +11954,7 @@ async def set_organization_membership(
     org: str = Field(..., description="The organization name (case-insensitive)."),
     username: str = Field(..., description="The GitHub user account handle to add or update in the organization."),
     role: Literal["admin", "member"] | None = Field(None, description="The role to assign the user in the organization. Use 'admin' to make the user an organization owner, or 'member' for a non-owner role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or update a user's membership in an organization. Only organization owners can add members or modify roles. New members receive an invitation email and have pending status until acceptance."""
 
     # Construct request model with validation
@@ -11876,7 +11996,7 @@ async def set_organization_membership(
 async def remove_organization_membership(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     username: str = Field(..., description="The GitHub username handle for the user whose membership will be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user's membership from an organization. The authenticated user must be an organization owner. This action removes active members or cancels pending invitations, and the affected user receives an email notification."""
 
     # Construct request model with validation
@@ -11912,7 +12032,7 @@ async def remove_organization_membership(
 
 # Tags: migrations
 @mcp.tool()
-async def list_organization_migrations(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def list_organization_migrations(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the most recent migrations for an organization, including both exports (startable via REST API) and imports (read-only). Repository details are only included for export migrations."""
 
     # Construct request model with validation
@@ -11951,7 +12071,7 @@ async def list_organization_migrations(org: str = Field(..., description="The or
 async def get_migration_status(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration to check status for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of an organization migration. Returns the migration state (pending, exporting, exported, or failed) and associated metadata."""
 
     # Construct request model with validation
@@ -11990,7 +12110,7 @@ async def get_migration_status(
 async def download_migration_archive(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     migration_id: int = Field(..., description="The unique identifier of the migration. Used to specify which migration archive to download."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Downloads the migration archive for an organization. Returns a URL to access the exported migration data."""
 
     # Construct request model with validation
@@ -12029,7 +12149,7 @@ async def download_migration_archive(
 async def delete_migration_archive(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration whose archive should be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a previous migration archive for an organization. Migration archives are automatically deleted after seven days, but can be manually removed earlier using this operation."""
 
     # Construct request model with validation
@@ -12069,7 +12189,7 @@ async def unlock_migration_repository(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     migration_id: int = Field(..., description="The unique identifier of the migration."),
     repo_name: str = Field(..., description="The name of the repository to unlock."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlock a repository that was locked during an organization migration. After unlocking, you can delete the repository when migration is complete and the source data is no longer needed."""
 
     # Construct request model with validation
@@ -12108,7 +12228,7 @@ async def unlock_migration_repository(
 async def list_migration_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization."),
     migration_id: int = Field(..., description="The unique identifier of the migration. Used to specify which organization migration to retrieve repositories for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all repositories included in an organization migration. This retrieves the complete set of repositories that are part of the specified migration for the organization."""
 
     # Construct request model with validation
@@ -12144,7 +12264,7 @@ async def list_migration_repositories(
 
 # Tags: orgs
 @mcp.tool()
-async def list_organization_roles(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any]:
+async def list_organization_roles(org: str = Field(..., description="The organization name. The name is not case sensitive.")) -> dict[str, Any] | ToolResult:
     """Lists all organization roles available in the specified organization. Requires administrator access or fine-grained `read_organization_custom_org_role` permission."""
 
     # Construct request model with validation
@@ -12183,7 +12303,7 @@ async def list_organization_roles(org: str = Field(..., description="The organiz
 async def revoke_team_organization_roles(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team from which to remove all organization roles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all organization roles assigned to a team. The authenticated user must be an organization administrator to perform this action."""
 
     # Construct request model with validation
@@ -12223,7 +12343,7 @@ async def assign_organization_role_to_team(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier of the team to assign the role to."),
     role_id: int = Field(..., description="The unique identifier of the organization role to assign to the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns an organization role to a team within an organization. The authenticated user must be an administrator for the organization to perform this action."""
 
     # Construct request model with validation
@@ -12263,7 +12383,7 @@ async def remove_organization_role_from_team(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_slug: str = Field(..., description="The slug of the team name."),
     role_id: int = Field(..., description="The unique identifier of the organization role to remove from the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an organization role from a team. The authenticated user must be an administrator for the organization, and the request requires the `admin:org` scope."""
 
     # Construct request model with validation
@@ -12302,7 +12422,7 @@ async def remove_organization_role_from_team(
 async def revoke_all_organization_roles_from_user(
     org: str = Field(..., description="The GitHub organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub username handle for the user whose organization roles will be revoked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all organization roles assigned to a user. The authenticated user must be an organization administrator to perform this action."""
 
     # Construct request model with validation
@@ -12342,7 +12462,7 @@ async def assign_organization_role_to_user(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the user to assign the role to."),
     role_id: int = Field(..., description="The unique identifier of the organization role to assign to the user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns an organization role to a user within an organization. The authenticated user must be an administrator of the organization to perform this action."""
 
     # Construct request model with validation
@@ -12382,7 +12502,7 @@ async def revoke_organization_role_from_user(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle from which to remove the organization role."),
     role_id: int = Field(..., description="The unique identifier of the organization role to remove from the user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an organization role from a user. The authenticated user must be an organization administrator to perform this action."""
 
     # Construct request model with validation
@@ -12421,7 +12541,7 @@ async def revoke_organization_role_from_user(
 async def get_organization_role(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific organization role by its unique identifier. Requires administrator access or the fine-grained `read_organization_custom_org_role` permission."""
 
     # Construct request model with validation
@@ -12460,7 +12580,7 @@ async def get_organization_role(
 async def list_organization_role_teams(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all teams assigned to a specific organization role. Requires administrator privileges for the organization."""
 
     # Construct request model with validation
@@ -12499,7 +12619,7 @@ async def list_organization_role_teams(
 async def list_organization_role_users(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     role_id: int = Field(..., description="The unique identifier of the organization role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists organization members assigned to a specific organization role. Requires administrator privileges for the organization."""
 
     # Construct request model with validation
@@ -12538,7 +12658,7 @@ async def list_organization_role_users(
 async def list_outside_collaborators(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     filter_: Literal["2fa_disabled", "2fa_insecure", "all"] | None = Field(None, alias="filter", description="Filter outside collaborators by two-factor authentication status. Use '2fa_disabled' to show only those without 2FA enabled, '2fa_insecure' to show only those with insecure 2FA methods, or 'all' to show all outside collaborators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all outside collaborators for an organization, with optional filtering by two-factor authentication status. Outside collaborators are users who have access to organization repositories but are not members of the organization."""
 
     # Construct request model with validation
@@ -12581,7 +12701,7 @@ async def convert_member_to_outside_collaborator(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle to convert."),
     async_: bool | None = Field(None, alias="async", description="When true, the request executes asynchronously and returns a 202 status code when the job is queued."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert an organization member to an outside collaborator, restricting their access to only repositories their team membership allows. The user will no longer be an organization member."""
 
     # Construct request model with validation
@@ -12623,7 +12743,7 @@ async def convert_member_to_outside_collaborator(
 async def remove_outside_collaborator(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     username: str = Field(..., description="The GitHub username handle for the outside collaborator to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an outside collaborator from an organization, which automatically revokes their access to all organization repositories."""
 
     # Construct request model with validation
@@ -12663,7 +12783,7 @@ async def list_organization_packages(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, Docker images in the Container registry use `container`, and `docker` finds images in the legacy Docker registry."),
     visibility: Literal["public", "private", "internal"] | None = Field(None, description="Filter results by package visibility level. The `internal` visibility is only supported for registries with granular permissions; for other ecosystems it is treated as `private`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all packages in an organization that are readable by the authenticated user. Requires `read:packages` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -12706,7 +12826,7 @@ async def get_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, container images pushed to ghcr.io use `container`, and `docker` finds images in the legacy Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific package from an organization's registry. Requires `read:packages` scope for authentication."""
 
     # Construct request model with validation
@@ -12746,7 +12866,7 @@ async def delete_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an entire package from an organization. Public packages with more than 5,000 downloads cannot be deleted; contact GitHub support in such cases."""
 
     # Construct request model with validation
@@ -12786,7 +12906,7 @@ async def restore_organization_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type to restore. Different registries support different types: npm, maven, and rubygems are language-specific registries; docker and container are image registries; nuget is for .NET packages."),
     package_name: str = Field(..., description="The name of the package to restore."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package in an organization. The package must have been deleted within the last 30 days and the same package namespace and version must still be available."""
 
     # Construct request model with validation
@@ -12827,7 +12947,7 @@ async def list_organization_package_versions(
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
     state: Literal["active", "deleted"] | None = Field(None, description="Filter versions by state: active for current versions or deleted for removed versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a package owned by an organization. Requires `read:packages` scope for authentication."""
 
     # Construct request model with validation
@@ -12871,7 +12991,7 @@ async def get_organization_package_version(
     package_name: str = Field(..., description="The name of the package to retrieve. Package names are case-sensitive identifiers within the registry."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     package_version_id: int = Field(..., description="The unique numeric identifier for the specific package version to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific package version from an organization's package registry. Requires `read:packages` scope for authentication."""
 
     # Construct request model with validation
@@ -12912,7 +13032,7 @@ async def delete_package_version(
     package_name: str = Field(..., description="The name of the package to delete a version from."),
     org: str = Field(..., description="The organization name (case-insensitive)."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific package version from an organization's package registry. Note that public packages with over 5,000 downloads cannot be deleted; contact GitHub support in such cases."""
 
     # Construct request model with validation
@@ -12953,7 +13073,7 @@ async def restore_package_version(
     package_name: str = Field(..., description="The name of the package to restore."),
     org: str = Field(..., description="The organization name. Case-insensitive."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to restore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package version in an organization. The package must have been deleted within the last 30 days and the same package namespace and version must still be available."""
 
     # Construct request model with validation
@@ -12994,7 +13114,7 @@ async def list_pat_grant_requests(
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort results by."),
     permission: str | None = Field(None, description="Filter results by the specific permission required by the token request."),
     token_id: list[str] | None = Field(None, description="Filter results by one or more token IDs. Accepts up to 50 IDs as a comma-separated array.", max_length=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists pending requests from organization members to access organization resources using fine-grained personal access tokens. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13038,7 +13158,7 @@ async def review_pat_grant_requests(
     action: Literal["approve", "deny"] = Field(..., description="The action to apply to all specified requests: approve to grant access or deny to reject access."),
     pat_request_ids: list[int] | None = Field(None, description="Unique identifiers of the personal access token requests to review. Accepts between 1 and 100 request IDs.", min_length=1, max_length=100),
     reason: str | None = Field(None, description="Optional reason for the approval or denial decision. Maximum 1024 characters.", max_length=1024),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Review and approve or deny multiple pending requests for fine-grained personal access token access to organization resources. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13082,7 +13202,7 @@ async def review_pat_grant_request(
     pat_request_id: int = Field(..., description="The unique identifier of the personal access token request to review."),
     action: Literal["approve", "deny"] = Field(..., description="The action to take on the request: approve to grant access or deny to reject it."),
     reason: str | None = Field(None, description="Optional reason for the approval or denial decision. Maximum 1024 characters.", max_length=1024),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Review and approve or deny a pending request for fine-grained personal access token access to organization resources. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13124,7 +13244,7 @@ async def review_pat_grant_request(
 async def list_pat_request_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_request_id: int = Field(..., description="The unique identifier of the fine-grained personal access token request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists the repositories that a fine-grained personal access token request is requesting access to. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13165,7 +13285,7 @@ async def list_organization_pat_grants(
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
     permission: str | None = Field(None, description="Filter results by the specific permission granted to the token."),
     token_id: list[str] | None = Field(None, description="Filter results by one or more token IDs. Provide as a comma-separated list of numeric token identifiers.", max_length=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists fine-grained personal access tokens owned by organization members that have been approved to access organization resources. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13208,7 +13328,7 @@ async def revoke_organization_pat_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     action: Literal["revoke"] = Field(..., description="The action to apply to the fine-grained personal access tokens."),
     pat_ids: list[int] = Field(..., description="The IDs of the fine-grained personal access tokens to revoke. Accepts 1 to 100 token IDs per request.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke organization members' access to organization resources via fine-grained personal access tokens. This operation is restricted to GitHub Apps and supports revoking access for multiple tokens in a single request."""
 
     # Construct request model with validation
@@ -13251,7 +13371,7 @@ async def revoke_org_pat_access(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_id: int = Field(..., description="The unique identifier of the fine-grained personal access token to revoke."),
     action: Literal["revoke"] = Field(..., description="The action to apply to the fine-grained personal access token."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a fine-grained personal access token's access to organization resources. Only GitHub Apps can use this endpoint."""
 
     # Construct request model with validation
@@ -13293,7 +13413,7 @@ async def revoke_org_pat_access(
 async def list_pat_repositories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     pat_id: int = Field(..., description="The unique identifier of the fine-grained personal access token."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that a fine-grained personal access token has access to within an organization. This endpoint is only available to GitHub Apps."""
 
     # Construct request model with validation
@@ -13329,7 +13449,7 @@ async def list_pat_repositories(
 
 # Tags: private-registries
 @mcp.tool()
-async def list_organization_private_registries(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the private registries query.")) -> dict[str, Any]:
+async def list_organization_private_registries(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the private registries query.")) -> dict[str, Any] | ToolResult:
     """Retrieve all private registry configurations for an organization. Encrypted credential values are not included in the response. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -13374,7 +13494,7 @@ async def create_organization_private_registry(
     visibility: Literal["all", "private", "selected"] = Field(..., description="The access scope for the private registry. Use 'all' for all repositories, 'private' for private repositories only, or 'selected' to restrict access to specific repositories."),
     replaces_base: bool | None = Field(None, description="Whether this registry should replace the base public registry. When true, Dependabot uses only this registry without fallback to public registries. When false (default), Dependabot uses this registry for scoped packages and may fall back to public registries for others."),
     selected_repository_ids: list[int] | None = Field(None, description="Array of repository IDs that can access this private registry. Required only when visibility is set to 'selected'. Omit this field when visibility is 'all' or 'private'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a private registry configuration for an organization with encrypted credentials. The encrypted secret must be generated using LibSodium with the public key retrieved from the organization's private registries endpoint."""
 
     # Construct request model with validation
@@ -13413,7 +13533,7 @@ async def create_organization_private_registry(
 
 # Tags: private-registries
 @mcp.tool()
-async def get_private_registry_public_key(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def get_private_registry_public_key(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for an organization's private registries, which is required to encrypt secrets before creating or updating them. Requires `admin:org` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -13452,7 +13572,7 @@ async def get_private_registry_public_key(org: str = Field(..., description="The
 async def get_private_registry(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the private registry secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration details of a private registry for an organization, excluding its encrypted credential value. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -13499,7 +13619,7 @@ async def update_organization_private_registry(
     selected_repository_ids: list[int] | None = Field(None, description="Array of repository IDs that can access this private registry. Only provide this when visibility is set to 'selected'; omit for 'all' or 'private' visibility."),
     secret_value: str | None = Field(None, description="The plaintext secret value to be encrypted"),
     public_key: str | None = Field(None, description="The base64-encoded public key retrieved from the Get a repository public key endpoint"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a private registry configuration for an organization, allowing you to manage Dependabot's access to private package repositories. Requires encrypting sensitive credentials using LibSodium before submission."""
 
     # Call helper functions
@@ -13544,7 +13664,7 @@ async def update_organization_private_registry(
 async def delete_org_private_registry(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the private registry secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a private registry configuration for an organization. Requires `admin:org` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -13583,7 +13703,7 @@ async def delete_org_private_registry(
 async def list_organization_projects(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     q: str | None = Field(None, description="Filter results to projects of a specified type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all projects owned by an organization that are accessible to the authenticated user. Results can be filtered by project type using the optional query parameter."""
 
     # Construct request model with validation
@@ -13625,7 +13745,7 @@ async def list_organization_projects(
 async def get_organization_project(
     project_number: int = Field(..., description="The unique numeric identifier for the project within the organization."),
     org: str = Field(..., description="The name of the organization that owns the project. Organization names are case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific project owned by an organization using its project number. This operation fetches detailed information about a single organization-level project."""
 
     # Construct request model with validation
@@ -13666,7 +13786,7 @@ async def create_draft_item(
     project_number: int = Field(..., description="The project number that uniquely identifies the project within the organization."),
     title: str = Field(..., description="The title of the draft issue item. This is the primary heading for the draft."),
     body: str | None = Field(None, description="The body content of the draft issue item. Supports markdown formatting for rich text content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a draft issue item in an organization-owned project. Draft items can be converted to full issues later."""
 
     # Construct request model with validation
@@ -13708,7 +13828,7 @@ async def create_draft_item(
 async def list_project_fields(
     project_number: int = Field(..., description="The numeric identifier of the project. This uniquely identifies the project within the organization."),
     org: str = Field(..., description="The name of the organization that owns the project. Organization names are case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all fields configured for a specific organization-owned project. Fields define the custom properties and metadata available for project items."""
 
     # Construct request model with validation
@@ -13748,7 +13868,7 @@ async def add_project_field(
     project_number: int = Field(..., description="The project number that uniquely identifies the project within the organization."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     body: _models.ProjectsAddFieldForOrgBodyV0 | _models.ProjectsAddFieldForOrgBodyV1 | _models.ProjectsAddFieldForOrgBodyV2 | _models.ProjectsAddFieldForOrgBodyV3 = Field(..., description="Field configuration object specifying the field name, data type, and type-specific options. Supported data types include text, number, date, single_select, and iteration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a custom field to an organization-owned project. Fields can be of various types including text, number, date, single select, and iteration to support project tracking and management."""
 
     # Construct request model with validation
@@ -13792,7 +13912,7 @@ async def get_project_field(
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     field_id: int = Field(..., description="The unique identifier of the field to retrieve."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific field from an organization-owned project. Fields define custom properties and data types for project items."""
 
     # Construct request model with validation
@@ -13833,7 +13953,7 @@ async def list_project_items(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     q: str | None = Field(None, description="Search query to filter items by their properties and values."),
     fields: str | list[str] | None = Field(None, description="Comma-separated or repeated field IDs to include in results. If not specified, only the title field is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all items in an organization-owned project. Retrieve project items with optional filtering by search query and field selection."""
 
     # Construct request model with validation
@@ -13876,7 +13996,7 @@ async def add_item_to_project(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     type_: Literal["Issue", "PullRequest"] = Field(..., alias="type", description="The type of item being added to the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an issue or pull request to an organization's project. This operation allows you to associate existing GitHub items with a specific project for tracking and organization purposes."""
 
     # Construct request model with validation
@@ -13920,7 +14040,7 @@ async def get_project_item(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     item_id: int = Field(..., description="The unique identifier of the project item to retrieve."),
     fields: str | list[str] | None = Field(None, description="Comma-separated or repeated field IDs to include in the response. If not specified, only the title field is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific item from an organization-owned project. Returns the item's details, including selected fields or the title field by default."""
 
     # Construct request model with validation
@@ -13964,7 +14084,7 @@ async def update_project_item(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     item_id: int = Field(..., description="The unique identifier of the project item to update."),
     fields: list[_models.ProjectsUpdateItemForOrgBodyFieldsItem] = Field(..., description="An ordered list of field updates to apply to the item. Each entry specifies a field and its new value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a specific item in an organization-owned project by applying field changes. Modify item properties such as status, assignees, or custom fields."""
 
     # Construct request model with validation
@@ -14007,7 +14127,7 @@ async def delete_project_item(
     project_number: int = Field(..., description="The project's unique number identifier within the organization."),
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     item_id: int = Field(..., description="The unique identifier of the project item to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific item from an organization-owned project. This operation permanently removes the item from the project."""
 
     # Construct request model with validation
@@ -14050,7 +14170,7 @@ async def create_project_view(
     layout: Literal["table", "board", "roadmap"] = Field(..., description="The layout type that determines how project items are displayed."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter query to control which items appear in the view. Use standard project filtering syntax to narrow results by status, type, assignee, and other criteria."),
     visible_fields: list[int] | None = Field(None, description="Optional array of field IDs to display in the view. Not applicable for roadmap layouts. If omitted, default visible fields will be used. Field order in the array determines display order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view in an organization-owned project to customize how items are displayed and filtered. Views support different layouts (table, board, roadmap) and can include optional filtering and field visibility settings."""
 
     # Construct request model with validation
@@ -14094,7 +14214,7 @@ async def list_project_view_items(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     view_number: int = Field(..., description="The number that identifies the project view within the project."),
     fields: str | list[str] | None = Field(None, description="Limit results to specific fields by their IDs. If not specified, only the title field will be returned. Accepts multiple field IDs as a comma-separated list or repeated query parameters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List items in an organization project view with the view's saved filters applied. Returns project items matching the specified view's configuration."""
 
     # Construct request model with validation
@@ -14133,7 +14253,7 @@ async def list_project_view_items(
 
 # Tags: orgs
 @mcp.tool()
-async def list_organization_custom_property_definitions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property definitions.")) -> dict[str, Any]:
+async def list_organization_custom_property_definitions(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property definitions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom property definitions configured for an organization. Organization members can access these property schemas to understand available custom properties."""
 
     # Construct request model with validation
@@ -14172,7 +14292,7 @@ async def list_organization_custom_property_definitions(org: str = Field(..., de
 async def get_organization_custom_property(
     org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the custom property lookup."),
     custom_property_name: str = Field(..., description="The name of the custom property to retrieve. Must match an existing custom property defined for the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a custom property definition for an organization. Organization members can access these property definitions to understand custom metadata configured for the organization."""
 
     # Construct request model with validation
@@ -14211,7 +14331,7 @@ async def get_organization_custom_property(
 async def list_organization_repository_custom_properties(
     org: str = Field(..., description="The organization name. The lookup is case-insensitive."),
     repository_query: str | None = Field(None, description="Search query to filter repositories by keywords and qualifiers. Supports the same search syntax as the GitHub web interface for repository discovery and filtering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all repositories in an organization along with their custom property values. Organization members can access this information to view how custom properties are applied across repositories."""
 
     # Construct request model with validation
@@ -14254,7 +14374,7 @@ async def batch_update_repository_custom_properties(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the repositories."),
     repository_names: list[str] = Field(..., description="The names of repositories to update. Each repository must belong to the organization. Order is not significant.", min_length=1, max_length=30),
     properties: list[_models.CustomPropertyValue] = Field(..., description="Custom properties and their values to apply to the repositories. Each property entry specifies a property name and its value. Use null to remove or unset a property value from the repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update custom property values for multiple repositories in an organization. Apply the same custom property values across up to 30 repositories in a single batch operation, with support for unsetting properties using null values."""
 
     # Construct request model with validation
@@ -14293,7 +14413,7 @@ async def batch_update_repository_custom_properties(
 
 # Tags: orgs
 @mcp.tool()
-async def list_organization_public_members(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any]:
+async def list_organization_public_members(org: str = Field(..., description="The organization name. The lookup is case-insensitive.")) -> dict[str, Any] | ToolResult:
     """List all members of an organization whose membership is publicly visible. Organization members can choose whether their membership is public or private."""
 
     # Construct request model with validation
@@ -14332,7 +14452,7 @@ async def list_organization_public_members(org: str = Field(..., description="Th
 async def check_public_organization_membership(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username handle to check for public membership in the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a user is a public member of the specified organization. Public membership is visible to anyone, unlike concealed membership."""
 
     # Construct request model with validation
@@ -14371,7 +14491,7 @@ async def check_public_organization_membership(
 async def publicize_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the authenticated user whose membership will be publicized."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Publicize your own membership in an organization. This makes your membership visible to others, and can only be performed by the authenticated user for their own membership."""
 
     # Construct request model with validation
@@ -14410,7 +14530,7 @@ async def publicize_organization_membership(
 async def remove_public_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     username: str = Field(..., description="The GitHub username of the account whose public membership should be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove your public membership from an organization. This action makes your membership private unless the organization enforces public visibility by default."""
 
     # Construct request model with validation
@@ -14450,7 +14570,7 @@ async def list_organization_repositories(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     type_: Literal["all", "public", "private", "forks", "sources", "member"] | None = Field(None, alias="type", description="Filters repositories by type. Use 'all' to include all repository types, 'public' for publicly accessible repositories, 'private' for private repositories, 'forks' for forked repositories, 'sources' for original repositories, or 'member' for repositories the authenticated user is a member of."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort order for results. Use 'asc' for ascending order or 'desc' for descending order. Defaults to 'asc' when sorting by full name, otherwise 'desc'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves repositories for the specified organization. Supports filtering by repository type and sorting results in ascending or descending order."""
 
     # Construct request model with validation
@@ -14513,7 +14633,7 @@ async def create_organization_repository(
     merge_commit_title: Literal["PR_TITLE", "MERGE_MESSAGE"] | None = Field(None, description="The default title format for merge commits. Required when using merge_commit_message."),
     merge_commit_message: Literal["PR_BODY", "PR_TITLE", "BLANK"] | None = Field(None, description="The default message content for merge commits, determining whether to use the pull request title, body, or a blank message."),
     custom_properties: dict[str, Any] | None = Field(None, description="Custom properties for the repository as key-value pairs, where keys are custom property names and values are their corresponding values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new repository in the specified organization. The authenticated user must be a member of the organization with appropriate OAuth scopes (`public_repo` or `repo` for public repositories, `repo` for private repositories)."""
 
     # Construct request model with validation
@@ -14555,7 +14675,7 @@ async def create_organization_repository(
 async def list_organization_rulesets(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     targets: str | None = Field(None, description="Filter rulesets by target types using a comma-separated list. Only rulesets applying to the specified targets will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all repository rulesets configured for an organization. Optionally filter rulesets by their target types (branch, tag, push, etc.)."""
 
     # Construct request model with validation
@@ -14600,7 +14720,7 @@ async def list_organization_rule_suites(
     time_period: Literal["hour", "day", "week", "month"] | None = Field(None, description="Filter results by time period. Use 'hour' for the past 24 hours, 'day' for the past 24 hours, 'week' for the past 7 days, or 'month' for the past 30 days."),
     actor_name: str | None = Field(None, description="Filter results to rule evaluations triggered by a specific GitHub user account handle."),
     rule_suite_result: Literal["pass", "fail", "bypass", "all"] | None = Field(None, description="Filter results by rule suite outcome. Use 'pass' for successful evaluations, 'fail' for failed evaluations, 'bypass' for bypassed evaluations, or 'all' to include all outcomes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists suites of rule evaluations at the organization level to view insights and compliance results for repository rulesets. Filter by repository, time period, actor, or result status."""
 
     # Construct request model with validation
@@ -14642,7 +14762,7 @@ async def list_organization_rule_suites(
 async def get_organization_rule_suite(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     rule_suite_id: int = Field(..., description="The unique identifier of the rule suite result. Retrieve this ID from the organization or repository rule suites list endpoints."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific rule suite evaluation within an organization. Use this to view insights and results from ruleset evaluations applied across your organization's repositories."""
 
     # Construct request model with validation
@@ -14681,7 +14801,7 @@ async def get_organization_rule_suite(
 async def get_organization_ruleset(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific repository ruleset for an organization. Note that the bypass_actors property is only returned if the requester has write access to the ruleset."""
 
     # Construct request model with validation
@@ -14720,7 +14840,7 @@ async def get_organization_ruleset(
 async def delete_organization_ruleset(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a repository ruleset for an organization. This removes the ruleset and all its associated rules from the organization."""
 
     # Construct request model with validation
@@ -14759,7 +14879,7 @@ async def delete_organization_ruleset(
 async def list_ruleset_history(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete history of changes for an organization ruleset, including all modifications and their timestamps."""
 
     # Construct request model with validation
@@ -14799,7 +14919,7 @@ async def get_ruleset_version(
     org: str = Field(..., description="The organization name. Organization names are case-insensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset."),
     version_id: int = Field(..., description="The unique identifier of the ruleset version to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific version of an organization ruleset. Use this to view the configuration and rules that were active at a particular point in the ruleset's history."""
 
     # Construct request model with validation
@@ -14845,7 +14965,7 @@ async def list_secret_scanning_alerts(
     is_publicly_leaked: bool | None = Field(None, description="When true, only returns alerts that have been publicly leaked."),
     is_multi_repo: bool | None = Field(None, description="When true, only returns alerts that appear across multiple repositories."),
     hide_secret: bool | None = Field(None, description="When true, redacts literal secret values from the response results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists secret scanning alerts for an organization across eligible repositories, ordered from newest to oldest. The authenticated user must be an administrator or security manager for the organization."""
 
     # Construct request model with validation
@@ -14884,7 +15004,7 @@ async def list_secret_scanning_alerts(
 
 # Tags: secret-scanning
 @mcp.tool()
-async def list_secret_scanning_patterns(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the pattern configurations to a specific organization.")) -> dict[str, Any]:
+async def list_secret_scanning_patterns(org: str = Field(..., description="The organization name. Case-insensitive identifier used to scope the pattern configurations to a specific organization.")) -> dict[str, Any] | ToolResult:
     """Lists all secret scanning pattern configurations for an organization. These patterns define custom rules used to detect secrets during scanning."""
 
     # Construct request model with validation
@@ -14924,7 +15044,7 @@ async def list_organization_security_advisories(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results."),
     state: Literal["triage", "draft", "published", "closed"] | None = Field(None, description="Filter advisories by their current state. Only advisories matching the specified state will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all repository security advisories for an organization. The authenticated user must be an owner or security manager to access this endpoint."""
 
     # Construct request model with validation
@@ -14963,7 +15083,7 @@ async def list_organization_security_advisories(
 
 # Tags: orgs
 @mcp.tool()
-async def list_immutable_release_repositories(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any]:
+async def list_immutable_release_repositories(org: str = Field(..., description="The organization name. Case-insensitive.")) -> dict[str, Any] | ToolResult:
     """List all repositories in an organization that have been selected for immutable releases enforcement. Requires admin:org scope."""
 
     # Construct request model with validation
@@ -15002,7 +15122,7 @@ async def list_immutable_release_repositories(org: str = Field(..., description=
 async def enable_repository_immutable_releases(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     repository_id: int = Field(..., description="The unique identifier of the repository to enable for immutable releases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a repository to the organization's list of selected repositories enforced for immutable releases. This endpoint requires the organization's immutable releases policy to be configured for selected repositories."""
 
     # Construct request model with validation
@@ -15041,7 +15161,7 @@ async def enable_repository_immutable_releases(
 async def remove_repository_from_immutable_releases(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from immutable releases enforcement."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from the organization's immutable releases enforcement list. This endpoint is only available when the organization's immutable releases policy is configured to enforce selected repositories."""
 
     # Construct request model with validation
@@ -15077,7 +15197,7 @@ async def remove_repository_from_immutable_releases(
 
 # Tags: hosted-compute
 @mcp.tool()
-async def list_network_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any]:
+async def list_network_configurations(org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all hosted compute network configurations for an organization. Requires `read:network_configurations` scope."""
 
     # Construct request model with validation
@@ -15116,7 +15236,7 @@ async def list_network_configurations(org: str = Field(..., description="The org
 async def get_network_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific hosted compute network configuration for an organization. Requires `read:network_configurations` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -15157,7 +15277,7 @@ async def update_network_configuration(
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to update."),
     compute_service: Literal["none", "actions"] | None = Field(None, description="The hosted compute service to use for this network configuration."),
     network_settings_ids: list[str] | None = Field(None, description="A list of network settings resource identifiers to associate with this configuration. Exactly one identifier must be provided if specified.", min_length=0, max_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a hosted compute network configuration for an organization. Requires the `write:network_configurations` OAuth scope."""
 
     # Construct request model with validation
@@ -15199,7 +15319,7 @@ async def update_network_configuration(
 async def delete_network_configuration(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the network configuration."),
     network_configuration_id: str = Field(..., description="The unique identifier of the hosted compute network configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a hosted compute network configuration from an organization. Requires the `write:network_configurations` OAuth scope."""
 
     # Construct request model with validation
@@ -15238,7 +15358,7 @@ async def delete_network_configuration(
 async def get_network_settings(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the network settings."),
     network_settings_id: str = Field(..., description="The unique identifier of the hosted compute network settings resource to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a hosted compute network settings resource for an organization. Requires `read:network_configurations` OAuth scope."""
 
     # Construct request model with validation
@@ -15279,7 +15399,7 @@ async def get_team_copilot_metrics(
     team_slug: str = Field(..., description="The team slug (URL-friendly identifier). Used to specify which team within the organization to retrieve metrics for."),
     since: str | None = Field(None, description="Start date for the metrics query in ISO 8601 format. Limits results to metrics from this date onward. Maximum lookback is 100 days ago."),
     until: str | None = Field(None, description="End date for the metrics query in ISO 8601 format. Limits results to metrics up to this date. Must not precede the since date if both are provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated GitHub Copilot usage metrics for a team over a specified date range. Returns metrics for up to 100 days of historical data, with results only available for days when the team had five or more active Copilot license holders."""
 
     # Construct request model with validation
@@ -15321,7 +15441,7 @@ async def get_team_copilot_metrics(
 async def list_teams(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_type: Literal["all", "enterprise", "organization"] | None = Field(None, description="Filter team results by their type. Use 'all' to include all teams, 'enterprise' for enterprise-managed teams, or 'organization' for organization-managed teams."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all teams in an organization that are visible to the authenticated user. Optionally filter results by team type (all, enterprise, or organization)."""
 
     # Construct request model with validation
@@ -15370,7 +15490,7 @@ async def create_team(
     notification_setting: Literal["notifications_enabled", "notifications_disabled"] | None = Field(None, description="Whether team members receive notifications when the team is mentioned. 'notifications_enabled' sends notifications, 'notifications_disabled' suppresses them."),
     permission: Literal["pull", "push"] | None = Field(None, description="The default permission level for new repositories added to the team when no specific permission is provided."),
     parent_team_id: int | None = Field(None, description="The team ID to set as the parent team, creating a nested team hierarchy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new team within an organization. The authenticated user must be a member or owner of the organization, and will automatically become a team maintainer."""
 
     # Construct request model with validation
@@ -15412,7 +15532,7 @@ async def create_team(
 async def get_team(
     org: str = Field(..., description="The organization name. This parameter is case-insensitive."),
     team_slug: str = Field(..., description="The slug of the team name. This is a URL-friendly identifier created by converting the team name to lowercase and replacing spaces with hyphens."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a team by its slug within an organization. The team slug is a URL-friendly identifier derived from the team name by converting to lowercase and replacing spaces with hyphens."""
 
     # Construct request model with validation
@@ -15456,7 +15576,7 @@ async def update_team(
     notification_setting: Literal["notifications_enabled", "notifications_disabled"] | None = Field(None, description="Whether team members receive notifications when the team is @mentioned. Choose notifications_enabled to send notifications or notifications_disabled to disable them."),
     permission: Literal["pull", "push", "admin"] | None = Field(None, description="The default permission level for new repositories added to the team when no permission is explicitly specified."),
     parent_team_id: int | None = Field(None, description="The ID of a team to set as the parent team, establishing a nested team hierarchy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an organization team's settings including name, description, privacy level, and notification preferences. The authenticated user must be an organization owner or team maintainer."""
 
     # Construct request model with validation
@@ -15498,7 +15618,7 @@ async def update_team(
 async def delete_team(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the organization that owns the team."),
     team_slug: str = Field(..., description="The slug of the team name. A URL-friendly identifier for the team within the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a team from an organization. The authenticated user must be an organization owner or team maintainer. Deleting a parent team will also delete all of its child teams."""
 
     # Construct request model with validation
@@ -15537,7 +15657,7 @@ async def delete_team(
 async def list_team_invitations(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all pending invitations for a team within an organization. Returns invitation details including the invitee's login (null if not a GitHub member) and their assigned role."""
 
     # Construct request model with validation
@@ -15577,7 +15697,7 @@ async def list_team_members(
     org: str = Field(..., description="The organization name. Case-insensitive."),
     team_slug: str = Field(..., description="The slug identifier for the team name."),
     role: Literal["member", "maintainer", "all"] | None = Field(None, description="Filter members by their role within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all members of a team in an organization, including members from child teams. The team must be visible to the authenticated user."""
 
     # Construct request model with validation
@@ -15620,7 +15740,7 @@ async def get_team_membership(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     team_slug: str = Field(..., description="The URL-friendly slug identifier for the team within the organization."),
     username: str = Field(..., description="The GitHub username handle for the user whose team membership is being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a user's membership status and role within a specific team. The response includes the membership state and the user's role, with organization owners shown as maintainers."""
 
     # Construct request model with validation
@@ -15661,7 +15781,7 @@ async def add_or_update_team_membership(
     team_slug: str = Field(..., description="The slug identifier for the team."),
     username: str = Field(..., description="The GitHub username handle for the user being added or updated."),
     role: Literal["member", "maintainer"] | None = Field(None, description="The role to assign the user within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an organization member to a team or update their existing team role. An authenticated organization owner or team maintainer can manage team membership, with automatic email invitations sent to non-members."""
 
     # Construct request model with validation
@@ -15704,7 +15824,7 @@ async def remove_team_member_org(
     org: str = Field(..., description="The organization name. Case-insensitive identifier for the GitHub organization."),
     team_slug: str = Field(..., description="The slug of the team name. This is the URL-friendly identifier for the team within the organization."),
     username: str = Field(..., description="The GitHub username handle for the user whose team membership will be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user's membership from a team. The authenticated user must have admin permissions to the team or be an organization owner. This action does not delete the user account, only removes their team membership."""
 
     # Construct request model with validation
@@ -15743,7 +15863,7 @@ async def remove_team_member_org(
 async def list_team_repositories(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     team_slug: str = Field(..., description="The URL-friendly slug identifier for the team name within the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all repositories that are visible to the authenticated user and associated with a specific team within an organization. This includes repositories the team has access to through various permission levels."""
 
     # Construct request model with validation
@@ -15784,7 +15904,7 @@ async def verify_team_repository_permissions(
     team_slug: str = Field(..., description="The slug of the team name. Case-insensitive."),
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a team has a specific permission level for a repository, including permissions inherited through parent teams. Returns repository details if the team has access, or 404 if the team lacks permission or lacks read access to a private repository."""
 
     # Construct request model with validation
@@ -15826,7 +15946,7 @@ async def set_team_repository_permission(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     permission: str | None = Field(None, description="The permission level to grant the team on this repository. If not specified, the team's existing permission will be used. Accepts standard permission levels or custom repository role names defined by the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant or update a team's permission level on a repository owned by the organization. The authenticated user must have admin access to the repository and visibility of the team."""
 
     # Construct request model with validation
@@ -15870,7 +15990,7 @@ async def remove_repository_from_team(
     team_slug: str = Field(..., description="The slug identifier for the team name. Case-insensitive."),
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from a team within an organization. This action does not delete the repository, only removes the team's access to it. Requires organization owner, team maintainer, or admin access to the repository."""
 
     # Construct request model with validation
@@ -15909,7 +16029,7 @@ async def remove_repository_from_team(
 async def list_child_teams(
     org: str = Field(..., description="The organization name. The name is not case sensitive."),
     team_slug: str = Field(..., description="The slug of the team name, used to identify the parent team whose child teams should be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all child teams nested under a specified team within an organization. This operation retrieves the direct child teams only, not grandchild teams."""
 
     # Construct request model with validation
@@ -15948,7 +16068,7 @@ async def list_child_teams(
 async def get_repository(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific repository, including fork relationships and security settings. Admin or security manager permissions are required to view security and analysis data."""
 
     # Construct request model with validation
@@ -16009,7 +16129,7 @@ async def update_repository(
     archived: bool | None = Field(None, description="Archive or unarchive this repository."),
     allow_forking: bool | None = Field(None, description="Allow private forks of this repository."),
     web_commit_signoff_required: bool | None = Field(None, description="Require contributors to sign off on web-based commits."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update repository settings including visibility, features, merge strategies, and metadata. Note: Use the dedicated endpoint to manage repository topics."""
 
     # Construct request model with validation
@@ -16052,7 +16172,7 @@ async def update_repository(
 async def delete_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a repository. Requires admin access to the repository, and organization owners may restrict this action for organization-owned repositories."""
 
     # Construct request model with validation
@@ -16091,7 +16211,7 @@ async def delete_repository(
 async def list_artifacts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all artifacts for a repository. Anyone with read access can use this endpoint; OAuth apps and personal access tokens need the `repo` scope for private repositories."""
 
     # Construct request model with validation
@@ -16131,7 +16251,7 @@ async def get_artifact(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     artifact_id: int = Field(..., description="The unique identifier of the artifact to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific artifact from a workflow run. Accessible to anyone with read access to the repository; private repositories require the `repo` scope for OAuth tokens and personal access tokens."""
 
     # Construct request model with validation
@@ -16171,7 +16291,7 @@ async def delete_artifact(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     artifact_id: int = Field(..., description="The unique identifier of the artifact to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a workflow artifact from a repository. Requires `repo` scope authentication."""
 
     # Construct request model with validation
@@ -16212,7 +16332,7 @@ async def download_artifact(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     artifact_id: int = Field(..., description="The unique identifier of the artifact to download."),
     archive_format: str = Field(..., description="The archive format for the downloaded artifact. Must be `zip`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download a repository artifact as a ZIP archive. Returns a redirect URL in the response header that expires after 1 minute."""
 
     # Construct request model with validation
@@ -16251,7 +16371,7 @@ async def download_artifact(
 async def get_cache_retention_limit(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the GitHub Actions cache retention limit for a repository, which determines how long cached artifacts are retained before automatic eviction due to age or size constraints."""
 
     # Construct request model with validation
@@ -16290,7 +16410,7 @@ async def get_cache_retention_limit(
 async def get_actions_cache_storage_limit_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the GitHub Actions cache storage limit for a repository, which determines the maximum size of caches before eviction occurs. Requires admin:repository scope."""
 
     # Construct request model with validation
@@ -16329,7 +16449,7 @@ async def get_actions_cache_storage_limit_repository(
 async def get_actions_cache_usage(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve GitHub Actions cache usage statistics for a repository. Data is refreshed approximately every 5 minutes, so values may take at least 5 minutes to reflect recent changes."""
 
     # Construct request model with validation
@@ -16370,7 +16490,7 @@ async def list_caches(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     key: str | None = Field(None, description="Filter caches by an explicit key or key prefix to narrow results to specific cache entries."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all GitHub Actions caches for a repository. Requires `repo` scope authentication to access cache metadata and management information."""
 
     # Construct request model with validation
@@ -16413,7 +16533,7 @@ async def delete_actions_cache_by_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     key: str = Field(..., description="A cache key used to identify and delete matching caches. All caches with this key will be deleted unless filtered by a Git ref."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete GitHub Actions caches for a repository by cache key. Optionally restrict deletions to caches matching both the provided key and a specific Git ref."""
 
     # Construct request model with validation
@@ -16456,7 +16576,7 @@ async def delete_actions_cache(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     cache_id: int = Field(..., description="The unique identifier of the GitHub Actions cache to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a GitHub Actions cache for a repository by its cache ID. Requires `repo` scope authentication."""
 
     # Construct request model with validation
@@ -16496,7 +16616,7 @@ async def get_workflow_job(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     job_id: int = Field(..., description="The unique identifier of the job to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific job within a workflow run. Anyone with read access to the repository can use this endpoint."""
 
     # Construct request model with validation
@@ -16536,7 +16656,7 @@ async def get_workflow_job_logs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     job_id: int = Field(..., description="The unique identifier of the job to retrieve logs for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a download URL for workflow job logs as plain text. The returned redirect URL expires after 1 minute and is found in the `Location` response header."""
 
     # Construct request model with validation
@@ -16577,7 +16697,7 @@ async def rerun_workflow_job(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     job_id: int = Field(..., description="The unique identifier of the job to re-run."),
     enable_debug_logging: bool | None = Field(None, description="Whether to enable debug logging for the re-run."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Re-run a job and its dependent jobs in a workflow run. Requires `repo` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -16619,7 +16739,7 @@ async def rerun_workflow_job(
 async def get_oidc_subject_claim_customization(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the customization template for an OpenID Connect (OIDC) subject claim in a repository. This template defines how the OIDC subject claim is formatted for GitHub Actions workflows."""
 
     # Construct request model with validation
@@ -16658,7 +16778,7 @@ async def get_oidc_subject_claim_customization(
 async def list_organization_secrets_available_to_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all organization secrets shared with a repository, displaying metadata without revealing encrypted values. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -16697,7 +16817,7 @@ async def list_organization_secrets_available_to_repository(
 async def list_organization_variables_shared(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all organization variables that are shared with a specific repository. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -16736,7 +16856,7 @@ async def list_organization_variables_shared(
 async def list_runners(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all self-hosted runners configured in a repository. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -16775,7 +16895,7 @@ async def list_runners(
 async def list_runner_downloads(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists available runner application binaries that can be downloaded and executed for a repository. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -16814,7 +16934,7 @@ async def list_runner_downloads(
 async def generate_runner_removal_token_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a removal token for a self-hosted runner in a repository. The token expires after one hour and can be used with the config script to remove the runner."""
 
     # Construct request model with validation
@@ -16854,7 +16974,7 @@ async def get_runner_repo(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific self-hosted runner configured in a repository. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -16894,7 +17014,7 @@ async def remove_runner_from_repository(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently remove a self-hosted runner from a repository. Use this endpoint when the runner machine no longer exists or you need to completely deregister it from the repository."""
 
     # Construct request model with validation
@@ -16934,7 +17054,7 @@ async def list_runner_labels_for_repo(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all labels assigned to a self-hosted runner in a repository. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -16975,7 +17095,7 @@ async def add_labels_to_runner_for_repo(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to add labels to."),
     labels: list[str] = Field(..., description="An array of custom label names to add to the runner. Each label is a string identifier.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add custom labels to a self-hosted runner in a repository. Requires admin access to the organization and `repo` scope for authentication."""
 
     # Construct request model with validation
@@ -17019,7 +17139,7 @@ async def update_runner_labels_repo(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner to update."),
     labels: list[str] = Field(..., description="An array of custom label names to assign to the runner. Pass an empty array to remove all custom labels. Labels are unordered.", min_length=0, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all custom labels for a self-hosted runner in a repository. Requires admin access to the repository and appropriate OAuth or personal access token permissions."""
 
     # Construct request model with validation
@@ -17062,7 +17182,7 @@ async def remove_all_custom_labels_from_runner_for_repo(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all custom labels from a self-hosted runner in a repository, returning only the read-only labels that remain. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -17103,7 +17223,7 @@ async def remove_runner_label(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     runner_id: int = Field(..., description="The unique identifier of the self-hosted runner."),
     name: str = Field(..., description="The name of the custom label to remove from the runner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom label from a self-hosted runner in a repository. Returns the remaining labels after removal. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -17148,7 +17268,7 @@ async def list_workflow_runs(
     exclude_pull_requests: bool | None = Field(None, description="Exclude pull request workflow runs from the response when set to true."),
     check_suite_id: int | None = Field(None, description="Filter results to workflow runs associated with a specific check suite ID."),
     head_sha: str | None = Field(None, description="Filter results to workflow runs associated with a specific commit SHA."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all workflow runs for a repository with optional filtering by actor, branch, date range, and other criteria. Anyone with read access can use this endpoint; up to 1,000 results are returned per search when using certain filter parameters."""
 
     # Construct request model with validation
@@ -17192,7 +17312,7 @@ async def get_workflow_run(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run."),
     exclude_pull_requests: bool | None = Field(None, description="If true, pull requests are omitted from the response as an empty array."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific workflow run in a repository. Anyone with read access can use this endpoint."""
 
     # Construct request model with validation
@@ -17235,7 +17355,7 @@ async def delete_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific workflow run from a repository. Requires write access to the repository; private repositories need the `repo` scope for OAuth tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -17275,7 +17395,7 @@ async def list_workflow_run_approvals(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to retrieve approvals for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the review and approval history for a specific workflow run. Anyone with read access to the repository can use this endpoint."""
 
     # Construct request model with validation
@@ -17315,7 +17435,7 @@ async def approve_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to approve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approve a workflow run for a pull request from a public fork of a first-time contributor. This allows the workflow to proceed after security review. Requires `repo` scope authentication."""
 
     # Construct request model with validation
@@ -17356,7 +17476,7 @@ async def list_workflow_run_artifacts(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all artifacts generated by a specific workflow run. Requires read access to the repository."""
 
     # Construct request model with validation
@@ -17401,7 +17521,7 @@ async def get_workflow_run_attempt(
     run_id: int = Field(..., description="The unique identifier of the workflow run."),
     attempt_number: int = Field(..., description="The attempt number of the workflow run."),
     exclude_pull_requests: bool | None = Field(None, description="If true, pull requests are omitted from the response as an empty array."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific workflow run attempt. Anyone with read access to the repository can use this endpoint."""
 
     # Construct request model with validation
@@ -17445,7 +17565,7 @@ async def list_workflow_run_attempt_jobs(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run."),
     attempt_number: int = Field(..., description="The attempt number of the workflow run, used to identify a specific retry or re-run of the workflow."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all jobs for a specific workflow run attempt. Use this endpoint to retrieve job details and status for a particular attempt of a workflow run."""
 
     # Construct request model with validation
@@ -17486,7 +17606,7 @@ async def download_workflow_run_attempt_logs(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run."),
     attempt_number: int = Field(..., description="The attempt number of the workflow run, indicating which retry or re-run of the workflow to retrieve logs for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a redirect URL to download an archive of log files for a specific workflow run attempt. The download link expires after 1 minute, so check the `Location` response header for the actual download URL."""
 
     # Construct request model with validation
@@ -17526,7 +17646,7 @@ async def cancel_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to cancel."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an in-progress workflow run by its unique identifier. Requires `repo` scope authorization."""
 
     # Construct request model with validation
@@ -17569,7 +17689,7 @@ async def review_deployment_protection_rule(
     environment_name: str = Field(..., description="The name of the environment for which to approve or reject the deployment protection rule."),
     comment: str | None = Field(None, description="Optional comment to associate with the deployment protection rule review. Required if state is not provided."),
     state: Literal["approved", "rejected"] | None = Field(None, description="The decision for the deployment protection rule: approve to allow deployment or reject to block it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approve or reject custom deployment protection rules for a workflow run. This allows GitHub Apps to review their own deployment protection rules before allowing a workflow to proceed to a specified environment."""
 
     # Construct request model with validation
@@ -17612,7 +17732,7 @@ async def force_cancel_workflow_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to force cancel."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Force cancel a workflow run, bypassing conditions like `always()` that would normally allow execution to continue. Use this only when the standard cancel endpoint is unresponsive."""
 
     # Construct request model with validation
@@ -17653,7 +17773,7 @@ async def list_workflow_run_jobs(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to retrieve jobs for."),
     filter_: Literal["latest", "all"] | None = Field(None, alias="filter", description="Filter jobs by execution recency. Use `latest` to return jobs from the most recent execution, or `all` to return jobs from all historical executions of the workflow run."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all jobs associated with a specific workflow run, with optional filtering to show only the latest execution or all historical executions. Requires read access to the repository."""
 
     # Construct request model with validation
@@ -17696,7 +17816,7 @@ async def get_workflow_run_logs_download_url(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to download logs for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a temporary download URL for workflow run logs archive. The returned redirect URL expires after 1 minute and is found in the Location response header."""
 
     # Construct request model with validation
@@ -17736,7 +17856,7 @@ async def delete_workflow_run_logs(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run whose logs should be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete all logs associated with a specific workflow run. Requires `repo` scope authentication."""
 
     # Construct request model with validation
@@ -17776,7 +17896,7 @@ async def list_pending_deployments(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to retrieve pending deployments for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all deployment environments for a workflow run that are awaiting protection rule approval. This endpoint helps identify which deployments are blocked and require manual or automated approval to proceed."""
 
     # Construct request model with validation
@@ -17819,7 +17939,7 @@ async def review_pending_deployments(
     environment_ids: list[int] = Field(..., description="The list of environment IDs to approve or reject. Order is not significant. Each ID must be a valid environment identifier."),
     state: Literal["approved", "rejected"] = Field(..., description="Whether to approve or reject deployment to the specified environments."),
     comment: str = Field(..., description="A comment to accompany the deployment review, providing context for the approval or rejection decision."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approve or reject pending deployments awaiting reviewer approval for a workflow run. Required reviewers with repository access can use this endpoint to gate deployments to specified environments."""
 
     # Construct request model with validation
@@ -17863,7 +17983,7 @@ async def rerun_workflow(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to re-run."),
     enable_debug_logging: bool | None = Field(None, description="Enable debug logging for the workflow re-run to capture additional diagnostic information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Re-run a workflow by its run ID. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -17907,7 +18027,7 @@ async def rerun_workflow_failed_jobs(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to re-run failed jobs from."),
     enable_debug_logging: bool | None = Field(None, description="Whether to enable debug logging for the re-run."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Re-run all failed jobs and their dependent jobs in a workflow run. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -17950,7 +18070,7 @@ async def get_workflow_run_usage(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     run_id: int = Field(..., description="The unique identifier of the workflow run to retrieve usage metrics for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve billable minutes and total execution time for a specific workflow run. This endpoint is deprecated and will be shut down; refer to GitHub's official announcement for migration guidance."""
 
     # Construct request model with validation
@@ -17989,7 +18109,7 @@ async def get_workflow_run_usage(
 async def list_repository_secrets(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all secrets configured in a repository without exposing their encrypted values. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -18028,7 +18148,7 @@ async def list_repository_secrets(
 async def get_repository_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for a repository, which is required to encrypt secrets before creating or updating them. Read access to the repository is sufficient to use this endpoint."""
 
     # Construct request model with validation
@@ -18068,7 +18188,7 @@ async def get_repository_secret(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a specific repository secret without exposing its encrypted value. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -18108,7 +18228,7 @@ async def delete_repository_secret(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository, excluding the `.git` extension. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a secret from a repository by name. Requires collaborator access and appropriate authentication scope."""
 
     # Construct request model with validation
@@ -18147,7 +18267,7 @@ async def delete_repository_secret(
 async def list_repository_variables(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all variables configured for a repository. Authenticated users must have collaborator access to read variables."""
 
     # Construct request model with validation
@@ -18188,7 +18308,7 @@ async def create_repository_variable(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     name: str = Field(..., description="The name of the variable. Used as the identifier for referencing this variable in workflows."),
     value: str = Field(..., description="The value assigned to the variable. This is the data that will be available in GitHub Actions workflows."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a repository variable for use in GitHub Actions workflows. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -18231,7 +18351,7 @@ async def get_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     name: str = Field(..., description="The name of the variable to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific variable from a repository. The authenticated user must have collaborator access to the repository."""
 
     # Construct request model with validation
@@ -18272,7 +18392,7 @@ async def update_repository_variable(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     name: str = Field(..., description="The name of the variable to update."),
     value: str | None = Field(None, description="The new value for the variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a repository variable that can be referenced in GitHub Actions workflows. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -18315,7 +18435,7 @@ async def delete_repository_variable(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     name: str = Field(..., description="The name of the variable to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a repository variable by name. Requires collaborator access to the repository and appropriate OAuth or personal access token permissions."""
 
     # Construct request model with validation
@@ -18354,7 +18474,7 @@ async def delete_repository_variable(
 async def list_workflows(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all workflows in a repository. Anyone with read access can use this endpoint; private repositories require the `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -18394,7 +18514,7 @@ async def get_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     workflow_id: str = Field(..., description="The ID of the workflow or the workflow file name (e.g., `main.yaml`). Accepts integer ID or string file name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific workflow by its ID or file name. Anyone with read access to the repository can use this endpoint."""
 
     # Construct request model with validation
@@ -18434,7 +18554,7 @@ async def disable_workflow(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     workflow_id: str = Field(..., description="The ID of the workflow or the workflow file name as a string identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable a workflow and set its state to `disabled_manually`. You can reference the workflow by its ID or file name (e.g., `main.yaml`)."""
 
     # Construct request model with validation
@@ -18477,7 +18597,7 @@ async def trigger_workflow(
     ref: str = Field(..., description="The git reference (branch or tag name) where the workflow should run."),
     inputs: dict[str, Any] | None = Field(None, description="Input keys and values configured in the workflow file. Maximum of 25 properties. Default values from the workflow file are used if inputs are omitted.", max_length=25),
     return_run_details: bool | None = Field(None, description="Whether the response should include the workflow run ID and URLs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Manually trigger a GitHub Actions workflow run by dispatching a workflow_dispatch event. The workflow must be configured to respond to workflow_dispatch events, and you can optionally provide input values that are defined in the workflow file."""
 
     # Construct request model with validation
@@ -18520,7 +18640,7 @@ async def enable_workflow(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. The name is case-insensitive."),
     workflow_id: str = Field(..., description="The workflow identifier, which can be either the numeric ID or the workflow file name (e.g., main.yaml)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Activates a workflow by setting its state to active. You can reference the workflow by its ID or file name (e.g., main.yaml)."""
 
     # Construct request model with validation
@@ -18566,7 +18686,7 @@ async def list_workflow_runs_for_workflow(
     exclude_pull_requests: bool | None = Field(None, description="If true, pull request workflow runs are excluded from the response."),
     check_suite_id: int | None = Field(None, description="Filter results to show workflow runs associated with a specific check suite ID."),
     head_sha: str | None = Field(None, description="Filter results to show only workflow runs associated with the specified commit SHA."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all workflow runs for a specific workflow in a repository. You can filter results by actor, branch, date range, and other criteria to narrow down the results."""
 
     # Construct request model with validation
@@ -18612,7 +18732,7 @@ async def list_repository_activities(
     actor: str | None = Field(None, description="Filter activities by the GitHub username of the user who performed the action."),
     time_period: Literal["day", "week", "month", "quarter", "year"] | None = Field(None, description="Filter activities by the time window in which they occurred (e.g., `day` for the past 24 hours, `week` for the past 7 days)."),
     activity_type: Literal["push", "force_push", "branch_creation", "branch_deletion", "pr_merge", "merge_queue_merge"] | None = Field(None, description="Filter activities by type (e.g., `force_push` to show only force pushes, `pr_merge` to show pull request merges)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a detailed history of repository changes including pushes, merges, force pushes, and branch modifications, with associations to commits and users. Use filters to narrow results by actor, time period, or activity type."""
 
     # Construct request model with validation
@@ -18654,7 +18774,7 @@ async def list_repository_activities(
 async def list_assignees(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of available assignees for issues and pull requests in a repository. Use this to discover which users can be assigned to work items."""
 
     # Construct request model with validation
@@ -18694,7 +18814,7 @@ async def verify_assignee_permission(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     assignee: str = Field(..., description="The username of the user to check for assignment permission."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a user has permission to be assigned to issues in a repository. Returns a 204 status if the user can be assigned, or 404 if they cannot."""
 
     # Construct request model with validation
@@ -18736,7 +18856,7 @@ async def create_attestation(
     media_type: str | None = Field(None, alias="mediaType", description="The media type that specifies the format of the attestation payload being submitted."),
     verification_material: dict[str, Any] | None = Field(None, alias="verificationMaterial", description="The verification material containing cryptographic proof and supporting evidence for the attestation."),
     dsse_envelope: dict[str, Any] | None = Field(None, alias="dsseEnvelope", description="The DSSE (Dead Simple Signing Envelope) containing the signed attestation statement and signature."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Store an artifact attestation and associate it with a repository. The authenticated user must have write permission to the repository and, if using a fine-grained access token, the `attestations:write` permission is required."""
 
     # Construct request model with validation
@@ -18780,7 +18900,7 @@ async def list_attestations(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     subject_digest: str = Field(..., description="The attestation subject's SHA256 digest in the format `sha256:HEX_DIGEST`."),
     predicate_type: str | None = Field(None, description="Optional filter to retrieve attestations matching a specific predicate type. Supports standard types like provenance and sbom, or custom freeform text for user-defined predicates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve artifact attestations for a given subject digest in a repository. The authenticated user must have read access to the repository and the `attestations:read` permission when using fine-grained access tokens. Attestations should be cryptographically verified using GitHub CLI before relying on them for security decisions."""
 
     # Construct request model with validation
@@ -18822,7 +18942,7 @@ async def list_attestations(
 async def list_autolinks(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all autolinks configured for a repository. This operation is only available to repository administrators and returns autolink configurations that automatically convert references to external URLs."""
 
     # Construct request model with validation
@@ -18864,7 +18984,7 @@ async def create_autolink(
     key_prefix: str = Field(..., description="The prefix that triggers autolink generation when found in issues, pull requests, or commits. The prefix is appended by certain characters to create the link."),
     url_template: str = Field(..., description="The URL template for the generated link. Must contain `<num>` as a placeholder for the reference number, which matches alphanumeric or numeric characters depending on the `is_alphanumeric` setting."),
     is_alphanumeric: bool | None = Field(None, description="Whether the autolink matches alphanumeric characters (A-Z case-insensitive, 0-9, and hyphen) or only numeric characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an autolink reference for a repository to automatically generate links when a key prefix is found in issues, pull requests, or commits. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -18907,7 +19027,7 @@ async def get_autolink(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     autolink_id: int = Field(..., description="The unique identifier of the autolink to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific autolink reference configured for a repository by its unique identifier. Only repository administrators can access autolink information."""
 
     # Construct request model with validation
@@ -18947,7 +19067,7 @@ async def delete_autolink(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     autolink_id: int = Field(..., description="The unique identifier of the autolink to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an autolink reference from a repository by its unique identifier. Only repository administrators can perform this action."""
 
     # Construct request model with validation
@@ -18986,7 +19106,7 @@ async def delete_autolink(
 async def get_automated_security_fixes_status(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the Dependabot security updates configuration status for a repository. Returns whether security updates are enabled, disabled, or paused. Requires admin read access to the repository."""
 
     # Construct request model with validation
@@ -19025,7 +19145,7 @@ async def get_automated_security_fixes_status(
 async def enable_automated_security_fixes(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable Dependabot security updates for a repository to automatically detect and fix vulnerable dependencies. The authenticated user must have admin access to the repository."""
 
     # Construct request model with validation
@@ -19064,7 +19184,7 @@ async def enable_automated_security_fixes(
 async def disable_automated_security_fixes(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable Dependabot security updates for a repository. The authenticated user must have admin access to the repository."""
 
     # Construct request model with validation
@@ -19104,7 +19224,7 @@ async def list_branches(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     protected: bool | None = Field(None, description="Filter branches by protection status. Set to `true` to return only branches protected by branch protections or rulesets, or `false` to return only unprotected branches. Omit to return all branches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of branches in a repository, with optional filtering by protection status. Use the protected parameter to filter for branches with active branch protections or rulesets."""
 
     # Construct request model with validation
@@ -19147,7 +19267,7 @@ async def get_branch(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard-based branch queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific branch in a repository, including its commit reference and protection status."""
 
     # Construct request model with validation
@@ -19187,7 +19307,7 @@ async def get_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch name queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve branch protection rules for a specific branch. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19250,7 +19370,7 @@ async def configure_branch_protection(
     required_conversation_resolution: bool | None = Field(None, description="Require all conversations on code to be resolved before merging pull requests."),
     lock_branch: bool | None = Field(None, description="Set the branch as read-only, preventing all pushes. Users cannot push to a locked branch."),
     allow_fork_syncing: bool | None = Field(None, description="Allow users to pull changes from upstream when the branch is locked, enabling fork synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure comprehensive protection rules for a repository branch, including status checks, pull request reviews, push restrictions, and merge requirements. Requires admin or owner permissions."""
 
     # Construct request model with validation
@@ -19298,7 +19418,7 @@ async def remove_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to remove protection from. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove branch protection rules from a specified branch. Branch protection is available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19338,7 +19458,7 @@ async def get_branch_admin_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch name queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve whether admin enforcement is enabled for a protected branch. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, Team, Enterprise Cloud, and Enterprise Server."""
 
     # Construct request model with validation
@@ -19378,7 +19498,7 @@ async def enforce_admin_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to enforce admin protection on. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enforce admin branch protection on a protected branch, requiring administrators to follow branch protection rules. This action requires admin or owner permissions and branch protection to be already enabled."""
 
     # Construct request model with validation
@@ -19418,7 +19538,7 @@ async def disable_admin_branch_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The name of the branch to modify. Cannot contain wildcard characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable admin enforcement on a protected branch. Requires admin or owner permissions and branch protection must already be enabled."""
 
     # Construct request model with validation
@@ -19458,7 +19578,7 @@ async def check_branch_signature_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The name of the branch to check for signature protection requirements. Cannot contain wildcard characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a branch requires signed commits. Returns the signature protection status for a protected branch when you have admin or owner permissions to the repository."""
 
     # Construct request model with validation
@@ -19498,7 +19618,7 @@ async def disable_branch_signature_protection(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable required commit signature protection on a branch. Requires admin or owner permissions to the repository and branch protection must already be enabled."""
 
     # Construct request model with validation
@@ -19538,7 +19658,7 @@ async def get_branch_status_checks_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch name queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the required status checks protection rules for a branch. Status checks must pass before pull requests can be merged into the protected branch."""
 
     # Construct request model with validation
@@ -19578,7 +19698,7 @@ async def disable_branch_status_check_protection(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to remove status check protection from. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove status check protection requirements from a branch. This allows commits to be merged without passing required status checks. Status check protection is available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19618,7 +19738,7 @@ async def list_status_check_contexts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to retrieve status check contexts for. Cannot contain wildcard characters; use GraphQL API for wildcard support."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all required status check contexts for a protected branch. Status checks must pass before merging is allowed on the specified branch."""
 
     # Construct request model with validation
@@ -19659,7 +19779,7 @@ async def remove_branch_protection_status_check_contexts(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters. To use wildcard characters in branch names, use the GraphQL API."),
     body: _models.ReposRemoveStatusCheckContextsBodyV0 | list[str] | None = Field(None, description="An array of status check context strings to remove from the branch's required status checks. Each context identifies a specific status check (e.g., a CI/CD service)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove specific status check contexts from a protected branch's required status checks. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19703,7 +19823,7 @@ async def list_branch_access_restrictions(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use GraphQL API for wildcard support."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List users, teams, and apps with access to a protected branch. Access restrictions are only available for organization-owned repositories."""
 
     # Construct request model with validation
@@ -19743,7 +19863,7 @@ async def remove_branch_protection_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to remove restrictions from. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove access restrictions from a protected branch, allowing anyone with push access to the repository to push to this branch. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19783,7 +19903,7 @@ async def list_apps_with_protected_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch name queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists the GitHub Apps that have push access to a protected branch. Only GitHub Apps installed on the repository with write access to repository contents can be authorized on a protected branch."""
 
     # Construct request model with validation
@@ -19824,7 +19944,7 @@ async def update_branch_protection_app_restrictions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
     apps: list[str] = Field(..., description="The GitHub Apps that have push access to this branch, specified using the slugified version of each app name. The total number of users, apps, and teams combined cannot exceed 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace the list of GitHub Apps with push access to a protected branch. This operation removes all previously authorized apps and grants push access only to the newly specified apps. Only GitHub Apps installed on the repository with write access to repository contents can be authorized."""
 
     # Construct request model with validation
@@ -19868,7 +19988,7 @@ async def revoke_app_branch_push_access(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The branch name. Wildcard characters are not supported; use GraphQL API for wildcard branch operations."),
     apps: list[str] = Field(..., description="Array of GitHub App slugified names to revoke push access from. The combined total of users, apps, and teams cannot exceed 100 items. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke push access permissions for GitHub Apps on a protected branch. This operation removes the ability of specified apps to push to the branch; only apps installed on the repository with write access can be managed."""
 
     # Construct request model with validation
@@ -19911,7 +20031,7 @@ async def list_teams_with_branch_access(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard branch name queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List teams with push access to a protected branch, including child teams. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -19952,7 +20072,7 @@ async def grant_team_branch_push_access(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to restrict. Cannot contain wildcard characters; use the GraphQL API for wildcard branch names."),
     body: _models.ReposAddTeamAccessRestrictionsBodyV0 | list[str] | None = Field(None, description="List of team slugs to grant push access to this branch. Teams can include child teams."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant specified teams push access to a protected branch. This operation allows you to add team-level access restrictions, including child teams, to control who can push to the branch."""
 
     # Construct request model with validation
@@ -19997,7 +20117,7 @@ async def replace_branch_protection_team_restrictions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to protect. Cannot contain wildcard characters; use GraphQL API for wildcard support."),
     body: _models.ReposSetTeamAccessRestrictionsBodyV0 | list[str] | None = Field(None, description="Array of team slugs to grant push access to the protected branch. Replaces all existing team restrictions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace the list of teams with push access to a protected branch. This operation removes all previously granted team access and applies the new team list, including child teams."""
 
     # Construct request model with validation
@@ -20042,7 +20162,7 @@ async def revoke_team_branch_push_access(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to modify protection restrictions for. Cannot contain wildcard characters."),
     body: _models.ReposRemoveTeamAccessRestrictionsBodyV0 | list[str] | None = Field(None, description="List of team slugs to remove push access from the branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a team's ability to push to a protected branch. This removes push access for the specified team and its child teams. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -20086,7 +20206,7 @@ async def list_branch_protection_users(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters; use the GraphQL API for wildcard support."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List users with push access to a protected branch. Protected branches are available in public repositories with GitHub Free and in public and private repositories with GitHub Pro, GitHub Team, GitHub Enterprise Cloud, and GitHub Enterprise Server."""
 
     # Construct request model with validation
@@ -20127,7 +20247,7 @@ async def grant_user_push_access(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The name of the branch. Cannot contain wildcard characters."),
     users: list[str] = Field(..., description="List of usernames to grant push access. Order is not significant. The combined total of users, apps, and teams cannot exceed 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant push access to specified users on a protected branch. The total number of users, apps, and teams combined cannot exceed 100 items."""
 
     # Construct request model with validation
@@ -20171,7 +20291,7 @@ async def revoke_user_branch_access(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to modify protection restrictions for. Cannot contain wildcard characters."),
     users: list[str] = Field(..., description="Array of usernames to revoke push access from. The combined total of users, apps, and teams cannot exceed 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke push access to a protected branch for specified users. This operation removes the ability for one or more users to push commits to the branch."""
 
     # Construct request model with validation
@@ -20215,7 +20335,7 @@ async def rename_branch(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The current name of the branch. Cannot contain wildcard characters."),
     new_name: str = Field(..., description="The new name for the branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rename a branch in a repository. The authenticated user must have push access to the branch, and admin/owner permissions if renaming the default branch. Note that the rename process may take time to complete in the background."""
 
     # Construct request model with validation
@@ -20258,7 +20378,7 @@ async def create_check_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     body: _models.ChecksCreateBodyV0 | _models.ChecksCreateBodyV1 = Field(..., description="Check run configuration including the commit SHA, status, conclusion, output details with annotations and images, and optional actions. Supports both in-progress and completed states."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new check run for a specific commit in a repository. Requires a GitHub App and enforces a limit of 1000 check runs with the same name per check suite."""
 
     # Construct request model with validation
@@ -20302,7 +20422,7 @@ async def get_check_run(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_run_id: int = Field(..., description="The unique identifier of the check run to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single check run by its unique identifier. Returns detailed information about the check run's status, conclusion, and associated metadata."""
 
     # Construct request model with validation
@@ -20343,7 +20463,7 @@ async def update_check_run(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_run_id: int = Field(..., description="The unique identifier of the check run to update."),
     body: _models.ChecksUpdateBodyV0 | _models.ChecksUpdateBodyV1 = Field(..., description="The check run update payload containing status, conclusion, output details, and optional annotations. Supports structured output with title, summary, text, and file-level annotations with severity levels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status, conclusion, and output details of a check run for a specific commit. This allows you to report test results, annotations, and other check metadata back to GitHub."""
 
     # Construct request model with validation
@@ -20387,7 +20507,7 @@ async def list_check_run_annotations(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_run_id: int = Field(..., description="The unique identifier of the check run for which to retrieve annotations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all annotations for a specific check run. Requires `repo` scope for private repositories when using OAuth app tokens or personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -20427,7 +20547,7 @@ async def trigger_check_run_recheck(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_run_id: int = Field(..., description="The unique identifier of the check run to recheck."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a recheck of an existing check run without requiring new code to be pushed. This action resets the associated check suite status to queued and clears its conclusion, allowing GitHub Apps to decide whether to update the check run via the update endpoint."""
 
     # Construct request model with validation
@@ -20467,7 +20587,7 @@ async def create_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     head_sha: str = Field(..., description="The commit SHA (hash) that identifies the head commit for which to create the check suite."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Manually create a check suite for a repository commit. Use this endpoint only when automatic check suite creation has been disabled via repository preferences."""
 
     # Construct request model with validation
@@ -20510,7 +20630,7 @@ async def get_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_suite_id: int = Field(..., description="The unique identifier of the check suite to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single check suite by its unique identifier. Returns detailed information about the check suite including its status, conclusion, and associated check runs."""
 
     # Construct request model with validation
@@ -20552,7 +20672,7 @@ async def list_check_runs(
     check_suite_id: int = Field(..., description="The unique identifier of the check suite to retrieve check runs from."),
     check_name: str | None = Field(None, description="Filter results to return only check runs with the specified name."),
     filter_: Literal["latest", "all"] | None = Field(None, alias="filter", description="Filter check runs by their completion status. Use `latest` to return only the most recent check runs, or `all` to return all check runs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all check runs for a specific check suite. Use this to retrieve detailed results of checks that ran as part of a suite."""
 
     # Construct request model with validation
@@ -20595,7 +20715,7 @@ async def rerun_check_suite(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     check_suite_id: int = Field(..., description="The unique identifier of the check suite to rerun."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rerun a check suite without pushing new code to the repository. This triggers the check_suite webhook event with the `rerequested` action, resetting the suite's status to `queued` and clearing its conclusion."""
 
     # Construct request model with validation
@@ -20637,7 +20757,7 @@ async def list_code_scanning_alerts_repository(
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
     state: Literal["open", "closed", "dismissed", "fixed"] | None = Field(None, description="Filter alerts by their current state. Only alerts matching the specified state will be returned."),
     assignees: str | None = Field(None, description="Filter alerts by assignees using a comma-separated list of user handles. Use `*` to include alerts with at least one assignee or `none` to include alerts with no assignees."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists code scanning alerts for a repository, including details of the most recent instance on the default branch or specified Git reference. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -20680,7 +20800,7 @@ async def get_code_scanning_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific code scanning alert by its number. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -20725,7 +20845,7 @@ async def update_code_scanning_alert(
     dismissed_comment: str | None = Field(None, description="An optional comment explaining the dismissal decision, up to 280 characters.", max_length=280),
     create_request: bool | None = Field(None, description="If `true`, attempt to create an alert dismissal request alongside the status update."),
     assignees: list[str] | None = Field(None, description="A list of users to assign to the alert. Provide an empty array to unassign all previous assignees."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status and metadata of a code scanning alert, including dismissal state, reason, and assignees. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -20768,7 +20888,7 @@ async def get_autofix_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the status and description of an autofix for a code scanning alert. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -20808,7 +20928,7 @@ async def create_code_scanning_autofix(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates autofix generation for a code scanning alert. Returns 202 Accepted if a new autofix is being created, or 200 OK if one already exists for the alert."""
 
     # Construct request model with validation
@@ -20850,7 +20970,7 @@ async def commit_code_scanning_autofix(
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
     target_ref: str | None = Field(None, description="The Git reference (branch name) where the autofix commit will be created. The branch must already exist."),
     message: str | None = Field(None, description="Custom commit message for the autofix. If not provided, a default message will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Commits an autofix for a code scanning alert to a specified branch. Returns a 201 Created response if the autofix is successfully committed."""
 
     # Construct request model with validation
@@ -20893,7 +21013,7 @@ async def list_code_scanning_alert_instances(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all instances of a specified code scanning alert within a repository. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -20934,7 +21054,7 @@ async def list_code_scanning_analyses(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     sarif_id: str | None = Field(None, description="Filter analyses to those belonging to a specific SARIF upload batch."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the analyses list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve code scanning analyses for a repository, ordered by most recent first. Results are paginated with 30 analyses per page by default."""
 
     # Construct request model with validation
@@ -20977,7 +21097,7 @@ async def get_code_scanning_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     analysis_id: int = Field(..., description="The unique identifier of the code scanning analysis to retrieve, as returned from the list analyses operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific code scanning analysis for a repository, including details about the scan results, tool used, and alert counts. Supports SARIF format output for detailed analysis data."""
 
     # Construct request model with validation
@@ -21018,7 +21138,7 @@ async def delete_code_scanning_analysis(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     analysis_id: int = Field(..., description="The ID of the analysis to delete, as returned from the list code scanning analyses operation."),
     confirm_delete: str | None = Field(None, description="Set to `true` to allow deletion of the final analysis in a set. Required when deleting the last analysis to prevent accidental loss of historical alert data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a code scanning analysis from a repository. Only the most recent analysis in a set (determined by unique ref, tool, and category combinations) can be deleted. Use the returned URLs to delete subsequent analyses in the set or confirm deletion of the final analysis."""
 
     # Construct request model with validation
@@ -21060,7 +21180,7 @@ async def delete_code_scanning_analysis(
 async def list_codeql_databases(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all CodeQL databases available in a repository. Requires `repo` scope for private repositories or `public_repo` scope for public repositories."""
 
     # Construct request model with validation
@@ -21100,7 +21220,7 @@ async def get_codeql_database(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. Case-insensitive."),
     language: str = Field(..., description="The programming language for which to retrieve the CodeQL database."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a CodeQL database for a specific language in a repository. Returns JSON metadata by default; set Accept header to application/zip to download the binary database file."""
 
     # Construct request model with validation
@@ -21140,7 +21260,7 @@ async def delete_codeql_database(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     language: str = Field(..., description="The programming language of the CodeQL database to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a CodeQL database for a specific language from a repository. Requires `repo` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -21181,7 +21301,7 @@ async def create_variant_analysis(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     language: Literal["actions", "cpp", "csharp", "go", "java", "javascript", "python", "ruby", "rust", "swift"] = Field(..., description="The programming language targeted by the CodeQL query."),
     query_pack: str = Field(..., description="A Base64-encoded tarball containing a CodeQL query and all its dependencies."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new CodeQL variant analysis to run a CodeQL query against one or more repositories. The analysis will execute within the specified controller repository using GitHub Actions workflows and store results there."""
 
     # Construct request model with validation
@@ -21224,7 +21344,7 @@ async def get_variant_analysis(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     codeql_variant_analysis_id: int = Field(..., description="The unique identifier of the CodeQL variant analysis to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the summary of a CodeQL variant analysis by its unique identifier. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -21266,7 +21386,7 @@ async def get_variant_analysis_repository_status(
     codeql_variant_analysis_id: int = Field(..., description="The unique identifier of the CodeQL variant analysis."),
     repo_owner: str = Field(..., description="The account owner of the repository being analyzed in the variant analysis. Case-insensitive."),
     repo_name: str = Field(..., description="The name of the repository being analyzed in the variant analysis."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the analysis status and results of a specific repository within a CodeQL variant analysis. Requires `security_events` scope for private/public repositories or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -21305,7 +21425,7 @@ async def get_variant_analysis_repository_status(
 async def get_code_scanning_default_setup(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the default setup configuration for code scanning in a repository. Requires `repo` scope for private repositories or `public_repo` scope for public repositories."""
 
     # Construct request model with validation
@@ -21349,7 +21469,7 @@ async def upload_sarif(
     sarif: str = Field(..., description="The SARIF file compressed with gzip and encoded as Base64. Compress your SARIF file first, then encode the binary output to Base64 format."),
     checkout_uri: str | None = Field(None, description="The base directory used during analysis (as it appears in the SARIF file). Used to convert absolute file paths to repository-relative paths for accurate alert mapping."),
     validate_: bool | None = Field(None, alias="validate", description="Whether to validate the SARIF file against code scanning specifications. Useful for integrators to verify correct rendering before production use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload SARIF-formatted code scanning analysis results to a repository. Results can be mapped to pull requests for check annotations or to branches for the Security tab, with automatic prioritization when data exceeds platform limits."""
 
     # Construct request model with validation
@@ -21392,7 +21512,7 @@ async def get_sarif_upload(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     sarif_id: str = Field(..., description="The unique identifier of the SARIF upload, obtained when the SARIF file was initially uploaded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a SARIF upload including its processing status and the URL to access the uploaded analysis results. Use this to check the status of a code scanning analysis that was previously uploaded."""
 
     # Construct request model with validation
@@ -21431,7 +21551,7 @@ async def get_sarif_upload(
 async def get_repository_code_security_configuration(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the code security configuration that manages a repository's security settings. The authenticated user must be an administrator or security manager for the organization."""
 
     # Construct request model with validation
@@ -21470,7 +21590,7 @@ async def get_repository_code_security_configuration(
 async def list_codeowners_errors(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List any syntax errors detected in the repository's CODEOWNERS file. Use this to validate CODEOWNERS syntax and identify issues that need correction."""
 
     # Construct request model with validation
@@ -21509,7 +21629,7 @@ async def list_codeowners_errors(
 async def list_codespaces_in_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all codespaces associated with a specified repository for the authenticated user. Requires the `codespace` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -21556,7 +21676,7 @@ async def create_codespace(
     idle_timeout_minutes: int | None = Field(None, description="Time in minutes before the codespace automatically stops due to inactivity."),
     display_name: str | None = Field(None, description="A human-readable display name for this codespace."),
     retention_period_minutes: int | None = Field(None, description="Duration in minutes after the codespace becomes idle before it is automatically deleted. Must be between 0 and 43200 minutes (30 days)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new codespace in a repository for the authenticated user. Requires the `codespace` OAuth scope or personal access token (classic) scope."""
 
     # Construct request model with validation
@@ -21598,7 +21718,7 @@ async def create_codespace(
 async def list_devcontainers(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the .git extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all devcontainer.json configuration files in a repository that are accessible to the authenticated user. These configurations define the development environment setup for codespaces created from this repository."""
 
     # Construct request model with validation
@@ -21637,7 +21757,7 @@ async def list_devcontainers(
 async def list_codespace_machines(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List the machine types available for a repository based on its configuration. Use this to determine which machine specifications can be used when creating or updating a codespace for the repository."""
 
     # Construct request model with validation
@@ -21676,7 +21796,7 @@ async def list_codespace_machines(
 async def get_codespace_defaults(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the default configuration attributes for creating a new codespace in a repository. This includes machine types, regions, and other preset values based on the repository's codespace settings."""
 
     # Construct request model with validation
@@ -21715,7 +21835,7 @@ async def get_codespace_defaults(
 async def list_codespace_secrets(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all development environment secrets available in a repository without revealing their encrypted values. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -21754,7 +21874,7 @@ async def list_codespace_secrets(
 async def get_codespace_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the public key for a repository, which is required to encrypt secrets before creating or updating them in Codespaces. For private repositories, the request requires the `repo` scope."""
 
     # Construct request model with validation
@@ -21794,7 +21914,7 @@ async def get_codespace_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a repository development environment secret without revealing its encrypted value. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -21836,7 +21956,7 @@ async def create_or_update_codespace_secret_repository(
     secret_name: str = Field(..., description="The name of the secret to create or update."),
     encrypted_value: str | None = Field(None, description="The encrypted value for the secret. Must be encrypted using LibSodium with the public key retrieved from the Get repository public key endpoint. The encrypted value must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
     key_id: str | None = Field(None, description="The ID of the public key used to encrypt the secret. Retrieve this from the Get repository public key endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update an encrypted repository secret for GitHub Codespaces. The secret value must be encrypted using LibSodium with the repository's public key before submission."""
 
     # Construct request model with validation
@@ -21879,7 +21999,7 @@ async def delete_codespace_secret(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     secret_name: str = Field(..., description="The name of the secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a development environment secret from a repository. Requires repository admin access and the `repo` OAuth scope."""
 
     # Construct request model with validation
@@ -21920,7 +22040,7 @@ async def list_collaborators(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     affiliation: Literal["outside", "direct", "all"] | None = Field(None, description="Filter collaborators by their affiliation type. Use 'outside' for external collaborators only, 'direct' for all collaborators regardless of organization membership, or 'all' to include all visible collaborators."),
     permission: Literal["pull", "triage", "push", "maintain", "admin"] | None = Field(None, description="Filter collaborators by the permissions they have on the repository. If not specified, all collaborators are returned regardless of permission level."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all collaborators on a repository, including outside collaborators, organization members, and team members. The authenticated user must have write, maintain, or admin privileges to use this endpoint."""
 
     # Construct request model with validation
@@ -21963,7 +22083,7 @@ async def verify_repository_collaborator(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     username: str = Field(..., description="The GitHub username to check for collaborator access. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a user has collaborator access to a repository. For organization-owned repositories, this includes outside collaborators, direct organization members, members with team-based access, and owners."""
 
     # Construct request model with validation
@@ -22004,7 +22124,7 @@ async def add_collaborator(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     username: str = Field(..., description="The GitHub user account handle to add as a collaborator."),
     permission: str | None = Field(None, description="The permission level to grant the collaborator. Valid values are `pull`, `triage`, `push`, `maintain`, `admin`, or a custom repository role name if defined by the organization. Only applicable to organization-owned repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to a repository with a specified permission level. The user will receive an invitation notification that they must accept or decline, unless they are an Enterprise Managed User who will be automatically added."""
 
     # Construct request model with validation
@@ -22047,7 +22167,7 @@ async def remove_collaborator(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     username: str = Field(..., description="The GitHub user account handle to remove as a collaborator."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a collaborator from a repository. The authenticated user must be a repository administrator or the target user being removed. This action cancels pending invitations, unassigns the user from issues, removes project access, and has cascading effects on forks."""
 
     # Construct request model with validation
@@ -22087,7 +22207,7 @@ async def get_collaborator_permission(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     username: str = Field(..., description="The GitHub username handle for the collaborator whose permissions you want to check."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the repository permission level and role assigned to a collaborator. Returns the highest permission across all sources (repository, team, organization, and enterprise grants)."""
 
     # Construct request model with validation
@@ -22126,7 +22246,7 @@ async def get_collaborator_permission(
 async def list_commit_comments(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all commit comments for a repository, ordered by ascending ID. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     # Construct request model with validation
@@ -22166,7 +22286,7 @@ async def get_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific commit comment by its ID. Supports multiple response formats including raw markdown, plain text, HTML, or a combination of all three representations."""
 
     _comment_id = _parse_int(comment_id)
@@ -22209,7 +22329,7 @@ async def update_commit_comment(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment to update."),
     body: str = Field(..., description="The new contents of the comment. Supports markdown formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the contents of a commit comment. Supports multiple response formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     _comment_id = _parse_int(comment_id)
@@ -22254,7 +22374,7 @@ async def delete_commit_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a commit comment from a repository. This permanently removes the specified comment from a commit."""
 
     _comment_id = _parse_int(comment_id)
@@ -22297,7 +22417,7 @@ async def list_commit_comment_reactions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] | None = Field(None, description="Filter results to a single reaction type. Omit this parameter to list all reactions to the commit comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all reactions or filter by a specific reaction type for a commit comment. Reactions allow users to express sentiment on commit comments using emoji."""
 
     _comment_id = _parse_int(comment_id)
@@ -22343,7 +22463,7 @@ async def add_commit_comment_reaction(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment to react to."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] = Field(..., description="The emoji reaction type to add to the commit comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a commit comment. Returns HTTP 200 if the reaction type was already added by the authenticated user."""
 
     _comment_id = _parse_int(comment_id)
@@ -22389,7 +22509,7 @@ async def remove_commit_comment_reaction(
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. This is case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the commit comment from which to remove the reaction."),
     reaction_id: int = Field(..., description="The unique identifier of the reaction to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a commit comment. This operation deletes a specific reaction that was previously added to a commit comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -22435,7 +22555,7 @@ async def list_commits(
     committer: str | None = Field(None, description="Filter commits by the GitHub username or email address of the commit committer."),
     since: str | None = Field(None, description="Only return commits that were last updated after this timestamp. Must be between 1970-01-01 and 2099-12-31."),
     until: str | None = Field(None, description="Only return commits before this timestamp. Must be between 1970-01-01 and 2099-12-31."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of commits from a repository, with optional filtering by author, committer, or date range. The response includes signature verification details for each commit."""
 
     # Construct request model with validation
@@ -22478,7 +22598,7 @@ async def list_branches_for_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     commit_sha: str = Field(..., description="The SHA (commit hash) to find as the HEAD of branches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all branches where the given commit SHA is the HEAD (latest commit). Available for public repositories with GitHub Free and in public/private repositories with GitHub Pro or higher plans."""
 
     # Construct request model with validation
@@ -22518,7 +22638,7 @@ async def list_commit_comments_by_sha(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     commit_sha: str = Field(..., description="The commit SHA identifier for which to retrieve comments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all comments for a specific commit in a repository. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     # Construct request model with validation
@@ -22560,7 +22680,7 @@ async def create_commit_comment(
     commit_sha: str = Field(..., description="The commit SHA identifier to comment on."),
     body: str = Field(..., description="The comment text content. Supports markdown formatting."),
     position: int | None = Field(None, description="Optional line index in the diff to attach the comment to. If omitted, the comment is added to the general commit discussion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a comment to a specific commit in a repository. This endpoint triggers notifications and is subject to secondary rate limiting when used rapidly."""
 
     # Construct request model with validation
@@ -22603,7 +22723,7 @@ async def list_pull_requests_for_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     commit_sha: str = Field(..., description="The SHA of the commit, or alternatively a branch name to list pull requests associated with that branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List pull requests associated with a commit. Returns the merged pull request that introduced the commit to the default branch, or both merged and open pull requests if the commit is not in the default branch. You can also use a branch name as the commit_sha parameter to list pull requests associated with that branch."""
 
     # Construct request model with validation
@@ -22643,7 +22763,7 @@ async def get_commit(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ref: str = Field(..., description="The commit reference to retrieve. Can be a commit SHA, branch name (prefixed with `heads/`), or tag name (prefixed with `tags/`). Refer to Git References documentation for valid reference formats."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific commit, including file changes, diff, or patch data. Requires read access to the repository."""
 
     # Construct request model with validation
@@ -22685,7 +22805,7 @@ async def list_check_runs_for_ref(
     ref: str = Field(..., description="The commit reference to query. Can be a commit SHA, branch name (format: `heads/BRANCH_NAME`), or tag name (format: `tags/TAG_NAME`)."),
     check_name: str | None = Field(None, description="Filters results to return only check runs with the specified name."),
     filter_: Literal["latest", "all"] | None = Field(None, alias="filter", description="Filters check runs by completion status. Use `latest` for the most recent check runs or `all` to include all check runs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists check runs for a commit reference (SHA, branch, or tag). The endpoint returns up to 1000 most recent check runs; use check suite endpoints for comprehensive iteration."""
 
     # Construct request model with validation
@@ -22729,7 +22849,7 @@ async def list_check_suites(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ref: str = Field(..., description="The commit reference to list check suites for. Can be a commit SHA, branch name (prefixed with `heads/`), or tag name (prefixed with `tags/`)."),
     check_name: str | None = Field(None, description="Filters results to return only check suites with the specified name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all check suites for a commit reference (SHA, branch, or tag). The ref can be a commit SHA, branch name with `heads/` prefix, or tag name with `tags/` prefix."""
 
     # Construct request model with validation
@@ -22772,7 +22892,7 @@ async def get_commit_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     ref: str = Field(..., description="The commit reference to check status for. Can be a commit SHA, branch name (prefixed with `heads/`), or tag name (prefixed with `tags/`)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the combined status for a commit reference. Users with pull access can view an aggregated status across all contexts for a given SHA, branch, or tag, with an overall state indicating success, pending, or failure."""
 
     # Construct request model with validation
@@ -22812,7 +22932,7 @@ async def list_commit_statuses(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     ref: str = Field(..., description="The commit reference to query statuses for. Can be a commit SHA, branch name (prefixed with `heads/`), or tag name (prefixed with `tags/`)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve commit statuses for a given reference in reverse chronological order, with the latest status appearing first. Requires pull access to the repository."""
 
     # Construct request model with validation
@@ -22851,7 +22971,7 @@ async def list_commit_statuses(
 async def get_repository_community_profile(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve community health metrics for a repository, including health score, documentation presence, code of conduct, license, and standard community files. The repository cannot be a fork."""
 
     # Construct request model with validation
@@ -22891,7 +23011,7 @@ async def compare_commits(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     basehead: str = Field(..., description="The base and head references to compare, specified as `BASE...HEAD` where both are branch names in the repository. To compare across repositories in the same network, use the format `USERNAME:BASE...USERNAME:HEAD`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compare two commits to identify differences between them. Supports comparing branches, tags, and commit SHAs within the same repository or across repositories in the same network, returning a chronologically ordered list of commits and changed files."""
 
     # Construct request model with validation
@@ -22931,7 +23051,7 @@ async def get_repository_content(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     path: str = Field(..., description="The file or directory path within the repository. Omit to retrieve the root directory contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the contents of a file or directory in a repository. Supports multiple response formats including raw file content, HTML rendering, and structured object format. Directories return up to 1,000 items; use the Git Trees API for larger directories."""
 
     # Construct request model with validation
@@ -22979,7 +23099,7 @@ async def create_or_update_file(
     author_email: str = Field(..., alias="authorEmail", description="The email address of the author. Required; omitting will result in a 422 error."),
     sha: str | None = Field(None, description="The blob SHA of the file being replaced. Required when updating an existing file; omit when creating a new file."),
     branch: str | None = Field(None, description="The branch name where the file will be created or updated. Defaults to the repository's default branch if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new file or update an existing file in a repository. Note: Do not use this endpoint in parallel with the delete file endpoint, as concurrent requests will conflict."""
 
     # Construct request model with validation
@@ -23029,7 +23149,7 @@ async def delete_file(
     branch: str | None = Field(None, description="The branch name where the file will be deleted. If not specified, defaults to the repository's default branch."),
     name: str | None = Field(None, description="The name of the committer. Required if committer information is provided; must be paired with committer email."),
     email: str | None = Field(None, description="The email address of the committer. Required if committer information is provided; must be paired with committer name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a file from a repository by providing the file path and commit SHA. The authenticated user or specified committer information will be used for the commit."""
 
     # Construct request model with validation
@@ -23073,7 +23193,7 @@ async def list_contributors(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     anon: str | None = Field(None, description="Include anonymous contributors (those without associated GitHub user accounts) in the results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of contributors to a repository, sorted by commit count in descending order. Contributor data may be cached and up to a few hours old, and only the first 500 email addresses are linked to GitHub user accounts."""
 
     # Construct request model with validation
@@ -23123,7 +23243,7 @@ async def list_dependabot_alerts_repository(
     has: str | list[Literal["patch"]] | None = Field(None, description="Filter alerts based on specific attributes. Multiple filters can be combined to match alerts with all specified attributes. Currently supports `patch` to filter for alerts with available patches."),
     scope: Literal["development", "runtime"] | None = Field(None, description="Filter alerts by dependency scope within the project."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort results in ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Dependabot security alerts for a repository with optional filtering by state, ecosystem, package, and vulnerability metrics. Requires `security_events` scope or `public_repo` scope for public repositories."""
 
     # Construct request model with validation
@@ -23166,7 +23286,7 @@ async def get_dependabot_alert(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies a Dependabot alert in its repository.\nYou can find this at the end of the URL for a Dependabot alert within GitHub,\nor in `number` fields in the response from the\n`GET /repos/{owner}/{repo}/dependabot/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Dependabot security alert for a repository. Requires `security_events` scope for OAuth apps and personal access tokens, or `public_repo` scope for public repositories only."""
 
     # Construct request model with validation
@@ -23210,7 +23330,7 @@ async def update_dependabot_alert(
     dismissed_reason: Literal["fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"] | None = Field(None, description="A reason for dismissing the alert. Required when `state` is set to `dismissed`."),
     dismissed_comment: str | None = Field(None, description="An optional comment associated with dismissing the alert. Maximum 280 characters.", max_length=280),
     assignees: list[str] | None = Field(None, description="GitHub usernames to assign to this alert. Pass one or more logins to replace the current assignees, or an empty array to clear all assignees."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the state, dismissal reason, and assignees of a Dependabot security alert. The authenticated user must have access to security alerts for the repository."""
 
     # Construct request model with validation
@@ -23252,7 +23372,7 @@ async def update_dependabot_alert(
 async def list_dependabot_secrets(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all Dependabot secrets configured for a repository without revealing their encrypted values. Requires `repo` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -23291,7 +23411,7 @@ async def list_dependabot_secrets(
 async def get_dependabot_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the public key for a repository, which is required to encrypt secrets before creating or updating Dependabot secrets. This endpoint is accessible to anyone with read access to the repository."""
 
     # Construct request model with validation
@@ -23331,7 +23451,7 @@ async def get_dependabot_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single Dependabot repository secret without revealing its encrypted value. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -23374,7 +23494,7 @@ async def create_or_update_dependabot_secret(
     key_id: str | None = Field(None, description="The ID of the public key used to encrypt the secret. If not provided, the default key for the repository will be used."),
     secret_value: str | None = Field(None, description="The plaintext secret value to be encrypted"),
     public_key: str | None = Field(None, description="The base64-encoded public key retrieved from the Get a repository public key endpoint"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update a repository secret for Dependabot with an encrypted value. The secret must be encrypted using LibSodium before submission."""
 
     # Call helper functions
@@ -23420,7 +23540,7 @@ async def delete_dependabot_secret(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     secret_name: str = Field(..., description="The name of the Dependabot secret to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a Dependabot secret from a repository by its name. Requires `repo` scope authentication."""
 
     # Construct request model with validation
@@ -23460,7 +23580,7 @@ async def compare_dependency_changes(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     basehead: str = Field(..., description="The base and head Git revisions to compare, specified in the format `{base}...{head}`. Git revisions are resolved to commit SHAs, and named revisions (like branch names) are resolved to their corresponding HEAD commits with an appropriate merge base determined automatically."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a detailed diff of dependency changes between two commits by analyzing modifications to dependency manifests. This helps identify what dependencies were added, removed, or updated between specified Git revisions."""
 
     # Construct request model with validation
@@ -23499,7 +23619,7 @@ async def compare_dependency_changes(
 async def export_sbom(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export the software bill of materials (SBOM) for a repository in SPDX JSON format. This provides a comprehensive inventory of all dependencies and components used in the project."""
 
     # Construct request model with validation
@@ -23549,7 +23669,7 @@ async def submit_dependency_snapshot(
     scanned: str = Field(..., description="The timestamp when the dependency snapshot was scanned."),
     metadata: dict[str, str | float | bool] | None = Field(None, description="Optional user-defined metadata for storing domain-specific information. Limited to 8 keys with scalar values.", max_length=8),
     manifests: dict[str, _models.Manifest] | None = Field(None, description="Optional collection of package manifests representing detected dependencies, organized by logical groups or declaration files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a snapshot of a repository's dependencies for a specific commit. This enables dependency tracking and vulnerability analysis by recording the detected dependencies at a point in time."""
 
     # Construct request model with validation
@@ -23596,7 +23716,7 @@ async def list_deployments(
     sha: str | None = Field(None, description="Filter deployments by the commit SHA recorded at creation time."),
     task: str | None = Field(None, description="Filter deployments by task name (e.g., `deploy` or `deploy:migrations`)."),
     environment: str | None = Field(None, description="Filter deployments by the target environment name (e.g., `staging` or `production`)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of deployments for a repository with optional filtering by commit SHA, task name, or target environment."""
 
     # Construct request model with validation
@@ -23647,7 +23767,7 @@ async def create_deployment(
     description: str | None = Field(None, description="A short description of the deployment."),
     transient_environment: bool | None = Field(None, description="Whether the environment is temporary and will no longer exist after the deployment completes."),
     production_environment: bool | None = Field(None, description="Whether the environment is directly used by end-users. Defaults to true for production environments, false otherwise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a deployment for a repository ref (branch, tag, or SHA) to a specified environment. Supports automatic merging, commit status verification, and custom deployment payloads."""
 
     # Construct request model with validation
@@ -23690,7 +23810,7 @@ async def get_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     deployment_id: int = Field(..., description="The unique identifier of the deployment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific deployment in a repository. Returns the deployment's current status, environment, and associated metadata."""
 
     # Construct request model with validation
@@ -23730,7 +23850,7 @@ async def delete_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     deployment_id: int = Field(..., description="The unique identifier of the deployment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a deployment from a repository. You can delete any deployment if the repository has only one, but can only delete inactive deployments if multiple exist. To deactivate a deployment, create a new active deployment or add a non-successful deployment status to the current one."""
 
     # Construct request model with validation
@@ -23770,7 +23890,7 @@ async def list_deployment_statuses(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     deployment_id: int = Field(..., description="The unique identifier of the deployment for which to retrieve statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all deployment statuses for a specific deployment. Users with pull access can view the status history and details of a deployment."""
 
     # Construct request model with validation
@@ -23816,7 +23936,7 @@ async def create_deployment_status(
     environment: str | None = Field(None, description="Name of the target deployment environment (e.g., `production`, `staging`, `qa`). If not specified, the environment from the previous deployment status or the deployment itself will be used."),
     environment_url: str | None = Field(None, description="The URL for accessing the deployed environment."),
     auto_inactive: bool | None = Field(None, description="When true, automatically marks all prior successful non-transient, non-production environment deployments with the same repository and environment name as inactive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a deployment status for a given deployment. Users with push access can report the progress and outcome of a deployment by setting its state, environment, and associated metadata."""
 
     # Construct request model with validation
@@ -23860,7 +23980,7 @@ async def get_deployment_status(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     deployment_id: int = Field(..., description="The unique identifier of the deployment for which to retrieve the status."),
     status_id: int = Field(..., description="The unique identifier of the specific deployment status to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment status for a deployment. Users with pull access can view deployment status details to monitor deployment progress and outcomes."""
 
     # Construct request model with validation
@@ -23899,7 +24019,7 @@ async def get_deployment_status(
 async def list_environments(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all environments configured for a repository. Accessible to anyone with read access; private repositories require the `repo` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -23939,7 +24059,7 @@ async def get_environment(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with forward slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific deployment environment in a repository. Requires read access to the repository; use the `repo` OAuth scope for private repositories."""
 
     # Construct request model with validation
@@ -23984,7 +24104,7 @@ async def configure_environment(
     wait_timer: int | None = Field(None, description="The number of minutes to delay a job after it is initially triggered. Must be an integer between 0 and 43,200 (30 days)."),
     prevent_self_review: bool | None = Field(None, description="Whether to prevent the user who created the job from approving their own job."),
     reviewers: list[_models.ReposCreateOrUpdateEnvironmentBodyReviewersItem] | None = Field(None, description="The people or teams that may review and approve jobs referencing this environment. You can specify up to six users or teams, each requiring at least read access to the repository. Only one reviewer needs to approve for the job to proceed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update a deployment environment with protection rules, including required reviewers and branch policies. This controls which branches can deploy and who must approve deployments to this environment."""
 
     # Construct request model with validation
@@ -24028,7 +24148,7 @@ async def delete_environment(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with forward slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a deployment environment from a repository. Requires `repo` scope authentication via OAuth app token or personal access token (classic)."""
 
     # Construct request model with validation
@@ -24068,7 +24188,7 @@ async def list_deployment_branch_policies(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all deployment branch policies configured for a specific environment in a repository. This endpoint allows you to view which branches are authorized to deploy to the environment."""
 
     # Construct request model with validation
@@ -24110,7 +24230,7 @@ async def create_deployment_branch_policy(
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     name: str = Field(..., description="The name pattern that branches or tags must match to deploy to the environment. Wildcard characters do not match `/`. Use patterns like `release/*/*` to match branches beginning with `release/` and containing an additional single slash. See Ruby File.fnmatch documentation for pattern matching syntax."),
     type_: Literal["branch", "tag"] | None = Field(None, alias="type", description="Whether this policy targets a branch or tag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a deployment branch or tag policy for an environment, controlling which branches or tags are allowed to deploy. Requires `repo` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -24154,7 +24274,7 @@ async def get_deployment_branch_policy(
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by `%2F`."),
     branch_policy_id: int = Field(..., description="The unique identifier of the branch policy to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment branch or tag policy for a repository environment. This endpoint allows anyone with read access to view policy details that control which branches or tags can be deployed to the environment."""
 
     # Construct request model with validation
@@ -24196,7 +24316,7 @@ async def update_deployment_branch_policy(
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     branch_policy_id: int = Field(..., description="The unique identifier of the branch policy to update."),
     name: str = Field(..., description="The name pattern that branches must match to deploy to the environment. Wildcard characters do not match `/`. Use patterns like `release/*/*` to match branches beginning with `release/` and containing an additional single slash. Refer to Ruby File.fnmatch syntax for pattern matching rules."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a deployment branch or tag policy for a specific environment. This allows you to modify the branch name pattern that controls which branches can deploy to the environment."""
 
     # Construct request model with validation
@@ -24240,7 +24360,7 @@ async def delete_deployment_branch_policy(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     branch_policy_id: int = Field(..., description="The unique identifier of the branch policy to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a deployment branch or tag policy for an environment. This removes restrictions on which branches or tags can be deployed to the specified environment."""
 
     # Construct request model with validation
@@ -24280,7 +24400,7 @@ async def list_deployment_protection_rules(
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by %2F."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is case-insensitive."),
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all custom deployment protection rules enabled for a specific environment. Anyone with read access to the repository can use this endpoint to view deployment safeguards."""
 
     # Construct request model with validation
@@ -24320,7 +24440,7 @@ async def list_deployment_rule_integrations(
     environment_name: str = Field(..., description="The name of the environment. URL encode special characters, such as replacing forward slashes with `%2F`."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all custom deployment protection rule integrations available for a specific environment. The authenticated user must have admin or owner permissions on the repository."""
 
     # Construct request model with validation
@@ -24361,7 +24481,7 @@ async def get_deployment_protection_rule(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced with `%2F`."),
     protection_rule_id: int = Field(..., description="The unique identifier of the deployment protection rule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a custom deployment protection rule for a specific environment. Anyone with read access to the repository can use this endpoint."""
 
     # Construct request model with validation
@@ -24402,7 +24522,7 @@ async def disable_deployment_protection_rule(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     protection_rule_id: int = Field(..., description="The unique identifier of the protection rule to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable a custom deployment protection rule for an environment. The authenticated user must have admin or owner permissions to the repository."""
 
     # Construct request model with validation
@@ -24442,7 +24562,7 @@ async def list_environment_secrets(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     environment_name: str = Field(..., description="The environment name. Must be URL encoded, with forward slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all secrets configured for a specific environment without exposing their encrypted values. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24482,7 +24602,7 @@ async def get_environment_public_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the public key for an environment, which is required to encrypt environment secrets before creation or updates. This endpoint is accessible to anyone with read access to the repository."""
 
     # Construct request model with validation
@@ -24523,7 +24643,7 @@ async def get_environment_secret(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     secret_name: str = Field(..., description="The name of the secret to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single environment secret without revealing its encrypted value. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24564,7 +24684,7 @@ async def delete_environment_secret(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     secret_name: str = Field(..., description="The name of the secret to delete from the environment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a secret from a repository environment by name. Requires collaborator access and the `repo` OAuth scope."""
 
     # Construct request model with validation
@@ -24604,7 +24724,7 @@ async def list_environment_variables(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all environment variables for a specific repository environment. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24646,7 +24766,7 @@ async def create_environment_variable(
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     name: str = Field(..., description="The name of the variable to create in the environment."),
     value: str = Field(..., description="The value assigned to the environment variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an environment variable in a GitHub Actions workflow environment. Authenticated users must have collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24690,7 +24810,7 @@ async def get_environment_variable(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     environment_name: str = Field(..., description="The name of the environment. The name must be URL encoded, with slashes replaced by `%2F`."),
     name: str = Field(..., description="The name of the variable to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific environment variable from a repository environment. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24732,7 +24852,7 @@ async def update_environment_variable(
     name: str = Field(..., description="The name of the environment variable to update."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by `%2F`."),
     value: str | None = Field(None, description="The new value for the environment variable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an environment variable in a GitHub Actions workflow environment. Requires collaborator access to the repository."""
 
     # Construct request model with validation
@@ -24776,7 +24896,7 @@ async def delete_environment_variable(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     name: str = Field(..., description="The name of the environment variable to delete."),
     environment_name: str = Field(..., description="The name of the environment. Must be URL encoded, with slashes replaced by `%2F`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an environment variable from a repository environment by name. Requires collaborator access to the repository and appropriate OAuth or personal access token permissions."""
 
     # Construct request model with validation
@@ -24815,7 +24935,7 @@ async def delete_environment_variable(
 async def list_repository_events(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of events that have occurred in a repository. Note: This API is not optimized for real-time use cases and may have latency ranging from 30 seconds to 6 hours depending on time of day."""
 
     # Construct request model with validation
@@ -24854,7 +24974,7 @@ async def list_repository_events(
 async def list_repository_forks(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all forks created from a specified repository. This operation returns fork metadata for the given repository."""
 
     # Construct request model with validation
@@ -24895,7 +25015,7 @@ async def fork_repository(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     organization: str | None = Field(None, description="The organization name to fork the repository into. If not specified, the fork is created under the authenticated user's account."),
     default_branch_only: bool | None = Field(None, description="When enabled, fork only the default branch instead of all branches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a fork of a repository for the authenticated user. The fork operation is asynchronous and may take a short time before git objects are accessible."""
 
     # Construct request model with validation
@@ -24939,7 +25059,7 @@ async def create_blob(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     content: str = Field(..., description="The content to store in the blob object."),
     encoding: str | None = Field(None, description="The encoding format for the content. Determines how the content string is interpreted before storage."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new blob object in a repository with specified content. The blob is stored in the Git object database and can be referenced by its SHA-1 hash."""
 
     # Construct request model with validation
@@ -24982,7 +25102,7 @@ async def get_blob(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     file_sha: str = Field(..., description="The SHA hash identifier of the blob object to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a blob object from a repository by its SHA hash. The blob content is returned as Base64 encoded by default, with support for raw data retrieval via custom media types. Supports blobs up to 100 megabytes in size."""
 
     # Construct request model with validation
@@ -25026,7 +25146,7 @@ async def create_commit(
     parents: list[str] | None = Field(None, description="Array of parent commit SHAs. If omitted or empty, creates a root commit. For a single parent, provide an array with one SHA; for merge commits, provide multiple SHAs in order."),
     signature: str | None = Field(None, description="An ASCII-armored detached PGP signature over the commit object. GitHub adds this to the commit's `gpgsig` header for signature verification. Requires a pre-generated valid PGP signature."),
     author: str | None = Field(None, description="Author identity in RFC 5322 format: 'Name <email@example.com>' or 'email@example.com'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Git commit object with the specified tree and parent commits. The response includes signature verification details if applicable."""
 
     # Call helper functions
@@ -25073,7 +25193,7 @@ async def get_commit_object(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     commit_sha: str = Field(..., description="The SHA (Secure Hash Algorithm) identifier of the commit to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a Git commit object by its SHA hash. Returns commit metadata including author, committer, message, tree, parents, and GPG signature verification details."""
 
     # Construct request model with validation
@@ -25113,7 +25233,7 @@ async def list_git_refs(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ref: str = Field(..., description="The Git reference pattern to match. Use `heads/<branch_name>` for branches and `tags/<tag_name>` for tags. If the exact ref doesn't exist, all refs starting with the pattern will be returned. Omit this parameter to retrieve all references in the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List Git references matching a specified pattern. Returns branches, tags, notes, stashes, and other references from the repository's Git database that match the provided ref pattern."""
 
     # Construct request model with validation
@@ -25153,7 +25273,7 @@ async def get_git_reference(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     ref: str = Field(..., description="The Git reference to retrieve, formatted as `heads/<branch name>` for branches or `tags/<tag name>` for tags."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single Git reference (branch or tag) from the repository's Git database. The reference must be formatted as `heads/<branch name>` for branches or `tags/<tag name>` for tags; returns 404 if the reference does not exist."""
 
     # Construct request model with validation
@@ -25194,7 +25314,7 @@ async def create_git_ref(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     ref: str = Field(..., description="The fully qualified reference name (e.g., `refs/heads/main`, `refs/tags/v1.0`). Must start with 'refs' and contain at least two slashes, otherwise the request will be rejected."),
     sha: str = Field(..., description="The SHA-1 commit hash that this reference should point to. The commit must exist in the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new reference (branch, tag, or other ref) in a repository. The repository must have at least one commit; empty repositories cannot have references created."""
 
     # Construct request model with validation
@@ -25239,7 +25359,7 @@ async def update_git_ref(
     ref: str = Field(..., description="The Git reference to update, such as a branch name (e.g., `heads/main`) or tag. See Git References documentation for valid reference formats."),
     sha: str = Field(..., description="The SHA1 commit hash to set this reference to point at."),
     force: bool | None = Field(None, description="Force the update without safety checks. When false or omitted, the operation will only succeed if it's a fast-forward update, preventing accidental overwrites."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Git reference to point to a new commit SHA. This operation allows you to move branches, tags, or other references to different commits, with optional force-push capability to override safety checks."""
 
     # Construct request model with validation
@@ -25282,7 +25402,7 @@ async def delete_git_ref(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ref: str = Field(..., description="The Git reference to delete, such as a branch or tag (e.g., `heads/feature-a` for branches or `tags/v1.0` for tags)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specified Git reference from the repository. This operation removes branches, tags, or other Git references permanently."""
 
     # Construct request model with validation
@@ -25327,7 +25447,7 @@ async def create_tag(
     type_: Literal["commit", "tree", "blob"] = Field(..., alias="type", description="The type of Git object being tagged."),
     name: str = Field(..., description="The name of the author who created the tag."),
     email: str = Field(..., description="The email address of the author who created the tag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an annotated tag object in a repository. Note that this creates the tag object itself; you must separately create a reference (refs/tags/[tag]) to make the tag accessible in Git. For lightweight tags, only the reference creation is needed."""
 
     # Construct request model with validation
@@ -25371,7 +25491,7 @@ async def get_tag(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     tag_sha: str = Field(..., description="The SHA (commit hash) of the tag object to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Git tag object by its SHA. Returns tag metadata including signature verification details to validate the authenticity of the tag."""
 
     # Construct request model with validation
@@ -25412,7 +25532,7 @@ async def create_tree(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     tree: list[_models.GitCreateTreeBodyTreeItem] = Field(..., description="Array of tree entry objects defining the file structure. Each entry specifies a file path, Unix file mode, object type (blob or tree), and Git object SHA. Entries are processed in order and will overwrite base_tree entries with matching paths."),
     base_tree: str | None = Field(None, description="The SHA1 of an existing Git tree to use as the base. New entries will be merged with the base tree, with matching paths overwritten. If omitted, the tree is created from only the provided entries, and any files not included will be marked as deleted in subsequent commits."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Git tree object with specified file structure, optionally based on an existing tree. Tree entries can add, modify, or delete files; use the returned tree SHA to create commits and update branch references."""
 
     # Construct request model with validation
@@ -25456,7 +25576,7 @@ async def fetch_tree(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     tree_sha: str = Field(..., description="The SHA1 value or ref (branch or tag) name identifying the tree to retrieve."),
     recursive: str | None = Field(None, description="Enable recursive retrieval of all objects and subtrees referenced by the specified tree. Any value (including '0', '1', 'true', 'false') enables recursion; omit to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a Git tree object by its SHA1 value or ref name. Optionally fetch the tree recursively to include all referenced objects and subtrees, with a limit of 100,000 entries and 7 MB maximum size."""
 
     # Construct request model with validation
@@ -25498,7 +25618,7 @@ async def fetch_tree(
 async def list_webhooks_repository(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks configured for a repository. The last response field may be null if no deliveries have occurred within the past 30 days."""
 
     # Construct request model with validation
@@ -25541,7 +25661,7 @@ async def create_webhook_repository(
     content_type: str | None = Field(None, description="The media type format for serializing webhook payloads. Defaults to `form` if not specified."),
     secret: str | None = Field(None, description="A secret string used to generate HMAC hex digest signatures for authenticating webhook delivery headers. Enhances security by allowing verification that payloads originated from GitHub."),
     active: bool | None = Field(None, description="Whether the webhook is active and will send notifications when triggered. Defaults to `true`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a webhook for a repository to receive HTTP POST notifications when repository events occur. Each webhook must have a unique configuration, though multiple webhooks can share the same configuration if their event subscriptions do not overlap."""
 
     # Construct request model with validation
@@ -25585,7 +25705,7 @@ async def get_webhook(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. You can find this value in the `X-GitHub-Hook-ID` header of a webhook delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a webhook configured in a repository by its unique identifier. Returns the complete webhook configuration including URL, events, and delivery settings."""
 
     # Construct request model with validation
@@ -25629,7 +25749,7 @@ async def update_webhook_repository(
     content_type: str | None = Field(None, description="The media type used to serialize payloads. Supported values are `json` and `form`, with `form` as the default."),
     secret: str | None = Field(None, description="A secret used as the key to generate HMAC hex digest values for delivery signature headers. If previously set, you must provide the same secret or a new one to avoid removal."),
     active: bool | None = Field(None, description="Determines if notifications are sent when the webhook is triggered. Set to `true` to enable notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing webhook in a repository. When updating, you must provide the same secret if one was previously set, or provide a new secret; otherwise the secret will be removed."""
 
     # Construct request model with validation
@@ -25673,7 +25793,7 @@ async def delete_webhook_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. You can find this value in the `X-GitHub-Hook-ID` header of a webhook delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a webhook from a repository. The authenticated user must be a repository owner or have admin access to perform this action."""
 
     # Construct request model with validation
@@ -25713,7 +25833,7 @@ async def get_webhook_config_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. You can find this value in the `X-GitHub-Hook-ID` header of a webhook delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the webhook configuration for a repository, including URL, content type, and custom headers. Use this to inspect webhook delivery settings without fetching the full webhook object."""
 
     # Construct request model with validation
@@ -25756,7 +25876,7 @@ async def update_webhook_config_repository(
     url: str | None = Field(None, description="The URL to which the webhook payloads will be delivered."),
     content_type: str | None = Field(None, description="The media type used to serialize the payloads. Supported values are `json` and `form`, with `form` as the default."),
     secret: str | None = Field(None, description="If provided, the secret will be used as the key to generate the HMAC hex digest value for delivery signature headers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the webhook configuration for a repository, including the delivery URL, payload format, and signature secret. Use this endpoint to modify webhook settings; for changes to active state or event subscriptions, use the update webhook endpoint instead."""
 
     # Construct request model with validation
@@ -25799,7 +25919,7 @@ async def list_webhook_deliveries(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the `X-GitHub-Hook-ID` header of any webhook delivery from this hook."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all webhook deliveries for a specific repository webhook. Each delivery record includes the payload, response status, and timing information."""
 
     # Construct request model with validation
@@ -25840,7 +25960,7 @@ async def get_webhook_delivery(
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the `X-GitHub-Hook-ID` header of a webhook delivery."),
     delivery_id: str = Field(..., description="The unique identifier of the specific webhook delivery to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific delivery record for a repository webhook. This returns detailed information about a webhook event that was sent to a configured endpoint."""
 
     # Construct request model with validation
@@ -25881,7 +26001,7 @@ async def redeliver_webhook_delivery(
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the `X-GitHub-Hook-ID` header of a webhook delivery."),
     delivery_id: str = Field(..., description="The unique identifier of the webhook delivery to redeliver."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Redeliver a previously failed or missed webhook delivery for a repository webhook. This allows you to retry sending a webhook payload to its configured endpoint."""
 
     # Construct request model with validation
@@ -25921,7 +26041,7 @@ async def trigger_webhook_ping(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. This value can be found in the `X-GitHub-Hook-ID` header of a webhook delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a ping event to be sent to a repository webhook. This is useful for testing webhook connectivity and verifying that the webhook endpoint is responding correctly."""
 
     # Construct request model with validation
@@ -25961,7 +26081,7 @@ async def trigger_webhook_test(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     hook_id: int = Field(..., description="The unique identifier of the webhook. You can find this value in the `X-GitHub-Hook-ID` header of a webhook delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a test delivery of a repository webhook using the latest push event. The webhook must be subscribed to push events; otherwise, the server responds with 204 and no test payload is sent."""
 
     # Construct request model with validation
@@ -26000,7 +26120,7 @@ async def trigger_webhook_test(
 async def get_immutable_releases(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the immutable releases configuration for a repository, including whether immutability is enabled and if it's being enforced by the repository owner. Requires admin read access to the repository."""
 
     # Construct request model with validation
@@ -26039,7 +26159,7 @@ async def get_immutable_releases(
 async def get_app_installation_repository(
     owner: str = Field(..., description="The owner of the repository account. This is case-insensitive and can be either a user or organization name."),
     repo: str = Field(..., description="The repository name without the `.git` extension. This is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the installation information for a GitHub App in a specific repository. This endpoint requires JWT authentication and returns details about whether the app is installed for a user or organization account."""
 
     # Construct request model with validation
@@ -26078,7 +26198,7 @@ async def get_app_installation_repository(
 async def get_repository_interaction_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current interaction restrictions for a repository, including which user types can interact and when the restriction expires. Returns an empty response if no restrictions are active."""
 
     # Construct request model with validation
@@ -26117,7 +26237,7 @@ async def get_repository_interaction_restrictions(
 async def remove_interaction_restrictions(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all interaction restrictions from a repository. Requires owner or admin access. Note: If interaction limits are set at the user or organization level, you will receive a 409 Conflict response and cannot modify restrictions for individual repositories."""
 
     # Construct request model with validation
@@ -26156,7 +26276,7 @@ async def remove_interaction_restrictions(
 async def list_repository_invitations(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all open repository invitations for a repository. Requires admin access to the repository."""
 
     # Construct request model with validation
@@ -26197,7 +26317,7 @@ async def update_repository_invitation(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to update."),
     permissions: Literal["read", "write", "maintain", "triage", "admin"] | None = Field(None, description="The permissions level to grant the invited user on the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the permissions for an existing repository invitation. Allows you to modify the access level that will be granted to the invited user."""
 
     # Construct request model with validation
@@ -26240,7 +26360,7 @@ async def delete_repository_invitation(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     invitation_id: int = Field(..., description="The unique identifier of the invitation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a pending repository invitation by its unique identifier. This removes access that was previously offered to a user or team."""
 
     # Construct request model with validation
@@ -26287,7 +26407,7 @@ async def list_issues_repository(
     labels: str | None = Field(None, description="Filter by labels. Provide as comma-separated label names."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results."),
     since: str | None = Field(None, description="Only return issues last updated after this timestamp in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List issues in a repository, including pull requests. By default, only open issues are returned. Use filters to narrow results by milestone, state, creator, labels, and other criteria."""
 
     # Construct request model with validation
@@ -26335,7 +26455,7 @@ async def create_issue(
     labels: list[_models.IssuesCreateBodyLabelsItem] | None = Field(None, description="Labels to associate with this issue. Only users with push access can set labels; they are silently dropped for other users. Provide as an array of label names."),
     assignees: list[str] | None = Field(None, description="GitHub usernames to assign to this issue. Only users with push access can set assignees; they are silently dropped for other users. Provide as an array of login handles."),
     type_: str | None = Field(None, alias="type", description="The issue type to associate with this issue. Only users with push access can set the type; it is silently dropped for other users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new issue in a repository. Any user with pull access can create issues, though labels, assignees, and type can only be set by users with push access."""
 
     # Construct request model with validation
@@ -26379,7 +26499,7 @@ async def list_issue_comments_for_repository(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results. Only applies when used with a sort parameter."),
     since: str | None = Field(None, description="Only return comments that were last updated after this timestamp. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all comments on issues and pull requests for a repository. Comments are ordered by ID in ascending order by default, with support for filtering by update time and sort direction."""
 
     # Construct request model with validation
@@ -26422,7 +26542,7 @@ async def get_issue_comment(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific comment from an issue or pull request. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     _comment_id = _parse_int(comment_id)
@@ -26465,7 +26585,7 @@ async def update_issue_comment(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment to update."),
     body: str = Field(..., description="The new content for the comment. Supports markdown formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the content of an existing comment on an issue or pull request. Supports multiple response formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     _comment_id = _parse_int(comment_id)
@@ -26510,7 +26630,7 @@ async def delete_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a comment from an issue or pull request. This operation permanently removes the specified comment and cannot be undone."""
 
     _comment_id = _parse_int(comment_id)
@@ -26552,7 +26672,7 @@ async def pin_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment to pin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Pin a comment on an issue to highlight it for visibility. Pinned comments appear at the top of the issue's comment section."""
 
     _comment_id = _parse_int(comment_id)
@@ -26594,7 +26714,7 @@ async def unpin_issue_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment to unpin."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unpin a comment from an issue. This removes the pinned status from a previously pinned issue comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -26637,7 +26757,7 @@ async def list_comment_reactions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] | None = Field(None, description="Filter results to a specific reaction type. Omit to list all reactions to the comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all reactions or filter by a specific reaction type for an issue comment. Reactions include thumbs up/down, laugh, confused, heart, hooray, rocket, and eyes."""
 
     _comment_id = _parse_int(comment_id)
@@ -26683,7 +26803,7 @@ async def add_issue_comment_reaction(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the issue comment to react to."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] = Field(..., description="The reaction emoji type to add to the comment. Choose from the supported reaction types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a reaction emoji to an issue comment. Returns HTTP 200 if the reaction type was already added by the authenticated user."""
 
     _comment_id = _parse_int(comment_id)
@@ -26729,7 +26849,7 @@ async def remove_issue_comment_reaction(
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. This is case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the comment from which to remove the reaction."),
     reaction_id: int = Field(..., description="The unique identifier of the reaction to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a reaction from an issue comment. This operation deletes a specific reaction that was previously added to a comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -26770,7 +26890,7 @@ async def remove_issue_comment_reaction(
 async def list_issue_events(
     owner: str = Field(..., description="The owner account of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all events that have occurred for issues in a repository, including creation, modification, and state change events."""
 
     # Construct request model with validation
@@ -26810,7 +26930,7 @@ async def get_issue_event(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     event_id: int = Field(..., description="The unique identifier of the issue event to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific issue event by its event ID. This returns detailed information about a single event that occurred on an issue, such as comments, state changes, or assignments."""
 
     # Construct request model with validation
@@ -26850,7 +26970,7 @@ async def get_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific issue or pull request by its number. Returns a 301 redirect if the issue was transferred, 404 if inaccessible, or 410 if deleted from an accessible repository."""
 
     # Construct request model with validation
@@ -26898,7 +27018,7 @@ async def update_issue(
     assignees: list[str] | None = Field(None, description="Usernames to assign to this issue. Pass one or more user logins to replace the existing assignees. Send an empty array to clear all assignees. Only users with push access can set assignees; changes are silently dropped without push access."),
     issue_field_values: list[_models.IssuesUpdateBodyIssueFieldValuesItem] | None = Field(None, description="An array of issue field values to set on this issue. Each entry must include the field ID and the value to set. Only users with push access can set field values."),
     type_: str | None = Field(None, alias="type", description="The name of the issue type to associate with this issue. Pass `null` to remove the current issue type. Only users with push access can set the type; changes are silently dropped without push access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an issue in a repository. Issue owners and users with push access or Triage role can modify issue properties including title, body, state, labels, assignees, and other metadata."""
 
     # Construct request model with validation
@@ -26942,7 +27062,7 @@ async def assign_issue_users(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     assignees: list[str] | None = Field(None, description="Usernames of people to assign to this issue. Only users with push access can add assignees; others are silently ignored. Up to 10 assignees can be added per request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add up to 10 assignees to an issue. Existing assignees are preserved and new ones are appended to the list."""
 
     # Construct request model with validation
@@ -26986,7 +27106,7 @@ async def remove_issue_assignees(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     assignees: list[str] | None = Field(None, description="Usernames of assignees to remove from the issue. Provide as an array of strings representing GitHub usernames."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more assignees from an issue. Only users with push access can remove assignees; other users' removal requests are silently ignored."""
 
     # Construct request model with validation
@@ -27030,7 +27150,7 @@ async def verify_issue_assignee(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies the specific issue to check assignee permissions for."),
     assignee: str = Field(..., description="The username of the user to verify for assignment eligibility to the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a user has permission to be assigned to a specific issue. Returns a 204 status if the user can be assigned, or 404 if they cannot."""
 
     # Construct request model with validation
@@ -27071,7 +27191,7 @@ async def list_issue_comments(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     since: str | None = Field(None, description="Only show comments that were last updated after the given time. Specify as an ISO 8601 timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all comments on an issue or pull request, ordered by ascending ID. Supports multiple response formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     # Construct request model with validation
@@ -27115,7 +27235,7 @@ async def add_issue_comment(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue or pull request."),
     body: str = Field(..., description="The comment text content. Supports markdown formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a comment to an issue or pull request. This action triggers notifications and is subject to secondary rate limiting if used too frequently."""
 
     # Construct request model with validation
@@ -27158,7 +27278,7 @@ async def list_blocking_issues(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number to retrieve blocking dependencies for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all issues that are blocking the specified issue. This helps identify dependencies that must be resolved before the current issue can be completed."""
 
     # Construct request model with validation
@@ -27199,7 +27319,7 @@ async def mark_issue_blocked_by(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue that is blocked."),
     issue_id: int = Field(..., description="The ID of the issue that blocks the current issue. This issue must exist in the same repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark an issue as blocked by another issue by creating a 'blocked by' dependency relationship. This establishes that the current issue cannot progress until the blocking issue is resolved."""
 
     # Construct request model with validation
@@ -27243,7 +27363,7 @@ async def remove_issue_blocking_dependency(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue from which the blocking dependency will be removed."),
     issue_id: int = Field(..., description="The ID of the blocking issue to remove as a dependency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a blocking dependency from an issue. This operation unlinks an issue that was blocking the specified issue, allowing it to proceed independently."""
 
     # Construct request model with validation
@@ -27283,7 +27403,7 @@ async def list_blocking_dependencies(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue's blocking dependencies to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all issues that are blocked by the specified issue. Use this to understand what work depends on resolving the current issue."""
 
     # Construct request model with validation
@@ -27323,7 +27443,7 @@ async def list_issue_events_for_issue(
     owner: str = Field(..., description="The owner account of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue's events to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a chronological list of all events that have occurred on a specific issue, including comments, state changes, assignments, and other activity."""
 
     # Construct request model with validation
@@ -27363,7 +27483,7 @@ async def list_issue_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all labels assigned to a specific issue in a repository. Labels are used to categorize and organize issues."""
 
     # Construct request model with validation
@@ -27404,7 +27524,7 @@ async def add_issue_labels(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
     body: _models.IssuesAddLabelsBodyV0 | list[str] | list[_models.IssuesAddLabelsBodyV2Item] | None = Field(None, description="An object containing an array of label names to add to the issue. Each label name should be a string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more labels to an issue in a repository. Labels help organize and categorize issues for better tracking and filtering."""
 
     # Construct request model with validation
@@ -27449,7 +27569,7 @@ async def replace_issue_labels(
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue to update labels for."),
     body: _models.IssuesSetLabelsBody | None = Field(None, description="An array of label names to assign to the issue. Replaces all existing labels. Can also accept a single label name as a string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all labels on an issue with a new set of labels. This operation removes any previously assigned labels and applies only the labels specified in the request."""
 
     # Construct request model with validation
@@ -27493,7 +27613,7 @@ async def remove_all_issue_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove all labels from a specific issue in a repository. This operation clears any labels currently assigned to the issue."""
 
     # Construct request model with validation
@@ -27534,7 +27654,7 @@ async def remove_issue_label(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue to remove the label from."),
     name: str = Field(..., description="The name of the label to remove from the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a specific label from an issue and return the remaining labels. Returns a 404 error if the label does not exist on the issue."""
 
     # Construct request model with validation
@@ -27575,7 +27695,7 @@ async def lock_issue(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     lock_reason: Literal["off-topic", "too heated", "resolved", "spam"] | None = Field(None, description="The reason for locking the issue or pull request conversation. Must be one of the predefined reasons."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lock an issue or pull request conversation to prevent further comments. Requires push access to the repository."""
 
     # Construct request model with validation
@@ -27618,7 +27738,7 @@ async def unlock_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlock an issue's conversation to allow further discussion. Users with push access can perform this action."""
 
     # Construct request model with validation
@@ -27658,7 +27778,7 @@ async def get_parent_issue(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The numeric identifier of the sub-issue for which to retrieve the parent issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the parent issue of a sub-issue. Supports multiple content representation formats including raw markdown, plain text, HTML, or combined representations."""
 
     # Construct request model with validation
@@ -27699,7 +27819,7 @@ async def list_issue_reactions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] | None = Field(None, description="Filter results to a specific reaction type. Omit this parameter to list all reactions to the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all reactions or filter by a specific reaction type for an issue. Reactions allow users to express sentiment on issues using emoji."""
 
     # Construct request model with validation
@@ -27743,7 +27863,7 @@ async def add_issue_reaction(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the issue."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] = Field(..., description="The emoji reaction type to add to the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a GitHub issue. Returns HTTP 200 if the reaction type was already added by the authenticated user."""
 
     # Construct request model with validation
@@ -27787,7 +27907,7 @@ async def delete_issue_reaction(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue to remove the reaction from."),
     reaction_id: int = Field(..., description="The unique identifier of the reaction to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a reaction from an issue. The authenticated user must have permission to delete the reaction."""
 
     # Construct request model with validation
@@ -27828,7 +27948,7 @@ async def unlink_sub_issue(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The number that identifies the parent issue."),
     sub_issue_id: int = Field(..., description="The numeric identifier of the sub-issue to remove from the parent issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a sub-issue relationship from a parent issue. This operation unlinks the sub-issue without deleting it."""
 
     # Construct request model with validation
@@ -27871,7 +27991,7 @@ async def list_sub_issues(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     issue_number: int = Field(..., description="The issue number that identifies the parent issue containing the sub-issues to list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all sub-issues associated with a parent issue in a repository. Supports multiple content representation formats via custom media types."""
 
     # Construct request model with validation
@@ -27913,7 +28033,7 @@ async def link_sub_issue(
     issue_number: int = Field(..., description="The number that identifies the parent issue."),
     sub_issue_id: int = Field(..., description="The ID of the sub-issue to link. The sub-issue must belong to the same repository owner as the parent issue."),
     replace_parent: bool | None = Field(None, description="When true, replaces the sub-issue's current parent issue with this issue. When false or omitted, the sub-issue is added without removing its existing parent relationship."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing sub-issue to a parent issue in the same repository. Optionally replace the sub-issue's current parent with this issue."""
 
     # Construct request model with validation
@@ -27959,7 +28079,7 @@ async def reorder_sub_issue(
     sub_issue_id: int = Field(..., description="The unique identifier of the sub-issue to move to a new position in the parent issue's sub-issue list."),
     before_id: int | None = Field(None, description="The id of the sub-issue to be prioritized before (either positional argument after OR before should be specified)."),
     after_id: int | None = Field(None, description="The id of the sub-issue to be prioritized after (either positional argument after OR before should be specified)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder a sub-issue to a different position within its parent issue's sub-issue list. Use this to change the priority ranking of sub-issues."""
 
     # Construct request model with validation
@@ -28002,7 +28122,7 @@ async def list_issue_timeline_events(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     issue_number: int = Field(..., description="The issue number that identifies which issue's timeline events to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all timeline events for a specific issue, including comments, state changes, and other activity. Timeline events provide a chronological record of all interactions and modifications to an issue."""
 
     # Construct request model with validation
@@ -28041,7 +28161,7 @@ async def list_issue_timeline_events(
 async def list_deploy_keys(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all deploy keys for a repository. Deploy keys are SSH keys that grant access to a single repository for automated deployments and CI/CD workflows."""
 
     # Construct request model with validation
@@ -28082,7 +28202,7 @@ async def create_deploy_key(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     key: str = Field(..., description="The public key contents in OpenSSH format."),
     read_only: bool | None = Field(None, description="If true, the key will only be able to read repository contents. If false, the key will be able to read and write, granting permissions equivalent to an organization admin or repository collaborator."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a read-only or read-write deploy key for a repository. Deploy keys enable secure, key-based access to repository contents without requiring user credentials."""
 
     # Construct request model with validation
@@ -28125,7 +28245,7 @@ async def get_deploy_key(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     key_id: int = Field(..., description="The unique identifier of the deploy key to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deploy key for a repository by its unique identifier. Deploy keys are used to grant read or write access to a repository for automated deployments."""
 
     # Construct request model with validation
@@ -28165,7 +28285,7 @@ async def delete_deploy_key(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     key_id: int = Field(..., description="The unique identifier of the deploy key to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a deploy key from a repository. Deploy keys are immutable, so you must delete and recreate a key to make changes."""
 
     # Construct request model with validation
@@ -28204,7 +28324,7 @@ async def delete_deploy_key(
 async def list_labels(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all labels defined for a repository. Labels are used to categorize and organize issues and pull requests."""
 
     # Construct request model with validation
@@ -28246,7 +28366,7 @@ async def create_label(
     name: str = Field(..., description="The name of the label. Emoji can be added using native emoji or colon-style markup (e.g., `:strawberry:`)."),
     color: str | None = Field(None, description="The hexadecimal color code for the label, without the leading `#`. Must be a valid hex color value."),
     description: str | None = Field(None, description="A short description of the label to provide additional context. Maximum length is 100 characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new label for a repository with a specified name and color. Labels are used to categorize and organize issues and pull requests."""
 
     # Construct request model with validation
@@ -28289,7 +28409,7 @@ async def get_label(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     name: str = Field(..., description="The name of the label to retrieve. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific label from a repository by its name. Labels are used to categorize and organize issues and pull requests."""
 
     # Construct request model with validation
@@ -28332,7 +28452,7 @@ async def update_label(
     new_name: str | None = Field(None, description="The new name for the label. Supports emoji using native emoji or colon-style markup (e.g., `:strawberry:`)."),
     color: str | None = Field(None, description="The hexadecimal color code for the label without the leading `#` character."),
     description: str | None = Field(None, description="A short description of the label's purpose. Maximum 100 characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing repository label by name. Modify the label's name, color, and description in a single request."""
 
     # Construct request model with validation
@@ -28375,7 +28495,7 @@ async def delete_label(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     name: str = Field(..., description="The name of the label to delete. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a label from a repository by name. This operation permanently removes the label and its associations with any issues or pull requests."""
 
     # Construct request model with validation
@@ -28414,7 +28534,7 @@ async def delete_label(
 async def list_repository_languages(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the programming languages used in a repository with the number of bytes of code written in each language. Useful for understanding the technology stack and composition of a project."""
 
     # Construct request model with validation
@@ -28453,7 +28573,7 @@ async def list_repository_languages(
 async def get_repository_license(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the license file contents for a repository. Returns the raw license text or HTML-rendered markup depending on the requested media type."""
 
     # Construct request model with validation
@@ -28493,7 +28613,7 @@ async def sync_fork_with_upstream(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     branch: str = Field(..., description="The name of the branch to synchronize with the upstream repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronize a branch in a forked repository with the corresponding upstream branch to keep it current. This operation updates the specified branch to match the upstream repository's state."""
 
     # Construct request model with validation
@@ -28538,7 +28658,7 @@ async def merge_branch(
     base: str = Field(..., description="The name of the base branch that will receive the merged changes."),
     head: str = Field(..., description="The head to merge into the base branch. Can be a branch name or a commit SHA1."),
     commit_message: str | None = Field(None, description="Optional commit message for the merge commit. If not provided, a default message will be generated automatically."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a head branch or commit into a base branch. This creates a merge commit combining the changes from both branches."""
 
     # Construct request model with validation
@@ -28582,7 +28702,7 @@ async def list_milestones(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     state: Literal["open", "closed", "all"] | None = Field(None, description="Filter milestones by their current state: open for active milestones, closed for completed ones, or all to include both."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Control the sort order of results: ascending (asc) for oldest first, or descending (desc) for newest first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of milestones for a repository, with options to filter by state and control sort order. Useful for tracking project progress and deadlines."""
 
     # Construct request model with validation
@@ -28628,7 +28748,7 @@ async def create_milestone(
     state: Literal["open", "closed"] | None = Field(None, description="The state of the milestone, indicating whether it is actively being worked on or completed."),
     description: str | None = Field(None, description="A description of the milestone providing additional context about its goals and scope."),
     due_on: str | None = Field(None, description="The milestone due date in ISO 8601 format, specifying when the milestone should be completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new milestone in a repository to track progress toward project goals. Milestones help organize issues and pull requests by target dates and objectives."""
 
     # Construct request model with validation
@@ -28671,7 +28791,7 @@ async def get_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     milestone_number: int = Field(..., description="The numeric identifier that uniquely identifies the milestone within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific milestone from a repository using its milestone number. This operation returns detailed information about the milestone including its title, description, state, and associated dates."""
 
     # Construct request model with validation
@@ -28714,7 +28834,7 @@ async def update_milestone(
     state: Literal["open", "closed"] | None = Field(None, description="The state of the milestone. Set to `open` to activate the milestone or `closed` to mark it as complete."),
     description: str | None = Field(None, description="A description of the milestone. Use this to provide context or details about the milestone's purpose and goals."),
     due_on: str | None = Field(None, description="The milestone due date in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ). Set this to establish a target completion date for the milestone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing milestone in a repository. Modify the milestone's state, description, and due date as needed."""
 
     # Construct request model with validation
@@ -28757,7 +28877,7 @@ async def delete_milestone(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     milestone_number: int = Field(..., description="The numeric identifier of the milestone to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a milestone from a repository using its milestone number. This action cannot be undone."""
 
     # Construct request model with validation
@@ -28797,7 +28917,7 @@ async def list_milestone_labels(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     milestone_number: int = Field(..., description="The numeric identifier of the milestone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all labels associated with issues in a specific milestone. Useful for understanding the categorization and tagging of work items within a milestone."""
 
     # Construct request model with validation
@@ -28839,7 +28959,7 @@ async def list_notifications_repository(
     all_: bool | None = Field(None, alias="all", description="If true, include notifications marked as read. By default, only unread notifications are returned."),
     participating: bool | None = Field(None, description="If true, show only notifications where the user is directly participating or mentioned. By default, all notifications are returned."),
     since: str | None = Field(None, description="Only return notifications that were last updated after this timestamp. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all notifications for the authenticated user in a specific repository. Filter by read status, participation level, and update time to focus on relevant notifications."""
 
     # Construct request model with validation
@@ -28882,7 +29002,7 @@ async def mark_repository_notifications_as_read(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     last_read_at: str | None = Field(None, description="The timestamp marking the last point notifications were checked. Notifications updated after this time will not be marked as read. If omitted, all notifications are marked as read. Must be in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark all notifications in a repository as read for the authenticated user. For large notification volumes, this operation may run asynchronously and return a 202 Accepted status."""
 
     # Construct request model with validation
@@ -28924,7 +29044,7 @@ async def mark_repository_notifications_as_read(
 async def get_pages_site(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve information about a GitHub Pages site for a repository. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -28965,7 +29085,7 @@ async def enable_pages_site(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The repository branch that contains the source files for publishing the Pages site."),
     build_type: Literal["legacy", "workflow"] | None = Field(None, description="The build process for the Pages site. Use 'legacy' for traditional Jekyll builds or 'workflow' for GitHub Actions-based builds."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable and configure a GitHub Pages site for a repository. Requires repository administrator, maintainer, or 'manage GitHub Pages settings' permission."""
 
     # Construct request model with validation
@@ -29011,7 +29131,7 @@ async def configure_pages_site(
     cname: str | None = Field(None, description="A custom domain for the GitHub Pages site. Pass null to remove an existing custom domain."),
     https_enforced: bool | None = Field(None, description="Whether HTTPS should be enforced for the GitHub Pages site."),
     build_type: Literal["legacy", "workflow"] | None = Field(None, description="The build process for the GitHub Pages site. Use 'workflow' for custom GitHub Actions builds or 'legacy' for automatic builds on branch pushes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure GitHub Pages settings for a repository, including custom domain and HTTPS enforcement. Requires repository administrator or maintainer permissions."""
 
     # Construct request model with validation
@@ -29053,7 +29173,7 @@ async def configure_pages_site(
 async def delete_pages_site(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a GitHub Pages site for a repository. The authenticated user must have repository administrator, maintainer, or 'manage GitHub Pages settings' permissions."""
 
     # Construct request model with validation
@@ -29092,7 +29212,7 @@ async def delete_pages_site(
 async def list_pages_builds(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all builds for a GitHub Pages site associated with a repository. Requires `repo` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -29131,7 +29251,7 @@ async def list_pages_builds(
 async def trigger_pages_build(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request a GitHub Pages build from the latest revision on the default branch. This manually triggers a site build without requiring a new commit, useful for diagnosing build warnings and failures."""
 
     # Construct request model with validation
@@ -29170,7 +29290,7 @@ async def trigger_pages_build(
 async def get_latest_pages_build(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves information about the most recent build of a GitHub Pages site for a repository. Requires `repo` scope authorization."""
 
     # Construct request model with validation
@@ -29210,7 +29330,7 @@ async def get_pages_build(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     build_id: int = Field(..., description="The unique identifier of the GitHub Pages build to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific GitHub Pages build for a repository. Requires `repo` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -29253,7 +29373,7 @@ async def deploy_pages(
     oidc_token: str = Field(..., description="The OIDC token issued by GitHub Actions certifying the origin of the deployment."),
     environment: str | None = Field(None, description="The target environment for this GitHub Pages deployment."),
     artifact_url: str | None = Field(None, description="The URL of an artifact that contains the .zip or .tar of static assets to deploy. The artifact belongs to the repository. Either `artifact_id` or `artifact_url` are required."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a GitHub Pages deployment for a repository. The authenticated user must have write permission to the repository."""
 
     # Construct request model with validation
@@ -29296,7 +29416,7 @@ async def get_pages_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pages_deployment_id: str = Field(..., description="The ID of the Pages deployment. You can also provide the commit SHA of the deployment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a GitHub Pages deployment. The authenticated user must have read permission for the GitHub Pages site."""
 
     # Construct request model with validation
@@ -29336,7 +29456,7 @@ async def cancel_pages_deployment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pages_deployment_id: str = Field(..., description="The ID of the Pages deployment. You can also provide the commit SHA of the deployment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancel an active GitHub Pages deployment. The authenticated user must have write permissions for the GitHub Pages site."""
 
     # Construct request model with validation
@@ -29375,7 +29495,7 @@ async def cancel_pages_deployment(
 async def check_private_vulnerability_reporting(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether private vulnerability reporting is enabled for a repository. This setting allows security researchers to report vulnerabilities privately before public disclosure."""
 
     # Construct request model with validation
@@ -29414,7 +29534,7 @@ async def check_private_vulnerability_reporting(
 async def list_repository_custom_properties(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all custom property values set for a repository. This endpoint allows users with read access to view the complete set of custom properties and their values configured for the repository."""
 
     # Construct request model with validation
@@ -29454,7 +29574,7 @@ async def set_repository_custom_properties(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. Case-insensitive."),
     properties: list[_models.CustomPropertyValue] = Field(..., description="A list of custom property names and their associated values to apply to the repository. Each property in the list will be created or updated with the specified value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update custom property values for a repository. Set property values to null to remove them from the repository."""
 
     # Construct request model with validation
@@ -29500,7 +29620,7 @@ async def list_pull_requests(
     head: str | None = Field(None, description="Filter pull requests by the head branch. Specify in the format `user:ref-name` or `organization:ref-name` to match the source branch and owner."),
     base: str | None = Field(None, description="Filter pull requests by the base branch name. Matches the target branch where pull requests are being merged."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort direction for results. Defaults to descending when sorting by creation date or when no sort is specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve pull requests from a repository with filtering and sorting options. Supports draft pull requests depending on your GitHub plan and repository visibility."""
 
     # Construct request model with validation
@@ -29549,7 +29669,7 @@ async def create_pull_request(
     maintainer_can_modify: bool | None = Field(None, description="Whether maintainers can modify the pull request branch. Allows maintainers to push commits to your PR branch."),
     draft: bool | None = Field(None, description="Whether to create the pull request as a draft. Draft PRs can be marked ready for review later."),
     title: str | None = Field(None, description="The title of the new pull request. Required unless `issue` is specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a pull request to propose changes from a head branch into a base branch. Supports draft pull requests and cross-repository PRs within the same network."""
 
     # Construct request model with validation
@@ -29593,7 +29713,7 @@ async def list_pull_request_review_comments_for_repo(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort results. Only applies when used with a sort parameter."),
     since: str | None = Field(None, description="Only show results that were last updated after the given time. Specify as an ISO 8601 timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists review comments for all pull requests in a repository, sorted by ID in ascending order by default. Supports multiple content formats including raw markdown, plain text, HTML, or combined representations."""
 
     # Construct request model with validation
@@ -29636,7 +29756,7 @@ async def get_pull_request_review_comment(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the review comment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific review comment from a pull request. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three representations."""
 
     _comment_id = _parse_int(comment_id)
@@ -29679,7 +29799,7 @@ async def update_pull_request_review_comment(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the review comment to update."),
     body: str = Field(..., description="The updated text content for the review comment. Supports markdown formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the text content of a review comment on a pull request. Supports multiple response formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     _comment_id = _parse_int(comment_id)
@@ -29724,7 +29844,7 @@ async def delete_pull_request_review_comment(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the review comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a review comment from a pull request. This permanently removes the specified comment and cannot be undone."""
 
     _comment_id = _parse_int(comment_id)
@@ -29767,7 +29887,7 @@ async def list_pull_request_review_comment_reactions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     comment_id: str = Field(..., description="The unique identifier of the pull request review comment."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] | None = Field(None, description="Filter results to show only a specific reaction type. Omit to list all reactions to the pull request review comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all reactions or filter by a specific reaction type for a pull request review comment. Reactions indicate how reviewers feel about specific code feedback."""
 
     _comment_id = _parse_int(comment_id)
@@ -29813,7 +29933,7 @@ async def add_reaction_to_pull_request_comment(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the pull request review comment."),
     content: Literal["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"] = Field(..., description="The emoji reaction type to add to the comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a pull request review comment. Returns HTTP 200 if the reaction type was already added by the authenticated user."""
 
     _comment_id = _parse_int(comment_id)
@@ -29859,7 +29979,7 @@ async def remove_pull_request_comment_reaction(
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     comment_id: str = Field(..., description="The unique identifier of the pull request review comment."),
     reaction_id: int = Field(..., description="The unique identifier of the reaction to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a pull request review comment. This operation deletes a specific reaction (emoji) that was previously added to a comment."""
 
     _comment_id = _parse_int(comment_id)
@@ -29901,7 +30021,7 @@ async def get_pull_request(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pull_number: int = Field(..., description="The number that identifies the pull request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific pull request by its number. Returns comprehensive PR metadata including merge status, commit information, and body content in various formats."""
 
     # Construct request model with validation
@@ -29945,7 +30065,7 @@ async def update_pull_request(
     state: Literal["open", "closed"] | None = Field(None, description="The desired state of the pull request."),
     base: str | None = Field(None, description="The name of the branch you want your changes pulled into. This must be an existing branch on the current repository and cannot point to another repository."),
     maintainer_can_modify: bool | None = Field(None, description="Indicates whether maintainers can modify the pull request branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing pull request including its title, description, state, and base branch. Supports draft pull requests and requires write access to the head or source branch."""
 
     # Construct request model with validation
@@ -29996,7 +30116,7 @@ async def create_codespace_from_pull_request(
     idle_timeout_minutes: int | None = Field(None, description="Time in minutes before the codespace automatically stops due to inactivity."),
     display_name: str | None = Field(None, description="A human-readable display name for this codespace."),
     retention_period_minutes: int | None = Field(None, description="Duration in minutes after the codespace becomes idle before it is automatically deleted. Must be between 0 and 43200 (30 days)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a codespace owned by the authenticated user for a specified pull request. Requires the `codespace` OAuth scope or personal access token (classic) scope."""
 
     # Construct request model with validation
@@ -30041,7 +30161,7 @@ async def list_pull_request_review_comments(
     pull_number: int = Field(..., description="The pull request identifier number."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The sort direction for results. Only applies when used with a sort parameter."),
     since: str | None = Field(None, description="Filter results to show only comments updated after this timestamp in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all review comments for a pull request, sorted by ID in ascending order by default. Supports multiple content formats including raw markdown, plain text, HTML, or combined representations."""
 
     # Construct request model with validation
@@ -30093,7 +30213,7 @@ async def create_pull_request_review_comment(
     subject_type: Literal["line", "file"] | None = Field(None, description="The scope level at which the comment is targeted, either at a specific line or for the entire file."),
     line: int | None = Field(None, description="**Required unless using `subject_type:file`**. The line of the blob in the pull request diff that the comment applies to. For a multi-line comment, the last line of the range that your comment applies to."),
     position: int | None = Field(None, description="**This parameter is closing down. Use `line` instead**. The position in the diff where you want to add a review comment. Note this value is not the same as the line number in the file. The position value equals the number of lines down from the first \"@@\" hunk header in the file you want to add a comment. The line just below the \"@@\" line is position 1, the next line is position 2, and so on. The position in the diff continues to increase through lines of whitespace and additional hunks until the beginning of a new file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a review comment on a specific line or range of lines in a pull request diff. This enables targeted feedback on code changes and triggers notifications to relevant participants."""
 
     # Construct request model with validation
@@ -30138,7 +30258,7 @@ async def reply_to_review_comment(
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     comment_id: str = Field(..., description="The unique identifier of the top-level review comment to reply to."),
     body: str = Field(..., description="The text content of the reply, formatted as markdown."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a reply to a top-level review comment on a pull request. Replies to replies are not supported."""
 
     _comment_id = _parse_int(comment_id)
@@ -30183,7 +30303,7 @@ async def list_pull_request_commits(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     pull_number: int = Field(..., description="The pull request identifier number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the commits included in a pull request, with a maximum of 250 commits returned. For pull requests with more than 250 commits, use the general commits list endpoint instead."""
 
     # Construct request model with validation
@@ -30223,7 +30343,7 @@ async def list_pull_request_files(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pull_number: int = Field(..., description="The pull request number that identifies which pull request's files to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all files changed in a specified pull request. Returns up to 3000 files with 30 files per page by default."""
 
     # Construct request model with validation
@@ -30263,7 +30383,7 @@ async def check_pull_request_merged(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     pull_number: int = Field(..., description="The pull request identifier number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Determines whether a pull request has been merged into its base branch. The HTTP status code indicates the merge status; a 204 response means merged, 404 means not merged."""
 
     # Construct request model with validation
@@ -30307,7 +30427,7 @@ async def merge_pull_request(
     commit_message: str | None = Field(None, description="Additional details to append to the automatic commit message."),
     sha: str | None = Field(None, description="The commit SHA that the pull request head must match to allow the merge. Used to prevent merging if the branch has been updated since the last check."),
     merge_method: Literal["merge", "squash", "rebase"] | None = Field(None, description="The merge strategy to use when combining the pull request with the base branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge a pull request into its base branch. This operation triggers notifications and is subject to secondary rate limiting; use appropriate delays when merging multiple pull requests."""
 
     # Construct request model with validation
@@ -30350,7 +30470,7 @@ async def list_pull_request_requested_reviewers(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     pull_number: int = Field(..., description="The pull request identifier number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all users and teams whose review has been requested for a pull request. Requested reviewers are excluded once they submit a review."""
 
     # Construct request model with validation
@@ -30392,7 +30512,7 @@ async def request_pull_request_reviewers(
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     reviewers: list[str] | None = Field(None, description="An array of user login names to request as reviewers. Order is not significant."),
     team_reviewers: list[str] | None = Field(None, description="An array of team slugs to request as reviewers. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request code reviews for a pull request from specified users and/or teams. This operation triggers notifications and is subject to secondary rate limiting; use judiciously to avoid throttling."""
 
     # Construct request model with validation
@@ -30437,7 +30557,7 @@ async def remove_pull_request_reviewers(
     pull_number: int = Field(..., description="The pull request number that identifies which pull request to modify."),
     reviewers: list[str] = Field(..., description="An array of user login names to remove from the review request. Order is not significant."),
     team_reviewers: list[str] | None = Field(None, description="An array of team slugs to remove from the review request. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove review requests from a pull request by specifying users and/or teams to be removed. This operation allows you to withdraw review requests that were previously assigned."""
 
     # Construct request model with validation
@@ -30480,7 +30600,7 @@ async def list_pull_request_reviews(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     pull_number: int = Field(..., description="The numeric identifier of the pull request to retrieve reviews for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all reviews for a specified pull request in chronological order. Supports multiple content formats including raw markdown, plain text, HTML, or combined representations."""
 
     # Construct request model with validation
@@ -30527,7 +30647,7 @@ async def create_pull_request_review(
     comment_line: int | None = Field(None, description="Required when using a multi-line comment. The line of the blob in the pull request diff that the comment applies to."),
     comment_body: str | None = Field(None, description="Text content of the review comment."),
     event: Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"] | None = Field(None, description="The review action you want to perform. The review actions include: `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`. By leaving this blank, you set the review action state to `PENDING`, which means you will need to [submit the pull request review](https://docs.github.com/rest/pulls/reviews#submit-a-review-for-a-pull-request) when you are ready."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a review on a pull request, optionally with comments on specific lines in the diff. Reviews can be submitted immediately or saved as pending for later submission."""
 
     # Call helper functions
@@ -30574,7 +30694,7 @@ async def get_pull_request_review(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     review_id: int = Field(..., description="The unique identifier of the review to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific review for a pull request by its review ID. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three representations."""
 
     # Construct request model with validation
@@ -30616,7 +30736,7 @@ async def update_pull_request_review(
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     review_id: int = Field(..., description="The unique identifier of the review to update."),
     body: str = Field(..., description="The body text of the pull request review. Supports markdown formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the body text of an existing pull request review. This endpoint allows you to modify the summary comment of a review that has already been submitted."""
 
     # Construct request model with validation
@@ -30660,7 +30780,7 @@ async def delete_pending_review(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     review_id: int = Field(..., description="The unique identifier of the review to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a pending pull request review that has not yet been submitted. Only unsubmitted reviews can be deleted; submitted reviews are permanent and cannot be removed."""
 
     # Construct request model with validation
@@ -30701,7 +30821,7 @@ async def list_review_comments(
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     pull_number: int = Field(..., description="The pull request number that contains the review."),
     review_id: int = Field(..., description="The unique identifier of the review whose comments should be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all comments made during a specific pull request review. Supports multiple content formats including raw markdown, plain text, HTML, or a combination of all three."""
 
     # Construct request model with validation
@@ -30743,7 +30863,7 @@ async def dismiss_pull_request_review(
     pull_number: int = Field(..., description="The number that identifies the pull request."),
     review_id: int = Field(..., description="The unique identifier of the review to dismiss."),
     message: str = Field(..., description="The message explaining the reason for dismissing the review."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Dismiss a review on a pull request with an optional message. Requires repository administrator permissions or explicit dismissal rights on protected branches."""
 
     # Construct request model with validation
@@ -30789,7 +30909,7 @@ async def submit_pull_request_review(
     review_id: int = Field(..., description="The unique identifier of the review to submit."),
     event: Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"] = Field(..., description="The review action to perform on the pull request. Must be one of: `APPROVE` (approve the changes), `REQUEST_CHANGES` (request modifications), or `COMMENT` (provide feedback without approval)."),
     body: str | None = Field(None, description="The body text of the pull request review. Optional; can be omitted if the review action is `APPROVE` or `REQUEST_CHANGES`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a pending review for a pull request with an approval, request for changes, or comment action. The review must be finalized with one of the three review actions; submitting without an action will result in an error."""
 
     # Construct request model with validation
@@ -30832,7 +30952,7 @@ async def sync_pull_request_branch(
     owner: str = Field(..., description="The owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
     pull_number: int = Field(..., description="The pull request identifier number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronize a pull request branch with the latest changes from its base branch by merging the upstream HEAD. Requires write permissions to the head repository when using a GitHub App."""
 
     # Construct request model with validation
@@ -30871,7 +30991,7 @@ async def sync_pull_request_branch(
 async def get_repository_readme(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the preferred README file for a repository. Supports both raw and HTML-rendered formats via custom media types."""
 
     # Construct request model with validation
@@ -30911,7 +31031,7 @@ async def get_readme(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. Case-insensitive."),
     dir_: str = Field(..., alias="dir", description="The directory path within the repository to search for the README file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the README file from a specified directory within a repository. Supports both raw text and rendered HTML formats."""
 
     # Construct request model with validation
@@ -30950,7 +31070,7 @@ async def get_readme(
 async def list_releases(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of published releases for a repository. Draft releases are only visible to users with push access. Regular Git tags without associated releases are not included; use the Repository Tags API for those."""
 
     # Construct request model with validation
@@ -30998,7 +31118,7 @@ async def create_release(
     generate_release_notes: bool | None = Field(None, description="Whether to automatically generate release name and body from commit history. If a name is provided, it will be used; if body is provided, it will be prepended to auto-generated notes."),
     make_latest: Literal["true", "false", "legacy"] | None = Field(None, description="Whether to set this release as the latest for the repository. Drafts and prereleases cannot be marked as latest. Use 'legacy' to determine latest by creation date and semantic version."),
     name: str | None = Field(None, description="The name of the release."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new release for a repository. Users with push access can publish releases, which trigger notifications. Be aware of secondary rate limits when creating releases in rapid succession."""
 
     # Construct request model with validation
@@ -31041,7 +31161,7 @@ async def download_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. The name is not case sensitive."),
     asset_id: int = Field(..., description="The unique identifier of the asset to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata and download URL for a specific release asset. Use the browser_download_url for direct downloads or set Accept header to application/octet-stream to stream the binary content directly."""
 
     # Construct request model with validation
@@ -31083,7 +31203,7 @@ async def update_release_asset(
     asset_id: int = Field(..., description="The unique identifier of the asset to update."),
     label: str | None = Field(None, description="An alternate short description of the asset, displayed in place of the filename."),
     state: str | None = Field(None, description="The state of the asset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update metadata for a release asset in a repository. Users with push access can modify the asset's label and state."""
 
     # Construct request model with validation
@@ -31126,7 +31246,7 @@ async def delete_release_asset(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     asset_id: int = Field(..., description="The unique identifier of the asset to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific asset from a release. This permanently removes the asset file from the release."""
 
     # Construct request model with validation
@@ -31169,7 +31289,7 @@ async def generate_release_notes(
     target_commitish: str | None = Field(None, description="The commitish value (branch, commit SHA, or tag) that will be the target for the release's tag. Required only if the tag_name does not reference an existing tag; ignored if the tag already exists."),
     previous_tag_name: str | None = Field(None, description="The name of the previous tag to use as the starting point for release notes. Use this to manually specify the range of changes to include in the release notes."),
     configuration_file_path: str | None = Field(None, description="Path to a repository file containing release notes configuration settings. If not specified, defaults to `.github/release.yml` or `.github/release.yaml`, falling back to default configuration if neither exists."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate release notes content including a name and markdown-formatted body describing changes and contributors for a release. The generated notes are temporary and intended for use when creating a new release."""
 
     # Construct request model with validation
@@ -31211,7 +31331,7 @@ async def generate_release_notes(
 async def get_latest_release(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the latest published release for a repository. Returns the most recent non-prerelease, non-draft release, sorted by creation date of the associated commit."""
 
     # Construct request model with validation
@@ -31251,7 +31371,7 @@ async def get_release_by_tag(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
     tag: str = Field(..., description="The tag name identifying the release to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a published release by its tag name. Returns detailed information about the release including assets, author, and metadata."""
 
     # Construct request model with validation
@@ -31291,7 +31411,7 @@ async def get_release(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     release_id: int = Field(..., description="The unique identifier of the release to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a public release by its unique identifier. Returns release metadata including an upload_url hypermedia resource for managing release assets."""
 
     # Construct request model with validation
@@ -31338,7 +31458,7 @@ async def update_release(
     prerelease: bool | None = Field(None, description="Set to `true` to identify the release as a prerelease, or `false` to identify it as a full release."),
     make_latest: Literal["true", "false", "legacy"] | None = Field(None, description="Specifies whether this release should be set as the latest release for the repository. Drafts and prereleases cannot be set as latest. Use `legacy` to determine the latest release based on creation date and semantic version."),
     discussion_category_name: str | None = Field(None, description="Category name for creating and linking a discussion to this release. The category must already exist in the repository. Ignored if a discussion is already linked to the release."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing release in a repository. Users with push access can modify release details including tag name, description, draft status, and prerelease designation."""
 
     # Construct request model with validation
@@ -31381,7 +31501,7 @@ async def delete_release(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     release_id: int = Field(..., description="The unique identifier of the release to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a release from a repository. Only users with push access to the repository can perform this action."""
 
     # Construct request model with validation
@@ -31421,7 +31541,7 @@ async def list_release_assets(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     release_id: int = Field(..., description="The unique identifier of the release to retrieve assets from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all assets (files, binaries, archives) attached to a specific release. Assets are downloadable files published with a release."""
 
     # Construct request model with validation
@@ -31464,7 +31584,7 @@ async def upload_release_asset(
     name: str = Field(..., description="The filename for the asset. GitHub will rename files with special characters, non-alphanumeric characters, or leading/trailing periods. Duplicate filenames will cause an error and require deletion of the existing asset before re-upload."),
     label: str | None = Field(None, description="An optional display label for the asset that describes its purpose or contents."),
     body: str | None = Field(None, description="The raw binary file data to upload. Set the Content-Type header to the appropriate media type (e.g., application/zip)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a binary asset file to a release. The asset data must be sent as raw binary content in the request body with the appropriate Content-Type header."""
 
     # Construct request model with validation
@@ -31512,7 +31632,7 @@ async def list_release_reactions(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     release_id: int = Field(..., description="The unique identifier of the release for which to list reactions."),
     content: Literal["+1", "laugh", "heart", "hooray", "rocket", "eyes"] | None = Field(None, description="Filter results to a single reaction type. Omit this parameter to list all reactions to the release."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all reactions or filter by a specific reaction type for a release. Reactions allow users to express sentiment on releases using emoji."""
 
     # Construct request model with validation
@@ -31556,7 +31676,7 @@ async def add_release_reaction(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     release_id: int = Field(..., description="The unique identifier of the release to add a reaction to."),
     content: Literal["+1", "laugh", "heart", "hooray", "rocket", "eyes"] = Field(..., description="The emoji reaction type to add to the release."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a release. Returns a 200 status if the reaction type was already added by the authenticated user."""
 
     # Construct request model with validation
@@ -31600,7 +31720,7 @@ async def delete_release_reaction(
     repo: str = Field(..., description="The name of the repository, without the `.git` extension. The name is case-insensitive."),
     release_id: int = Field(..., description="The unique identifier of the release from which to delete the reaction."),
     reaction_id: int = Field(..., description="The unique identifier of the reaction to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a reaction from a release. This removes the specified reaction emoji that was added to the release."""
 
     # Construct request model with validation
@@ -31640,7 +31760,7 @@ async def list_branch_rules(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     branch: str = Field(..., description="The branch name to retrieve rules for. Wildcard characters are not supported; use the GraphQL API for wildcard matching."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all active rules that apply to a specified branch. Rules are returned regardless of configuration level (repository or organization) and include only those with active enforcement status."""
 
     # Construct request model with validation
@@ -31682,7 +31802,7 @@ async def list_rule_suites(
     time_period: Literal["hour", "day", "week", "month"] | None = Field(None, description="The time period to filter rule suites by. Filters results to evaluations that occurred within the specified window (hour: past 1 hour, day: past 24 hours, week: past 7 days, month: past 30 days)."),
     actor_name: str | None = Field(None, description="The GitHub user account handle to filter on. When specified, only rule evaluations triggered by this actor will be returned."),
     rule_suite_result: Literal["pass", "fail", "bypass", "all"] | None = Field(None, description="The rule suite result status to filter on. When specified, only suites with this result will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists suites of rule evaluations at the repository level. Use this to view insights and audit rule enforcement across your repository."""
 
     # Construct request model with validation
@@ -31725,7 +31845,7 @@ async def get_rule_suite(
     owner: str = Field(..., description="The owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
     rule_suite_id: int = Field(..., description="The unique identifier of the rule suite result. Retrieve this ID using the list rule suites endpoint for your repository or organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific rule suite evaluation result within a repository. Use this to view insights and outcomes from ruleset enforcement."""
 
     # Construct request model with validation
@@ -31766,7 +31886,7 @@ async def get_ruleset(
     repo: str = Field(..., description="The repository name without the .git extension. Case-insensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset to retrieve."),
     includes_parents: bool | None = Field(None, description="Whether to include rulesets configured at higher organizational or enterprise levels that apply to this repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific ruleset configured for a repository. The bypass_actors property is only included if you have write access to the ruleset."""
 
     # Construct request model with validation
@@ -31809,7 +31929,7 @@ async def list_ruleset_history_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset whose history you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete history of changes for a repository ruleset, including all modifications and their timestamps."""
 
     # Construct request model with validation
@@ -31850,7 +31970,7 @@ async def get_ruleset_version_repository(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ruleset_id: int = Field(..., description="The unique identifier of the ruleset."),
     version_id: int = Field(..., description="The unique identifier of the ruleset version to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific version of a repository ruleset to view its configuration and rules at that point in time."""
 
     # Construct request model with validation
@@ -31897,7 +32017,7 @@ async def list_secret_scanning_alerts_repository(
     is_publicly_leaked: bool | None = Field(None, description="Filter to include only alerts that have been publicly leaked."),
     is_multi_repo: bool | None = Field(None, description="Filter to include only alerts detected across multiple repositories."),
     hide_secret: bool | None = Field(None, description="Redact literal secret values from the response for security purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve secret scanning alerts for a repository, ordered from newest to oldest. Requires administrator access to the repository or owning organization."""
 
     # Construct request model with validation
@@ -31941,7 +32061,7 @@ async def get_secret_scanning_alert(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
     hide_secret: bool | None = Field(None, description="Whether to hide literal secrets in the response results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single secret scanning alert detected in a repository. The authenticated user must be an administrator for the repository or owning organization."""
 
     # Construct request model with validation
@@ -31987,7 +32107,7 @@ async def update_secret_scanning_alert(
     state: Literal["open", "resolved"] | None = Field(None, description="Sets the state of the secret scanning alert. When setting to `resolved`, you must provide a `resolution` reason."),
     resolution: Literal["false_positive", "wont_fix", "revoked", "used_in_tests"] | None = Field(None, description="The reason for resolving the alert. Required when `state` is set to `resolved`."),
     resolution_comment: str | None = Field(None, description="An optional comment when closing or reopening an alert. Cannot be updated or deleted after creation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status of a secret scanning alert in a repository, including resolving it with a reason or assigning it to a user. The authenticated user must be an administrator for the repository or organization."""
 
     # Construct request model with validation
@@ -32030,7 +32150,7 @@ async def list_secret_alert_locations(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     alert_number: int = Field(..., description="The number that identifies an alert. You can find this at the end of the URL for a code scanning alert within GitHub, and in the `number` field in the response from the `GET /repos/{owner}/{repo}/code-scanning/alerts` operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all locations where a secret scanning alert has been detected in a repository. Requires administrator access to the repository or owning organization."""
 
     # Construct request model with validation
@@ -32071,7 +32191,7 @@ async def bypass_push_protection(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     reason: Literal["false_positive", "used_in_tests", "will_fix_later"] = Field(..., description="The reason for bypassing push protection. Select from predefined reasons that categorize why the secret should be allowed."),
     placeholder_id: str = Field(..., description="The ID of the push protection bypass placeholder returned when a secret is push protected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a bypass for a secret that was previously blocked by push protection. The authenticated user must be the original author of the committed secret."""
 
     # Construct request model with validation
@@ -32113,7 +32233,7 @@ async def bypass_push_protection(
 async def list_secret_scan_history(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the latest secret scanning scan history for a repository, including default incremental and backfill scans by type. Requires GitHub Advanced Security and appropriate authentication scopes."""
 
     # Construct request model with validation
@@ -32154,7 +32274,7 @@ async def list_security_advisories(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The direction to sort the results by."),
     state: Literal["triage", "draft", "published", "closed"] | None = Field(None, description="Filter advisories by their current state. Only advisories matching the specified state will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve security advisories for a repository. Authenticated users with appropriate permissions can access both published and unpublished advisories, depending on their role and access level."""
 
     # Construct request model with validation
@@ -32204,7 +32324,7 @@ async def create_security_advisory(
     credits_: list[_models.SecurityAdvisoriesCreateRepositoryAdvisoryBodyCreditsItem] | None = Field(None, alias="credits", description="An array of users to receive credit for their participation in identifying or fixing the security advisory."),
     start_private_fork: bool | None = Field(None, description="Whether to create a temporary private fork of the repository to collaborate on a fix."),
     severity: Literal["critical", "high", "medium", "low"] | None = Field(None, description="The severity of the advisory. You must choose between setting this field or `cvss_vector_string`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new repository security advisory to document and track vulnerabilities. The authenticated user must be a security manager or administrator of the repository."""
 
     # Construct request model with validation
@@ -32251,7 +32371,7 @@ async def report_security_vulnerability(
     vulnerabilities: list[_models.SecurityAdvisoriesCreatePrivateVulnerabilityReportBodyVulnerabilitiesItem] | None = Field(None, description="An array of products or components affected by the vulnerability. Each item should specify the affected product and version range."),
     cwe_ids: list[str] | None = Field(None, description="A list of Common Weakness Enumeration (CWE) IDs that classify the vulnerability type."),
     start_private_fork: bool | None = Field(None, description="Whether to create a temporary private fork of the repository to facilitate collaborative fix development."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Privately report a security vulnerability to repository maintainers. This initiates a coordinated disclosure process allowing maintainers to address the issue before public disclosure."""
 
     # Construct request model with validation
@@ -32294,7 +32414,7 @@ async def get_security_advisory_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ghsa_id: str = Field(..., description="The GitHub Security Advisory (GHSA) identifier that uniquely identifies the security advisory."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a repository security advisory by its GitHub Security Advisory (GHSA) identifier. Published advisories on public repositories are accessible to anyone; unpublished advisories require appropriate permissions (security manager, administrator, or collaborator status)."""
 
     # Construct request model with validation
@@ -32343,7 +32463,7 @@ async def update_security_advisory(
     state: Literal["published", "closed", "draft"] | None = Field(None, description="The publication state of the advisory."),
     collaborating_users: list[str] | None = Field(None, description="An array of usernames who have been granted write access to the advisory."),
     collaborating_teams: list[str] | None = Field(None, description="An array of team slugs which have been granted write access to the advisory."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a repository security advisory by its GHSA identifier. The authenticated user must be a security manager, administrator, or collaborator on the advisory."""
 
     # Construct request model with validation
@@ -32386,7 +32506,7 @@ async def request_cve_for_advisory(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ghsa_id: str = Field(..., description="The GHSA (GitHub Security Advisory) identifier of the advisory for which you are requesting a CVE."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request a CVE identification number for a repository security advisory. This allows you to obtain an official CVE ID from GitHub for a vulnerability in your public repository."""
 
     # Construct request model with validation
@@ -32426,7 +32546,7 @@ async def create_security_advisory_fork(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ghsa_id: str = Field(..., description="The GitHub Security Advisory (GHSA) identifier for the vulnerability being addressed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a temporary private fork to collaborate on fixing a security vulnerability. The fork is created asynchronously and may take up to 5 minutes to become accessible."""
 
     # Construct request model with validation
@@ -32465,7 +32585,7 @@ async def create_security_advisory_fork(
 async def list_stargazers(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. Case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all users who have starred the repository. Supports custom media type to include star creation timestamps."""
 
     # Construct request model with validation
@@ -32504,7 +32624,7 @@ async def list_stargazers(
 async def get_code_frequency_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve weekly code frequency statistics showing the aggregate number of additions and deletions pushed to a repository. This endpoint is limited to repositories with fewer than 10,000 commits."""
 
     # Construct request model with validation
@@ -32543,7 +32663,7 @@ async def get_code_frequency_stats(
 async def list_commit_activity_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The repository name without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve commit activity statistics for the last year, grouped by week with daily breakdowns starting on Sunday. Useful for analyzing repository contribution patterns and trends."""
 
     # Construct request model with validation
@@ -32582,7 +32702,7 @@ async def list_commit_activity_stats(
 async def list_contributor_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve commit activity statistics for all contributors to a repository, including total commits and weekly breakdowns of additions, deletions, and commits. Note: repositories with 10,000+ commits will show 0 for addition and deletion counts."""
 
     # Construct request model with validation
@@ -32621,7 +32741,7 @@ async def list_contributor_stats(
 async def get_repository_participation_stats(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve weekly commit statistics for a repository over the last 52 weeks, showing total commits by the owner and all contributors combined. Data is ordered from oldest to most recent week, with the most recent week spanning from seven days ago to today at UTC midnight."""
 
     # Construct request model with validation
@@ -32660,7 +32780,7 @@ async def get_repository_participation_stats(
 async def get_commit_punch_card(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve hourly commit statistics for each day of the week, showing commit frequency patterns across all hours. Data is organized as arrays containing day number (0-6), hour (0-23), and commit count."""
 
     # Construct request model with validation
@@ -32703,7 +32823,7 @@ async def create_commit_status(
     state: Literal["error", "failure", "pending", "success"] = Field(..., description="The state of the commit status, indicating the result of the check or build."),
     description: str | None = Field(None, description="A short description of the status, providing additional context about the state."),
     context: str | None = Field(None, description="A string label to differentiate this status from other systems. Case-insensitive. Defaults to 'default' if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a commit status for a given SHA in a repository. Users with push access can set the status to track build results, checks, or other system states, with a limit of 1000 statuses per SHA and context combination."""
 
     # Construct request model with validation
@@ -32745,7 +32865,7 @@ async def create_commit_status(
 async def list_watchers(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all users who are watching the specified repository. Watchers receive notifications about repository activity."""
 
     # Construct request model with validation
@@ -32784,7 +32904,7 @@ async def list_watchers(
 async def get_repository_subscription(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated user's subscription status for a repository. Returns subscription details including whether the user is watching, subscribed to notifications, or ignoring the repository."""
 
     # Construct request model with validation
@@ -32825,7 +32945,7 @@ async def configure_repository_subscription(
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     subscribed: bool | None = Field(None, description="Set to `true` to receive notifications from this repository, or `false` to disable watch notifications."),
     ignored: bool | None = Field(None, description="Set to `true` to block all notifications from this repository, or `false` to allow notifications based on other settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure your notification preferences for a repository by enabling or disabling watch status and notification blocking. Use this to control whether you receive notifications from repository activity."""
 
     # Construct request model with validation
@@ -32867,7 +32987,7 @@ async def configure_repository_subscription(
 async def unwatch_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stop watching a repository and remove its subscription. This endpoint only controls watch status; to manage notification preferences, set the repository subscription manually."""
 
     # Construct request model with validation
@@ -32906,7 +33026,7 @@ async def unwatch_repository(
 async def list_tags(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all tags for a repository. Tags are typically used to mark specific points in the repository's history, such as release versions."""
 
     # Construct request model with validation
@@ -32946,7 +33066,7 @@ async def download_repository_archive(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     ref: str = Field(..., description="The git reference to archive, such as a branch name, tag, or commit SHA. If omitted, the repository's default branch will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Downloads a tar archive of a repository at a specified reference (branch, tag, or commit). Returns a redirect URL that must be followed to retrieve the actual archive file."""
 
     # Construct request model with validation
@@ -32985,7 +33105,7 @@ async def download_repository_archive(
 async def list_repository_teams(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all teams that have access to the specified repository and are visible to the authenticated user. For public repositories, only teams that explicitly added the repository are included."""
 
     # Construct request model with validation
@@ -33024,7 +33144,7 @@ async def list_repository_teams(
 async def list_repository_topics(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all topics associated with a repository. Topics are labels that help categorize and discover repositories."""
 
     # Construct request model with validation
@@ -33064,7 +33184,7 @@ async def update_repository_topics(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     names: list[str] = Field(..., description="An array of topics to set for the repository. Provide one or more topics to replace existing topics, or an empty array to clear all topics. Topics are automatically stored as lowercase."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all topics associated with a repository. Pass an array of topics to update the repository's topic tags, or send an empty array to remove all topics. Topics are stored as lowercase."""
 
     # Construct request model with validation
@@ -33107,7 +33227,7 @@ async def list_repository_clones(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     per: Literal["day", "week"] | None = Field(None, description="The time frame to display clone results for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the total number of clones and daily or weekly breakdown for a repository over the last 14 days. Timestamps are aligned to UTC midnight at the start of each period, with weeks beginning on Monday."""
 
     # Construct request model with validation
@@ -33149,7 +33269,7 @@ async def list_repository_clones(
 async def list_popular_paths(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the top 10 most popular content paths for a repository based on traffic data from the last 14 days."""
 
     # Construct request model with validation
@@ -33189,7 +33309,7 @@ async def get_repository_views(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
     per: Literal["day", "week"] | None = Field(None, description="The time frame to display results for. Choose between daily or weekly aggregation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the total number of page views and daily or weekly breakdown for a repository over the last 14 days. Timestamps are aligned to UTC midnight at the start of each period, with weeks beginning on Monday."""
 
     # Construct request model with validation
@@ -33234,7 +33354,7 @@ async def transfer_repository(
     new_owner: str = Field(..., description="The username or organization name that will become the new repository owner."),
     new_name: str | None = Field(None, description="Optional new name for the repository after transfer."),
     team_ids: list[int] | None = Field(None, description="Optional array of team IDs to add to the repository. Teams can only be added to organization-owned repositories. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transfer a repository to a new owner (user or organization). The transfer request requires acceptance by the new owner and proceeds asynchronously, with the original owner retained in the response."""
 
     # Construct request model with validation
@@ -33276,7 +33396,7 @@ async def transfer_repository(
 async def get_vulnerability_alerts_status(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the vulnerability alert status for a repository. Returns whether dependency alerts are enabled or disabled. Requires admin read access to the repository."""
 
     # Construct request model with validation
@@ -33315,7 +33435,7 @@ async def get_vulnerability_alerts_status(
 async def enable_vulnerability_alerts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable dependency alerts and the dependency graph for a repository to receive security notifications about vulnerable dependencies. The authenticated user must have admin access to the repository."""
 
     # Construct request model with validation
@@ -33354,7 +33474,7 @@ async def enable_vulnerability_alerts(
 async def disable_vulnerability_alerts(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disables dependency alerts and the dependency graph for a repository. The authenticated user must have admin access to the repository."""
 
     # Construct request model with validation
@@ -33394,7 +33514,7 @@ async def download_repository_archive_zip(
     owner: str = Field(..., description="The account owner of the repository. Case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the .git extension. Case-insensitive."),
     ref: str = Field(..., description="The git reference (branch, tag, or commit SHA) to archive. If omitted, the repository's default branch will be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Downloads a repository as a zip archive by following a redirect URL. Omit the ref parameter to use the repository's default branch (usually main). Note: links for private repositories expire after five minutes, and empty repositories return a 404 error."""
 
     # Construct request model with validation
@@ -33436,7 +33556,7 @@ async def create_repository_from_template(
     name: str = Field(..., description="The name for the new repository being created."),
     description: str | None = Field(None, description="A short description of the new repository."),
     include_all_branches: bool | None = Field(None, description="Set to true to include the directory structure and files from all branches in the template repository, rather than just the default branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new repository using an existing repository template. The template repository must have `is_template` set to true, and you must have access to it (ownership or organization membership for private templates)."""
 
     # Construct request model with validation
@@ -33475,7 +33595,7 @@ async def create_repository_from_template(
 
 # Tags: repos
 @mcp.tool()
-async def list_public_repositories(since: int | None = Field(None, description="Filter results to return only repositories with an ID greater than this value. Use this parameter for pagination by passing the ID of the last repository from the previous page.")) -> dict[str, Any]:
+async def list_public_repositories(since: int | None = Field(None, description="Filter results to return only repositories with an ID greater than this value. Use this parameter for pagination by passing the ID of the last repository from the previous page.")) -> dict[str, Any] | ToolResult:
     """Retrieve all public repositories ordered by creation time. Pagination is controlled exclusively through the `since` parameter to fetch subsequent pages of results."""
 
     # Construct request model with validation
@@ -33517,7 +33637,7 @@ async def add_issue_field_values(
     repository_id: int = Field(..., description="The unique identifier of the repository."),
     issue_number: int = Field(..., description="The issue number to update with field values."),
     issue_field_values: list[_models.IssuesAddIssueFieldValuesBodyIssueFieldValuesItem] | None = Field(None, description="An array of field value objects to set on the issue, where each object contains a field ID and its corresponding value. Pass an empty array to clear all existing field values. Supports up to 25 field values per request.", max_length=25),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set custom field values for an issue using organization-level fields defined for the repository. Supports text, single-select, number, and date field types. Requires push access to the repository."""
 
     # Construct request model with validation
@@ -33560,7 +33680,7 @@ async def set_issue_field_values(
     repository_id: int = Field(..., description="The unique identifier of the repository."),
     issue_number: int = Field(..., description="The number that identifies the issue within the repository."),
     issue_field_values: list[_models.IssuesSetIssueFieldValuesBodyIssueFieldValuesItem] | None = Field(None, description="An array of field value objects to set for this issue. Each object must include the field ID and the value to set. All existing field values will be replaced. Values must match the field's data type: text (string), single_select (option name), number (numeric), or date (ISO 8601 format).", max_length=25),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set custom field values for an issue, replacing all existing values. Supports text, single_select, number, and date field types. Requires push access to the repository."""
 
     # Construct request model with validation
@@ -33603,7 +33723,7 @@ async def delete_issue_field_value(
     repository_id: int = Field(..., description="The unique identifier of the repository containing the issue."),
     issue_number: int = Field(..., description="The issue number that identifies which issue to modify."),
     issue_field_id: int = Field(..., description="The unique identifier of the custom field whose value should be deleted from the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom field value from an issue. Requires push access to the repository; returns 404 if the field has no value set on the issue."""
 
     # Construct request model with validation
@@ -33639,7 +33759,7 @@ async def delete_issue_field_value(
 
 # Tags: search
 @mcp.tool()
-async def search_code(q: str = Field(..., description="Search query containing one or more keywords and qualifiers (e.g., language, repo, in:file). At least one search term is required; qualifiers can filter by language, repository, file path, and other code attributes.")) -> dict[str, Any]:
+async def search_code(q: str = Field(..., description="Search query containing one or more keywords and qualifiers (e.g., language, repo, in:file). At least one search term is required; qualifiers can filter by language, repository, file path, and other code attributes.")) -> dict[str, Any] | ToolResult:
     """Search for code across repositories by query terms within file contents and paths. Returns up to 100 results per page, limited to the default branch and files under 384 KB."""
 
     # Construct request model with validation
@@ -33689,7 +33809,7 @@ async def search_commits(
     repo: str | None = Field(None, description="Filter by repository in format 'owner/repo'"),
     created_after: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-01-01')"),
     created_before: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-12-31')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for commits across a repository using various criteria on the default branch. Returns up to 100 results per page and supports text match metadata for commit messages."""
 
     # Call helper functions
@@ -33742,7 +33862,7 @@ async def search_issues(
     repo: str | None = Field(None, description="Filter by repository in format 'owner/repo'"),
     created_after: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-01-01')"),
     created_before: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-12-31')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for issues and pull requests across repositories by state, keywords, and labels. Returns up to 100 results per page with optional text match metadata for titles, bodies, and comments."""
 
     # Call helper functions
@@ -33787,7 +33907,7 @@ async def search_labels(
     repository_id: int = Field(..., description="The numeric identifier of the repository to search labels within."),
     q: str = Field(..., description="The search keywords to match against label names and descriptions. Qualifiers are not supported in this query."),
     order: Literal["desc", "asc"] | None = Field(None, description="Determines the sort order of results: highest match count first (desc) or lowest match count first (asc)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for labels in a repository by name or description using keywords. Returns up to 100 results per page, with the best matching labels appearing first."""
 
     # Construct request model with validation
@@ -33828,7 +33948,7 @@ async def search_labels(
 async def search_repositories(
     q: str = Field(..., description="Search query containing one or more keywords and qualifiers to filter repositories. Qualifiers allow you to limit results by language, stars, forks, creation date, and other repository attributes. Refer to GitHub's search query syntax documentation for supported qualifiers and formatting."),
     order: Literal["desc", "asc"] | None = Field(None, description="Sort order for search results. Use 'desc' to return results with the highest match count first, or 'asc' for lowest match count first. This parameter only applies when results are sorted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search GitHub repositories using keywords and qualifiers to find repositories matching specific criteria. Results are paginated with up to 100 repositories per page."""
 
     # Construct request model with validation
@@ -33866,7 +33986,7 @@ async def search_repositories(
 
 # Tags: search
 @mcp.tool()
-async def search_topics(q: str = Field(..., description="Search query containing one or more keywords and optional qualifiers (e.g., is:featured) to filter results. Qualifiers allow you to limit searches to specific topic attributes like featured status, language, or other criteria supported by GitHub's search interface.")) -> dict[str, Any]:
+async def search_topics(q: str = Field(..., description="Search query containing one or more keywords and optional qualifiers (e.g., is:featured) to filter results. Qualifiers allow you to limit searches to specific topic attributes like featured status, language, or other criteria supported by GitHub's search interface.")) -> dict[str, Any] | ToolResult:
     """Search for GitHub topics using keywords and qualifiers to find the best matching results. Results are sorted by relevance and limited to 100 per page."""
 
     # Construct request model with validation
@@ -33916,7 +34036,7 @@ async def search_users(
     repo: str | None = Field(None, description="Filter by repository in format 'owner/repo'"),
     created_after: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-01-01')"),
     created_before: str | None = Field(None, description="Filter by creation date (ISO 8601 format, e.g., '2023-12-31')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for publicly visible users by various criteria including name, email, repository count, and followers. Returns up to 100 results per page and supports text match metadata for enhanced result highlighting."""
 
     # Call helper functions
@@ -33957,7 +34077,7 @@ async def search_users(
 
 # Tags: users
 @mcp.tool()
-async def get_authenticated_user() -> dict[str, Any]:
+async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile information of the currently authenticated user. Requires `user` scope for OAuth app tokens or personal access tokens (classic) to include private profile details."""
 
     # Extract parameters for API call
@@ -33990,7 +34110,7 @@ async def update_user(
     company: str | None = Field(None, description="The user's company or organization name."),
     hireable: bool | None = Field(None, description="Whether the user is available for hiring."),
     bio: str | None = Field(None, description="A short biography or about section for the user's profile."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the authenticated user's profile information. Note that email privacy settings are always enforced—if your email is private, it will not be displayed publicly regardless of updates."""
 
     # Construct request model with validation
@@ -34028,7 +34148,7 @@ async def update_user(
 
 # Tags: users
 @mcp.tool()
-async def list_blocked_users_personal() -> dict[str, Any]:
+async def list_blocked_users_personal() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all users blocked by the authenticated user on their personal account."""
 
     # Extract parameters for API call
@@ -34055,7 +34175,7 @@ async def list_blocked_users_personal() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def check_user_blocked(username: str = Field(..., description="The GitHub username handle to check for a blocking relationship.")) -> dict[str, Any]:
+async def check_user_blocked(username: str = Field(..., description="The GitHub username handle to check for a blocking relationship.")) -> dict[str, Any] | ToolResult:
     """Determine if a specific user is blocked by the authenticated user. Returns a 204 status if the user is blocked, or 404 if the user is not blocked or has been identified as spam."""
 
     # Construct request model with validation
@@ -34091,7 +34211,7 @@ async def check_user_blocked(username: str = Field(..., description="The GitHub 
 
 # Tags: users
 @mcp.tool()
-async def block_user(username: str = Field(..., description="The GitHub username handle of the user to block.")) -> dict[str, Any]:
+async def block_user(username: str = Field(..., description="The GitHub username handle of the user to block.")) -> dict[str, Any] | ToolResult:
     """Block a GitHub user to prevent interactions with them. Returns a 204 status on success, or 422 if the authenticated user cannot block the specified user."""
 
     # Construct request model with validation
@@ -34127,7 +34247,7 @@ async def block_user(username: str = Field(..., description="The GitHub username
 
 # Tags: users
 @mcp.tool()
-async def unblock_user(username: str = Field(..., description="The GitHub username handle of the user to unblock.")) -> dict[str, Any]:
+async def unblock_user(username: str = Field(..., description="The GitHub username handle of the user to unblock.")) -> dict[str, Any] | ToolResult:
     """Unblock a previously blocked user account. Returns a 204 status code on successful completion."""
 
     # Construct request model with validation
@@ -34163,7 +34283,7 @@ async def unblock_user(username: str = Field(..., description="The GitHub userna
 
 # Tags: codespaces
 @mcp.tool()
-async def list_codespaces(repository_id: int | None = Field(None, description="Filter codespaces to only those associated with a specific repository by its ID.")) -> dict[str, Any]:
+async def list_codespaces(repository_id: int | None = Field(None, description="Filter codespaces to only those associated with a specific repository by its ID.")) -> dict[str, Any] | ToolResult:
     """Lists all codespaces for the authenticated user. Optionally filter results by a specific repository."""
 
     # Construct request model with validation
@@ -34201,7 +34321,7 @@ async def list_codespaces(repository_id: int | None = Field(None, description="F
 
 # Tags: codespaces
 @mcp.tool()
-async def create_codespace_from_pull_request_2(body: _models.CodespacesCreateForAuthenticatedUserBodyV0 | _models.CodespacesCreateForAuthenticatedUserBodyV1 = Field(..., description="Configuration for the new codespace, including the target repository or pull request, optional branch/tag reference, and preferred geographic region for the codespace environment.")) -> dict[str, Any]:
+async def create_codespace_from_pull_request_2(body: _models.CodespacesCreateForAuthenticatedUserBodyV0 | _models.CodespacesCreateForAuthenticatedUserBodyV1 = Field(..., description="Configuration for the new codespace, including the target repository or pull request, optional branch/tag reference, and preferred geographic region for the codespace environment.")) -> dict[str, Any] | ToolResult:
     """Create a new codespace for the authenticated user from a repository or pull request. Requires either a repository ID or pull request reference, but not both."""
 
     # Construct request model with validation
@@ -34240,7 +34360,7 @@ async def create_codespace_from_pull_request_2(body: _models.CodespacesCreateFor
 
 # Tags: codespaces
 @mcp.tool()
-async def list_codespace_secrets_for_user() -> dict[str, Any]:
+async def list_codespace_secrets_for_user() -> dict[str, Any] | ToolResult:
     """Retrieve all development environment secrets available for the authenticated user's codespaces. Secret values are not revealed; only metadata about available secrets is returned."""
 
     # Extract parameters for API call
@@ -34267,7 +34387,7 @@ async def list_codespace_secrets_for_user() -> dict[str, Any]:
 
 # Tags: codespaces
 @mcp.tool()
-async def get_codespaces_public_key() -> dict[str, Any]:
+async def get_codespaces_public_key() -> dict[str, Any] | ToolResult:
     """Retrieve your public key needed to encrypt secrets for GitHub Codespaces. This key must be obtained before creating or updating any Codespaces secrets."""
 
     # Extract parameters for API call
@@ -34294,7 +34414,7 @@ async def get_codespaces_public_key() -> dict[str, Any]:
 
 # Tags: codespaces
 @mcp.tool()
-async def get_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to retrieve.")) -> dict[str, Any]:
+async def get_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a development environment secret available to the authenticated user's codespaces without revealing its encrypted value. Requires Codespaces access and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -34335,7 +34455,7 @@ async def create_or_update_codespace_secret(
     key_id: str = Field(..., description="The ID of the public key used to encrypt the secret value."),
     encrypted_value: str | None = Field(None, description="The encrypted value of the secret, encrypted using LibSodium with the public key from the Get public key endpoint. Must be base64-encoded.", pattern="^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$"),
     selected_repository_ids: list[int | str] | None = Field(None, description="An array of repository IDs that can access this secret. Manage repository access separately using the dedicated repository endpoints."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update an encrypted development environment secret for the authenticated user's codespaces. The secret value must be encrypted using LibSodium with a public key retrieved from the public key endpoint."""
 
     # Construct request model with validation
@@ -34374,7 +34494,7 @@ async def create_or_update_codespace_secret(
 
 # Tags: codespaces
 @mcp.tool()
-async def delete_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to delete from the user's codespaces.")) -> dict[str, Any]:
+async def delete_codespace_secret_for_user(secret_name: str = Field(..., description="The name of the secret to delete from the user's codespaces.")) -> dict[str, Any] | ToolResult:
     """Delete a development environment secret for the authenticated user. Removing the secret revokes access from all codespaces that were previously allowed to use it."""
 
     # Construct request model with validation
@@ -34410,7 +34530,7 @@ async def delete_codespace_secret_for_user(secret_name: str = Field(..., descrip
 
 # Tags: codespaces
 @mcp.tool()
-async def list_repositories_for_secret(secret_name: str = Field(..., description="The name of the user secret for which to list authorized repositories.")) -> dict[str, Any]:
+async def list_repositories_for_secret(secret_name: str = Field(..., description="The name of the user secret for which to list authorized repositories.")) -> dict[str, Any] | ToolResult:
     """List the repositories that have been granted access to use a user's development environment secret. The authenticated user must have Codespaces access to use this endpoint."""
 
     # Construct request model with validation
@@ -34449,7 +34569,7 @@ async def list_repositories_for_secret(secret_name: str = Field(..., description
 async def update_secret_repositories(
     secret_name: str = Field(..., description="The name of the user secret to configure repository access for."),
     selected_repository_ids: list[int] = Field(..., description="An array of repository IDs that will have access to this secret. Provide the complete list of repositories you want to authorize; any repositories not included will be removed from access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update which repositories can access a user's development environment secret. This replaces the entire list of authorized repositories for the specified secret."""
 
     # Construct request model with validation
@@ -34491,7 +34611,7 @@ async def update_secret_repositories(
 async def add_repository_to_codespace_secret(
     secret_name: str = Field(..., description="The name of the Codespaces secret to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the secret's accessible repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a repository to the list of selected repositories that can access a user's Codespaces development environment secret. The authenticated user must have Codespaces access and appropriate OAuth or personal access token scopes."""
 
     # Construct request model with validation
@@ -34530,7 +34650,7 @@ async def add_repository_to_codespace_secret(
 async def remove_repository_from_codespace_secret(
     secret_name: str = Field(..., description="The name of the Codespaces secret to modify."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the secret's access list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a repository from a user's Codespaces development environment secret. This restricts which repositories can access the specified secret."""
 
     # Construct request model with validation
@@ -34566,7 +34686,7 @@ async def remove_repository_from_codespace_secret(
 
 # Tags: codespaces
 @mcp.tool()
-async def get_codespace(codespace_name: str = Field(..., description="The name of the codespace to retrieve information for.")) -> dict[str, Any]:
+async def get_codespace(codespace_name: str = Field(..., description="The name of the codespace to retrieve information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific codespace for the authenticated user. Requires the `codespace` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -34607,7 +34727,7 @@ async def update_codespace(
     machine: str | None = Field(None, description="The machine type to transition this codespace to. Changes take effect the next time the codespace is started."),
     display_name: str | None = Field(None, description="A display name for the codespace."),
     recent_folders: list[str] | None = Field(None, description="An ordered list of folder paths recently opened inside the codespace. Used by clients to determine which folder to load when starting the codespace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a codespace owned by the authenticated user. You can modify the machine type (applied on next start), display name, and recently opened folders."""
 
     # Construct request model with validation
@@ -34646,7 +34766,7 @@ async def update_codespace(
 
 # Tags: codespaces
 @mcp.tool()
-async def delete_codespace(codespace_name: str = Field(..., description="The name of the codespace to delete.")) -> dict[str, Any]:
+async def delete_codespace(codespace_name: str = Field(..., description="The name of the codespace to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
     # Construct request model with validation
@@ -34682,7 +34802,7 @@ async def delete_codespace(codespace_name: str = Field(..., description="The nam
 
 # Tags: codespaces
 @mcp.tool()
-async def export_codespace(codespace_name: str = Field(..., description="The name of the codespace to export.")) -> dict[str, Any]:
+async def export_codespace(codespace_name: str = Field(..., description="The name of the codespace to export.")) -> dict[str, Any] | ToolResult:
     """Initiates an export of a codespace and returns a URL and ID to monitor the export status. Any uncommitted changes will be pushed to the codespace's repository or to a new/existing fork if pushing to the repository is not possible."""
 
     # Construct request model with validation
@@ -34721,7 +34841,7 @@ async def export_codespace(codespace_name: str = Field(..., description="The nam
 async def get_codespace_export_details(
     codespace_name: str = Field(..., description="The name of the codespace to retrieve export details for."),
     export_id: str = Field(..., description="The ID of the export operation to retrieve details for. Use `latest` to get the most recent export."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a codespace export operation. Use this to check the status and details of an exported codespace."""
 
     # Construct request model with validation
@@ -34757,7 +34877,7 @@ async def get_codespace_export_details(
 
 # Tags: codespaces
 @mcp.tool()
-async def list_codespace_machines_available(codespace_name: str = Field(..., description="The name of the codespace for which to list available machine types.")) -> dict[str, Any]:
+async def list_codespace_machines_available(codespace_name: str = Field(..., description="The name of the codespace for which to list available machine types.")) -> dict[str, Any] | ToolResult:
     """List the machine types available for a codespace to transition to. This helps determine which hardware configurations are compatible with the specified codespace."""
 
     # Construct request model with validation
@@ -34793,7 +34913,7 @@ async def list_codespace_machines_available(codespace_name: str = Field(..., des
 
 # Tags: codespaces
 @mcp.tool()
-async def publish_codespace(codespace_name: str = Field(..., description="The name of the codespace to publish. The codespace must be unpublished (not already associated with a repository).")) -> dict[str, Any]:
+async def publish_codespace(codespace_name: str = Field(..., description="The name of the codespace to publish. The codespace must be unpublished (not already associated with a repository).")) -> dict[str, Any] | ToolResult:
     """Publish an unpublished codespace by creating a new repository and associating it with the codespace. The codespace's token will have write permissions to the new repository, enabling you to push changes."""
 
     # Construct request model with validation
@@ -34829,7 +34949,7 @@ async def publish_codespace(codespace_name: str = Field(..., description="The na
 
 # Tags: codespaces
 @mcp.tool()
-async def start_codespace(codespace_name: str = Field(..., description="The name of the codespace to start.")) -> dict[str, Any]:
+async def start_codespace(codespace_name: str = Field(..., description="The name of the codespace to start.")) -> dict[str, Any] | ToolResult:
     """Start a codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
     # Construct request model with validation
@@ -34865,7 +34985,7 @@ async def start_codespace(codespace_name: str = Field(..., description="The name
 
 # Tags: codespaces
 @mcp.tool()
-async def stop_codespace_authenticated(codespace_name: str = Field(..., description="The name of the codespace to stop.")) -> dict[str, Any]:
+async def stop_codespace_authenticated(codespace_name: str = Field(..., description="The name of the codespace to stop.")) -> dict[str, Any] | ToolResult:
     """Stop a running codespace for the authenticated user. Requires the `codespace` OAuth scope."""
 
     # Construct request model with validation
@@ -34901,7 +35021,7 @@ async def stop_codespace_authenticated(codespace_name: str = Field(..., descript
 
 # Tags: users
 @mcp.tool()
-async def set_primary_email_visibility(visibility: Literal["public", "private"] = Field(..., description="Controls whether your primary email address is publicly visible or kept private.")) -> dict[str, Any]:
+async def set_primary_email_visibility(visibility: Literal["public", "private"] = Field(..., description="Controls whether your primary email address is publicly visible or kept private.")) -> dict[str, Any] | ToolResult:
     """Configure the visibility setting for your primary email address. Choose whether your primary email is publicly visible or private."""
 
     # Construct request model with validation
@@ -34939,7 +35059,7 @@ async def set_primary_email_visibility(visibility: Literal["public", "private"] 
 
 # Tags: users
 @mcp.tool()
-async def list_emails() -> dict[str, Any]:
+async def list_emails() -> dict[str, Any] | ToolResult:
     """Retrieve all email addresses associated with the authenticated user, including which email is publicly visible. Requires the `user:email` OAuth scope."""
 
     # Extract parameters for API call
@@ -34966,7 +35086,7 @@ async def list_emails() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def add_email(body: _models.UsersAddEmailForAuthenticatedUserBody | None = Field(None, description="A list of email addresses to add to the user's account. Accepts either an object with an `emails` array or a scalar email string.")) -> dict[str, Any]:
+async def add_email(body: _models.UsersAddEmailForAuthenticatedUserBody | None = Field(None, description="A list of email addresses to add to the user's account. Accepts either an object with an `emails` array or a scalar email string.")) -> dict[str, Any] | ToolResult:
     """Add one or more email addresses to the authenticated user's account. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35005,7 +35125,7 @@ async def add_email(body: _models.UsersAddEmailForAuthenticatedUserBody | None =
 
 # Tags: users
 @mcp.tool()
-async def delete_email(body: _models.UsersDeleteEmailForAuthenticatedUserBody | None = Field(None, description="Object containing one or more email addresses to delete from the account. At least one email address is required. Accepts either an object with an `emails` key containing an array of addresses, or a single email address, or an array of email addresses.")) -> dict[str, Any]:
+async def delete_email(body: _models.UsersDeleteEmailForAuthenticatedUserBody | None = Field(None, description="Object containing one or more email addresses to delete from the account. At least one email address is required. Accepts either an object with an `emails` key containing an array of addresses, or a single email address, or an array of email addresses.")) -> dict[str, Any] | ToolResult:
     """Remove one or more email addresses from the authenticated user's GitHub account. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35044,7 +35164,7 @@ async def delete_email(body: _models.UsersDeleteEmailForAuthenticatedUserBody | 
 
 # Tags: users
 @mcp.tool()
-async def list_followers() -> dict[str, Any]:
+async def list_followers() -> dict[str, Any] | ToolResult:
     """Retrieve a list of users who are following the authenticated user. This provides visibility into your followers on the platform."""
 
     # Extract parameters for API call
@@ -35071,7 +35191,7 @@ async def list_followers() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def list_followed_users() -> dict[str, Any]:
+async def list_followed_users() -> dict[str, Any] | ToolResult:
     """Retrieve the list of users that the authenticated user follows. This allows you to see all accounts the current user is subscribed to."""
 
     # Extract parameters for API call
@@ -35098,7 +35218,7 @@ async def list_followed_users() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def check_user_is_followed(username: str = Field(..., description="The GitHub username to check if it is being followed by the authenticated user.")) -> dict[str, Any]:
+async def check_user_is_followed(username: str = Field(..., description="The GitHub username to check if it is being followed by the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Verify whether the authenticated user is following a specific GitHub user account. Returns true if the user is followed, false otherwise."""
 
     # Construct request model with validation
@@ -35134,7 +35254,7 @@ async def check_user_is_followed(username: str = Field(..., description="The Git
 
 # Tags: users
 @mcp.tool()
-async def follow_user(username: str = Field(..., description="The GitHub username of the account to follow.")) -> dict[str, Any]:
+async def follow_user(username: str = Field(..., description="The GitHub username of the account to follow.")) -> dict[str, Any] | ToolResult:
     """Follow a GitHub user account. Requires the `user:follow` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35170,7 +35290,7 @@ async def follow_user(username: str = Field(..., description="The GitHub usernam
 
 # Tags: users
 @mcp.tool()
-async def unfollow_user(username: str = Field(..., description="The GitHub username handle to unfollow.")) -> dict[str, Any]:
+async def unfollow_user(username: str = Field(..., description="The GitHub username handle to unfollow.")) -> dict[str, Any] | ToolResult:
     """Unfollow a GitHub user. Requires the `user:follow` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35206,7 +35326,7 @@ async def unfollow_user(username: str = Field(..., description="The GitHub usern
 
 # Tags: users
 @mcp.tool()
-async def list_gpg_keys() -> dict[str, Any]:
+async def list_gpg_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all GPG keys associated with the authenticated user's account. Requires `read:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Extract parameters for API call
@@ -35233,7 +35353,7 @@ async def list_gpg_keys() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def add_gpg_key(armored_public_key: str = Field(..., description="A GPG public key in ASCII-armored format. This is the exported public key block that begins with '-----BEGIN PGP PUBLIC KEY BLOCK-----' and ends with '-----END PGP PUBLIC KEY BLOCK-----'.")) -> dict[str, Any]:
+async def add_gpg_key(armored_public_key: str = Field(..., description="A GPG public key in ASCII-armored format. This is the exported public key block that begins with '-----BEGIN PGP PUBLIC KEY BLOCK-----' and ends with '-----END PGP PUBLIC KEY BLOCK-----'.")) -> dict[str, Any] | ToolResult:
     """Add a GPG key to the authenticated user's GitHub account. Requires the `write:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35271,7 +35391,7 @@ async def add_gpg_key(armored_public_key: str = Field(..., description="A GPG pu
 
 # Tags: users
 @mcp.tool()
-async def get_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to retrieve.")) -> dict[str, Any]:
+async def get_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific GPG key for the authenticated user. Requires the `read:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35307,7 +35427,7 @@ async def get_gpg_key(gpg_key_id: int = Field(..., description="The unique ident
 
 # Tags: users
 @mcp.tool()
-async def delete_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to delete.")) -> dict[str, Any]:
+async def delete_gpg_key(gpg_key_id: int = Field(..., description="The unique identifier of the GPG key to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a GPG key from the authenticated user's GitHub account. Requires `admin:gpg_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35343,7 +35463,7 @@ async def delete_gpg_key(gpg_key_id: int = Field(..., description="The unique id
 
 # Tags: apps
 @mcp.tool()
-async def list_app_installations_user() -> dict[str, Any]:
+async def list_app_installations_user() -> dict[str, Any] | ToolResult:
     """List all GitHub App installations that the authenticated user has explicit permission to access. This includes installations on repositories the user owns, collaborates on, or can access through organization membership."""
 
     # Extract parameters for API call
@@ -35373,7 +35493,7 @@ async def list_app_installations_user() -> dict[str, Any]:
 async def add_repository_to_installation(
     installation_id: int = Field(..., description="The unique identifier of the installation to which the repository will be added."),
     repository_id: int = Field(..., description="The unique identifier of the repository to add to the installation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a single repository to an app installation. The authenticated user must have admin access to the repository."""
 
     # Construct request model with validation
@@ -35412,7 +35532,7 @@ async def add_repository_to_installation(
 async def remove_repository_from_app_installation(
     installation_id: int = Field(..., description="The unique identifier of the app installation from which to remove the repository."),
     repository_id: int = Field(..., description="The unique identifier of the repository to remove from the installation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a single repository from an app installation. The authenticated user must have admin access to the repository, and the installation must have repository selection set to 'selected'."""
 
     # Construct request model with validation
@@ -35448,7 +35568,7 @@ async def remove_repository_from_app_installation(
 
 # Tags: interactions
 @mcp.tool()
-async def get_interaction_restrictions() -> dict[str, Any]:
+async def get_interaction_restrictions() -> dict[str, Any] | ToolResult:
     """Retrieve the current interaction restrictions applied to your public repositories, including which types of GitHub users can interact and when the restriction expires."""
 
     # Extract parameters for API call
@@ -35481,7 +35601,7 @@ async def list_issues_assigned(
     labels: str | None = Field(None, description="Filter by one or more labels. Provide as comma-separated label names to match issues with any of the specified labels."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results, either ascending or descending by the sort field."),
     since: str | None = Field(None, description="Only return issues updated after this timestamp. Provide in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve issues assigned to the authenticated user across owned and member repositories. Note that pull requests are included in results and can be identified by the `pull_request` key."""
 
     # Construct request model with validation
@@ -35519,7 +35639,7 @@ async def list_issues_assigned(
 
 # Tags: users
 @mcp.tool()
-async def list_ssh_keys() -> dict[str, Any]:
+async def list_ssh_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all public SSH keys associated with the authenticated user's GitHub account. Requires `read:public_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Extract parameters for API call
@@ -35546,7 +35666,7 @@ async def list_ssh_keys() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def add_ssh_key(key: str = Field(..., description="The public SSH key to add to your GitHub account. Must be in a valid SSH key format (RSA, DSS, ED25519, or ECDSA).", pattern="^ssh-(rsa|dss|ed25519) |^ecdsa-sha2-nistp(256|384|521) ")) -> dict[str, Any]:
+async def add_ssh_key(key: str = Field(..., description="The public SSH key to add to your GitHub account. Must be in a valid SSH key format (RSA, DSS, ED25519, or ECDSA).", pattern="^ssh-(rsa|dss|ed25519) |^ecdsa-sha2-nistp(256|384|521) ")) -> dict[str, Any] | ToolResult:
     """Add a public SSH key to the authenticated user's GitHub account. Requires the `write:public_key` OAuth scope or personal access token permission."""
 
     # Construct request model with validation
@@ -35584,7 +35704,7 @@ async def add_ssh_key(key: str = Field(..., description="The public SSH key to a
 
 # Tags: users
 @mcp.tool()
-async def get_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to retrieve.")) -> dict[str, Any]:
+async def get_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific public SSH key for the authenticated user. Requires the `read:public_key` scope."""
 
     # Construct request model with validation
@@ -35620,7 +35740,7 @@ async def get_ssh_key(key_id: int = Field(..., description="The unique identifie
 
 # Tags: users
 @mcp.tool()
-async def delete_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to delete.")) -> dict[str, Any]:
+async def delete_ssh_key(key_id: int = Field(..., description="The unique identifier of the SSH key to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a public SSH key from the authenticated user's GitHub account. Requires `admin:public_key` scope for OAuth apps and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -35656,7 +35776,7 @@ async def delete_ssh_key(key_id: int = Field(..., description="The unique identi
 
 # Tags: apps
 @mcp.tool()
-async def list_subscriptions() -> dict[str, Any]:
+async def list_subscriptions() -> dict[str, Any] | ToolResult:
     """Retrieves all active marketplace subscriptions for the authenticated user. This includes any active plans or licenses the user has purchased."""
 
     # Extract parameters for API call
@@ -35683,7 +35803,7 @@ async def list_subscriptions() -> dict[str, Any]:
 
 # Tags: apps
 @mcp.tool()
-async def list_subscriptions_stubbed() -> dict[str, Any]:
+async def list_subscriptions_stubbed() -> dict[str, Any] | ToolResult:
     """Retrieves all active marketplace subscriptions for the authenticated user. This endpoint provides a view of the user's current subscription status and details."""
 
     # Extract parameters for API call
@@ -35710,7 +35830,7 @@ async def list_subscriptions_stubbed() -> dict[str, Any]:
 
 # Tags: orgs
 @mcp.tool()
-async def list_organization_memberships(state: Literal["active", "pending"] | None = Field(None, description="Filter memberships by their current state. Returns both active and pending memberships if not specified.")) -> dict[str, Any]:
+async def list_organization_memberships(state: Literal["active", "pending"] | None = Field(None, description="Filter memberships by their current state. Returns both active and pending memberships if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organization memberships for the authenticated user. Returns both active and pending memberships by default, or filter by membership state."""
 
     # Construct request model with validation
@@ -35748,7 +35868,7 @@ async def list_organization_memberships(state: Literal["active", "pending"] | No
 
 # Tags: orgs
 @mcp.tool()
-async def get_organization_membership_authenticated(org: str = Field(..., description="The name of the organization. Organization names are case-insensitive.")) -> dict[str, Any]:
+async def get_organization_membership_authenticated(org: str = Field(..., description="The name of the organization. Organization names are case-insensitive.")) -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated user's membership status in a specified organization. Returns membership details if the user is an active or pending member, otherwise returns a 404 error."""
 
     # Construct request model with validation
@@ -35787,7 +35907,7 @@ async def get_organization_membership_authenticated(org: str = Field(..., descri
 async def activate_organization_membership(
     org: str = Field(..., description="The name of the organization. Organization names are case-insensitive."),
     state: Literal["active"] = Field(..., description="The desired membership state. Only active membership status is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Activate an organization membership for the authenticated user by converting a pending invitation to active status. The user must have a pending invitation from the organization to perform this action."""
 
     # Construct request model with validation
@@ -35826,7 +35946,7 @@ async def activate_organization_membership(
 
 # Tags: migrations
 @mcp.tool()
-async def list_migrations() -> dict[str, Any]:
+async def list_migrations() -> dict[str, Any] | ToolResult:
     """Retrieves all migrations that have been initiated by the authenticated user. This includes migrations in progress, completed, and failed states."""
 
     # Extract parameters for API call
@@ -35853,7 +35973,7 @@ async def list_migrations() -> dict[str, Any]:
 
 # Tags: migrations
 @mcp.tool()
-async def get_migration_status_user(migration_id: int = Field(..., description="The unique identifier of the migration to retrieve status for.")) -> dict[str, Any]:
+async def get_migration_status_user(migration_id: int = Field(..., description="The unique identifier of the migration to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a user migration by its unique identifier. The response includes the migration state (pending, exporting, exported, or failed) and can be used to track progress or determine when the migration archive is ready for download."""
 
     # Construct request model with validation
@@ -35889,7 +36009,7 @@ async def get_migration_status_user(migration_id: int = Field(..., description="
 
 # Tags: migrations
 @mcp.tool()
-async def download_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve the archive.")) -> dict[str, Any]:
+async def download_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve the archive.")) -> dict[str, Any] | ToolResult:
     """Download a user migration archive as a tar.gz file containing repository data, metadata, and attachments. The archive includes JSON files for various GitHub objects and Git repository data."""
 
     # Construct request model with validation
@@ -35925,7 +36045,7 @@ async def download_migration_archive_user(migration_id: int = Field(..., descrip
 
 # Tags: migrations
 @mcp.tool()
-async def delete_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration whose archive should be deleted.")) -> dict[str, Any]:
+async def delete_migration_archive_user(migration_id: int = Field(..., description="The unique identifier of the migration whose archive should be deleted.")) -> dict[str, Any] | ToolResult:
     """Delete a user migration archive for a completed migration. Downloadable archives are automatically deleted after seven days, but you can manually remove them earlier. Migration metadata remains available even after the archive is deleted."""
 
     # Construct request model with validation
@@ -35964,7 +36084,7 @@ async def delete_migration_archive_user(migration_id: int = Field(..., descripti
 async def unlock_migration_repository_user(
     migration_id: int = Field(..., description="The unique identifier of the migration that locked the repository."),
     repo_name: str = Field(..., description="The name of the repository to unlock."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlock a repository that was locked during a user migration. After migration completes, unlock repositories to resume normal usage or delete them if no longer needed."""
 
     # Construct request model with validation
@@ -36000,7 +36120,7 @@ async def unlock_migration_repository_user(
 
 # Tags: migrations
 @mcp.tool()
-async def list_migration_repositories_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve associated repositories.")) -> dict[str, Any]:
+async def list_migration_repositories_user(migration_id: int = Field(..., description="The unique identifier of the migration for which to retrieve associated repositories.")) -> dict[str, Any] | ToolResult:
     """Lists all repositories associated with a specific user migration. Use this to retrieve the repositories that were migrated as part of a migration operation."""
 
     # Construct request model with validation
@@ -36036,7 +36156,7 @@ async def list_migration_repositories_user(migration_id: int = Field(..., descri
 
 # Tags: orgs
 @mcp.tool()
-async def list_organizations_authenticated() -> dict[str, Any]:
+async def list_organizations_authenticated() -> dict[str, Any] | ToolResult:
     """Retrieve all organizations for the authenticated user. The list is filtered based on the authorization scopes provided; OAuth app tokens and personal access tokens (classic) require at least `user` or `read:org` scope, while fine-grained access tokens will return an empty list."""
 
     # Extract parameters for API call
@@ -36066,7 +36186,7 @@ async def list_organizations_authenticated() -> dict[str, Any]:
 async def list_packages(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, container images pushed to ghcr.io use `container`, and `docker` finds images in the legacy Docker registry even if migrated to Container registry."),
     visibility: Literal["public", "private", "internal"] | None = Field(None, description="Filter results by package visibility level. The `internal` visibility is only supported for registries with granular permissions; for other ecosystems it is treated as `private`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all packages owned by the authenticated user within their namespace. Requires `read:packages` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -36107,7 +36227,7 @@ async def list_packages(
 async def get_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` retrieves images from the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific package owned by the authenticated user. Requires `read:packages` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -36146,7 +36266,7 @@ async def get_package(
 async def delete_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type to delete. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a package owned by the authenticated user. Public packages with more than 5,000 downloads cannot be deleted; contact GitHub support in such cases."""
 
     # Construct request model with validation
@@ -36185,7 +36305,7 @@ async def delete_package(
 async def restore_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package to restore. Gradle packages use 'maven', container images use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package owned by the authenticated user. The package must have been deleted within the last 30 days and the same package namespace and version must still be available."""
 
     # Construct request model with validation
@@ -36225,7 +36345,7 @@ async def list_package_versions(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
     state: Literal["active", "deleted"] | None = Field(None, description="Filter package versions by their lifecycle state. Use `active` for current versions or `deleted` for removed versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a package owned by the authenticated user. Requires `read:packages` OAuth scope or personal access token (classic) with appropriate permissions."""
 
     # Construct request model with validation
@@ -36268,7 +36388,7 @@ async def get_package_version(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to ghcr.io use `container`, and `docker` retrieves images from the legacy Docker registry (docker.pkg.github.com)."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
     package_version_id: int = Field(..., description="The unique numeric identifier of the package version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific package version owned by the authenticated user. Requires `read:packages` scope for OAuth apps and personal access tokens."""
 
     # Construct request model with validation
@@ -36308,7 +36428,7 @@ async def delete_package_version_authenticated(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package type (e.g., npm, maven, docker). Gradle packages use 'maven', and Container registry images use 'container'."),
     package_name: str = Field(..., description="The name of the package to delete a version from."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific package version owned by the authenticated user. Public packages with more than 5,000 downloads cannot be deleted; contact GitHub support in such cases."""
 
     # Construct request model with validation
@@ -36348,7 +36468,7 @@ async def restore_package_version_for_authenticated_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The type of package registry (npm, Maven, RubyGems, Docker, NuGet, or Container)."),
     package_name: str = Field(..., description="The name of the package to restore."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to restore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package version for the authenticated user. The package must have been deleted within the last 30 days and the same package namespace and version must still be available."""
 
     # Construct request model with validation
@@ -36384,7 +36504,7 @@ async def restore_package_version_for_authenticated_user(
 
 # Tags: users
 @mcp.tool()
-async def list_public_emails() -> dict[str, Any]:
+async def list_public_emails() -> dict[str, Any] | ToolResult:
     """Retrieve all publicly visible email addresses for the authenticated user. Requires the `user:email` scope for OAuth apps and personal access tokens (classic)."""
 
     # Extract parameters for API call
@@ -36417,7 +36537,7 @@ async def list_repositories(
     type_: Literal["all", "owner", "public", "private", "member"] | None = Field(None, alias="type", description="Filter repositories by type. Cannot be used together with visibility or affiliation parameters. Defaults to all repository types."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results. Defaults to ascending when sorting by full_name, otherwise descending."),
     since: str | None = Field(None, description="Return only repositories updated after this timestamp in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List repositories accessible to the authenticated user, including owned repositories, collaborations, and organization memberships. Filter and sort results by visibility, affiliation, type, and update time."""
 
     # Construct request model with validation
@@ -36477,7 +36597,7 @@ async def create_repository(
     merge_commit_title: Literal["PR_TITLE", "MERGE_MESSAGE"] | None = Field(None, description="The default title format for merge commits. Use `PR_TITLE` to default to the pull request's title, or `MERGE_MESSAGE` for the classic merge message format."),
     merge_commit_message: Literal["PR_BODY", "PR_TITLE", "BLANK"] | None = Field(None, description="The default message format for merge commits. Use `PR_BODY` for the pull request's body, `PR_TITLE` for the pull request's title, or `BLANK` for a blank message."),
     is_template: bool | None = Field(None, description="Whether this repository acts as a template that can be used to generate new repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new repository for the authenticated user. Requires `public_repo` or `repo` scope for public repositories, and `repo` scope for private repositories."""
 
     # Construct request model with validation
@@ -36515,7 +36635,7 @@ async def create_repository(
 
 # Tags: repos
 @mcp.tool()
-async def list_repository_invitations_for_user() -> dict[str, Any]:
+async def list_repository_invitations_for_user() -> dict[str, Any] | ToolResult:
     """List all open repository invitations for the authenticated user. Returns pending invitations to collaborate on repositories."""
 
     # Extract parameters for API call
@@ -36542,7 +36662,7 @@ async def list_repository_invitations_for_user() -> dict[str, Any]:
 
 # Tags: repos
 @mcp.tool()
-async def accept_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to accept.")) -> dict[str, Any]:
+async def accept_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to accept.")) -> dict[str, Any] | ToolResult:
     """Accept a repository invitation for the authenticated user. This action confirms the user's intent to join the repository and grants them access based on the invitation's permissions."""
 
     # Construct request model with validation
@@ -36578,7 +36698,7 @@ async def accept_repository_invitation(invitation_id: int = Field(..., descripti
 
 # Tags: repos
 @mcp.tool()
-async def decline_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to decline.")) -> dict[str, Any]:
+async def decline_repository_invitation(invitation_id: int = Field(..., description="The unique identifier of the repository invitation to decline.")) -> dict[str, Any] | ToolResult:
     """Decline a repository invitation for the authenticated user. This removes the invitation and prevents the user from accessing the repository."""
 
     # Construct request model with validation
@@ -36614,7 +36734,7 @@ async def decline_repository_invitation(invitation_id: int = Field(..., descript
 
 # Tags: users
 @mcp.tool()
-async def list_social_accounts() -> dict[str, Any]:
+async def list_social_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all social accounts connected to the authenticated user's profile. This includes any third-party social media or identity provider accounts that have been linked."""
 
     # Extract parameters for API call
@@ -36641,7 +36761,7 @@ async def list_social_accounts() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def add_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to add. Each URL should point to a valid social media profile.")) -> dict[str, Any]:
+async def add_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to add. Each URL should point to a valid social media profile.")) -> dict[str, Any] | ToolResult:
     """Add one or more social media accounts to the authenticated user's profile. Requires the `user` scope for OAuth app tokens and personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -36679,7 +36799,7 @@ async def add_social_accounts(account_urls: list[str] = Field(..., description="
 
 # Tags: users
 @mcp.tool()
-async def delete_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to delete. Each URL should point to the full profile address on the respective social platform.")) -> dict[str, Any]:
+async def delete_social_accounts(account_urls: list[str] = Field(..., description="Array of complete URLs for the social media profiles to delete. Each URL should point to the full profile address on the respective social platform.")) -> dict[str, Any] | ToolResult:
     """Remove one or more social media accounts from the authenticated user's profile. Requires the `user` OAuth scope."""
 
     # Construct request model with validation
@@ -36717,7 +36837,7 @@ async def delete_social_accounts(account_urls: list[str] = Field(..., descriptio
 
 # Tags: activity
 @mcp.tool()
-async def list_starred_repositories(direction: Literal["asc", "desc"] | None = Field(None, description="Sort order for the results. Use ascending to show oldest stars first, or descending to show newest stars first.")) -> dict[str, Any]:
+async def list_starred_repositories(direction: Literal["asc", "desc"] | None = Field(None, description="Sort order for the results. Use ascending to show oldest stars first, or descending to show newest stars first.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of repositories that the authenticated user has starred. Results can be sorted in ascending or descending order by star creation timestamp."""
 
     # Construct request model with validation
@@ -36758,7 +36878,7 @@ async def list_starred_repositories(direction: Literal["asc", "desc"] | None = F
 async def check_repository_starred(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether the authenticated user has starred a specific repository. Returns a 204 status if starred, 404 if not."""
 
     # Construct request model with validation
@@ -36797,7 +36917,7 @@ async def check_repository_starred(
 async def star_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is not case sensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is not case sensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Star a repository for the authenticated user. This action marks the repository as starred and adds it to the user's starred list."""
 
     # Construct request model with validation
@@ -36836,7 +36956,7 @@ async def star_repository(
 async def unstar_repository(
     owner: str = Field(..., description="The account owner of the repository. The name is case-insensitive."),
     repo: str = Field(..., description="The name of the repository without the `.git` extension. The name is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a starred repository from the authenticated user's starred list. The repository must have been previously starred by the user."""
 
     # Construct request model with validation
@@ -36872,7 +36992,7 @@ async def unstar_repository(
 
 # Tags: activity
 @mcp.tool()
-async def list_watched_repositories() -> dict[str, Any]:
+async def list_watched_repositories() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all repositories that the authenticated user is currently watching. This includes repositories the user has subscribed to for notifications and updates."""
 
     # Extract parameters for API call
@@ -36899,7 +37019,7 @@ async def list_watched_repositories() -> dict[str, Any]:
 
 # Tags: teams
 @mcp.tool()
-async def list_teams_authenticated() -> dict[str, Any]:
+async def list_teams_authenticated() -> dict[str, Any] | ToolResult:
     """Retrieve all teams across all organizations to which the authenticated user belongs. Requires appropriate OAuth scopes or fine-grained personal access token with organization resource ownership."""
 
     # Extract parameters for API call
@@ -36926,7 +37046,7 @@ async def list_teams_authenticated() -> dict[str, Any]:
 
 # Tags: users
 @mcp.tool()
-async def get_user(account_id: int = Field(..., description="The unique numeric identifier for the GitHub user account. This ID is durable and does not change even if the user's login name changes.")) -> dict[str, Any]:
+async def get_user(account_id: int = Field(..., description="The unique numeric identifier for the GitHub user account. This ID is durable and does not change even if the user's login name changes.")) -> dict[str, Any] | ToolResult:
     """Retrieve publicly available information about a GitHub user by their account ID. Returns user profile data including name, bio, location, and publicly visible email address if set."""
 
     # Construct request model with validation
@@ -36967,7 +37087,7 @@ async def create_draft_item_user(
     project_number: int = Field(..., description="The project's number, which uniquely identifies the project within the user's account."),
     title: str = Field(..., description="The title of the draft issue item. This is the primary heading for the draft."),
     body: str | None = Field(None, description="The body content of the draft issue item. This field provides additional details and context for the draft."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a draft issue item in a user-owned project. Draft items allow you to prepare issues before formally adding them to the project."""
 
     # Construct request model with validation
@@ -37006,7 +37126,7 @@ async def create_draft_item_user(
 
 # Tags: users
 @mcp.tool()
-async def list_users(since: int | None = Field(None, description="Filter results to return only users with an ID greater than this value. Use this parameter for pagination by passing the ID of the last user from the previous page.")) -> dict[str, Any]:
+async def list_users(since: int | None = Field(None, description="Filter results to return only users with an ID greater than this value. Use this parameter for pagination by passing the ID of the last user from the previous page.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users in signup order, including personal and organization accounts. Pagination is controlled exclusively through the `since` parameter using Link headers for subsequent pages."""
 
     # Construct request model with validation
@@ -37051,7 +37171,7 @@ async def create_project_view_user(
     layout: Literal["table", "board", "roadmap"] = Field(..., description="The layout type that determines how project items are displayed."),
     filter_: str | None = Field(None, alias="filter", description="Optional filter query to control which items appear in the view. Use filter syntax to match issues, pull requests, and other project items by status, labels, assignees, and other criteria."),
     visible_fields: list[int] | None = Field(None, description="Optional array of field IDs to display in the view. Not applicable for roadmap layouts. If omitted, default visible fields will be used for table and board layouts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view in a user-owned project to customize how items are displayed and filtered. Views support different layouts (table, board, roadmap) and can be configured with filters and visible fields."""
 
     # Construct request model with validation
@@ -37090,7 +37210,7 @@ async def create_project_view_user(
 
 # Tags: users
 @mcp.tool()
-async def get_user_by_username(username: str = Field(..., description="The GitHub username handle to look up. Case-insensitive identifier for the user account.")) -> dict[str, Any]:
+async def get_user_by_username(username: str = Field(..., description="The GitHub username handle to look up. Case-insensitive identifier for the user account.")) -> dict[str, Any] | ToolResult:
     """Retrieve publicly available information about a GitHub user account. Returns profile data including public email if set, with access restrictions for Enterprise Managed Users."""
 
     # Construct request model with validation
@@ -37130,7 +37250,7 @@ async def list_attestations_by_digests_user(
     username: str = Field(..., description="The GitHub username whose attestations should be retrieved."),
     subject_digests: list[str] = Field(..., description="List of subject digests to fetch attestations for. Each digest identifies an artifact for which attestations are requested.", min_length=1, max_length=1024),
     predicate_type: str | None = Field(None, description="Optional filter to retrieve only attestations matching a specific predicate type. Supports standard types (provenance, sbom, release) or custom freeform text values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve artifact attestations for a user across multiple subject digests. Results are filtered based on the authenticated user's repository permissions and require the `attestations:read` permission for fine-grained access tokens."""
 
     # Construct request model with validation
@@ -37172,7 +37292,7 @@ async def list_attestations_by_digests_user(
 async def delete_attestations_user(
     username: str = Field(..., description="The GitHub user account handle whose attestations will be deleted."),
     body: _models.UsersDeleteAttestationsBulkBodyV0 | _models.UsersDeleteAttestationsBulkBodyV1 = Field(..., description="Request payload containing deletion criteria. Provide either an array of subject digests (in format algorithm:hexvalue) or an array of attestation IDs, but not both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove artifact attestations in bulk for a GitHub user by specifying either subject digests or attestation IDs. Exactly one of these criteria must be provided."""
 
     # Construct request model with validation
@@ -37215,7 +37335,7 @@ async def delete_attestations_user(
 async def delete_attestation_by_subject_digest_user(
     username: str = Field(..., description="The GitHub username (handle) of the account whose attestation should be deleted."),
     subject_digest: str = Field(..., description="The subject digest that uniquely identifies the attestation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an artifact attestation for a GitHub user by its subject digest. This removes the attestation record associated with the specified digest."""
 
     # Construct request model with validation
@@ -37254,7 +37374,7 @@ async def delete_attestation_by_subject_digest_user(
 async def delete_attestation_user(
     username: str = Field(..., description="The GitHub username (handle) of the account that owns the repository containing the attestation."),
     attestation_id: int = Field(..., description="The unique identifier of the attestation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an artifact attestation by ID that is associated with a repository owned by a user. This operation removes the attestation record permanently."""
 
     # Construct request model with validation
@@ -37294,7 +37414,7 @@ async def list_attestations_user(
     username: str = Field(..., description="The GitHub user account handle whose repositories will be searched for attestations."),
     subject_digest: str = Field(..., description="The cryptographic digest identifying the artifact subject for which to retrieve attestations."),
     predicate_type: str | None = Field(None, description="Filter attestations by predicate type to narrow results to specific attestation categories or custom types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve artifact attestations for a specific subject digest across repositories owned by a user. Results are filtered based on the authenticated user's repository access permissions and require cryptographic verification before use."""
 
     # Construct request model with validation
@@ -37333,7 +37453,7 @@ async def list_attestations_user(
 
 # Tags: activity
 @mcp.tool()
-async def list_user_events(username: str = Field(..., description="The GitHub username whose events should be listed.")) -> dict[str, Any]:
+async def list_user_events(username: str = Field(..., description="The GitHub username whose events should be listed.")) -> dict[str, Any] | ToolResult:
     """List events for a GitHub user. If authenticated as the specified user, private events are included; otherwise only public events are returned. Note: This API is not optimized for real-time use cases and may have latency of 30 seconds to 6 hours depending on time of day."""
 
     # Construct request model with validation
@@ -37372,7 +37492,7 @@ async def list_user_events(username: str = Field(..., description="The GitHub us
 async def list_organization_events_for_user(
     username: str = Field(..., description="The GitHub username whose organization events should be retrieved. The authenticated user must have access to view this user's organization dashboard."),
     org: str = Field(..., description="The organization name to filter events for. Organization names are case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve organization events for the authenticated user. This endpoint provides the user's organization dashboard view and requires authentication as the specified user."""
 
     # Construct request model with validation
@@ -37408,7 +37528,7 @@ async def list_organization_events_for_user(
 
 # Tags: activity
 @mcp.tool()
-async def list_user_public_events(username: str = Field(..., description="The GitHub username (handle) for the user whose public events you want to retrieve.")) -> dict[str, Any]:
+async def list_user_public_events(username: str = Field(..., description="The GitHub username (handle) for the user whose public events you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events for a GitHub user. Note: This API is not optimized for real-time use cases and may have event latency ranging from 30 seconds to 6 hours depending on the time of day."""
 
     # Construct request model with validation
@@ -37444,7 +37564,7 @@ async def list_user_public_events(username: str = Field(..., description="The Gi
 
 # Tags: users
 @mcp.tool()
-async def list_followers_by_username(username: str = Field(..., description="The GitHub username whose followers you want to retrieve.")) -> dict[str, Any]:
+async def list_followers_by_username(username: str = Field(..., description="The GitHub username whose followers you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of users who are following the specified GitHub user account."""
 
     # Construct request model with validation
@@ -37480,7 +37600,7 @@ async def list_followers_by_username(username: str = Field(..., description="The
 
 # Tags: users
 @mcp.tool()
-async def list_following(username: str = Field(..., description="The GitHub username (handle) of the user whose following list should be retrieved.")) -> dict[str, Any]:
+async def list_following(username: str = Field(..., description="The GitHub username (handle) of the user whose following list should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of users that a specified GitHub user follows. This provides insight into the accounts and projects a user is interested in tracking."""
 
     # Construct request model with validation
@@ -37519,7 +37639,7 @@ async def list_following(username: str = Field(..., description="The GitHub user
 async def check_user_following(
     username: str = Field(..., description="The GitHub username of the user whose following list will be checked."),
     target_user: str = Field(..., description="The GitHub username of the target user to check if they are being followed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Determine whether a specific user follows another user on GitHub. Returns true if the follower relationship exists, false otherwise."""
 
     # Construct request model with validation
@@ -37558,7 +37678,7 @@ async def check_user_following(
 async def list_user_gists(
     username: str = Field(..., description="The GitHub username whose gists should be listed."),
     since: str | None = Field(None, description="Filter results to show only gists last updated after this timestamp in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all public gists created by a specified GitHub user. Results can be filtered to show only gists updated after a given timestamp."""
 
     # Construct request model with validation
@@ -37597,7 +37717,7 @@ async def list_user_gists(
 
 # Tags: users
 @mcp.tool()
-async def list_gpg_keys_by_username(username: str = Field(..., description="The GitHub username whose GPG keys should be retrieved.")) -> dict[str, Any]:
+async def list_gpg_keys_by_username(username: str = Field(..., description="The GitHub username whose GPG keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all GPG keys associated with a GitHub user account. This information is publicly accessible."""
 
     # Construct request model with validation
@@ -37637,7 +37757,7 @@ async def get_user_hovercard(
     username: str = Field(..., description="The GitHub username handle for the user whose hovercard information you want to retrieve."),
     subject_type: Literal["organization", "repository", "issue", "pull_request"] | None = Field(None, description="The type of subject context to include in the hovercard response. When specified, must be paired with the corresponding subject_id to provide relationship context."),
     subject_id: str | None = Field(None, description="The unique identifier for the subject specified in subject_type. Required when subject_type is provided to establish the contextual relationship."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve contextual information about a GitHub user, including their activity related to pull requests, issues, repositories, and organizations. Optionally provide subject context (repository, organization, issue, or pull request) to get more detailed relationship information."""
 
     # Construct request model with validation
@@ -37676,7 +37796,7 @@ async def get_user_hovercard(
 
 # Tags: apps
 @mcp.tool()
-async def get_user_installation(username: str = Field(..., description="The GitHub username (handle) for which to retrieve the app installation information.")) -> dict[str, Any]:
+async def get_user_installation(username: str = Field(..., description="The GitHub username (handle) for which to retrieve the app installation information.")) -> dict[str, Any] | ToolResult:
     """Retrieve the authenticated GitHub App's installation information for a specific user. Requires JWT authentication as a GitHub App."""
 
     # Construct request model with validation
@@ -37712,7 +37832,7 @@ async def get_user_installation(username: str = Field(..., description="The GitH
 
 # Tags: users
 @mcp.tool()
-async def list_public_keys(username: str = Field(..., description="The GitHub username whose public keys should be retrieved.")) -> dict[str, Any]:
+async def list_public_keys(username: str = Field(..., description="The GitHub username whose public keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all verified public SSH keys for a GitHub user. This endpoint is publicly accessible and does not require authentication."""
 
     # Construct request model with validation
@@ -37748,7 +37868,7 @@ async def list_public_keys(username: str = Field(..., description="The GitHub us
 
 # Tags: orgs
 @mcp.tool()
-async def list_user_organizations(username: str = Field(..., description="The GitHub username (handle) for the user whose public organization memberships you want to retrieve.")) -> dict[str, Any]:
+async def list_user_organizations(username: str = Field(..., description="The GitHub username (handle) for the user whose public organization memberships you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """List public organization memberships for a specified GitHub user. This operation only returns public memberships; use the authenticated user organizations endpoint to retrieve both public and private memberships for the current user."""
 
     # Construct request model with validation
@@ -37788,7 +37908,7 @@ async def list_user_packages(
     username: str = Field(..., description="The GitHub username whose packages to list."),
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type to filter by. Gradle packages use `maven`, Docker images in the Container registry use `container`, and `docker` finds images in the legacy Docker registry."),
     visibility: Literal["public", "private", "internal"] | None = Field(None, description="Filter results by package visibility level. The `internal` visibility is only supported for registries with granular permissions; for other ecosystems it is treated as `private`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all packages in a user's namespace that the requesting user has access to. Requires `read:packages` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -37831,7 +37951,7 @@ async def get_package_public(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` retrieves images from the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve."),
     username: str = Field(..., description="The GitHub username of the package owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a specific package owned by a user. Requires `read:packages` scope for OAuth app tokens or personal access tokens (classic)."""
 
     # Construct request model with validation
@@ -37871,7 +37991,7 @@ async def delete_user_package(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. Gradle packages use 'maven', Docker images pushed to ghcr.io use 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to delete."),
     username: str = Field(..., description="The GitHub username of the package owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an entire package for a user. Public packages with more than 5,000 downloads cannot be deleted; contact GitHub support in such cases. Admin permissions are required for registries with granular permissions."""
 
     # Construct request model with validation
@@ -37911,7 +38031,7 @@ async def restore_package_for_user(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package registry type. GitHub's Gradle registry uses 'maven', Container registry uses 'container', and 'docker' finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to restore."),
     username: str = Field(..., description="The GitHub username of the package owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package for a user. The package must have been deleted within the last 30 days and the same package namespace and version must still be available and not reused."""
 
     # Construct request model with validation
@@ -37951,7 +38071,7 @@ async def list_package_versions_public(
     package_type: Literal["npm", "maven", "rubygems", "docker", "nuget", "container"] = Field(..., description="The package ecosystem type. Gradle packages use `maven`, Docker images pushed to GitHub Container Registry use `container`, and `docker` finds images in the legacy Docker registry."),
     package_name: str = Field(..., description="The name of the package to retrieve versions for."),
     username: str = Field(..., description="The GitHub username of the package owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all versions of a public package owned by a specified user. Requires `read:packages` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -37992,7 +38112,7 @@ async def get_package_version_public(
     package_name: str = Field(..., description="The name of the package to retrieve."),
     package_version_id: int = Field(..., description="The unique numeric identifier for the specific package version."),
     username: str = Field(..., description="The GitHub username of the package owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific version of a public package owned by a user. Requires `read:packages` OAuth scope or personal access token (classic)."""
 
     # Construct request model with validation
@@ -38033,7 +38153,7 @@ async def delete_package_version_user(
     package_name: str = Field(..., description="The name of the package to delete a version from."),
     username: str = Field(..., description="The GitHub username of the account that owns the package."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific package version for a user account. Public packages with more than 5,000 downloads cannot be deleted; contact GitHub support for assistance in such cases."""
 
     # Construct request model with validation
@@ -38074,7 +38194,7 @@ async def restore_package_version_for_user(
     package_name: str = Field(..., description="The name of the package to restore."),
     username: str = Field(..., description="The GitHub username of the package owner."),
     package_version_id: int = Field(..., description="The unique identifier of the package version to restore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore a deleted package version for a user. The package must have been deleted within the last 30 days and the same package namespace and version must still be available."""
 
     # Construct request model with validation
@@ -38113,7 +38233,7 @@ async def restore_package_version_for_user(
 async def list_user_projects(
     username: str = Field(..., description="The GitHub username whose projects should be listed."),
     q: str | None = Field(None, description="Filter results to include only projects of a specified type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all projects owned by a specific GitHub user that are accessible to the authenticated user. Optionally filter results by project type."""
 
     # Construct request model with validation
@@ -38155,7 +38275,7 @@ async def list_user_projects(
 async def get_user_project(
     project_number: int = Field(..., description="The unique numeric identifier for the project within the user's project collection."),
     username: str = Field(..., description="The GitHub username (handle) of the user who owns the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific project owned by a GitHub user. Returns detailed information about the project identified by its number."""
 
     # Construct request model with validation
@@ -38194,7 +38314,7 @@ async def get_user_project(
 async def list_project_fields_user(
     project_number: int = Field(..., description="The numeric identifier of the GitHub Projects (V2) board."),
     username: str = Field(..., description="The GitHub username of the project owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all fields configured for a specific user-owned GitHub Projects (V2) board. Fields define the custom properties and metadata available for tracking issues and pull requests within the project."""
 
     # Construct request model with validation
@@ -38237,7 +38357,7 @@ async def add_project_field_user(
     data_type: Literal["date", "iteration", "number", "single_select", "text"] = Field(..., description="The data type for the field. Single select fields require at least one option to be provided via single_select_options."),
     single_select_options: list[Any] | None = Field(None, description="The list of options available for single select fields. Required when data_type is 'single_select'. Each option should be provided as a distinct item in the array."),
     iteration_configuration: _models.ProjectsAddFieldForUserBodyIterationConfiguration | None = Field(None, description="Configuration settings for iteration fields, such as duration and start date. Required when data_type is 'iteration'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new field to a user-owned GitHub project. The field can be of various types including text, number, date, iteration, or single select with configurable options."""
 
     # Construct request model with validation
@@ -38280,7 +38400,7 @@ async def get_project_field_user(
     project_number: int = Field(..., description="The project's unique number identifier within the user's account."),
     field_id: int = Field(..., description="The unique identifier of the field to retrieve from the project."),
     username: str = Field(..., description="The GitHub username (handle) of the account that owns the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific field from a user-owned GitHub Projects (V2) board. Fields define custom properties and metadata for project items."""
 
     # Construct request model with validation
@@ -38321,7 +38441,7 @@ async def list_project_items_user(
     username: str = Field(..., description="The GitHub username of the project owner."),
     q: str | None = Field(None, description="Filter items using a search query. Supports the same filtering syntax as GitHub Projects views."),
     fields: str | list[str] | None = Field(None, description="Restrict results to specific fields by their IDs. When omitted, only the title field is returned. Accepts multiple field IDs as comma-separated values or repeated query parameters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List all items in a user-owned project. Retrieve project items with optional filtering by search query and field selection."""
 
     # Construct request model with validation
@@ -38364,7 +38484,7 @@ async def add_item_to_project_user(
     username: str = Field(..., description="The GitHub username of the project owner."),
     project_number: int = Field(..., description="The project's unique number identifier."),
     type_: Literal["Issue", "PullRequest"] = Field(..., alias="type", description="The type of item being added to the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an issue or pull request to a user-owned project. The item will be added to the specified project by its number."""
 
     # Construct request model with validation
@@ -38408,7 +38528,7 @@ async def get_project_item_user(
     username: str = Field(..., description="The GitHub username of the project owner."),
     item_id: int = Field(..., description="The unique identifier of the project item to retrieve."),
     fields: str | list[str] | None = Field(None, description="Comma-separated or repeated field IDs to include in the response. If not specified, only the title field is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific item from a user-owned project. Returns the item's details including selected fields or the title field by default."""
 
     # Construct request model with validation
@@ -38452,7 +38572,7 @@ async def update_project_item_user(
     username: str = Field(..., description="The GitHub username or handle of the account that owns the project."),
     item_id: int = Field(..., description="The unique identifier of the project item to update."),
     fields: list[_models.ProjectsUpdateItemForUserBodyFieldsItem] = Field(..., description="An array of field updates to apply to the item. Each entry specifies a field and its new value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a specific item in a user-owned project by applying field changes. Allows modification of item properties within a GitHub Projects V2 board."""
 
     # Construct request model with validation
@@ -38495,7 +38615,7 @@ async def delete_project_item_user(
     project_number: int = Field(..., description="The project number that identifies which project to modify. This is a unique numeric identifier for the project."),
     username: str = Field(..., description="The GitHub username of the account that owns the project. This is the handle used to identify the user account."),
     item_id: int = Field(..., description="The unique numeric identifier of the project item to delete. This identifies which specific item within the project should be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific item from a user's project. This operation removes the item permanently from the project."""
 
     # Construct request model with validation
@@ -38536,7 +38656,7 @@ async def list_project_view_items_user(
     username: str = Field(..., description="The GitHub username or account handle."),
     view_number: int = Field(..., description="The numeric identifier for the project view."),
     fields: str | list[str] | None = Field(None, description="Restrict results to specific fields by their IDs. When omitted, only the title field is returned. Accepts multiple field IDs as comma-separated values or repeated query parameters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List items in a user's project view with the view's saved filters applied. Returns project items matching the specified view's configuration."""
 
     # Construct request model with validation
@@ -38575,7 +38695,7 @@ async def list_project_view_items_user(
 
 # Tags: activity
 @mcp.tool()
-async def list_received_events(username: str = Field(..., description="The GitHub username whose received events should be listed.")) -> dict[str, Any]:
+async def list_received_events(username: str = Field(..., description="The GitHub username whose received events should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve events received by a user through watching repositories and following other users. Private events are visible only to the authenticated user; otherwise only public events are returned. Note: This API is not real-time; event latency can range from 30 seconds to 6 hours depending on time of day."""
 
     # Construct request model with validation
@@ -38611,7 +38731,7 @@ async def list_received_events(username: str = Field(..., description="The GitHu
 
 # Tags: activity
 @mcp.tool()
-async def list_user_public_received_events(username: str = Field(..., description="The GitHub username (handle) for the user account whose received public events should be listed.")) -> dict[str, Any]:
+async def list_user_public_received_events(username: str = Field(..., description="The GitHub username (handle) for the user account whose received public events should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of public events received by a GitHub user. Note: This API is not optimized for real-time use cases and may have event latency ranging from 30 seconds to 6 hours depending on time of day."""
 
     # Construct request model with validation
@@ -38651,7 +38771,7 @@ async def list_user_repositories(
     username: str = Field(..., description="The GitHub username whose repositories should be listed."),
     type_: Literal["all", "owner", "member"] | None = Field(None, alias="type", description="Filter repositories by type. Use 'owner' to show only repositories owned by the user, 'member' for repositories where the user is a collaborator, or 'all' for both."),
     direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results. Use 'asc' for ascending order or 'desc' for descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists public repositories for a specified GitHub user. Results can be filtered by repository type and sorted in ascending or descending order."""
 
     # Construct request model with validation
@@ -38697,7 +38817,7 @@ async def get_premium_request_usage_report_user(
     day: int | None = Field(None, description="Filter results to a specific day within the month. Must be a value between 1 and 31. If not specified, defaults to the current day."),
     model: str | None = Field(None, description="Filter results by AI model name. The filter is case-insensitive."),
     product: str | None = Field(None, description="Filter results by product name. The filter is case-insensitive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a premium request usage report for a GitHub user, with optional filtering by time period, model, or product. Only data from the past 24 months is available."""
 
     # Construct request model with validation
@@ -38741,7 +38861,7 @@ async def get_billing_usage_report(
     year: int | None = Field(None, description="Filter results to a specific year. Specify as a four-digit integer representing the year (e.g., 2025). Defaults to the current year if not provided."),
     month: int | None = Field(None, description="Filter results to a specific month within the year. Specify as an integer between 1 and 12. Only applies when year is specified or defaults to the current year."),
     day: int | None = Field(None, description="Filter results to a specific day within the month. Specify as an integer between 1 and 31. Only applies when month is specified or defaults to the current year and month."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a billing usage report for a GitHub user, optionally filtered by year, month, or day. This endpoint is only available to users with access to the enhanced billing platform."""
 
     # Construct request model with validation
@@ -38787,7 +38907,7 @@ async def get_billing_usage_summary_user(
     day: int | None = Field(None, description="Filter results to a specific day within the month. Specify as an integer between 1 and 31. Defaults to the current day if not provided."),
     product: str | None = Field(None, description="Filter results by product name. The product name is case-insensitive."),
     sku: str | None = Field(None, description="Filter results by SKU (stock keeping unit) identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a summary report of billing usage for a GitHub user account. Only data from the past 24 months is accessible via this endpoint."""
 
     # Construct request model with validation
@@ -38826,7 +38946,7 @@ async def get_billing_usage_summary_user(
 
 # Tags: users
 @mcp.tool()
-async def list_social_accounts_public(username: str = Field(..., description="The GitHub username (handle) for the user whose social accounts should be retrieved.")) -> dict[str, Any]:
+async def list_social_accounts_public(username: str = Field(..., description="The GitHub username (handle) for the user whose social accounts should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all social media accounts associated with a GitHub user. This endpoint is publicly accessible and requires only the username."""
 
     # Construct request model with validation
@@ -38862,7 +38982,7 @@ async def list_social_accounts_public(username: str = Field(..., description="Th
 
 # Tags: users
 @mcp.tool()
-async def list_ssh_signing_keys_for_user(username: str = Field(..., description="The GitHub username whose SSH signing keys should be retrieved.")) -> dict[str, Any]:
+async def list_ssh_signing_keys_for_user(username: str = Field(..., description="The GitHub username whose SSH signing keys should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all SSH signing keys associated with a GitHub user account. This operation is publicly accessible and does not require authentication."""
 
     # Construct request model with validation
@@ -38901,7 +39021,7 @@ async def list_ssh_signing_keys_for_user(username: str = Field(..., description=
 async def list_starred_repositories_by_user(
     username: str = Field(..., description="The GitHub username whose starred repositories should be listed."),
     direction: Literal["asc", "desc"] | None = Field(None, description="The order in which to sort the starred repositories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve repositories that a user has starred. Supports sorting by creation timestamp when using the star+json media type."""
 
     # Construct request model with validation
@@ -38940,7 +39060,7 @@ async def list_starred_repositories_by_user(
 
 # Tags: activity
 @mcp.tool()
-async def list_watched_repositories_by_user(username: str = Field(..., description="The GitHub username whose watched repositories should be listed.")) -> dict[str, Any]:
+async def list_watched_repositories_by_user(username: str = Field(..., description="The GitHub username whose watched repositories should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of repositories that a user is watching. Watched repositories allow users to receive notifications about activity without being a collaborator."""
 
     # Construct request model with validation

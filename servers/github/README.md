@@ -1,11 +1,12 @@
 # GitHub MCP Server
+<!-- mcp-name: com.mcparmory/github -->
 
 Base URL: https://api.github.com
 | | |
 |---|---|
 | **Category** | Developer Tools |
 | **Tools** | 929 |
-| **Auth** | OAuth2, Bearer Token, JWTBearerAuth |
+| **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
 - **API License:** MIT — [https://spdx.org/licenses/MIT](https://spdx.org/licenses/MIT)
@@ -21,10 +22,7 @@ Base URL: https://api.github.com
 ```bash
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
-OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
-JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
-JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 uvx mcparmory-github
 ```
 
@@ -34,10 +32,7 @@ uvx mcparmory-github
 pip install mcparmory-github
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
-OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
-JWT_PRIVATE_KEY=YOUR_JWT_PRIVATE_KEY \
-JWT_ISSUER_ID=YOUR_JWT_ISSUER_ID \
 mcparmory-github
 ```
 
@@ -54,10 +49,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "env": {
         "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
         "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
-        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
-        "JWT_PRIVATE_KEY": "YOUR_JWT_PRIVATE_KEY",
-        "JWT_ISSUER_ID": "YOUR_JWT_ISSUER_ID"
+        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
   }
@@ -74,10 +66,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
-- `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `BEARER_TOKEN` — Bearer token
-- `JWT_PRIVATE_KEY` — Path to .pem file or inline PEM key
-- `JWT_ISSUER_ID` — Issuer ID (App ID, Team ID, etc.)
 Do not commit credentials to version control.
 
 ### OAuth2
@@ -93,18 +82,6 @@ If you change `OAUTH2_CALLBACK_PORT` in `.env`, update the redirect URI to match
 On first use, a browser window opens automatically for OAuth authorization. Grant access when prompted — tokens are saved to `tokens/oauth2_tokens.json` and refreshed automatically.
 
 **Re-authorization:** Delete `tokens/oauth2_tokens.json` and restart the server.
-
-### JWT Bearer
-
-This server uses **JWT Bearer authentication** — tokens are generated automatically from a private key.
-
-Set `JWT_PRIVATE_KEY` to either:
-- **File path:** `/path/to/private-key.pem`
-- **Inline PEM:** paste the full PEM content with newlines replaced by `\n`
-
-Set `JWT_ISSUER_ID` to the application/issuer ID provided by the API (e.g. GitHub App ID).
-
-Optional settings (see `.env` for details): algorithm (default RS256), expiry (default 600s), audience, key ID, token exchange URL.
 
 ---
 
@@ -137,6 +114,18 @@ Example (if server is at `/home/user/mcp-servers/github`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/github:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -148,6 +137,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env git
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {

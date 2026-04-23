@@ -5,16 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "mcparmory-github"
 version = "1.0.0"
-description = "MCP server for GitHub"
+description = "Manage repositories, users, releases, and automate GitHub workflows"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "authlib>=1.6.0,<2.0.0",
-    "fastmcp>=3.1.0",
+    "fastmcp>=3.2.4",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.0.0,<3.0.0",
-    "PyJWT[crypto]>=2.8.0,<3.0.0",
     "PyNaCl",
     "python-dotenv>=1.0.0,<2.0.0"
 ]
