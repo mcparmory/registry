@@ -1,11 +1,12 @@
 # Figma MCP Server
+<!-- mcp-name: com.mcparmory/figma -->
 
 Base URL: https://api.figma.com
 | | |
 |---|---|
 | **Category** | Productivity |
 | **Tools** | 41 |
-| **Auth** | OAuth2, OrgOAuth2Auth, API Key |
+| **Auth** | API Key, OAuth2 |
 
 ## API Info
 - **Terms of Service:** [https://www.figma.com/developer-terms/](https://www.figma.com/developer-terms/)
@@ -127,6 +128,22 @@ Example (if server is at `/home/user/mcp-servers/figma`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -p 9401:9401 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e ORG_OAUTH2_CLIENT_ID=YOUR_ORG_OAUTH2_CLIENT_ID \
+  -e ORG_OAUTH2_CLIENT_SECRET=YOUR_ORG_OAUTH2_CLIENT_SECRET \
+  -e ORG_OAUTH2_SCOPES=YOUR_ORG_OAUTH2_SCOPES \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/figma:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -138,6 +155,8 @@ docker run -p 8000:8000 -p 9400:9400 -p 9401:9401 -v ./tokens:/app/tokens --env-
 **Before running**, make sure ports 8000, 9400, 9401 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {

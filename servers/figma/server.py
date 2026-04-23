@@ -5,7 +5,7 @@ Figma MCP Server
 API Info:
 - Terms of Service: https://www.figma.com/developer-terms/
 
-Generated: 2026-04-14 18:21:04 UTC
+Generated: 2026-04-23 21:15:19 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.figma.com")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +717,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +773,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +839,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +873,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -826,16 +939,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -849,6 +963,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -891,6 +1006,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -902,7 +1032,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1068,7 +1197,7 @@ async def export_file_json(
     geometry: str | None = Field(None, description="Set to include vector path data in the export for shape and vector nodes."),
     plugin_data: str | None = Field(None, description="Comma-separated list of plugin IDs and/or the string 'shared' to include plugin data written to the document. Plugin data will appear in pluginData and sharedPluginData properties."),
     branch_data: bool | None = Field(None, description="Include branch metadata in the response, showing the main file key if this is a branch, or branch metadata if the file has branches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export a Figma file as JSON, including document structure, components, and optional metadata. Supports partial exports by node ID and configurable depth traversal."""
 
     # Construct request model with validation
@@ -1113,7 +1242,7 @@ async def get_file_nodes(
     depth: float | None = Field(None, description="How many levels deep to traverse the node tree from each specified node. A value of 1 returns only direct children; omitting this parameter returns the entire subtree."),
     geometry: str | None = Field(None, description="Include vector path data in the response. Set to 'paths' to export vector geometry; omit to exclude vector data."),
     plugin_data: str | None = Field(None, description="Comma-separated list of plugin IDs and/or the string 'shared' to include plugin data written to the document. Plugin data will be returned in pluginData and sharedPluginData properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve specific nodes from a Figma file as JSON objects. Extract node data by providing node IDs, with optional support for vector geometry, nested traversal depth, and plugin data."""
 
     # Construct request model with validation
@@ -1158,7 +1287,7 @@ async def render_node_images(
     scale: float | None = Field(None, description="Scaling factor for the rendered image. Values between 0.01 and 4 are supported, where 1.0 represents the original size.", ge=0.01, le=4),
     format_: Literal["jpg", "png", "svg", "pdf"] | None = Field(None, alias="format", description="Output format for the rendered image."),
     svg_include_id: bool | None = Field(None, description="Whether to include id attributes for all SVG elements. When enabled, adds the layer name to the id attribute of each SVG element."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Render images from specified nodes in a file. Returns a map of node IDs to image URLs, with null values indicating failed renders. Rendered images expire after 30 days."""
 
     # Construct request model with validation
@@ -1197,7 +1326,7 @@ async def render_node_images(
 
 # Tags: Files
 @mcp.tool()
-async def list_image_fills(file_key: str = Field(..., description="The Figma file identifier to retrieve images from. Accepts either a file key or branch key; use GET /v1/files/:key with branch_data query parameter to obtain a branch key.")) -> dict[str, Any]:
+async def list_image_fills(file_key: str = Field(..., description="The Figma file identifier to retrieve images from. Accepts either a file key or branch key; use GET /v1/files/:key with branch_data query parameter to obtain a branch key.")) -> dict[str, Any] | ToolResult:
     """Retrieve download URLs for all images used in image fills within a Figma document. Image URLs are valid for up to 14 days and can be located by their imageRef attribute in Paint objects from the file endpoint."""
 
     # Construct request model with validation
@@ -1233,7 +1362,7 @@ async def list_image_fills(file_key: str = Field(..., description="The Figma fil
 
 # Tags: Files
 @mcp.tool()
-async def get_file_metadata(file_key: str = Field(..., description="The unique identifier for the file or branch. Use a file key for standard file metadata or a branch key for branch-specific metadata.")) -> dict[str, Any]:
+async def get_file_metadata(file_key: str = Field(..., description="The unique identifier for the file or branch. Use a file key for standard file metadata or a branch key for branch-specific metadata.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a file or branch. Provide either a file key or branch key to access file information."""
 
     # Construct request model with validation
@@ -1269,7 +1398,7 @@ async def get_file_metadata(file_key: str = Field(..., description="The unique i
 
 # Tags: Projects
 @mcp.tool()
-async def list_team_projects(team_id: str = Field(..., description="The unique identifier of the team. You can find the team ID in the URL of your team page, positioned after 'team' and before your team name.")) -> dict[str, Any]:
+async def list_team_projects(team_id: str = Field(..., description="The unique identifier of the team. You can find the team ID in the URL of your team page, positioned after 'team' and before your team name.")) -> dict[str, Any] | ToolResult:
     """Retrieve all projects within a specified team that are visible to the authenticated user. Only projects accessible to the token owner or authenticated user will be returned."""
 
     # Construct request model with validation
@@ -1308,7 +1437,7 @@ async def list_team_projects(team_id: str = Field(..., description="The unique i
 async def list_project_files(
     project_id: str = Field(..., description="The unique identifier of the project from which to retrieve files."),
     branch_data: bool | None = Field(None, description="Include branch metadata in the response for each main file that contains branches within the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all files within a specified project. Optionally include branch metadata for files that contain branches."""
 
     # Construct request model with validation
@@ -1350,7 +1479,7 @@ async def list_project_files(
 async def list_file_versions(
     file_key: str = Field(..., description="The file or branch key identifying which file's version history to retrieve. Obtain the branch key using GET /v1/files/:key with the branch_data query parameter."),
     page_size: float | None = Field(None, description="Number of version records to return per page. Defaults to 30 if not specified.", le=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the version history of a file to see how it has evolved over time. Use the returned version information to render a specific version via another endpoint."""
 
     # Construct request model with validation
@@ -1392,7 +1521,7 @@ async def list_file_versions(
 async def list_file_comments(
     file_key: str = Field(..., description="The file or branch identifier to retrieve comments from. Use the file key for the main file, or obtain a branch key via GET /v1/files/:key with the branch_data query parameter to access comments on a specific branch."),
     as_md: bool | None = Field(None, description="When enabled, converts comments to their markdown equivalents where applicable for better formatting compatibility."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all comments left on a file. Supports both file keys and branch keys for accessing comments across different file versions."""
 
     # Construct request model with validation
@@ -1436,7 +1565,7 @@ async def add_file_comment(
     message: str = Field(..., description="The text content of the comment to post."),
     comment_id: str | None = Field(None, description="The ID of the root comment to reply to. Replies to replies are not supported; only root-level comments can be replied to."),
     client_meta: _models.Vector | _models.FrameOffset | _models.Region | _models.FrameOffsetRegion | None = Field(None, description="Metadata specifying the position or location where the comment should be placed within the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Posts a new comment on a file or replies to an existing root comment. Use the comment_id parameter to reply to a specific comment."""
 
     # Construct request model with validation
@@ -1478,7 +1607,7 @@ async def add_file_comment(
 async def delete_comment(
     file_key: str = Field(..., description="The file or branch key identifying the file containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
     comment_id: str = Field(..., description="The unique identifier of the comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific comment from a file. Only the comment author is permitted to delete their own comments."""
 
     # Construct request model with validation
@@ -1517,7 +1646,7 @@ async def delete_comment(
 async def list_comment_reactions(
     file_key: str = Field(..., description="The file identifier to retrieve the comment from. Can be either a file key or branch key; use `GET /v1/files/:key` with the `branch_data` query parameter to obtain a branch key if needed."),
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve reactions from."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of reactions left on a specific comment. Use this to see all emoji reactions and their authors for a given comment."""
 
     # Construct request model with validation
@@ -1557,7 +1686,7 @@ async def add_comment_reaction(
     file_key: str = Field(..., description="The file identifier to add the reaction to. Can be a file key or branch key; use GET /v1/files/:key with the branch_data query parameter to retrieve a branch key."),
     comment_id: str = Field(..., description="The unique identifier of the comment to react to."),
     emoji: str = Field(..., description="The emoji reaction as a shortcode format. Supports optional skin tone modifiers for applicable emoji. Valid shortcodes are defined in the emoji-mart native set."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a file comment. Reactions allow users to quickly respond to comments with emoji expressions."""
 
     # Construct request model with validation
@@ -1600,7 +1729,7 @@ async def remove_comment_reaction(
     file_key: str = Field(..., description="The file or branch key containing the comment. Retrieve the branch key using GET /v1/files/:key with the branch_data query parameter."),
     comment_id: str = Field(..., description="The unique identifier of the comment from which to remove the reaction."),
     emoji: str = Field(..., description="The emoji reaction to remove, specified as a shortcode format. Skin tone modifiers are supported where applicable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a comment. Only the user who added the reaction can delete it."""
 
     # Construct request model with validation
@@ -1639,7 +1768,7 @@ async def remove_comment_reaction(
 
 # Tags: Users
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieve the profile and account information for the currently authenticated user. This endpoint requires valid authentication credentials."""
 
     # Extract parameters for API call
@@ -1669,7 +1798,7 @@ async def get_current_user() -> dict[str, Any]:
 async def list_team_components(
     team_id: str = Field(..., description="The unique identifier of the team whose components you want to list."),
     page_size: float | None = Field(None, description="The number of components to return per page. Specify a value between 1 and 1000 to control result set size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of published components available in a team's component library. Use pagination to manage large result sets efficiently."""
 
     # Construct request model with validation
@@ -1708,7 +1837,7 @@ async def list_team_components(
 
 # Tags: Components
 @mcp.tool()
-async def list_file_components(file_key: str = Field(..., description="The main file key identifying the file library to retrieve components from. Branch keys are not supported for this operation.")) -> dict[str, Any]:
+async def list_file_components(file_key: str = Field(..., description="The main file key identifying the file library to retrieve components from. Branch keys are not supported for this operation.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of published components available in a file library. Only main file keys are supported, as components cannot be published from branch files."""
 
     # Construct request model with validation
@@ -1744,7 +1873,7 @@ async def list_file_components(file_key: str = Field(..., description="The main 
 
 # Tags: Components
 @mcp.tool()
-async def get_component(key: str = Field(..., description="The unique identifier that uniquely identifies the component within the system.")) -> dict[str, Any]:
+async def get_component(key: str = Field(..., description="The unique identifier that uniquely identifies the component within the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific component using its unique identifier. This operation returns comprehensive information about the component's configuration and properties."""
 
     # Construct request model with validation
@@ -1783,7 +1912,7 @@ async def get_component(key: str = Field(..., description="The unique identifier
 async def list_component_sets(
     team_id: str = Field(..., description="The unique identifier of the team whose component sets you want to retrieve."),
     page_size: float | None = Field(None, description="The number of component sets to return per page. Useful for controlling response size and implementing pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of published component sets available in a team's library. Use pagination to manage large result sets efficiently."""
 
     # Construct request model with validation
@@ -1822,7 +1951,7 @@ async def list_component_sets(
 
 # Tags: Component Sets
 @mcp.tool()
-async def list_component_sets_file(file_key: str = Field(..., description="The main file key identifying the library file. Branch keys are not supported as component sets can only be published from main files.")) -> dict[str, Any]:
+async def list_component_sets_file(file_key: str = Field(..., description="The main file key identifying the library file. Branch keys are not supported as component sets can only be published from main files.")) -> dict[str, Any] | ToolResult:
     """Retrieve all published component sets available in a file library. This operation requires a main file key and cannot be used with branch keys."""
 
     # Construct request model with validation
@@ -1858,7 +1987,7 @@ async def list_component_sets_file(file_key: str = Field(..., description="The m
 
 # Tags: Component Sets
 @mcp.tool()
-async def get_component_set(key: str = Field(..., description="The unique identifier that uniquely identifies the component set to retrieve.")) -> dict[str, Any]:
+async def get_component_set(key: str = Field(..., description="The unique identifier that uniquely identifies the component set to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a published component set using its unique identifier. Returns detailed information about the component set configuration and properties."""
 
     # Construct request model with validation
@@ -1897,7 +2026,7 @@ async def get_component_set(key: str = Field(..., description="The unique identi
 async def list_team_styles(
     team_id: str = Field(..., description="The unique identifier of the team whose styles you want to retrieve."),
     page_size: float | None = Field(None, description="The number of styles to return per page. Adjust this value to control result set size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of published styles from a team's design library. Use pagination to control the number of results returned per request."""
 
     # Construct request model with validation
@@ -1936,7 +2065,7 @@ async def list_team_styles(
 
 # Tags: Styles
 @mcp.tool()
-async def list_file_styles(file_key: str = Field(..., description="The main file key containing the styles to retrieve. Branch keys are not supported since style publishing is only available for main files.")) -> dict[str, Any]:
+async def list_file_styles(file_key: str = Field(..., description="The main file key containing the styles to retrieve. Branch keys are not supported since style publishing is only available for main files.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of published styles available in a file library. Styles can only be published from main files, not from branches."""
 
     # Construct request model with validation
@@ -1972,7 +2101,7 @@ async def list_file_styles(file_key: str = Field(..., description="The main file
 
 # Tags: Styles
 @mcp.tool()
-async def get_style(key: str = Field(..., description="The unique identifier that references the specific style to retrieve.")) -> dict[str, Any]:
+async def get_style(key: str = Field(..., description="The unique identifier that references the specific style to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific style using its unique identifier. Use this to fetch style configuration and properties."""
 
     # Construct request model with validation
@@ -2011,7 +2140,7 @@ async def get_style(key: str = Field(..., description="The unique identifier tha
 async def list_webhooks(
     context_id: str | None = Field(None, description="The unique identifier of the context to retrieve webhooks for. Cannot be used together with plan_api_id."),
     plan_api_id: str | None = Field(None, description="The unique identifier of your plan to retrieve all webhooks across all accessible contexts. Cannot be used together with context_id. Results are paginated when using this parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve webhooks filtered by context or plan. Use context_id to get webhooks for a specific context, or plan_api_id to retrieve all webhooks across all accessible contexts with pagination support."""
 
     # Construct request model with validation
@@ -2049,7 +2178,7 @@ async def list_webhooks(
 
 # Tags: Webhooks
 @mcp.tool()
-async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a webhook configuration by its ID. Use this to fetch details about a specific webhook including its URL, events, and status."""
 
     # Construct request model with validation
@@ -2091,7 +2220,7 @@ async def list_activity_logs(
     end_time: float | None = Field(None, description="Unix timestamp marking the end of the time range (inclusive). Defaults to the current timestamp if unspecified."),
     limit: float | None = Field(None, description="Maximum number of events to return in the response. Defaults to 1000 if unspecified."),
     order: Literal["asc", "desc"] | None = Field(None, description="Sort order for events by timestamp. Use ascending order to show oldest events first, or descending order to show newest events first."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of activity log events filtered by type, time range, and ordering. Useful for auditing, monitoring system changes, and tracking user actions."""
 
     # Construct request model with validation
@@ -2134,7 +2263,7 @@ async def list_payments(
     community_file_id: str | None = Field(None, description="The ID of the Community file to query. Find this in the file's Community page URL (the number after 'file/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
     plugin_id: str | None = Field(None, description="The ID of the plugin to query. Find this in the plugin's manifest or Community page URL (the number after 'plugin/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
     widget_id: str | None = Field(None, description="The ID of the widget to query. Find this in the widget's manifest or Community page URL (the number after 'widget/'). Provide exactly one of: community_file_id, plugin_id, or widget_id."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve payment information for a user on a specific Community file, plugin, or widget. You can only query resources that you own."""
 
     # Construct request model with validation
@@ -2172,7 +2301,7 @@ async def list_payments(
 
 # Tags: Variables
 @mcp.tool()
-async def list_local_variables(file_key: str = Field(..., description="The file or branch identifier to retrieve variables from. Use the branch key obtained from GET /v1/files/:key with the branch_data query parameter to access branch-specific variables.")) -> dict[str, Any]:
+async def list_local_variables(file_key: str = Field(..., description="The file or branch identifier to retrieve variables from. Use the branch key obtained from GET /v1/files/:key with the branch_data query parameter to access branch-specific variables.")) -> dict[str, Any] | ToolResult:
     """Retrieve all local variables created in a file and remote variables referenced within it. This operation is restricted to full members of Enterprise organizations and supports examining variable modes and bound variable details."""
 
     # Construct request model with validation
@@ -2208,7 +2337,7 @@ async def list_local_variables(file_key: str = Field(..., description="The file 
 
 # Tags: Variables
 @mcp.tool()
-async def list_published_variables(file_key: str = Field(..., description="The main file key to retrieve published variables from. Branch keys are not supported as variables cannot be published from branches.")) -> dict[str, Any]:
+async def list_published_variables(file_key: str = Field(..., description="The main file key to retrieve published variables from. Branch keys are not supported as variables cannot be published from branches.")) -> dict[str, Any] | ToolResult:
     """Retrieve all variables published from a file, including their subscription IDs and last published timestamps. Available only to full members of Enterprise organizations."""
 
     # Construct request model with validation
@@ -2250,7 +2379,7 @@ async def bulk_modify_variables(
     variable_modes: list[_models.VariableModeChange] | None = Field(None, alias="variableModes", description="Array of variable mode objects to create, update, or delete within collections. Each collection supports a maximum of 40 modes with names up to 40 characters. Processed second in the request."),
     variables: list[_models.VariableChange] | None = Field(None, description="Array of variable objects to create, update, or delete. Each collection supports a maximum of 5000 variables. Variable names must be unique within a collection and cannot contain special characters such as . { }. Processed third in the request."),
     variable_mode_values: list[_models.VariableModeValue] | None = Field(None, alias="variableModeValues", description="Array of variable mode value assignments to set specific values for variables under particular modes. Variables cannot be aliased to themselves or form alias cycles. Processed last in the request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk create, update, and delete variables, variable collections, modes, and mode values in a file. Changes are applied atomically in a defined order: collections, then modes, then variables, then mode values."""
 
     # Construct request model with validation
@@ -2292,7 +2421,7 @@ async def bulk_modify_variables(
 async def list_dev_resources(
     file_key: str = Field(..., description="The main file key to retrieve dev resources from. Branch keys are not supported."),
     node_ids: str | None = Field(None, description="Comma-separated list of node identifiers to filter results. When specified, only dev resources attached to these nodes are returned. Omit to retrieve all dev resources in the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve development resources associated with a file. Optionally filter results to specific nodes within the file."""
 
     # Construct request model with validation
@@ -2331,7 +2460,7 @@ async def list_dev_resources(
 
 # Tags: Dev Resources
 @mcp.tool()
-async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to create. Each resource must reference a valid file_key, have a unique URL per node, and not exceed the 10 dev resource limit per node.")) -> dict[str, Any]:
+async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to create. Each resource must reference a valid file_key, have a unique URL per node, and not exceed the 10 dev resource limit per node.")) -> dict[str, Any] | ToolResult:
     """Bulk create dev resources across multiple files. Successfully created resources are returned in the links_created array, while any resources that fail validation appear in the errors array with failure reasons."""
 
     # Construct request model with validation
@@ -2369,7 +2498,7 @@ async def create_dev_resources(dev_resources: list[_models.PostDevResourcesBodyD
 
 # Tags: Dev Resources
 @mcp.tool()
-async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to update. Each resource in the array will be processed, and results will be returned indicating which resources were successfully updated and which encountered errors.")) -> dict[str, Any]:
+async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDevResourcesItem] = Field(..., description="An array of dev resource objects to update. Each resource in the array will be processed, and results will be returned indicating which resources were successfully updated and which encountered errors.")) -> dict[str, Any] | ToolResult:
     """Bulk update dev resources across multiple files. Successfully updated resource IDs are returned in the response, while any resources that fail to update are included in an errors array."""
 
     # Construct request model with validation
@@ -2410,7 +2539,7 @@ async def update_dev_resources(dev_resources: list[_models.PutDevResourcesBodyDe
 async def remove_dev_resource(
     file_key: str = Field(..., description="The main file key containing the dev resource to delete. Must be a main file key, not a branch key."),
     dev_resource_id: str = Field(..., description="The unique identifier of the dev resource to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a dev resource from a file. This operation permanently deletes the specified dev resource and cannot be undone."""
 
     # Construct request model with validation
@@ -2451,7 +2580,7 @@ async def list_library_component_actions(
     group_by: Literal["component", "team"] = Field(..., description="The dimension by which to aggregate the returned analytics data."),
     start_date: str | None = Field(None, description="The earliest week to include in the analytics results, specified as an ISO 8601 date. The date will be rounded back to the nearest start of a week. Defaults to one year prior to the end date."),
     end_date: str | None = Field(None, description="The latest week to include in the analytics results, specified as an ISO 8601 date. The date will be rounded forward to the nearest end of a week. Defaults to the most recently computed week."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for component actions within a library, aggregated by the specified dimension (component or team). Use this to analyze usage patterns and activity metrics across your design library."""
 
     # Construct request model with validation
@@ -2493,7 +2622,7 @@ async def list_library_component_actions(
 async def list_library_component_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve component usage analytics."),
     group_by: Literal["component", "file"] = Field(..., description="The dimension by which to group the returned usage analytics data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analytics data on how components from a library are being used, with results grouped by the specified dimension (component or file)."""
 
     # Construct request model with validation
@@ -2537,7 +2666,7 @@ async def list_library_style_actions(
     group_by: Literal["style", "team"] = Field(..., description="The dimension to group analytics results by. Choose 'style' to aggregate by individual styles or 'team' to aggregate by team."),
     start_date: str | None = Field(None, description="The earliest week to include in results, specified as an ISO 8601 date. The date will be rounded back to the nearest week start. Defaults to one year prior to the end date."),
     end_date: str | None = Field(None, description="The latest week to include in results, specified as an ISO 8601 date. The date will be rounded forward to the nearest week end. Defaults to the most recently computed week."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for style actions in a library, aggregated by the specified dimension (style or team). Use date parameters to filter results to a specific time range."""
 
     # Construct request model with validation
@@ -2579,7 +2708,7 @@ async def list_library_style_actions(
 async def list_library_style_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve style usage analytics."),
     group_by: Literal["style", "file"] = Field(..., description="The dimension by which to group the returned analytics data. Choose 'style' to see usage broken down by individual styles, or 'file' to see usage broken down by the files that consume those styles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analytics data on how styles are used within a library, aggregated by the specified dimension (style or file). Use this to understand style adoption and usage patterns across your design library."""
 
     # Construct request model with validation
@@ -2623,7 +2752,7 @@ async def list_library_variable_actions(
     group_by: Literal["variable", "team"] = Field(..., description="The dimension by which to group the returned analytics data."),
     start_date: str | None = Field(None, description="ISO 8601 date marking the start of the analytics period. Dates are rounded back to the nearest week start. Defaults to one year prior to the end date."),
     end_date: str | None = Field(None, description="ISO 8601 date marking the end of the analytics period. Dates are rounded forward to the nearest week end. Defaults to the latest computed week."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for variable actions within a library, aggregated by the specified dimension (variable or team). Use date parameters to filter results to a specific time range."""
 
     # Construct request model with validation
@@ -2665,7 +2794,7 @@ async def list_library_variable_actions(
 async def list_library_variable_usages(
     file_key: str = Field(..., description="The unique identifier of the library file for which to retrieve variable usage analytics."),
     group_by: Literal["variable", "file"] = Field(..., description="The dimension by which to aggregate the returned variable usage data. Choose 'variable' to group by individual variables, or 'file' to group by source files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analytics data on how variables are used within a library, aggregated by the specified dimension (variable or file). Use this to understand variable usage patterns and dependencies."""
 
     # Construct request model with validation
