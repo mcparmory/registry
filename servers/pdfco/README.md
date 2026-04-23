@@ -1,6 +1,7 @@
 # PDF.co API MCP Server
+<!-- mcp-name: com.mcparmory/pdfco -->
 
-Base URL: https://api.pdf.co
+Base URL: https://api.pdf.co/v1
 | | |
 |---|---|
 | **Category** | Documents & Printing |
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/pdfco`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/pdfco:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t pdfco .
 docker run -p 8000:8000 --env-file .env pdfco
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
