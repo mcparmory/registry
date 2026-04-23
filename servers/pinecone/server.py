@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 - Contact: Pinecone Support <support@pinecone.io> (https://support.pinecone.io)
 
-Generated: 2026-04-14 18:30:38 UTC
+Generated: 2026-04-23 21:37:08 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.pinecone.io")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -851,16 +969,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -874,6 +993,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -916,6 +1036,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -927,7 +1062,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1068,7 +1202,7 @@ mcp = FastMCP("Pinecone Control Plane API", middleware=[_JsonCoercionMiddleware(
 
 # Tags: Manage Indexes
 @mcp.tool()
-async def list_indexes(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for request routing and response formatting. Defaults to 2026-04 if not provided.")) -> dict[str, Any]:
+async def list_indexes(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for request routing and response formatting. Defaults to 2026-04 if not provided.")) -> dict[str, Any] | ToolResult:
     """Retrieve all indexes in the current project. Returns a list of index configurations and metadata."""
 
     # Construct request model with validation
@@ -1113,7 +1247,7 @@ async def create_index(
     deletion_protection: str | None = Field(None, description="Enable or disable deletion protection for the index. When enabled, prevents accidental index removal. Defaults to disabled."),
     tags: dict[str, str] | None = Field(None, description="Optional custom metadata tags for organizing and identifying the index. Keys up to 80 characters (alphanumeric, underscore, hyphen); values up to 120 characters (alphanumeric, semicolon, at-sign, underscore, hyphen, period, plus, space). Set value to empty string to remove a tag."),
     vector_type: str | None = Field(None, description="Vector type for the index: 'dense' (default, requires dimension specification) or 'sparse' (omit dimension specification)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Pinecone index by specifying vector dimensions, similarity metric, deployment configuration, and optional metadata. This establishes the foundation for storing and searching vectors."""
 
     _dimension = _parse_int(dimension)
@@ -1157,7 +1291,7 @@ async def create_index(
 async def get_index(
     index_name: str = Field(..., description="The name of the index to retrieve. Use the exact index name as it appears in your Pinecone project (e.g., 'test-index')."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date in YYYY-MM format. Defaults to 2026-04 if not provided; include this header to ensure compatibility with a specific API version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata and configuration information about a specific index, including its dimensions, metric type, and current status."""
 
     # Construct request model with validation
@@ -1200,7 +1334,7 @@ async def update_index(
     spec: _models.ConfigureIndexBodySpecV0 | _models.ConfigureIndexBodySpecV1 | _models.ConfigureIndexBodySpecV2 | None = Field(None, description="The deployment specification for the index. Defines how the index is scaled and configured. Only modifiable attributes related to scaling and configuration are supported; cloud provider and region are immutable."),
     deletion_protection: str | None = Field(None, description="Enable or disable deletion protection for the index to prevent accidental removal. Defaults to disabled."),
     tags: dict[str, str] | None = Field(None, description="Custom key-value tags for organizing and labeling the index. Keys must be 80 characters or fewer and contain only alphanumeric characters, underscores, or hyphens. Values must be 120 characters or fewer and contain only alphanumeric characters, semicolons, at signs, underscores, hyphens, periods, plus signs, or spaces. Set a value to an empty string to remove a tag."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for an existing index, including scaling parameters, deletion protection, and custom tags. Only scaling and configuration attributes can be modified; the index's cloud provider and region cannot be changed."""
 
     # Construct request model with validation
@@ -1243,7 +1377,7 @@ async def update_index(
 async def delete_index(
     index_name: str = Field(..., description="The name of the index to delete (e.g., 'test-index'). Must match an existing index exactly."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required header for request routing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing index and all its data. This operation cannot be undone."""
 
     # Construct request model with validation
@@ -1285,7 +1419,7 @@ async def list_index_backups(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04). Required for request routing."),
     limit: int | None = Field(None, description="Maximum number of backup results to return per page. Must be between 1 and 100 (defaults to 10).", ge=1, le=100),
     pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all backups for a specified index with pagination support. Use pagination tokens to navigate through large result sets."""
 
     # Construct request model with validation
@@ -1330,7 +1464,7 @@ async def create_backup(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="The API version specified as a date-based header (required for all requests). Use the default version 2026-04 unless you need a specific earlier version."),
     name: str | None = Field(None, description="An optional name for the backup. If provided, this will be used to identify the backup in your backup list."),
     description: str | None = Field(None, description="An optional description of the backup. Use this to document the purpose or context of the backup for future reference."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a backup of a Pinecone index to preserve its current state. Backups can be named and described for easy identification and management."""
 
     # Construct request model with validation
@@ -1370,7 +1504,7 @@ async def create_backup(
 
 # Tags: Manage Indexes
 @mcp.tool()
-async def list_collections(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests to ensure compatibility with the API specification.")) -> dict[str, Any]:
+async def list_collections(x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests to ensure compatibility with the API specification.")) -> dict[str, Any] | ToolResult:
     """Retrieve all collections in a project. Note that serverless indexes do not support collections."""
 
     # Construct request model with validation
@@ -1410,7 +1544,7 @@ async def create_collection(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format. Defaults to 2026-04 if not provided."),
     name: str = Field(..., description="The name for the new collection. Must be 1-45 characters long, start and end with an alphanumeric character, and contain only lowercase alphanumeric characters or hyphens.", min_length=1, max_length=45),
     source: str = Field(..., description="The name of an existing index to use as the source for this collection. The source index will provide the data and configuration for the collection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new collection in Pinecone by specifying a name and source index. Collections allow you to organize and manage data within an index (note: serverless indexes do not support collections)."""
 
     # Construct request model with validation
@@ -1462,7 +1596,7 @@ async def create_index_for_model(
     read_capacity: _models.ReadCapacityOnDemandSpec | _models.ReadCapacityDedicatedSpec | None = Field(None, description="Optional capacity configuration for read operations. Defaults to OnDemand mode; specify Dedicated mode with node_type and scaling parameters for predictable, reserved throughput."),
     metric: str | None = Field(None, description="Distance metric for similarity search operations: cosine, euclidean, or dotproduct. If omitted, defaults based on the selected embedding model. Cannot be changed after index creation."),
     dimension: int | None = Field(None, description="Optional vector dimension size for embeddings. If not specified, the dimension is automatically determined by the selected embedding model."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a vector search index with integrated embedding capabilities. Pinecone automatically converts your source text using the specified hosted embedding model during data operations, eliminating the need for separate embedding infrastructure."""
 
     # Construct request model with validation
@@ -1507,7 +1641,7 @@ async def list_project_backups(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based string (defaults to 2026-04). Required header for API compatibility."),
     limit: int | None = Field(None, description="Maximum number of backups to return per page, between 1 and 100. Defaults to 10 results per page.", ge=1, le=100),
     pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all backups for indexes in a project with optional pagination. Use pagination tokens to navigate through large result sets."""
 
     # Construct request model with validation
@@ -1549,7 +1683,7 @@ async def list_project_backups(
 async def get_backup(
     backup_id: str = Field(..., description="The unique identifier of the backup to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific backup by its ID. Returns the backup's metadata and configuration."""
 
     # Construct request model with validation
@@ -1589,7 +1723,7 @@ async def get_backup(
 async def delete_backup(
     backup_id: str = Field(..., description="The unique identifier of the backup to delete, formatted as a UUID."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format (defaults to 2026-04 if not provided)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a backup by its ID. This operation removes the backup and cannot be undone."""
 
     # Construct request model with validation
@@ -1632,7 +1766,7 @@ async def create_index_from_backup(
     name: str = Field(..., description="The name for the new index. Must be 1-45 characters long, start and end with an alphanumeric character, and contain only lowercase letters, numbers, or hyphens.", min_length=1, max_length=45),
     tags: dict[str, str] | None = Field(None, description="Optional custom metadata tags for organizing and identifying the index. Tag keys can be up to 80 characters and must contain only alphanumeric characters, underscores, or hyphens. Tag values can be up to 120 characters and may include alphanumeric characters, semicolons, at signs, underscores, hyphens, periods, plus signs, or spaces. Set a value to an empty string to remove a tag."),
     deletion_protection: str | None = Field(None, description="Optional setting to prevent accidental deletion of the index. Set to 'enabled' to protect the index or 'disabled' (default) to allow deletion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new index by restoring data from an existing backup. The new index will be initialized with the backup's configuration and data."""
 
     # Construct request model with validation
@@ -1676,7 +1810,7 @@ async def list_restore_jobs(
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date string in YYYY-MM format. Required for all requests. Defaults to 2026-04."),
     limit: int | None = Field(None, description="Maximum number of restore jobs to return per page, between 1 and 100 results. Defaults to 10 if not specified.", ge=1, le=100),
     pagination_token: str | None = Field(None, alias="paginationToken", description="Pagination token from a previous response to retrieve the next page of restore jobs. Omit for the first page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all restore jobs for the project. Use pagination tokens to navigate through results."""
 
     # Construct request model with validation
@@ -1718,7 +1852,7 @@ async def list_restore_jobs(
 async def get_restore_job(
     job_id: str = Field(..., description="The unique identifier of the restore job to retrieve, formatted as a UUID (e.g., 670e8400-e29b-41d4-a716-446655440000)."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header to ensure compatibility with the Pinecone API. Defaults to 2026-04 if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific restore job, including its status, progress, and configuration."""
 
     # Construct request model with validation
@@ -1758,7 +1892,7 @@ async def get_restore_job(
 async def get_collection(
     collection_name: str = Field(..., description="The name of the collection to retrieve information about (e.g., 'tiny-collection')."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="API version specified as a date-based header in YYYY-MM format (defaults to 2026-04 if not provided)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata and configuration information about a specific collection. Note that serverless indexes do not support collections."""
 
     # Construct request model with validation
@@ -1798,7 +1932,7 @@ async def get_collection(
 async def delete_collection(
     collection_name: str = Field(..., description="The name of the collection to delete (e.g., 'test-collection'). This is a required identifier that specifies which collection will be removed."),
     x_pinecone_api_version: str = Field(..., alias="X-Pinecone-Api-Version", description="Required API version header in date-based format (defaults to 2026-04). This ensures the request is processed with the correct API specification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete an existing collection and all its data. Note that serverless indexes do not support collections."""
 
     # Construct request model with validation
