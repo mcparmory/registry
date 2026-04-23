@@ -1,7 +1,7 @@
 """
 Posthog Api MCP Server - Pydantic Models
 
-Generated: 2026-04-14 19:06:20 UTC
+Generated: 2026-04-23 21:38:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9428,8 +9428,8 @@ class PcaDetectorConfig(StrictModel):
 class PropertyItem(PermissiveModel):
     key: str = Field(..., description="Key of the property you're filtering on. For example `email` or `$current_url`")
     value: str | float | bool | list[str | float] = Field(..., description="Value of your filter. For example `test@example.com` or `https://example.com/test/`. Can be an array for an OR query, like `[\"test@example.com\",\"ok@example.com\"]`")
-    operator: Literal["exact", "is_not", "icontains", "not_icontains", "regex", "not_regex", "gt", "lt", "gte", "lte", "is_set", "is_not_set", "is_date_exact", "is_date_after", "is_date_before", "in", "not_in"] | Literal[""] | None = 'exact'
-    type_: Literal["event", "event_metadata", "feature", "person", "cohort", "element", "static-cohort", "dynamic-cohort", "precalculated-cohort", "group", "recording", "log_entry", "behavioral", "session", "hogql", "data_warehouse", "data_warehouse_person_property", "error_tracking_issue", "log", "log_attribute", "log_resource_attribute", "span", "span_attribute", "span_resource_attribute", "revenue_analytics", "flag", "workflow_variable"] | Literal[""] | None = Field('event', validation_alias="type", serialization_alias="type")
+    operator: Literal["exact", "is_not", "icontains", "not_icontains", "regex", "not_regex", "gt", "lt", "gte", "lte", "is_set", "is_not_set", "is_date_exact", "is_date_after", "is_date_before", "in", "not_in"] | Literal[""] | None = None
+    type_: Literal["event", "event_metadata", "feature", "person", "cohort", "element", "static-cohort", "dynamic-cohort", "precalculated-cohort", "group", "recording", "log_entry", "behavioral", "session", "hogql", "data_warehouse", "data_warehouse_person_property", "error_tracking_issue", "log", "log_attribute", "log_resource_attribute", "span", "span_attribute", "span_resource_attribute", "revenue_analytics", "flag", "workflow_variable"] | Literal[""] | None = Field(None, validation_alias="type", serialization_alias="type")
 
 class PropertyModel(PermissiveModel):
     type_: Literal["AND", "OR"] | None = Field('AND', validation_alias="type", serialization_alias="type", description="\n You can use a simplified version:\n```json\n{\n    \"properties\": [\n        {\n            \"key\": \"email\",\n            \"value\": \"x@y.com\",\n            \"operator\": \"exact\",\n            \"type\": \"event\"\n        }\n    ]\n}\n```\n\nOr you can create more complicated queries with AND and OR:\n```json\n{\n    \"properties\": {\n        \"type\": \"AND\",\n        \"values\": [\n            {\n                \"type\": \"OR\",\n                \"values\": [\n                    {\"key\": \"email\", ...},\n                    {\"key\": \"email\", ...}\n                ]\n            },\n            {\n                \"type\": \"AND\",\n                \"values\": [\n                    {\"key\": \"email\", ...},\n                    {\"key\": \"email\", ...}\n                ]\n            }\n        ]\n    ]\n}\n```\n\n\n* `AND` - AND\n* `OR` - OR")

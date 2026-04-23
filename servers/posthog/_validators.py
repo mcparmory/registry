@@ -1,7 +1,7 @@
 """
 Posthog Api MCP Server - Validators
 
-Generated: 2026-04-14 19:06:20 UTC
+Generated: 2026-04-23 21:38:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

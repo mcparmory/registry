@@ -1,7 +1,7 @@
 """
 Authentication module for PostHog API MCP server.
 
-Generated: 2026-04-14 19:06:20 UTC
+Generated: 2026-04-23 21:38:47 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -127,7 +127,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_error_tracking_suppression_rule": [["PersonalAPIKeyAuth"]],
     "list_error_tracking_symbol_sets": [["PersonalAPIKeyAuth"]],
     "get_error_tracking_symbol_set": [["PersonalAPIKeyAuth"]],
-    "update_error_tracking_symbol_set": [],
+    "update_error_tracking_symbol_set": [["PersonalAPIKeyAuth"]],
     "delete_error_tracking_symbol_set": [["PersonalAPIKeyAuth"]],
     "finish_symbol_set_bulk_upload": [["PersonalAPIKeyAuth"]],
     "start_symbol_sets_bulk_upload": [["PersonalAPIKeyAuth"]],
@@ -152,8 +152,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_llm_provider_key": [["PersonalAPIKeyAuth"]],
     "update_llm_provider_key_partial": [["PersonalAPIKeyAuth"]],
     "delete_llm_provider_key": [["PersonalAPIKeyAuth"]],
-    "list_dependent_configs_for_provider_key": [],
-    "validate_llm_provider_key": [],
+    "list_dependent_configs_for_provider_key": [["PersonalAPIKeyAuth"]],
+    "validate_llm_provider_key": [["PersonalAPIKeyAuth"]],
     "list_review_queue_items": [["PersonalAPIKeyAuth"]],
     "add_trace_to_review_queue": [["PersonalAPIKeyAuth"]],
     "get_review_queue_item": [["PersonalAPIKeyAuth"]],
@@ -368,7 +368,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_error_tracking_release_by_hash_project": [["PersonalAPIKeyAuth"]],
     "list_error_tracking_symbol_sets_project": [["PersonalAPIKeyAuth"]],
     "get_error_tracking_symbol_set_project": [["PersonalAPIKeyAuth"]],
-    "update_error_tracking_symbol_set_project_partial": [],
+    "update_error_tracking_symbol_set_project_partial": [["PersonalAPIKeyAuth"]],
     "delete_error_tracking_symbol_set_project": [["PersonalAPIKeyAuth"]],
     "finish_symbol_set_bulk_upload_project": [["PersonalAPIKeyAuth"]],
     "start_symbol_sets_bulk_upload_project": [["PersonalAPIKeyAuth"]],
@@ -425,14 +425,14 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_external_data_source": [["PersonalAPIKeyAuth"]],
     "update_external_data_source_partial": [["PersonalAPIKeyAuth"]],
     "delete_external_data_source": [["PersonalAPIKeyAuth"]],
-    "create_webhook_for_external_data_source": [],
-    "create_external_data_source_delete_webhook": [],
-    "list_external_data_source_jobs": [],
-    "refresh_external_data_source_schemas": [],
-    "reload_external_data_source": [],
-    "update_external_data_source_revenue_analytics_config": [],
-    "create_external_data_source_webhook_inputs": [],
-    "get_external_data_source_webhook_info": [],
+    "create_webhook_for_external_data_source": [["PersonalAPIKeyAuth"]],
+    "create_external_data_source_delete_webhook": [["PersonalAPIKeyAuth"]],
+    "list_external_data_source_jobs": [["PersonalAPIKeyAuth"]],
+    "refresh_external_data_source_schemas": [["PersonalAPIKeyAuth"]],
+    "reload_external_data_source": [["PersonalAPIKeyAuth"]],
+    "update_external_data_source_revenue_analytics_config": [["PersonalAPIKeyAuth"]],
+    "create_external_data_source_webhook_inputs": [["PersonalAPIKeyAuth"]],
+    "get_external_data_source_webhook_info": [["PersonalAPIKeyAuth"]],
     "list_feature_flags": [["PersonalAPIKeyAuth"]],
     "create_feature_flag": [["PersonalAPIKeyAuth"]],
     "get_feature_flag": [["PersonalAPIKeyAuth"]],
@@ -476,8 +476,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_hog_flow": [["PersonalAPIKeyAuth"]],
     "update_hog_flow_partial": [["PersonalAPIKeyAuth"]],
     "delete_hog_flow": [["PersonalAPIKeyAuth"]],
-    "list_hog_function_templates": [],
-    "get_hog_function_template": [],
+    "list_hog_function_templates": [["PersonalAPIKeyAuth"]],
+    "get_hog_function_template": [["PersonalAPIKeyAuth"]],
     "list_hog_functions": [["PersonalAPIKeyAuth"]],
     "create_hog_function": [["PersonalAPIKeyAuth"]],
     "get_hog_function": [["PersonalAPIKeyAuth"]],
@@ -693,9 +693,8 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "update_web_experiment": [["PersonalAPIKeyAuth"]],
     "update_web_experiment_partial": [["PersonalAPIKeyAuth"]],
     "delete_web_experiment": [["PersonalAPIKeyAuth"]],
-    "list_hog_function_templates_public": [],
+    "list_hog_function_templates_public": [["PersonalAPIKeyAuth"]],
     "list_users": [["PersonalAPIKeyAuth"]],
-    "create_user_with_email_verification": [],
-    "create_user_with_email_verification_confirmation": [],
-    "external_data_sources_connections_list": [["PersonalAPIKeyAuth"]]
+    "create_user_with_email_verification": [["PersonalAPIKeyAuth"]],
+    "create_user_with_email_verification_confirmation": [["PersonalAPIKeyAuth"]]
 }

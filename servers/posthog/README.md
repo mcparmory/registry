@@ -1,11 +1,7 @@
 # PostHog API MCP Server
+<!-- mcp-name: com.mcparmory/posthog -->
 
-| | |
-|---|---|
-| **Category** | Analytics |
-| **Tools** | 618 |
-| **Auth** | Bearer Token |
-
+Base URL: https://us.posthog.com
 | | |
 |---|---|
 | **Category** | Analytics |
@@ -19,8 +15,8 @@
 ### Quick Start (recommended)
 
 ```bash
-BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
+SERVER_REGION=YOUR_SERVER_REGION \
 uvx mcparmory-posthog
 ```
 
@@ -28,8 +24,8 @@ uvx mcparmory-posthog
 
 ```bash
 pip install mcparmory-posthog
-BASE_URL=https://your-instance.example.com \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
+SERVER_REGION=YOUR_SERVER_REGION \
 mcparmory-posthog
 ```
 
@@ -44,8 +40,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-posthog"],
       "env": {
-        "BASE_URL": "https://your-instance.example.com",
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
+        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
+        "SERVER_REGION": "YOUR_SERVER_REGION"
       }
     }
   }
@@ -59,6 +55,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `BEARER_TOKEN` — Bearer token
+- `SERVER_REGION` — PostHog cloud region prefix. Use us for US Cloud (default) or eu for EU Cloud hosted in Frankfurt. (default: `us`)
 Do not commit credentials to version control.
 
 ---
@@ -92,6 +89,17 @@ Example (if server is at `/home/user/mcp-servers/posthog`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  -e SERVER_REGION=YOUR_SERVER_REGION \
+  ghcr.io/mcparmory/posthog:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -99,7 +107,9 @@ docker build -t posthog .
 docker run -p 8000:8000 --env-file .env posthog
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
