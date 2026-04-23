@@ -5,7 +5,7 @@ Files.com MCP Server
 API Info:
 - Contact: Files.com Customer Success Team <support@files.com>
 
-Generated: 2026-04-14 18:21:17 UTC
+Generated: 2026-04-23 21:15:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,9 +41,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "http://app.files.com/api/rest/v1")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "subdomain": os.getenv("SERVER_SUBDOMAIN", ""),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{subdomain}.files.com/api/rest/v1".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Files.com"
 SERVER_VERSION = "1.0.0"
 
@@ -470,12 +477,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +529,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +575,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -900,16 +1018,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -923,6 +1042,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -965,6 +1085,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -976,7 +1111,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1120,7 +1254,7 @@ mcp = FastMCP("Files.com", middleware=[_JsonCoercionMiddleware()])
 async def list_action_notification_export_results(
     action_notification_export_id: str = Field(..., description="The unique identifier of the action notification export whose results you want to retrieve."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of results from a specific action notification export. Use the export ID to filter results and control pagination with per_page."""
 
     _action_notification_export_id = _parse_int(action_notification_export_id)
@@ -1171,7 +1305,7 @@ async def export_action_notifications(
     query_status: str | None = Field(None, description="Filter by the HTTP status code returned from the webhook server. Helps identify notifications that received specific response codes."),
     query_success: bool | None = Field(None, description="Filter by webhook delivery success. Set to true for successful deliveries (HTTP 200 or 204 responses) or false for failed deliveries."),
     start_at: str | None = Field(None, description="Start date and time for the export range (inclusive). Notifications triggered before this timestamp will be excluded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate an export of action notification records filtered by date range, folder, file path, webhook configuration, and delivery status. Use this to audit webhook delivery history and troubleshoot notification failures."""
 
     # Construct request model with validation
@@ -1210,7 +1344,7 @@ async def export_action_notifications(
 
 # Tags: action_notification_exports
 @mcp.tool()
-async def get_action_notification_export(id_: str = Field(..., alias="id", description="The unique identifier of the action notification export to retrieve.")) -> dict[str, Any]:
+async def get_action_notification_export(id_: str = Field(..., alias="id", description="The unique identifier of the action notification export to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific action notification export by its ID. Use this to view the status, configuration, and results of a previously created notification export."""
 
     _id_ = _parse_int(id_)
@@ -1248,7 +1382,7 @@ async def get_action_notification_export(id_: str = Field(..., alias="id", descr
 
 # Tags: action_webhook_failures
 @mcp.tool()
-async def retry_webhook_failure(id_: str = Field(..., alias="id", description="The unique identifier of the action webhook failure to retry.")) -> dict[str, Any]:
+async def retry_webhook_failure(id_: str = Field(..., alias="id", description="The unique identifier of the action webhook failure to retry.")) -> dict[str, Any] | ToolResult:
     """Retry a failed action webhook by its failure ID. This operation allows you to re-attempt delivery of a webhook that previously failed."""
 
     _id_ = _parse_int(id_)
@@ -1286,7 +1420,7 @@ async def retry_webhook_failure(id_: str = Field(..., alias="id", description="T
 
 # Tags: api_key
 @mcp.tool()
-async def get_current_api_key() -> dict[str, Any]:
+async def get_current_api_key() -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about the API key currently being used for authentication. This operation requires the API connection to be authenticated using an API key rather than other authentication methods."""
 
     # Extract parameters for API call
@@ -1316,7 +1450,7 @@ async def get_current_api_key() -> dict[str, Any]:
 async def list_api_keys(
     per_page: str | None = Field(None, description="Number of API keys to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort the results by a specified field in ascending or descending order. Supports sorting by expiration date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of API keys with optional sorting by expiration date. Use this to view all API keys associated with your account."""
 
     _per_page = _parse_int(per_page)
@@ -1361,7 +1495,7 @@ async def create_api_key(
     expires_at: str | None = Field(None, description="The date and time when this API key will automatically expire and become invalid. Specify in ISO 8601 format."),
     name: str | None = Field(None, description="An internal name for this API key for your own reference and organization."),
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(None, description="The permission level for this API key. `full` grants complete API access, `desktop_app` restricts to file and share link operations, `sync_app` for sync functionality, `office_integration` for office tools, and `mobile_app` for mobile access. `none` grants no permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new API key for programmatic access to the API. Configure the key's name, expiration date, description, and permission level to control its capabilities."""
 
     # Construct request model with validation
@@ -1400,7 +1534,7 @@ async def create_api_key(
 
 # Tags: api_keys
 @mcp.tool()
-async def get_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to retrieve.")) -> dict[str, Any]:
+async def get_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific API key by its ID. Use this to view details of an existing API key in your account."""
 
     _id_ = _parse_int(id_)
@@ -1444,7 +1578,7 @@ async def update_api_key_by_id(
     expires_at: str | None = Field(None, description="The date and time when this API key will expire and become invalid."),
     name: str | None = Field(None, description="An internal name for the API key to help you organize and identify it."),
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(None, description="The permission set determines what operations this API key can perform. Desktop app keys are limited to file and share link operations, while full keys have unrestricted access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing API key's configuration including name, description, expiration date, and permission set."""
 
     _id_ = _parse_int(id_)
@@ -1486,7 +1620,7 @@ async def update_api_key_by_id(
 
 # Tags: api_keys
 @mcp.tool()
-async def delete_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to delete.")) -> dict[str, Any]:
+async def delete_api_key(id_: str = Field(..., alias="id", description="The unique identifier of the API key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an API key by its ID. This action cannot be undone and will immediately revoke access for any integrations using this key."""
 
     _id_ = _parse_int(id_)
@@ -1527,7 +1661,7 @@ async def delete_api_key(id_: str = Field(..., alias="id", description="The uniq
 async def list_apps(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are `name` and `app_type`. Specify the field name as the key and the direction (asc or desc) as the value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all apps with optional sorting capabilities. Use pagination parameters to control result size and sorting to organize results by name or app type."""
 
     _per_page = _parse_int(per_page)
@@ -1571,7 +1705,7 @@ async def list_as2_incoming_messages(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid fields are `created_at` and `as2_partner_id`."),
     as2_partner_id: str | None = Field(None, description="Filter messages by a specific AS2 partner ID. When provided, only messages from that partner will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of incoming AS2 messages, optionally filtered by AS2 partner and sorted by specified fields. Supports pagination for managing large result sets."""
 
     _per_page = _parse_int(per_page)
@@ -1616,7 +1750,7 @@ async def list_as2_outgoing_messages(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `created_at` and `as2_partner_id`."),
     as2_partner_id: str | None = Field(None, description="Filter results to messages associated with a specific AS2 partner. If omitted, returns messages from all partners."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of outgoing AS2 messages, optionally filtered by AS2 partner and sorted by specified fields. Useful for monitoring message delivery status and history."""
 
     _per_page = _parse_int(per_page)
@@ -1657,7 +1791,7 @@ async def list_as2_outgoing_messages(
 
 # Tags: as2_partners
 @mcp.tool()
-async def list_as2_partners(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_as2_partners(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of AS2 partners configured in the system. Use the per_page parameter to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -1703,7 +1837,7 @@ async def create_as2_partner(
     public_certificate: str = Field(..., description="The public certificate in PEM format used to verify signatures and encrypt messages from this partner."),
     uri: str = Field(..., description="The base URL where AS2 responses and acknowledgments will be sent to this partner."),
     server_certificate: str | None = Field(None, description="The remote server's certificate for validating secure connections to the partner's AS2 endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AS2 partner configuration for secure EDI communication. Requires an associated AS2 station and partner identification details including certificates and response URI."""
 
     _as2_station_id = _parse_int(as2_station_id)
@@ -1744,7 +1878,7 @@ async def create_as2_partner(
 
 # Tags: as2_partners
 @mcp.tool()
-async def get_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to retrieve.")) -> dict[str, Any]:
+async def get_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific AS2 partner by ID. Returns the partner's configuration and connection information."""
 
     _id_ = _parse_int(id_)
@@ -1788,7 +1922,7 @@ async def update_as2_partner(
     public_certificate: str | None = Field(None, description="The public certificate used for verifying signatures and encrypting messages from this AS2 partner."),
     server_certificate: str | None = Field(None, description="The remote server's certificate for establishing secure connections and validating the AS2 partner's identity."),
     uri: str | None = Field(None, description="The base URL where AS2 responses and acknowledgments should be sent to this partner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an AS2 partner's configuration including name, certificates, and response URI. Allows modification of existing AS2 partner settings for secure EDI communication."""
 
     _id_ = _parse_int(id_)
@@ -1830,7 +1964,7 @@ async def update_as2_partner(
 
 # Tags: as2_partners
 @mcp.tool()
-async def delete_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to delete.")) -> dict[str, Any]:
+async def delete_as2_partner(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 partner to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an AS2 partner configuration. This operation permanently removes the specified AS2 partner from the system."""
 
     _id_ = _parse_int(id_)
@@ -1868,7 +2002,7 @@ async def delete_as2_partner(id_: str = Field(..., alias="id", description="The 
 
 # Tags: as2_stations
 @mcp.tool()
-async def list_as2_stations(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_as2_stations(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of AS2 stations. Use the per_page parameter to control the number of records returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -1913,7 +2047,7 @@ async def create_as2_station(
     private_key: str = Field(..., description="The private key used for signing outbound AS2 messages and decrypting inbound messages. Must be in PEM format."),
     public_certificate: str = Field(..., description="The public certificate corresponding to the private key, used for message authentication and encryption verification. Must be in PEM or DER format."),
     private_key_password: str | None = Field(None, description="Optional password protecting the private key. Required if the private key is encrypted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AS2 station for secure EDI communication. Requires cryptographic credentials including a private key and public certificate for message signing and encryption."""
 
     # Construct request model with validation
@@ -1952,7 +2086,7 @@ async def create_as2_station(
 
 # Tags: as2_stations
 @mcp.tool()
-async def get_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to retrieve.")) -> dict[str, Any]:
+async def get_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific AS2 station by its ID. Returns the configuration and status information for the AS2 station."""
 
     _id_ = _parse_int(id_)
@@ -1996,7 +2130,7 @@ async def update_as2_station(
     private_key: str | None = Field(None, description="The private key used for signing AS2 messages."),
     private_key_password: str | None = Field(None, description="The password protecting the private key."),
     public_certificate: str | None = Field(None, description="The public certificate used for verifying AS2 message signatures."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an AS2 station configuration including its name, private key, and public certificate credentials."""
 
     _id_ = _parse_int(id_)
@@ -2038,7 +2172,7 @@ async def update_as2_station(
 
 # Tags: as2_stations
 @mcp.tool()
-async def delete_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to delete.")) -> dict[str, Any]:
+async def delete_as2_station(id_: str = Field(..., alias="id", description="The unique identifier of the AS2 station to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an AS2 station by its ID. This operation permanently removes the AS2 station configuration and cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -2080,7 +2214,7 @@ async def list_automation_runs(
     automation_id: str = Field(..., description="The ID of the automation whose runs you want to list."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `created_at` and `status`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of automation runs for a specific automation. Filter, sort, and control pagination to find the runs you need."""
 
     _automation_id = _parse_int(automation_id)
@@ -2121,7 +2255,7 @@ async def list_automation_runs(
 
 # Tags: automation_runs
 @mcp.tool()
-async def get_automation_run(id_: str = Field(..., alias="id", description="The unique identifier of the automation run to retrieve.")) -> dict[str, Any]:
+async def get_automation_run(id_: str = Field(..., alias="id", description="The unique identifier of the automation run to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific automation run by its ID. Returns the current state, execution history, and results of the automation run."""
 
     _id_ = _parse_int(id_)
@@ -2163,7 +2297,7 @@ async def list_automations(
     per_page: str | None = Field(None, description="Number of automation records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: automation, disabled, last_modified_at, or name."),
     with_deleted: bool | None = Field(None, description="Include deleted automations in the results. Set to true to show all automations including those that have been deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of automations with optional filtering and sorting. Use this to view all automations in your account, including deleted ones if needed."""
 
     _per_page = _parse_int(per_page)
@@ -2203,7 +2337,7 @@ async def list_automations(
 
 # Tags: automations
 @mcp.tool()
-async def get_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to retrieve.")) -> dict[str, Any]:
+async def get_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific automation by its ID. Returns the automation configuration and current state."""
 
     _id_ = _parse_int(id_)
@@ -2258,7 +2392,7 @@ async def update_automation(
     schedule_days: list[str] | None = Field(None, description="Days of week for the schedule (e.g., 'monday', 'tuesday')"),
     schedule_times: list[str] | None = Field(None, description="Times in HH:MM format for the schedule"),
     schedule_timezone: str | None = Field(None, description="Timezone for the schedule (e.g., 'UTC', 'America/New_York')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing automation configuration. Modify automation properties such as schedule, trigger type, associated syncs/users, and behavior settings."""
 
     # Call helper functions
@@ -2304,7 +2438,7 @@ async def update_automation(
 
 # Tags: automations
 @mcp.tool()
-async def delete_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to delete.")) -> dict[str, Any]:
+async def delete_automation(id_: str = Field(..., alias="id", description="The unique identifier of the automation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an automation by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -2345,7 +2479,7 @@ async def delete_automation(id_: str = Field(..., alias="id", description="The u
 async def list_bandwidth_snapshots(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use the field name as the key and 'asc' or 'desc' as the value. Valid sortable field is 'logged_at'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of bandwidth snapshots. Results can be sorted by the logged timestamp in ascending or descending order."""
 
     _per_page = _parse_int(per_page)
@@ -2390,7 +2524,7 @@ async def list_behaviors_by_path(
     per_page: str | None = Field(None, description="Maximum number of behavior records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by the behavior field in ascending or descending order. Specify as an object with the field name as key and sort direction as value."),
     recursive: str | None = Field(None, description="Include behaviors from parent directories above the specified path when enabled. Controls whether the listing is limited to the exact path or includes the hierarchy above it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of behaviors from a specified folder path, with optional filtering, sorting, and recursive traversal capabilities."""
 
     _per_page = _parse_int(per_page)
@@ -2431,7 +2565,7 @@ async def list_behaviors_by_path(
 
 # Tags: behaviors
 @mcp.tool()
-async def get_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to retrieve.")) -> dict[str, Any]:
+async def get_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific behavior by its ID."""
 
     _id_ = _parse_int(id_)
@@ -2469,7 +2603,7 @@ async def get_behavior(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: behaviors
 @mcp.tool()
-async def delete_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to delete.")) -> dict[str, Any]:
+async def delete_behavior(id_: str = Field(..., alias="id", description="The unique identifier of the behavior to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a behavior by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -2512,7 +2646,7 @@ async def list_bundle_downloads(
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only `created_at` is supported as a valid sort field."),
     bundle_id: str | None = Field(None, description="Filter results to downloads associated with a specific bundle by its ID."),
     bundle_registration_id: str | None = Field(None, description="Filter results to downloads associated with a specific bundle registration by its ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of bundle downloads with optional filtering by bundle or bundle registration ID, and sorting capabilities."""
 
     _per_page = _parse_int(per_page)
@@ -2557,7 +2691,7 @@ async def list_bundle_downloads(
 async def list_bundle_notifications(
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     bundle_id: str | None = Field(None, description="Filter notifications by a specific bundle ID. Omit to retrieve notifications for all bundles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of notifications for a specific bundle or all bundles. Use pagination parameters to control result size and retrieval."""
 
     _per_page = _parse_int(per_page)
@@ -2598,7 +2732,7 @@ async def list_bundle_notifications(
 
 # Tags: bundle_notifications
 @mcp.tool()
-async def get_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to retrieve.")) -> dict[str, Any]:
+async def get_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific bundle notification by its ID. Use this to fetch the full notification record including its content and metadata."""
 
     _id_ = _parse_int(id_)
@@ -2640,7 +2774,7 @@ async def update_bundle_notification(
     id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to update."),
     notify_on_registration: bool | None = Field(None, description="Enable or disable notifications when a registration action occurs for this bundle."),
     notify_on_upload: bool | None = Field(None, description="Enable or disable notifications when an upload action occurs for this bundle."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update notification settings for a bundle, controlling when notifications are triggered for registration and upload actions."""
 
     _id_ = _parse_int(id_)
@@ -2682,7 +2816,7 @@ async def update_bundle_notification(
 
 # Tags: bundle_notifications
 @mcp.tool()
-async def delete_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to delete.")) -> dict[str, Any]:
+async def delete_bundle_notification(id_: str = Field(..., alias="id", description="The unique identifier of the bundle notification to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific bundle notification by its ID. This operation permanently removes the bundle notification from the system."""
 
     _id_ = _parse_int(id_)
@@ -2724,7 +2858,7 @@ async def list_bundle_recipients(
     bundle_id: str = Field(..., description="The ID of the bundle for which to list recipients."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid field is `has_registrations`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of recipients associated with a specific bundle. Supports pagination and sorting by registration status."""
 
     _bundle_id = _parse_int(bundle_id)
@@ -2772,7 +2906,7 @@ async def share_bundle_with_recipient(
     name: str | None = Field(None, description="The full name of the recipient."),
     note: str | None = Field(None, description="An optional message to include in the share notification email sent to the recipient."),
     share_after_create: bool | None = Field(None, description="When true, automatically sends a share notification email to the recipient upon creation. When false, the recipient is added without sending an email."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Share a bundle with a recipient by creating a bundle recipient record. Optionally send a share notification email immediately upon creation."""
 
     _bundle_id = _parse_int(bundle_id)
@@ -2816,7 +2950,7 @@ async def share_bundle_with_recipient(
 async def list_bundle_registrations(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     bundle_id: str | None = Field(None, description="Filter results to registrations associated with a specific bundle by its ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of bundle registrations, optionally filtered by a specific bundle ID."""
 
     _per_page = _parse_int(per_page)
@@ -2860,7 +2994,7 @@ async def list_bundle_registrations(
 async def list_bundles(
     per_page: str | None = Field(None, description="Number of bundle records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by `created_at` or `code` fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of bundles with optional sorting. Use pagination parameters to control result size and sorting to organize bundles by creation date or code."""
 
     _per_page = _parse_int(per_page)
@@ -2917,7 +3051,7 @@ async def create_bundle(
     require_share_recipient: bool | None = Field(None, description="When enabled, only recipients who received an invitation email through the Files.com interface can access the bundle."),
     send_email_receipt_to_uploader: bool | None = Field(None, description="When enabled, an email receipt confirming successful upload is sent to the uploader. Only applicable for bundles with write permissions."),
     watermark_attachment_file: str | None = Field(None, description="Image file to apply as a watermark overlay on all bundle item previews. Uploaded as binary file data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a shareable bundle that packages files and folders with configurable access controls, expiration, and submission handling. Bundles can require registration, limit access to specific recipients, and apply watermarks to previewed items."""
 
     _clickwrap_id = _parse_int(clickwrap_id)
@@ -2954,6 +3088,7 @@ async def create_bundle(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["watermark_attachment_file"],
         headers=_http_headers,
     )
 
@@ -2961,7 +3096,7 @@ async def create_bundle(
 
 # Tags: bundles
 @mcp.tool()
-async def get_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to retrieve.")) -> dict[str, Any]:
+async def get_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific bundle by its ID."""
 
     _id_ = _parse_int(id_)
@@ -3017,7 +3152,7 @@ async def update_bundle(
     require_share_recipient: bool | None = Field(None, description="When enabled, restricts access to only recipients who have been explicitly invited via email through the Files.com interface."),
     send_email_receipt_to_uploader: bool | None = Field(None, description="When enabled, sends a delivery receipt to the uploader upon bundle access. Only applicable for writable bundles."),
     watermark_attachment_file: str | None = Field(None, description="A watermark image file to overlay on all bundle item previews for branding or security purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing bundle's configuration, including access controls, expiration, paths, and metadata. Allows modification of sharing permissions, recipient requirements, and submission handling."""
 
     _id_ = _parse_int(id_)
@@ -3056,6 +3191,7 @@ async def update_bundle(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["watermark_attachment_file"],
         headers=_http_headers,
     )
 
@@ -3063,7 +3199,7 @@ async def update_bundle(
 
 # Tags: bundles
 @mcp.tool()
-async def delete_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to delete.")) -> dict[str, Any]:
+async def delete_bundle(id_: str = Field(..., alias="id", description="The unique identifier of the bundle to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a bundle by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -3104,7 +3240,7 @@ async def delete_bundle(id_: str = Field(..., alias="id", description="The uniqu
 async def share_bundle(
     id_: str = Field(..., alias="id", description="The unique identifier of the bundle to share."),
     note: str | None = Field(None, description="Optional custom message to include in the share email."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send email(s) with a shareable link to a bundle. Optionally include a custom note in the email message."""
 
     _id_ = _parse_int(id_)
@@ -3146,7 +3282,7 @@ async def share_bundle(
 
 # Tags: clickwraps
 @mcp.tool()
-async def list_clickwraps(per_page: str | None = Field(None, description="Number of clickwrap records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any]:
+async def list_clickwraps(per_page: str | None = Field(None, description="Number of clickwrap records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of clickwraps. Use the per_page parameter to control the number of records returned in each page."""
 
     _per_page = _parse_int(per_page)
@@ -3192,7 +3328,7 @@ async def create_clickwrap(
     use_with_inboxes: Literal["none", "available", "require"] | None = Field(None, description="Determines how this clickwrap applies to inbox operations: 'none' disables it, 'available' makes it optional, 'require' makes acceptance mandatory."),
     use_with_users: Literal["none", "require"] | None = Field(None, description="Determines how this clickwrap applies to user registration via email invitation: 'none' disables it, 'require' makes acceptance mandatory during password setup."),
     body: str | None = Field(None, description="Body text of Clickwrap (supports Markdown formatting)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new clickwrap agreement that users must accept. Clickwraps can be configured for use with bundles, inboxes, and user registrations."""
 
     # Construct request model with validation
@@ -3231,7 +3367,7 @@ async def create_clickwrap(
 
 # Tags: clickwraps
 @mcp.tool()
-async def get_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap agreement to retrieve.")) -> dict[str, Any]:
+async def get_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap agreement to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific clickwrap agreement by its ID. Returns the clickwrap details including its configuration and status."""
 
     _id_ = _parse_int(id_)
@@ -3275,7 +3411,7 @@ async def update_clickwrap(
     use_with_bundles: Literal["none", "available", "require"] | None = Field(None, description="Controls whether this Clickwrap is available for Bundle operations. Set to 'require' to mandate acceptance, 'available' to offer optionally, or 'none' to disable."),
     use_with_inboxes: Literal["none", "available", "require"] | None = Field(None, description="Controls whether this Clickwrap is available for Inbox operations. Set to 'require' to mandate acceptance, 'available' to offer optionally, or 'none' to disable."),
     use_with_users: Literal["none", "require"] | None = Field(None, description="Controls whether this Clickwrap is required for user registrations via email invitation. Applies only when users are invited to set their own password. Set to 'require' to mandate acceptance or 'none' to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Clickwrap agreement configuration, including its name and usage settings across bundles, inboxes, and user registrations."""
 
     _id_ = _parse_int(id_)
@@ -3317,7 +3453,7 @@ async def update_clickwrap(
 
 # Tags: clickwraps
 @mcp.tool()
-async def delete_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap to delete.")) -> dict[str, Any]:
+async def delete_clickwrap(id_: str = Field(..., alias="id", description="The unique identifier of the clickwrap to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a clickwrap by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -3355,7 +3491,7 @@ async def delete_clickwrap(id_: str = Field(..., alias="id", description="The un
 
 # Tags: dns_records
 @mcp.tool()
-async def list_dns_records(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any]:
+async def list_dns_records(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve the DNS records configured for a site. Results can be paginated to manage large record sets."""
 
     _per_page = _parse_int(per_page)
@@ -3398,7 +3534,7 @@ async def list_dns_records(per_page: str | None = Field(None, description="Numbe
 async def list_external_events(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: remote_server_type, site_id, folder_behavior_id, event_type, created_at, or status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of external events with optional sorting. Use this to monitor and track events from remote servers across your file management system."""
 
     _per_page = _parse_int(per_page)
@@ -3441,7 +3577,7 @@ async def list_external_events(
 async def create_external_event(
     body: str = Field(..., description="The content or payload of the event being created."),
     status: Literal["success", "failure", "partial_failure", "in_progress", "skipped"] = Field(..., description="The current processing state of the event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new external event with a specified status. This operation allows you to log events from external systems with their current processing state."""
 
     # Construct request model with validation
@@ -3480,7 +3616,7 @@ async def create_external_event(
 
 # Tags: external_events
 @mcp.tool()
-async def get_external_event(id_: str = Field(..., alias="id", description="The unique identifier of the external event to retrieve.")) -> dict[str, Any]:
+async def get_external_event(id_: str = Field(..., alias="id", description="The unique identifier of the external event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific external event by its ID. Returns the complete event information including metadata and configuration."""
 
     _id_ = _parse_int(id_)
@@ -3523,7 +3659,7 @@ async def initiate_file_upload(
     mkdir_parents: bool | None = Field(None, description="Whether to automatically create any missing parent directories in the path hierarchy."),
     parts: str | None = Field(None, description="The number of parts to divide the file into for multipart upload. Determines parallelization strategy for the upload."),
     size: str | None = Field(None, description="The total file size in bytes, including any existing bytes if appending to or restarting an existing file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a file upload by specifying the target path, total file size, and number of parts. Optionally create parent directories and configure multipart upload parameters."""
 
     _parts = _parse_int(parts)
@@ -3570,7 +3706,7 @@ async def copy_file(
     path: str = Field(..., description="The file or folder path to copy from."),
     destination: str = Field(..., description="The destination path where the file or folder will be copied to."),
     structure: bool | None = Field(None, description="If true, copy only the directory structure without copying file contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy a file or folder to a specified destination. Optionally copy only the directory structure without file contents."""
 
     # Construct request model with validation
@@ -3615,7 +3751,7 @@ async def get_file_metadata(
     preview_size: str | None = Field(None, description="The size of the file preview to include in the response. Determines the resolution and detail level of preview data."),
     with_previews: bool | None = Field(None, description="Whether to include preview information in the response metadata."),
     with_priority_color: bool | None = Field(None, description="Whether to include priority color information in the response metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for a file or folder at the specified path, optionally including preview and priority information."""
 
     # Construct request model with validation
@@ -3657,7 +3793,7 @@ async def get_file_metadata(
 async def move_file(
     path: str = Field(..., description="The current path of the file or folder to be moved."),
     destination: str = Field(..., description="The destination path where the file or folder should be moved to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a file or folder to a new location. The source path and destination path must both be valid within the file system."""
 
     # Construct request model with validation
@@ -3700,7 +3836,7 @@ async def move_file(
 async def add_file_comment_reaction(
     emoji: str = Field(..., description="The emoji character or emoji code to use as the reaction on the file comment."),
     file_comment_id: str = Field(..., description="The unique identifier of the file comment to attach the reaction to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add an emoji reaction to a file comment. This allows users to express feedback or acknowledgment on specific comments within a file."""
 
     _file_comment_id = _parse_int(file_comment_id)
@@ -3741,7 +3877,7 @@ async def add_file_comment_reaction(
 
 # Tags: file_comment_reactions
 @mcp.tool()
-async def remove_file_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the file comment reaction to delete.")) -> dict[str, Any]:
+async def remove_file_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the file comment reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a file comment. Deletes the specified file comment reaction by its ID."""
 
     _id_ = _parse_int(id_)
@@ -3782,7 +3918,7 @@ async def remove_file_comment_reaction(id_: str = Field(..., alias="id", descrip
 async def update_file_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the file comment to update."),
     body: str = Field(..., description="The new comment text content to replace the existing body."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the body text of an existing file comment. Allows modification of comment content after initial creation."""
 
     _id_ = _parse_int(id_)
@@ -3824,7 +3960,7 @@ async def update_file_comment(
 
 # Tags: file_comments
 @mcp.tool()
-async def delete_file_comment(id_: str = Field(..., alias="id", description="The unique identifier of the file comment to delete.")) -> dict[str, Any]:
+async def delete_file_comment(id_: str = Field(..., alias="id", description="The unique identifier of the file comment to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific file comment by its ID. This operation permanently removes the comment from the file."""
 
     _id_ = _parse_int(id_)
@@ -3862,7 +3998,7 @@ async def delete_file_comment(id_: str = Field(..., alias="id", description="The
 
 # Tags: file_migrations
 @mcp.tool()
-async def get_file_migration(id_: str = Field(..., alias="id", description="The unique identifier of the file migration to retrieve.")) -> dict[str, Any]:
+async def get_file_migration(id_: str = Field(..., alias="id", description="The unique identifier of the file migration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific file migration by its ID. Use this to check the status and information of a file migration operation."""
 
     _id_ = _parse_int(id_)
@@ -3906,7 +4042,7 @@ async def download_file(
     preview_size: str | None = Field(None, description="The size of the preview image to generate. Larger sizes provide higher resolution previews."),
     with_previews: bool | None = Field(None, description="Include preview image data in the response when available."),
     with_priority_color: bool | None = Field(None, description="Include priority color metadata in the response when available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download a file from the specified path with optional preview generation, metadata retrieval, or redirect handling. Supports stat mode to retrieve file information without initiating a download."""
 
     # Construct request model with validation
@@ -3956,7 +4092,7 @@ async def upload_file(
     provided_mtime: str | None = Field(None, description="User-provided modification timestamp for the uploaded file in ISO 8601 format."),
     size: str | None = Field(None, description="The total size of the file in bytes."),
     structure: str | None = Field(None, description="When copying a folder, set to `true` to copy only the directory structure without file contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file to the specified path, supporting multipart uploads, append operations, and optional parent directory creation. Supports various upload actions including standard upload, append, and multipart completion."""
 
     _length = _parse_int(length)
@@ -4004,7 +4140,7 @@ async def update_file_metadata(
     path: str = Field(..., description="The file or folder path to update."),
     priority_color: str | None = Field(None, description="Priority or bookmark color to assign to the file or folder."),
     provided_mtime: str | None = Field(None, description="The modification timestamp to set for the file or folder in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update metadata for a file or folder, including priority color and modification timestamp."""
 
     # Construct request model with validation
@@ -4047,7 +4183,7 @@ async def update_file_metadata(
 async def delete_file(
     path: str = Field(..., description="The file system path to the file or folder to delete."),
     recursive: bool | None = Field(None, description="When true, recursively deletes folders and their contents. When false, deletion fails if the target folder is not empty."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a file or folder at the specified path. Use the recursive parameter to delete non-empty folders; otherwise, deletion will fail if the folder contains items."""
 
     # Construct request model with validation
@@ -4093,7 +4229,7 @@ async def list_folders(
     search_all: bool | None = Field(None, description="When enabled, searches the entire site and ignores the specified folder path. Use only for ad-hoc human searches, not automated processes, as results are best-effort and not real-time guaranteed."),
     with_previews: bool | None = Field(None, description="Include file preview data in the response."),
     with_priority_color: bool | None = Field(None, description="Include file priority color metadata in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """List folders at a specified path with optional filtering, previews, and metadata. Supports site-wide search when enabled."""
 
     _per_page = _parse_int(per_page)
@@ -4138,7 +4274,7 @@ async def create_folder(
     path: str = Field(..., description="The file system path where the folder should be created."),
     mkdir_parents: bool | None = Field(None, description="Whether to automatically create any missing parent directories in the path."),
     provided_mtime: str | None = Field(None, description="Custom modification timestamp for the created folder in ISO 8601 date-time format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new folder at the specified path. Optionally create parent directories and set a custom modification time."""
 
     # Construct request model with validation
@@ -4178,7 +4314,7 @@ async def create_folder(
 
 # Tags: form_field_sets
 @mcp.tool()
-async def list_form_field_sets(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_form_field_sets(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of form field sets. Use pagination to control the number of records returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -4221,7 +4357,7 @@ async def list_form_field_sets(per_page: str | None = Field(None, description="N
 async def create_form_field_set(
     form_fields: list[_models.PostFormFieldSetsBodyFormFieldsItem] | None = Field(None, description="Array of form fields to include in this set. Order is preserved and determines field display sequence. Each item should represent a field configuration."),
     title: str | None = Field(None, description="Display title for the form field set. Used to identify and label the set in user interfaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new form field set with a title and optional collection of form fields. Form field sets organize related fields for structured data collection."""
 
     # Construct request model with validation
@@ -4259,7 +4395,7 @@ async def create_form_field_set(
 
 # Tags: form_field_sets
 @mcp.tool()
-async def get_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to retrieve.")) -> dict[str, Any]:
+async def get_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific form field set by its ID. Returns the complete configuration and structure of the requested form field set."""
 
     _id_ = _parse_int(id_)
@@ -4301,7 +4437,7 @@ async def update_form_field_set(
     id_: str = Field(..., alias="id", description="The unique identifier of the form field set to update."),
     form_fields: list[_models.PatchFormFieldSetsIdBodyFormFieldsItem] | None = Field(None, description="Array of form fields to associate with this field set. Order may be significant for display purposes."),
     title: str | None = Field(None, description="The display title for this form field set."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing form field set by modifying its title and/or associated form fields. Changes are applied to the specified form field set."""
 
     _id_ = _parse_int(id_)
@@ -4342,7 +4478,7 @@ async def update_form_field_set(
 
 # Tags: form_field_sets
 @mcp.tool()
-async def delete_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to delete.")) -> dict[str, Any]:
+async def delete_form_field_set(id_: str = Field(..., alias="id", description="The unique identifier of the form field set to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a form field set by its ID. This operation permanently removes the specified form field set and cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -4384,7 +4520,7 @@ async def list_group_users(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     group_id: str | None = Field(None, description="Group ID.  If provided, will return group_users of this group."),
     user_id: str | None = Field(None, description="User ID.  If provided, will return group_users of this user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users belonging to a group. Use the per_page parameter to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -4430,7 +4566,7 @@ async def add_user_to_group(
     group_id: str = Field(..., description="The ID of the group to which the user will be added."),
     user_id: str = Field(..., description="The ID of the user to add to the group."),
     admin: bool | None = Field(None, description="Grant group administrator privileges to the user, allowing them to manage group membership and settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to a group with optional administrator privileges. The user will gain access to all group resources based on their assigned role."""
 
     _group_id = _parse_int(group_id)
@@ -4477,7 +4613,7 @@ async def update_group_user(
     group_id: str = Field(..., description="The group to which the user belongs or should be associated."),
     user_id: str = Field(..., description="The user to be added or updated in the group membership."),
     admin: bool | None = Field(None, description="Whether the user should have administrator privileges within the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's membership in a group, including their administrator status. Modify group user associations and permissions."""
 
     _id_ = _parse_int(id_)
@@ -4525,7 +4661,7 @@ async def remove_user_from_group(
     id_: str = Field(..., alias="id", description="The unique identifier of the group user membership record to delete."),
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to remove from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a group by deleting the group membership record. This operation requires the group user ID along with the group and user IDs for verification."""
 
     _id_ = _parse_int(id_)
@@ -4572,7 +4708,7 @@ async def list_groups(
     per_page: str | None = Field(None, description="Maximum number of group records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. The `name` field is supported for sorting."),
     ids: str | None = Field(None, description="Filter results to include only groups with the specified IDs. Provide as a comma-separated list of group identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of groups with optional filtering by IDs and sorting capabilities. Use this operation to browse available groups in your system."""
 
     _per_page = _parse_int(per_page)
@@ -4617,7 +4753,7 @@ async def create_group(
     name: str | None = Field(None, description="The name of the group. Used for identification and display purposes."),
     notes: str | None = Field(None, description="Optional notes or description for the group. Useful for documenting the group's purpose or additional context."),
     user_ids: str | None = Field(None, description="Comma-delimited list of user IDs to add as members of the group. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new group with specified members and administrators. Optionally include group name, notes, and assign users and admins during creation."""
 
     # Construct request model with validation
@@ -4660,7 +4796,7 @@ async def update_group_membership(
     group_id: str = Field(..., description="The unique identifier of the group containing the membership to update."),
     user_id: str = Field(..., description="The unique identifier of the user whose group membership should be updated."),
     admin: bool | None = Field(None, description="Whether the user should have administrator privileges within the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's membership status in a group, including their administrator privileges. Allows modification of a user's role within the specified group."""
 
     _group_id = _parse_int(group_id)
@@ -4706,7 +4842,7 @@ async def update_group_membership(
 async def remove_group_member(
     group_id: str = Field(..., description="The unique identifier of the group from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to be removed from the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a group by deleting their membership. This operation revokes the user's access to the group."""
 
     _group_id = _parse_int(group_id)
@@ -4750,7 +4886,7 @@ async def list_group_permissions(
     per_page: str | None = Field(None, description="Number of permission records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort the results by a specified field in ascending or descending order. Valid sortable fields are `group_id`, `path`, `user_id`, or `permission`."),
     include_groups: bool | None = Field(None, description="When enabled, includes permissions inherited from the group's parent groups in addition to directly assigned permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of permissions for a specific group. Supports filtering, sorting, and optionally including inherited permissions from parent groups."""
 
     _per_page = _parse_int(per_page)
@@ -4794,7 +4930,7 @@ async def list_group_permissions(
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to retrieve."),
     per_page: str | None = Field(None, description="Number of user records to return per page. Recommended to use 1,000 or less for optimal performance; maximum allowed is 10,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users who are members of a specific group. Use pagination parameters to control result size and navigate through large member lists."""
 
     _group_id = _parse_int(group_id)
@@ -4872,7 +5008,7 @@ async def create_group_user(
     time_zone: str | None = Field(None, description="The user's time zone for scheduling and time-based operations."),
     user_root: str | None = Field(None, description="Root folder path for FTP access and optionally SFTP if configured site-wide. Not used for API, desktop, or web interface access."),
     username: str | None = Field(None, description="User's username"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user within a specified group with configurable authentication, permissions, and access settings."""
 
     _group_id = _parse_int(group_id)
@@ -4917,7 +5053,7 @@ async def create_group_user(
 
 # Tags: groups
 @mcp.tool()
-async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any]:
+async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific group by its ID."""
 
     _id_ = _parse_int(id_)
@@ -4961,7 +5097,7 @@ async def update_group(
     name: str | None = Field(None, description="The name of the group."),
     notes: str | None = Field(None, description="Additional notes or description for the group."),
     user_ids: str | None = Field(None, description="Comma-separated list of user IDs to add as members of the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing group's properties including name, notes, members, and administrators. Provide only the fields you want to modify."""
 
     _id_ = _parse_int(id_)
@@ -5003,7 +5139,7 @@ async def update_group(
 
 # Tags: groups
 @mcp.tool()
-async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any]:
+async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a group by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -5048,7 +5184,7 @@ async def list_history(
     per_page: str | None = Field(None, description="Number of history records to return per page. Maximum allowed is 10,000, though 1,000 or fewer is recommended for optimal performance."),
     sort_field: str | None = Field(None, description="Field to sort by. Valid values: 'path', 'folder', 'user_id', 'created_at'"),
     sort_direction: str | None = Field(None, description="Sort direction. Valid values: 'asc' or 'desc'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete action history for the site with optional filtering by date range and customizable display format."""
 
     # Call helper functions
@@ -5098,7 +5234,7 @@ async def list_file_history(
     display: str | None = Field(None, description="Control the detail level of returned records. Use `full` for complete details or `parent` for parent-only information."),
     per_page: str | None = Field(None, description="Number of records to return per page. Maximum is 10,000; 1,000 or less is recommended."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use object notation (e.g., `sort_by[user_id]=desc`). Valid fields are `user_id` and `created_at`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the change history for a specific file, with optional filtering by date range and customizable sorting and pagination."""
 
     _per_page = _parse_int(per_page)
@@ -5146,7 +5282,7 @@ async def list_folder_history(
     display: str | None = Field(None, description="Control the detail level of returned records: `full` for complete details or `parent` for parent-only information."),
     per_page: str | None = Field(None, description="Number of history records to return per page. Recommended maximum is 1,000 for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `user_id` and `created_at`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the change history for a specific folder, with optional filtering by date range and customizable sorting and pagination."""
 
     _per_page = _parse_int(per_page)
@@ -5193,7 +5329,7 @@ async def list_logins(
     display: str | None = Field(None, description="Control the response format. Use `full` for complete details or `parent` for parent-level information only."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended maximum is 1,000 for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use format `sort_by[field_name]=direction` where field_name is `user_id` or `created_at` and direction is `asc` or `desc`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of site login history with optional filtering by date range and sorting capabilities."""
 
     _per_page = _parse_int(per_page)
@@ -5240,7 +5376,7 @@ async def list_user_history(
     display: str | None = Field(None, description="Control the detail level of returned records. Use `full` for complete details or `parent` for parent-only information."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use field names `user_id` or `created_at` with direction indicators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of history records for a specific user, with optional filtering by date range and customizable sorting and display format."""
 
     _user_id = _parse_int(user_id)
@@ -5285,7 +5421,7 @@ async def list_user_history(
 async def list_history_export_results(
     history_export_id: str = Field(..., description="The unique identifier of the history export whose results you want to retrieve."),
     per_page: str | None = Field(None, description="Number of results to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of results from a completed history export. Use the history export ID to fetch the exported records with configurable page size."""
 
     _history_export_id = _parse_int(history_export_id)
@@ -5346,7 +5482,7 @@ async def create_history_export(
     query_user_id: str | None = Field(None, description="Filter results to include only actions performed by the user with this user ID."),
     query_username: str | None = Field(None, description="Filter results to include only actions performed by this username."),
     start_at: str | None = Field(None, description="Start date and time for the export range (inclusive). Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a history export with optional filtering by date range, user, action type, interface, and target object. Returns an export job that can be monitored for completion."""
 
     # Construct request model with validation
@@ -5385,7 +5521,7 @@ async def create_history_export(
 
 # Tags: history_exports
 @mcp.tool()
-async def get_history_export(id_: str = Field(..., alias="id", description="The unique identifier of the history export to retrieve.")) -> dict[str, Any]:
+async def get_history_export(id_: str = Field(..., alias="id", description="The unique identifier of the history export to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific history export by its ID. Use this to check the status, metadata, and information about a previously created history export."""
 
     _id_ = _parse_int(id_)
@@ -5427,7 +5563,7 @@ async def list_inbox_recipients(
     inbox_id: str = Field(..., description="The unique identifier of the inbox for which to list recipients."),
     per_page: str | None = Field(None, description="Maximum number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only `has_registrations` is supported as a sortable field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of recipients associated with a specific inbox. Use sorting and pagination to manage large result sets."""
 
     _inbox_id = _parse_int(inbox_id)
@@ -5475,7 +5611,7 @@ async def share_inbox_with_recipient(
     name: str | None = Field(None, description="Full name of the recipient for identification purposes."),
     note: str | None = Field(None, description="Optional message to include in the notification email sent to the recipient."),
     share_after_create: bool | None = Field(None, description="When true, automatically sends a sharing notification email to the recipient upon creation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant a recipient access to an inbox by sharing it with their email address. Optionally send them a notification email upon creation."""
 
     _inbox_id = _parse_int(inbox_id)
@@ -5519,7 +5655,7 @@ async def share_inbox_with_recipient(
 async def list_inbox_registrations(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     folder_behavior_id: str | None = Field(None, description="Filter results by the ID of the associated inbox. When provided, only registrations for that specific inbox are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of inbox registrations, optionally filtered by a specific inbox. Use pagination parameters to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -5565,7 +5701,7 @@ async def list_inbox_uploads(
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only `created_at` is supported as a valid sort field."),
     inbox_registration_id: str | None = Field(None, description="Filter uploads by the associated inbox registration ID."),
     inbox_id: str | None = Field(None, description="Filter uploads by the associated inbox ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of uploads associated with inboxes. Filter by specific inbox or inbox registration, and optionally sort results by creation date."""
 
     _per_page = _parse_int(per_page)
@@ -5607,7 +5743,7 @@ async def list_inbox_uploads(
 
 # Tags: invoices
 @mcp.tool()
-async def list_invoices(per_page: str | None = Field(None, description="Number of invoice records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any]:
+async def list_invoices(per_page: str | None = Field(None, description="Number of invoice records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of invoices. Use the per_page parameter to control the number of results returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -5647,7 +5783,7 @@ async def list_invoices(per_page: str | None = Field(None, description="Number o
 
 # Tags: invoices
 @mcp.tool()
-async def get_invoice(id_: str = Field(..., alias="id", description="The unique identifier of the invoice to retrieve.")) -> dict[str, Any]:
+async def get_invoice(id_: str = Field(..., alias="id", description="The unique identifier of the invoice to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific invoice by its ID. Returns detailed invoice information including amounts, dates, and line items."""
 
     _id_ = _parse_int(id_)
@@ -5685,7 +5821,7 @@ async def get_invoice(id_: str = Field(..., alias="id", description="The unique 
 
 # Tags: ip_addresses
 @mcp.tool()
-async def list_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any]:
+async def list_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of IP addresses associated with the current site. Use the per_page parameter to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -5725,7 +5861,7 @@ async def list_ip_addresses(per_page: str | None = Field(None, description="Numb
 
 # Tags: ip_addresses
 @mcp.tool()
-async def list_exavault_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any]:
+async def list_exavault_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all public IP addresses reserved and used by ExaVault for its services. Use this to configure firewall rules or IP allowlists for ExaVault connectivity."""
 
     _per_page = _parse_int(per_page)
@@ -5765,7 +5901,7 @@ async def list_exavault_reserved_ip_addresses(per_page: str | None = Field(None,
 
 # Tags: ip_addresses
 @mcp.tool()
-async def list_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any]:
+async def list_reserved_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all reserved public IP addresses available in the system."""
 
     _per_page = _parse_int(per_page)
@@ -5809,7 +5945,7 @@ async def list_locks(
     path: str = Field(..., description="The resource path for which to retrieve locks."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000."),
     include_children: bool | None = Field(None, description="Whether to include locks from child objects in addition to the specified path."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all locks for a specified path, with optional support for including locks from child objects and pagination control."""
 
     _per_page = _parse_int(per_page)
@@ -5853,7 +5989,7 @@ async def list_locks(
 async def release_lock(
     path: str = Field(..., description="The resource path for which the lock should be released."),
     token: str = Field(..., description="The unique token that identifies and authorizes the release of this specific lock."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Release a lock on a resource by providing its path and token. This removes the lock, allowing other operations to proceed."""
 
     # Construct request model with validation
@@ -5895,7 +6031,7 @@ async def release_lock(
 async def list_message_comment_reactions(
     message_comment_id: str = Field(..., description="The ID of the message comment for which to retrieve reactions."),
     per_page: str | None = Field(None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all reactions added to a specific message comment. Results are paginated and can be controlled via the per_page parameter."""
 
     _message_comment_id = _parse_int(message_comment_id)
@@ -5936,7 +6072,7 @@ async def list_message_comment_reactions(
 
 # Tags: message_comment_reactions
 @mcp.tool()
-async def get_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to retrieve.")) -> dict[str, Any]:
+async def get_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific message comment reaction by its ID. Use this to fetch information about a user's reaction to a message comment."""
 
     _id_ = _parse_int(id_)
@@ -5974,7 +6110,7 @@ async def get_message_comment_reaction(id_: str = Field(..., alias="id", descrip
 
 # Tags: message_comment_reactions
 @mcp.tool()
-async def remove_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to delete.")) -> dict[str, Any]:
+async def remove_message_comment_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message comment reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a message comment. Deletes the specified reaction by its ID."""
 
     _id_ = _parse_int(id_)
@@ -6015,7 +6151,7 @@ async def remove_message_comment_reaction(id_: str = Field(..., alias="id", desc
 async def list_message_comments(
     message_id: str = Field(..., description="The ID of the message for which to retrieve comments."),
     per_page: str | None = Field(None, description="Maximum number of comments to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all comments associated with a specific message. Results are paginated and can be controlled via the per_page parameter."""
 
     _message_id = _parse_int(message_id)
@@ -6056,7 +6192,7 @@ async def list_message_comments(
 
 # Tags: message_comments
 @mcp.tool()
-async def get_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to retrieve.")) -> dict[str, Any]:
+async def get_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific message comment by its ID. Returns the full details of the requested comment."""
 
     _id_ = _parse_int(id_)
@@ -6097,7 +6233,7 @@ async def get_message_comment(id_: str = Field(..., alias="id", description="The
 async def update_message_comment(
     id_: str = Field(..., alias="id", description="The unique identifier of the message comment to update."),
     body: str = Field(..., description="The updated text content for the message comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the body text of an existing message comment. Allows modification of comment content after initial creation."""
 
     _id_ = _parse_int(id_)
@@ -6139,7 +6275,7 @@ async def update_message_comment(
 
 # Tags: message_comments
 @mcp.tool()
-async def delete_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to delete.")) -> dict[str, Any]:
+async def delete_message_comment(id_: str = Field(..., alias="id", description="The unique identifier of the message comment to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific message comment by its ID. This operation permanently removes the comment from the message thread."""
 
     _id_ = _parse_int(id_)
@@ -6180,7 +6316,7 @@ async def delete_message_comment(id_: str = Field(..., alias="id", description="
 async def list_message_reactions(
     message_id: str = Field(..., description="The ID of the message to retrieve reactions for."),
     per_page: str | None = Field(None, description="Maximum number of reactions to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all reactions added to a specific message. Supports pagination to control the number of results returned per page."""
 
     _message_id = _parse_int(message_id)
@@ -6221,7 +6357,7 @@ async def list_message_reactions(
 
 # Tags: message_reactions
 @mcp.tool()
-async def get_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to retrieve.")) -> dict[str, Any]:
+async def get_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific message reaction by its ID. Use this to fetch information about a single reaction to a message."""
 
     _id_ = _parse_int(id_)
@@ -6259,7 +6395,7 @@ async def get_message_reaction(id_: str = Field(..., alias="id", description="Th
 
 # Tags: message_reactions
 @mcp.tool()
-async def remove_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to delete.")) -> dict[str, Any]:
+async def remove_message_reaction(id_: str = Field(..., alias="id", description="The unique identifier of the message reaction to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a reaction from a message by its reaction ID. This deletes the association between the user and the message reaction."""
 
     _id_ = _parse_int(id_)
@@ -6300,7 +6436,7 @@ async def remove_message_reaction(id_: str = Field(..., alias="id", description=
 async def list_messages(
     project_id: str = Field(..., description="The project ID for which to retrieve messages. Required to scope results to a specific project."),
     per_page: str | None = Field(None, description="Number of messages to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of messages for a specific project. Use pagination parameters to control the number of results returned per page."""
 
     _project_id = _parse_int(project_id)
@@ -6345,7 +6481,7 @@ async def create_message(
     body: str = Field(..., description="The content of the message to be created."),
     project_id: str = Field(..., description="The unique identifier of the project to which this message should be attached."),
     subject: str = Field(..., description="The subject line or title for the message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new message attached to a specific project. Messages can be used for project communication and collaboration."""
 
     _project_id = _parse_int(project_id)
@@ -6386,7 +6522,7 @@ async def create_message(
 
 # Tags: messages
 @mcp.tool()
-async def get_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to retrieve.")) -> dict[str, Any]:
+async def get_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific message by its ID. Returns the full message details including content, metadata, and timestamps."""
 
     _id_ = _parse_int(id_)
@@ -6429,7 +6565,7 @@ async def update_message(
     body: str = Field(..., description="The new content body for the message."),
     project_id: str = Field(..., description="The project ID to which this message should be attached or reassigned."),
     subject: str = Field(..., description="The new subject line for the message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing message with new subject and body content. The message will be associated with the specified project."""
 
     _id_ = _parse_int(id_)
@@ -6472,7 +6608,7 @@ async def update_message(
 
 # Tags: messages
 @mcp.tool()
-async def delete_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to delete.")) -> dict[str, Any]:
+async def delete_message(id_: str = Field(..., alias="id", description="The unique identifier of the message to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a message by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -6514,7 +6650,7 @@ async def list_notifications(
     per_page: str | None = Field(None, description="Maximum number of notification records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are `path`, `user_id`, or `group_id`."),
     include_ancestors: bool | None = Field(None, description="When enabled and a `path` filter is applied, include notifications from all parent paths in addition to the specified path. Has no effect if `path` is not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of notifications with optional sorting and ancestor path inclusion. Use this to display notification feeds or audit logs with flexible filtering options."""
 
     _per_page = _parse_int(per_page)
@@ -6571,7 +6707,7 @@ async def create_notification(
     path: str | None = Field(None, description="Path"),
     user_id: str | None = Field(None, description="The id of the user to notify. Provide `user_id`, `username` or `group_id`."),
     group_id: str | None = Field(None, description="The ID of the group to notify.  Provide `user_id`, `username` or `group_id`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a notification rule that triggers on specified file system actions within a path. Configure which actions trigger notifications, who performs them, and how notifications are aggregated."""
 
     _user_id = _parse_int(user_id)
@@ -6613,7 +6749,7 @@ async def create_notification(
 
 # Tags: notifications
 @mcp.tool()
-async def get_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to retrieve.")) -> dict[str, Any]:
+async def get_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific notification by its ID. Returns the full details of the requested notification."""
 
     _id_ = _parse_int(id_)
@@ -6666,7 +6802,7 @@ async def update_notification(
     triggering_filenames: list[str] | None = Field(None, description="Array of filename patterns (supporting wildcards) to match against action paths. Only actions on matching files will trigger notifications."),
     triggering_group_ids: list[int] | None = Field(None, description="Array of group IDs. When specified, only actions performed by members of these groups will trigger notifications."),
     triggering_user_ids: list[int] | None = Field(None, description="Array of user IDs. When specified, only actions performed by these users will trigger notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update notification settings for a specific notification rule, including trigger conditions, aggregation intervals, and recipient filters."""
 
     _id_ = _parse_int(id_)
@@ -6708,7 +6844,7 @@ async def update_notification(
 
 # Tags: notifications
 @mcp.tool()
-async def delete_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to delete.")) -> dict[str, Any]:
+async def delete_notification(id_: str = Field(..., alias="id", description="The unique identifier of the notification to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a notification by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -6746,7 +6882,7 @@ async def delete_notification(id_: str = Field(..., alias="id", description="The
 
 # Tags: payments
 @mcp.tool()
-async def list_payments(per_page: str | None = Field(None, description="Number of payment records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any]:
+async def list_payments(per_page: str | None = Field(None, description="Number of payment records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of payments. Use the per_page parameter to control the number of records returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -6786,7 +6922,7 @@ async def list_payments(per_page: str | None = Field(None, description="Number o
 
 # Tags: payments
 @mcp.tool()
-async def get_payment(id_: str = Field(..., alias="id", description="The unique identifier of the payment to retrieve.")) -> dict[str, Any]:
+async def get_payment(id_: str = Field(..., alias="id", description="The unique identifier of the payment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific payment by its ID. Returns the payment information including amount, status, and transaction details."""
 
     _id_ = _parse_int(id_)
@@ -6828,7 +6964,7 @@ async def list_permissions(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid sortable fields are: group_id, path, user_id, or permission."),
     include_groups: bool | None = Field(None, description="When filtering by user or group, include permissions inherited from the user's group memberships in addition to directly assigned permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of permissions with optional sorting and group inheritance filtering. Use this to view all permissions in the system, optionally including permissions inherited from group memberships."""
 
     _per_page = _parse_int(per_page)
@@ -6874,7 +7010,7 @@ async def create_permission(
     path: str | None = Field(None, description="Folder path"),
     user_id: str | None = Field(None, description="User ID.  Provide `username` or `user_id`"),
     group_id: str | None = Field(None, description="Group ID"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new permission with specified access level and optional recursive application to subfolders."""
 
     _user_id = _parse_int(user_id)
@@ -6916,7 +7052,7 @@ async def create_permission(
 
 # Tags: permissions
 @mcp.tool()
-async def delete_permission(id_: str = Field(..., alias="id", description="The unique identifier of the permission to delete.")) -> dict[str, Any]:
+async def delete_permission(id_: str = Field(..., alias="id", description="The unique identifier of the permission to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a permission by its ID. This operation permanently removes the specified permission from the system."""
 
     _id_ = _parse_int(id_)
@@ -6954,7 +7090,7 @@ async def delete_permission(id_: str = Field(..., alias="id", description="The u
 
 # Tags: projects
 @mcp.tool()
-async def create_project(global_access: str = Field(..., description="Sets the global access level for the project, controlling visibility and permissions for all users in the organization.")) -> dict[str, Any]:
+async def create_project(global_access: str = Field(..., description="Sets the global access level for the project, controlling visibility and permissions for all users in the organization.")) -> dict[str, Any] | ToolResult:
     """Create a new project with specified global access permissions. Global access determines who can view or modify the project across your organization."""
 
     # Construct request model with validation
@@ -6993,7 +7129,7 @@ async def create_project(global_access: str = Field(..., description="Sets the g
 
 # Tags: projects
 @mcp.tool()
-async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any]:
+async def get_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project by its ID."""
 
     _id_ = _parse_int(id_)
@@ -7031,7 +7167,7 @@ async def get_project(id_: str = Field(..., alias="id", description="The unique 
 
 # Tags: projects
 @mcp.tool()
-async def delete_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to delete.")) -> dict[str, Any]:
+async def delete_project(id_: str = Field(..., alias="id", description="The unique identifier of the project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a project by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -7069,7 +7205,7 @@ async def delete_project(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: public_keys
 @mcp.tool()
-async def list_public_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_public_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of public keys. Use the per_page parameter to control the number of results returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -7112,7 +7248,7 @@ async def list_public_keys(per_page: str | None = Field(None, description="Numbe
 async def create_public_key(
     public_key: str = Field(..., description="The complete SSH public key content in standard format (typically starting with ssh-rsa, ssh-ed25519, or similar)."),
     title: str = Field(..., description="A descriptive name or label for this public key to help identify it among multiple keys."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new SSH public key for authentication. The key is stored with an internal reference title for easy identification."""
 
     # Construct request model with validation
@@ -7151,7 +7287,7 @@ async def create_public_key(
 
 # Tags: public_keys
 @mcp.tool()
-async def get_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to retrieve.")) -> dict[str, Any]:
+async def get_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific public key by its ID. Use this to fetch details of a previously created or stored public key."""
 
     _id_ = _parse_int(id_)
@@ -7192,7 +7328,7 @@ async def get_public_key(id_: str = Field(..., alias="id", description="The uniq
 async def update_public_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the public key to update."),
     title: str = Field(..., description="A descriptive name or label for the public key used for internal reference and identification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the title or metadata of an existing public key. This allows you to change the internal reference name for a key that has already been created."""
 
     _id_ = _parse_int(id_)
@@ -7234,7 +7370,7 @@ async def update_public_key(
 
 # Tags: public_keys
 @mcp.tool()
-async def delete_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to delete.")) -> dict[str, Any]:
+async def delete_public_key(id_: str = Field(..., alias="id", description="The unique identifier of the public key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a public key by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -7275,7 +7411,7 @@ async def delete_public_key(id_: str = Field(..., alias="id", description="The u
 async def list_bandwidth_snapshots_remote(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Use the field name as the key and 'asc' or 'desc' as the value. Valid sortable field is 'logged_at'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of remote bandwidth snapshots. Results can be sorted by the logged timestamp in ascending or descending order."""
 
     _per_page = _parse_int(per_page)
@@ -7315,7 +7451,7 @@ async def list_bandwidth_snapshots_remote(
 
 # Tags: remote_servers
 @mcp.tool()
-async def list_remote_servers(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_remote_servers(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of remote servers. Use the per_page parameter to control the number of results returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -7383,7 +7519,7 @@ async def create_remote_server(
     wasabi: _models.PostRemoteServersBodyWasabi | None = Field(None, description="Wasabi storage connection settings"),
     hostname: str | None = Field(None, description="Hostname or IP address"),
     port: str | None = Field(None, description="Port for remote server.  Not needed for S3."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a remote server configuration for cloud storage or file transfer integration. Supports multiple storage backends including AWS S3, Azure, Google Cloud Storage, and various other cloud providers."""
 
     _max_connections = _parse_int(max_connections)
@@ -7425,7 +7561,7 @@ async def create_remote_server(
 
 # Tags: remote_servers
 @mcp.tool()
-async def get_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to retrieve.")) -> dict[str, Any]:
+async def get_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific remote server by its ID. Returns the configuration and status information for the requested remote server."""
 
     _id_ = _parse_int(id_)
@@ -7492,7 +7628,7 @@ async def update_remote_server(
     rackspace: _models.PatchRemoteServersIdBodyRackspace | None = Field(None, description="Rackspace Cloud Files connection settings"),
     s3_compatible: _models.PatchRemoteServersIdBodyS3Compatible | None = Field(None, description="S3-compatible storage connection settings"),
     wasabi: _models.PatchRemoteServersIdBodyWasabi | None = Field(None, description="Wasabi storage connection settings"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration for a remote server connection. Modify authentication credentials, connection settings, storage bucket details, and security parameters for cloud storage providers (S3, Azure, Google Cloud, etc.) or traditional servers (FTP, SFTP, WebDAV)."""
 
     _id_ = _parse_int(id_)
@@ -7536,7 +7672,7 @@ async def update_remote_server(
 
 # Tags: remote_servers
 @mcp.tool()
-async def delete_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to delete.")) -> dict[str, Any]:
+async def delete_remote_server(id_: str = Field(..., alias="id", description="The unique identifier of the remote server to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a remote server by its ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -7574,7 +7710,7 @@ async def delete_remote_server(id_: str = Field(..., alias="id", description="Th
 
 # Tags: remote_servers
 @mcp.tool()
-async def download_remote_server_configuration(id_: str = Field(..., alias="id", description="The unique identifier of the Remote Server for which to download the configuration file.")) -> dict[str, Any]:
+async def download_remote_server_configuration(id_: str = Field(..., alias="id", description="The unique identifier of the Remote Server for which to download the configuration file.")) -> dict[str, Any] | ToolResult:
     """Download the configuration file for a Remote Server. This file is required for integrating certain Remote Server types, such as the Files.com Agent."""
 
     _id_ = _parse_int(id_)
@@ -7624,7 +7760,7 @@ async def update_remote_server_configuration(
     server_host_key: str | None = Field(None, description="The server's host key used for SSH-based authentication and verification."),
     status: str | None = Field(None, description="The current operational state of the agent, either running or shutdown."),
     subdomain: str | None = Field(None, description="The subdomain identifier for the remote server configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit local configuration changes, commit them, and retrieve the updated configuration file for a remote server. This operation is used by Remote Server integrations such as the Files.com Agent to synchronize agent configuration state."""
 
     _id_ = _parse_int(id_)
@@ -7671,7 +7807,7 @@ async def list_requests(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Only the `destination` field is supported for sorting."),
     mine: bool | None = Field(None, description="Filter to show only requests belonging to the current user. Defaults to true for non-admin users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of requests with optional filtering and sorting. By default, shows only the current user's requests unless the user is a site admin."""
 
     _per_page = _parse_int(per_page)
@@ -7715,7 +7851,7 @@ async def request_file(
     destination: str = Field(..., description="The destination filename (without file extension) being requested."),
     path: str = Field(..., description="The folder path where the requested file is located."),
     user_ids: str | None = Field(None, description="List of user IDs to request the file from. Provide as comma-separated values when sent as a string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Request a file from specified users by destination filename and folder path. Optionally target specific users; if no users are specified, the request is sent broadly."""
 
     # Construct request model with validation
@@ -7759,7 +7895,7 @@ async def list_requests_folder(
     per_page: str | None = Field(None, description="Number of records to return per page. Maximum allowed is 10,000, though 1,000 or less is recommended for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid field is `destination`."),
     mine: bool | None = Field(None, description="Filter to show only requests created by the current user. Defaults to true for non-admin users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of requests, optionally filtered by folder path and user ownership. Results can be paginated and sorted by destination."""
 
     _per_page = _parse_int(per_page)
@@ -7800,7 +7936,7 @@ async def list_requests_folder(
 
 # Tags: requests
 @mcp.tool()
-async def delete_request(id_: str = Field(..., alias="id", description="The unique identifier of the request to delete.")) -> dict[str, Any]:
+async def delete_request(id_: str = Field(..., alias="id", description="The unique identifier of the request to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific request by its ID. This operation permanently removes the request from the system."""
 
     _id_ = _parse_int(id_)
@@ -7838,7 +7974,7 @@ async def delete_request(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: sftp_host_keys
 @mcp.tool()
-async def list_sftp_host_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_sftp_host_keys(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of SFTP host keys. Use pagination to manage large result sets efficiently."""
 
     _per_page = _parse_int(per_page)
@@ -7881,7 +8017,7 @@ async def list_sftp_host_keys(per_page: str | None = Field(None, description="Nu
 async def create_sftp_host_key(
     name: str | None = Field(None, description="A user-friendly name to identify this SFTP host key for reference and management purposes."),
     private_key: str | None = Field(None, description="The private key data in PEM format used for SFTP host authentication. This should be the complete private key content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new SFTP host key for secure file transfer authentication. The host key consists of a friendly name and the associated private key data."""
 
     # Construct request model with validation
@@ -7920,7 +8056,7 @@ async def create_sftp_host_key(
 
 # Tags: sftp_host_keys
 @mcp.tool()
-async def get_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to retrieve.")) -> dict[str, Any]:
+async def get_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific SFTP host key by its ID. Use this to view the configuration and properties of an existing host key."""
 
     _id_ = _parse_int(id_)
@@ -7962,7 +8098,7 @@ async def update_sftp_host_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to update."),
     name: str | None = Field(None, description="A user-friendly name to identify this SFTP host key."),
     private_key: str | None = Field(None, description="The private key data in PEM format or other standard key format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an SFTP host key's friendly name and/or private key data. Specify the host key ID and provide the fields you want to modify."""
 
     _id_ = _parse_int(id_)
@@ -8004,7 +8140,7 @@ async def update_sftp_host_key(
 
 # Tags: sftp_host_keys
 @mcp.tool()
-async def delete_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to delete.")) -> dict[str, Any]:
+async def delete_sftp_host_key(id_: str = Field(..., alias="id", description="The unique identifier of the SFTP host key to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an SFTP host key by its ID. This operation permanently removes the specified host key from the system."""
 
     _id_ = _parse_int(id_)
@@ -8045,7 +8181,7 @@ async def delete_sftp_host_key(id_: str = Field(..., alias="id", description="Th
 async def list_api_keys_site(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by expiration date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of API keys for your site. Optionally sort and filter results to manage your API credentials."""
 
     _per_page = _parse_int(per_page)
@@ -8090,7 +8226,7 @@ async def create_api_key_site(
     expires_at: str | None = Field(None, description="The date and time when this API key will automatically expire and become invalid. Specified in ISO 8601 format."),
     name: str | None = Field(None, description="An internal name for this API key to help you identify and manage it."),
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(None, description="The permission level for this API key, controlling which operations it can perform. Desktop app keys are limited to file and share link operations, while full keys have unrestricted access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new API key for authenticating requests to the Files.com. Configure the key's name, expiration date, description, and permission level to control its access scope."""
 
     # Construct request model with validation
@@ -8129,7 +8265,7 @@ async def create_api_key_site(
 
 # Tags: site
 @mcp.tool()
-async def list_dns_records_site(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any]:
+async def list_dns_records_site(per_page: str | None = Field(None, description="Number of DNS records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 records can be retrieved in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve the DNS records configured for a site. Results can be paginated to manage large record sets."""
 
     _per_page = _parse_int(per_page)
@@ -8169,7 +8305,7 @@ async def list_dns_records_site(per_page: str | None = Field(None, description="
 
 # Tags: site
 @mcp.tool()
-async def list_site_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_site_ip_addresses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of IP addresses associated with the current site. Use the per_page parameter to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -8209,7 +8345,7 @@ async def list_site_ip_addresses(per_page: str | None = Field(None, description=
 
 # Tags: site
 @mcp.tool()
-async def get_site_usage() -> dict[str, Any]:
+async def get_site_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the most recent usage snapshot for a site, containing billing-related usage data. This provides a point-in-time view of resource consumption metrics."""
 
     # Extract parameters for API call
@@ -8236,7 +8372,7 @@ async def get_site_usage() -> dict[str, Any]:
 
 # Tags: sso_strategies
 @mcp.tool()
-async def get_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to retrieve.")) -> dict[str, Any]:
+async def get_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific SSO (Single Sign-On) strategy by its ID. Use this to view the configuration and details of an existing SSO strategy."""
 
     _id_ = _parse_int(id_)
@@ -8274,7 +8410,7 @@ async def get_sso_strategy(id_: str = Field(..., alias="id", description="The un
 
 # Tags: sso_strategies
 @mcp.tool()
-async def sync_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to synchronize.")) -> dict[str, Any]:
+async def sync_sso_strategy(id_: str = Field(..., alias="id", description="The unique identifier of the SSO strategy to synchronize.")) -> dict[str, Any] | ToolResult:
     """Synchronize provisioning data between the local system and the remote SSO server for the specified strategy. This operation ensures user and group data are up-to-date across both systems."""
 
     _id_ = _parse_int(id_)
@@ -8315,7 +8451,7 @@ async def sync_sso_strategy(id_: str = Field(..., alias="id", description="The u
 async def update_style(
     path: str = Field(..., description="The path identifier for the style to update."),
     file_: str = Field(..., alias="file", description="Binary file containing the logo or branding assets for custom styling."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a style configuration by uploading a new branding file. Specify the style path and provide the binary file for custom branding."""
 
     # Construct request model with validation
@@ -8348,6 +8484,7 @@ async def update_style(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -8355,7 +8492,7 @@ async def update_style(
 
 # Tags: styles
 @mcp.tool()
-async def delete_style(path: str = Field(..., description="The path identifier of the style to delete. This uniquely identifies which style resource to remove.")) -> dict[str, Any]:
+async def delete_style(path: str = Field(..., description="The path identifier of the style to delete. This uniquely identifies which style resource to remove.")) -> dict[str, Any] | ToolResult:
     """Delete a style by its path. This operation permanently removes the style from the system."""
 
     # Construct request model with validation
@@ -8394,7 +8531,7 @@ async def delete_style(path: str = Field(..., description="The path identifier o
 async def list_usage_snapshots_daily(
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000 records per page."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supported fields are `date` and `usage_snapshot_id`. Specify as an object with field name as key and sort direction as value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of daily usage snapshots. Results can be sorted by date or snapshot ID to track usage patterns over time."""
 
     _per_page = _parse_int(per_page)
@@ -8434,7 +8571,7 @@ async def list_usage_snapshots_daily(
 
 # Tags: usage_snapshots
 @mcp.tool()
-async def list_usage_snapshots(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any]:
+async def list_usage_snapshots(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of usage snapshots. Use the per_page parameter to control the number of records returned per page."""
 
     _per_page = _parse_int(per_page)
@@ -8508,7 +8645,7 @@ async def update_user(
     subscribe_to_newsletter: bool | None = Field(None, description="Subscribe or unsubscribe this user from the newsletter."),
     time_zone: str | None = Field(None, description="User's time zone for scheduling and time-based operations."),
     user_root: str | None = Field(None, description="Root folder path for FTP access and optionally SFTP if configured site-wide. Not used for API, desktop, or web interface access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user account settings, permissions, and authentication configuration. Allows modification of user profile, access controls, security settings, and notification preferences."""
 
     _notification_daily_send_time = _parse_int(notification_daily_send_time)
@@ -8554,7 +8691,7 @@ async def update_user(
 async def list_api_keys_current_user(
     per_page: str | None = Field(None, description="Number of API keys to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Supports sorting by expiration date (e.g., sort_by[expires_at]=desc)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of API keys for the authenticated user. Supports sorting by expiration date and customizable page size."""
 
     _per_page = _parse_int(per_page)
@@ -8599,7 +8736,7 @@ async def create_api_key_user(
     expires_at: str | None = Field(None, description="Optional expiration date and time for this API key in ISO 8601 format. After this date, the key will no longer be valid for authentication."),
     name: str | None = Field(None, description="Optional internal name for this API key to help you identify and manage it."),
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(None, description="Permission level for this API key. Controls which operations and resources the key can access. Desktop app keys are limited to file and share link operations, while full keys have unrestricted access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new API key for programmatic access to your account. Configure the key's name, permissions, expiration date, and optional description."""
 
     # Construct request model with validation
@@ -8638,7 +8775,7 @@ async def create_api_key_user(
 
 # Tags: user
 @mcp.tool()
-async def list_user_groups(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any]:
+async def list_user_groups(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users belonging to groups. Use the per_page parameter to control result set size for optimal performance."""
 
     _per_page = _parse_int(per_page)
@@ -8678,7 +8815,7 @@ async def list_user_groups(per_page: str | None = Field(None, description="Numbe
 
 # Tags: user
 @mcp.tool()
-async def list_public_keys_current_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any]:
+async def list_public_keys_current_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though the API supports up to 10,000 records per page.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of public keys associated with the user account. Use the per_page parameter to control pagination size."""
 
     _per_page = _parse_int(per_page)
@@ -8721,7 +8858,7 @@ async def list_public_keys_current_user(per_page: str | None = Field(None, descr
 async def add_public_key(
     public_key: str = Field(..., description="The complete SSH public key content (typically starts with 'ssh-rsa', 'ssh-ed25519', or similar algorithm identifier)."),
     title: str = Field(..., description="A descriptive label to identify this key within your account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new SSH public key to your account for authentication purposes. Each key requires a descriptive title for easy identification."""
 
     # Construct request model with validation
@@ -8760,7 +8897,7 @@ async def add_public_key(
 
 # Tags: user_cipher_uses
 @mcp.tool()
-async def list_cipher_uses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any]:
+async def list_cipher_uses(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, though up to 10,000 is supported.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of cipher uses associated with the authenticated user. Use the per_page parameter to control result set size."""
 
     _per_page = _parse_int(per_page)
@@ -8800,7 +8937,7 @@ async def list_cipher_uses(per_page: str | None = Field(None, description="Numbe
 
 # Tags: user_requests
 @mcp.tool()
-async def list_requests_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any]:
+async def list_requests_user(per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance, with a maximum of 10,000.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of user requests. Use the per_page parameter to control result set size for optimal performance."""
 
     _per_page = _parse_int(per_page)
@@ -8844,7 +8981,7 @@ async def create_user_request(
     details: str = Field(..., description="Detailed description or content of the user request, providing context about what is being requested."),
     email: str = Field(..., description="Email address of the user associated with this request. Used for identification and communication purposes."),
     name: str = Field(..., description="Full name of the user associated with this request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user request with details about a specific user. This operation registers a request associated with the provided user's email and name."""
 
     # Construct request model with validation
@@ -8883,7 +9020,7 @@ async def create_user_request(
 
 # Tags: user_requests
 @mcp.tool()
-async def get_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to retrieve.")) -> dict[str, Any]:
+async def get_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific user request by its ID. Returns the complete request information including status, content, and metadata."""
 
     _id_ = _parse_int(id_)
@@ -8921,7 +9058,7 @@ async def get_user_request(id_: str = Field(..., alias="id", description="The un
 
 # Tags: user_requests
 @mcp.tool()
-async def delete_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to delete.")) -> dict[str, Any]:
+async def delete_user_request(id_: str = Field(..., alias="id", description="The unique identifier of the user request to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific user request by its ID. This operation permanently removes the user request from the system."""
 
     _id_ = _parse_int(id_)
@@ -8971,7 +9108,7 @@ async def list_users(
     q_ssl_required: str | None = Field(None, alias="qssl_required", description="Filter results to include only users with custom SSL requirement settings configured."),
     sort_field: str | None = Field(None, description="Field to sort by. Valid values: 'path', 'folder', 'user_id', 'created_at'"),
     sort_direction: str | None = Field(None, description="Sort direction. Valid values: 'asc' or 'desc'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of users with optional filtering by ID, username, email, notes, or administrative and security settings."""
 
     # Call helper functions
@@ -9049,7 +9186,7 @@ async def create_user(
     time_zone: str | None = Field(None, description="User's time zone for scheduling notifications and displaying timestamps in the UI."),
     user_root: str | None = Field(None, description="Root folder path for FTP access and optionally SFTP (if configured site-wide). Does not apply to API, desktop, or web interface access."),
     username: str | None = Field(None, description="User's username"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user account with configurable authentication, permissions, and security settings. Supports multiple authentication methods and granular access control across protocols (FTP, SFTP, WebDAV, REST API)."""
 
     _notification_daily_send_time = _parse_int(notification_daily_send_time)
@@ -9092,7 +9229,7 @@ async def create_user(
 
 # Tags: users
 @mcp.tool()
-async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve.")) -> dict[str, Any]:
+async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific user by their ID."""
 
     _id_ = _parse_int(id_)
@@ -9165,7 +9302,7 @@ async def update_user_account(
     subscribe_to_newsletter: bool | None = Field(None, description="Whether the user is subscribed to receive newsletter communications."),
     time_zone: str | None = Field(None, description="The user's time zone for scheduling and time-based operations."),
     user_root: str | None = Field(None, description="Root folder path for FTP access and optionally SFTP if configured at the site level. Not used for API, desktop, or web interface access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user account settings, permissions, and authentication configuration. Allows modification of user profile, access controls, security settings, and notification preferences."""
 
     _id_ = _parse_int(id_)
@@ -9210,7 +9347,7 @@ async def update_user_account(
 
 # Tags: users
 @mcp.tool()
-async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete.")) -> dict[str, Any]:
+async def delete_user(id_: str = Field(..., alias="id", description="The unique identifier of the user to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a user account by ID. This action cannot be undone."""
 
     _id_ = _parse_int(id_)
@@ -9248,7 +9385,7 @@ async def delete_user(id_: str = Field(..., alias="id", description="The unique 
 
 # Tags: users
 @mcp.tool()
-async def reset_user_2fa(id_: str = Field(..., alias="id", description="The unique identifier of the user whose 2FA needs to be reset.")) -> dict[str, Any]:
+async def reset_user_2fa(id_: str = Field(..., alias="id", description="The unique identifier of the user whose 2FA needs to be reset.")) -> dict[str, Any] | ToolResult:
     """Initiate a two-factor authentication reset for a user who has lost access to their existing 2FA methods. This process allows the user to regain account access and reconfigure their authentication."""
 
     _id_ = _parse_int(id_)
@@ -9286,7 +9423,7 @@ async def reset_user_2fa(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: users
 @mcp.tool()
-async def resend_welcome_email(id_: str = Field(..., alias="id", description="The unique identifier of the user who should receive the welcome email.")) -> dict[str, Any]:
+async def resend_welcome_email(id_: str = Field(..., alias="id", description="The unique identifier of the user who should receive the welcome email.")) -> dict[str, Any] | ToolResult:
     """Resend the welcome email to a user. This operation is useful when the initial welcome email was not received or needs to be sent again."""
 
     _id_ = _parse_int(id_)
@@ -9324,7 +9461,7 @@ async def resend_welcome_email(id_: str = Field(..., alias="id", description="Th
 
 # Tags: users
 @mcp.tool()
-async def unlock_user(id_: str = Field(..., alias="id", description="The unique identifier of the user account to unlock.")) -> dict[str, Any]:
+async def unlock_user(id_: str = Field(..., alias="id", description="The unique identifier of the user account to unlock.")) -> dict[str, Any] | ToolResult:
     """Unlock a user account that has been locked due to failed login attempts. This restores the user's ability to authenticate."""
 
     _id_ = _parse_int(id_)
@@ -9366,7 +9503,7 @@ async def list_api_keys_for_user(
     user_id: str = Field(..., description="The user ID whose API keys to retrieve. Use `0` to operate on the current session's user."),
     per_page: str | None = Field(None, description="Number of records to return per page. Maximum 10,000; 1,000 or less is recommended."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort results by a specified field in ascending or descending order. Valid field: `expires_at`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of API keys for a user. Use user_id `0` to list keys for the current session's user."""
 
     _user_id = _parse_int(user_id)
@@ -9414,7 +9551,7 @@ async def create_api_key_admin(
     expires_at: str | None = Field(None, description="Optional expiration date and time for the API key in ISO 8601 format. After this date, the key will no longer be valid."),
     name: str | None = Field(None, description="Optional internal name for the API key for your own reference and organization."),
     permission_set: Literal["none", "full", "desktop_app", "sync_app", "office_integration", "mobile_app"] | None = Field(None, description="Permission level for this API key. `full` grants all permissions, `desktop_app` restricts to file and share link operations, and other sets provide specialized access for specific applications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new API key for the specified user with configurable permissions and optional expiration. Use user_id `0` to create a key for the current session's user."""
 
     _user_id = _parse_int(user_id)
@@ -9459,7 +9596,7 @@ async def create_api_key_admin(
 async def list_cipher_uses_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose cipher uses should be retrieved. Use 0 to refer to the current session's authenticated user."),
     per_page: str | None = Field(None, description="Number of cipher use records to return per page. Maximum allowed is 10,000, though 1,000 or fewer is recommended for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of cipher uses for a specific user. Use user_id value of 0 to retrieve cipher uses for the current authenticated session's user."""
 
     _user_id = _parse_int(user_id)
@@ -9504,7 +9641,7 @@ async def list_cipher_uses_by_user(
 async def list_user_groups_2(
     user_id: str = Field(..., description="The unique identifier of the user whose group memberships should be retrieved."),
     per_page: str | None = Field(None, description="Number of records to return per page. Recommended to use 1,000 or less for optimal performance; maximum allowed is 10,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all groups that a specific user belongs to. Supports pagination to handle large result sets."""
 
     _user_id = _parse_int(user_id)
@@ -9551,7 +9688,7 @@ async def list_user_permissions(
     per_page: str | None = Field(None, description="Number of permission records to return per page. Recommended to use 1,000 or less for optimal performance."),
     sort_by: dict[str, Any] | None = Field(None, description="Sort the results by a specified field in ascending or descending order. Valid sortable fields are group_id, path, user_id, or permission."),
     include_groups: bool | None = Field(None, description="When enabled, includes permissions inherited from the user's group memberships in addition to directly assigned permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of permissions for a specific user, with optional filtering by group inheritance and sorting capabilities."""
 
     _per_page = _parse_int(per_page)
@@ -9595,7 +9732,7 @@ async def list_user_permissions(
 async def list_public_keys_by_user(
     user_id: str = Field(..., description="The unique identifier of the user whose public keys should be retrieved. Use `0` to refer to the current authenticated user."),
     per_page: str | None = Field(None, description="Number of public keys to return per page. Recommended to use 1,000 or less for optimal performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of public keys for a specified user. Use user ID `0` to retrieve keys for the current authenticated session."""
 
     _user_id = _parse_int(user_id)
@@ -9641,7 +9778,7 @@ async def create_public_key_for_user(
     user_id: str = Field(..., description="The ID of the user to create the public key for. Use 0 to create a key for the current session's authenticated user."),
     public_key: str = Field(..., description="The complete SSH public key content (typically starting with ssh-rsa, ssh-ed25519, or similar)."),
     title: str = Field(..., description="A descriptive label for this public key to help identify it among multiple keys."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new SSH public key for a user account. The key can be associated with the current session's user by providing a user_id of 0."""
 
     _user_id = _parse_int(user_id)
@@ -9691,7 +9828,7 @@ async def test_webhook(
     file_form_field: str | None = Field(None, description="Form field name to use when sending file data as a named parameter in the POST body."),
     headers: dict[str, Any] | None = Field(None, description="Custom HTTP headers to include in the test request as key-value pairs."),
     method: str | None = Field(None, description="HTTP method for the test request: GET or POST."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a test request to a webhook URL to validate connectivity and configuration. Supports custom headers, multiple encoding formats, and optional file payload."""
 
     # Construct request model with validation

@@ -1,6 +1,7 @@
 # Files.com MCP Server
+<!-- mcp-name: com.mcparmory/files-com -->
 
-Base URL: http://app.files.com/api/rest/v1
+Base URL: https://.files.com/api/rest/v1
 | | |
 |---|---|
 | **Category** | Storage |
@@ -18,6 +19,7 @@ Base URL: http://app.files.com/api/rest/v1
 
 ```bash
 API_KEY=YOUR_API_KEY \
+SERVER_SUBDOMAIN=YOUR_SERVER_SUBDOMAIN \
 uvx mcparmory-files-com
 ```
 
@@ -26,6 +28,7 @@ uvx mcparmory-files-com
 ```bash
 pip install mcparmory-files-com
 API_KEY=YOUR_API_KEY \
+SERVER_SUBDOMAIN=YOUR_SERVER_SUBDOMAIN \
 mcparmory-files-com
 ```
 
@@ -40,7 +43,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-files-com"],
       "env": {
-        "API_KEY": "YOUR_API_KEY"
+        "API_KEY": "YOUR_API_KEY",
+        "SERVER_SUBDOMAIN": "YOUR_SERVER_SUBDOMAIN"
       }
     }
   }
@@ -54,6 +58,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
 - `API_KEY` — API Key Authentication (X-FilesAPI-Key)
+- `SERVER_SUBDOMAIN` — User-specific value for subdomain
 Do not commit credentials to version control.
 
 ---
@@ -87,6 +92,17 @@ Example (if server is at `/home/user/mcp-servers/files-com`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  -e SERVER_SUBDOMAIN=YOUR_SERVER_SUBDOMAIN \
+  ghcr.io/mcparmory/files-com:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -94,7 +110,9 @@ docker build -t files-com .
 docker run -p 8000:8000 --env-file .env files-com
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
