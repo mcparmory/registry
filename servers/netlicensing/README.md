@@ -1,4 +1,5 @@
 # NetLicensing MCP Server
+<!-- mcp-name: com.mcparmory/netlicensing -->
 
 Base URL: https://go.netlicensing.io/core/v2/rest
 | | |
@@ -19,6 +20,8 @@ Base URL: https://go.netlicensing.io/core/v2/rest
 ```bash
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+API_KEY_AUTH_USERNAME=YOUR_API_KEY_AUTH_USERNAME \
+API_KEY_AUTH_PASSWORD=YOUR_API_KEY_AUTH_PASSWORD \
 uvx mcparmory-netlicensing
 ```
 
@@ -28,6 +31,8 @@ uvx mcparmory-netlicensing
 pip install mcparmory-netlicensing
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+API_KEY_AUTH_USERNAME=YOUR_API_KEY_AUTH_USERNAME \
+API_KEY_AUTH_PASSWORD=YOUR_API_KEY_AUTH_PASSWORD \
 mcparmory-netlicensing
 ```
 
@@ -43,7 +48,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "args": ["mcparmory-netlicensing"],
       "env": {
         "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
+        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD",
+        "API_KEY_AUTH_USERNAME": "YOUR_API_KEY_AUTH_USERNAME",
+        "API_KEY_AUTH_PASSWORD": "YOUR_API_KEY_AUTH_PASSWORD"
       }
     }
   }
@@ -58,6 +65,8 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
+- `API_KEY_AUTH_USERNAME` — Username
+- `API_KEY_AUTH_PASSWORD` — Password
 Do not commit credentials to version control.
 
 ---
@@ -91,6 +100,19 @@ Example (if server is at `/home/user/mcp-servers/netlicensing`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
+  -e BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+  -e API_KEY_AUTH_USERNAME=YOUR_API_KEY_AUTH_USERNAME \
+  -e API_KEY_AUTH_PASSWORD=YOUR_API_KEY_AUTH_PASSWORD \
+  ghcr.io/mcparmory/netlicensing:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -98,7 +120,9 @@ docker build -t netlicensing .
 docker run -p 8000:8000 --env-file .env netlicensing
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

@@ -5,7 +5,7 @@ NetLicensing MCP Server
 API Info:
 - Terms of Service: https://www.labs64.com/legal/terms-of-service/netlicensing
 
-Generated: 2026-04-14 18:26:21 UTC
+Generated: 2026-04-23 21:29:11 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://go.netlicensing.io/core/v2/rest")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -850,16 +968,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -873,6 +992,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -915,6 +1035,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -926,7 +1061,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -934,6 +1068,7 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'basicAuth',
+    'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -946,6 +1081,14 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for basicAuth not configured: {error_msg}")
     _auth_handlers["basicAuth"] = None
+try:
+    _auth_handlers["ApiKeyAuth"] = _auth.BasicAuth(env_var_username="API_KEY_AUTH_USERNAME", env_var_password="API_KEY_AUTH_PASSWORD")
+    logging.info("Authentication configured: ApiKeyAuth")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
+    _auth_handlers["ApiKeyAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1067,7 +1210,7 @@ mcp = FastMCP("NetLicensing", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Product
 @mcp.tool()
-async def list_products() -> dict[str, Any]:
+async def list_products() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all configured products available for the current vendor. Use this to discover and enumerate products in your vendor account."""
 
     # Extract parameters for API call
@@ -1102,7 +1245,7 @@ async def create_product(
     description: str | None = Field(None, description="A descriptive text providing additional information about the product."),
     licensing_info: str | None = Field(None, alias="licensingInfo", description="Licensing-related information or terms associated with the product."),
     vat_mode: Literal["GROSS", "NET"] | None = Field(None, alias="vatMode", description="Tax calculation mode for the product. Choose GROSS for prices including tax or NET for prices excluding tax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new product with licensing configuration. The product is identified by its name and version combination and can be immediately activated or disabled for new licensee registrations."""
 
     # Construct request model with validation
@@ -1141,7 +1284,7 @@ async def create_product(
 
 # Tags: Product
 @mcp.tool()
-async def get_product(product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product. This value must exactly match the product number in the system.")) -> dict[str, Any]:
+async def get_product(product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product. This value must exactly match the product number in the system.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific product by its unique product number. Use this operation to fetch detailed information about a single product."""
 
     # Construct request model with validation
@@ -1186,7 +1329,7 @@ async def update_product(
     description: str | None = Field(None, description="A description of the product for internal or customer-facing documentation."),
     licensing_info: str | None = Field(None, alias="licensingInfo", description="Licensing terms and conditions information associated with the product."),
     vat_mode: Literal["GROSS", "NET"] | None = Field(None, alias="vatMode", description="The VAT calculation mode for the product: GROSS (price includes VAT) or NET (price excludes VAT)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update product properties such as name, version, licensing settings, and VAT configuration. Returns the updated product with all applied changes."""
 
     # Construct request model with validation
@@ -1229,7 +1372,7 @@ async def update_product(
 async def delete_product(
     product_number: str = Field(..., alias="productNumber", description="The unique identifier for the product to delete."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the product and all its dependent objects. Use with caution as this operation cannot be undone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a product by its unique product number. Optionally cascade the deletion to remove all dependent objects."""
 
     # Construct request model with validation
@@ -1268,7 +1411,7 @@ async def delete_product(
 
 # Tags: Product Module
 @mcp.tool()
-async def list_product_modules() -> dict[str, Any]:
+async def list_product_modules() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all Product Modules available for the current Vendor. This operation returns all modules without filtering or pagination."""
 
     # Extract parameters for API call
@@ -1305,7 +1448,7 @@ async def create_product_module(
     red_threshold: str | None = Field(None, alias="redThreshold", description="Remaining time volume threshold (in days) that triggers red status alerts. Required when using the Rental licensing model."),
     node_secret_mode: list[Literal["PREDEFINED", "CLIENT"]] | None = Field(None, alias="nodeSecretMode", description="Secret Mode configuration for node-locked licensing. Required when using the Node-Locked licensing model. Specify as an array of mode values."),
     license_template: list[Literal["TIMEVOLUME", "FEATURE"]] | None = Field(None, alias="licenseTemplate", description="License Template configuration defining license types and rules. Required when using the Try & Buy licensing model. Specify as an array of template objects."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Product Module within a Product, establishing the licensing model and configuration for how licenses are managed and validated for end customers."""
 
     _max_checkout_validity = _parse_int(max_checkout_validity)
@@ -1348,7 +1491,7 @@ async def create_product_module(
 
 # Tags: Product Module
 @mcp.tool()
-async def get_product_module(product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier for the Product Module, assigned by the Vendor or auto-generated by NetLicensing. This value becomes read-only once the first Licensee is created for the Product.")) -> dict[str, Any]:
+async def get_product_module(product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier for the Product Module, assigned by the Vendor or auto-generated by NetLicensing. This value becomes read-only once the first Licensee is created for the Product.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Product Module by its unique identifier. Returns the complete Product Module details for the given productModuleNumber."""
 
     # Construct request model with validation
@@ -1394,7 +1537,7 @@ async def update_product_module(
     red_threshold: str | None = Field(None, alias="redThreshold", description="Remaining time volume threshold (in days) that triggers red status. Required when using the Rental licensing model."),
     license_template: list[Literal["TIMEVOLUME", "FEATURE"]] | None = Field(None, alias="licenseTemplate", description="License Template configuration for this Product Module. Required when using the Try & Buy licensing model."),
     node_secret_mode: list[Literal["PREDEFINED", "CLIENT"]] | None = Field(None, alias="nodeSecretMode", description="Secret Mode configuration for node-locked licensing. Required when using the Node-Locked licensing model."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing Product Module. Modifies the specified Product Module configuration and returns the updated module details."""
 
     _max_checkout_validity = _parse_int(max_checkout_validity)
@@ -1441,7 +1584,7 @@ async def update_product_module(
 async def delete_product_module(
     product_module_number: str = Field(..., alias="productModuleNumber", description="The unique identifier for the Product Module within a Vendor's product catalog. This number must exactly match an existing Product Module."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the Product Module and all its child objects in the hierarchy. Use with caution as this operation cannot be undone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a Product Module by its unique number. Optionally cascade the deletion to all descendant objects."""
 
     # Construct request model with validation
@@ -1480,7 +1623,7 @@ async def delete_product_module(
 
 # Tags: License Template
 @mcp.tool()
-async def list_license_templates() -> dict[str, Any]:
+async def list_license_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available license templates configured for the current vendor. Use this to discover template options before creating or managing licenses."""
 
     # Extract parameters for API call
@@ -1517,7 +1660,7 @@ async def create_license_template(
     hidden: bool | None = Field(None, description="When enabled, this License Template is hidden from the NetLicensing Shop and not offered for direct purchase by customers."),
     hide_licenses: bool | None = Field(None, alias="hideLicenses", description="When enabled, licenses created from this template are hidden from end customers but still participate in license validation checks."),
     quota: str | None = Field(None, description="Required for quota-based licensing models; defines the maximum quota allocation for licenses created from this template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new License Template for a specified Product Module, defining the licensing model and availability rules for licensees."""
 
     # Construct request model with validation
@@ -1556,7 +1699,7 @@ async def create_license_template(
 
 # Tags: License Template
 @mcp.tool()
-async def get_license_template(license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template, assigned by the vendor during creation or auto-generated by NetLicensing. This value becomes read-only once the first License is created from this template.")) -> dict[str, Any]:
+async def get_license_template(license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template, assigned by the vendor during creation or auto-generated by NetLicensing. This value becomes read-only once the first License is created from this template.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific License Template by its unique identifier. This template defines the licensing model and terms for products from a vendor."""
 
     # Construct request model with validation
@@ -1602,7 +1745,7 @@ async def update_license_template(
     hidden: bool | None = Field(None, description="When enabled, this License Template is excluded from the NetLicensing Shop and is not available for direct purchase by customers."),
     hide_licenses: bool | None = Field(None, alias="hideLicenses", description="When enabled, Licenses created from this template are hidden from end-customer visibility but still participate in license validation checks."),
     quota: str | None = Field(None, description="Required when using the Quota License Model. Specifies the quota limit for Licenses created from this template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing License Template. Changes apply to the template itself and affect how new Licenses are created from it."""
 
     # Construct request model with validation
@@ -1645,7 +1788,7 @@ async def update_license_template(
 async def delete_license_template(
     license_template_number: str = Field(..., alias="licenseTemplateNumber", description="The unique identifier for the License Template to delete, assigned across all Products within a Vendor."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the License Template and all its descendant objects. Use with caution as this operation cannot be undone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a License Template by its unique number. Optionally cascade the deletion to remove all dependent objects."""
 
     # Construct request model with validation
@@ -1684,7 +1827,7 @@ async def delete_license_template(
 
 # Tags: Licensee
 @mcp.tool()
-async def list_licensees() -> dict[str, Any]:
+async def list_licensees() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licensees associated with the current vendor account."""
 
     # Extract parameters for API call
@@ -1716,7 +1859,7 @@ async def create_licensee(
     active: bool = Field(..., description="Determines whether the Licensee is active. When set to false, the Licensee is disabled and cannot obtain new licenses or participate in validation."),
     name: str | None = Field(None, description="The display name for the Licensee. Used to identify the licensee in the system."),
     marked_for_transfer: bool | None = Field(None, alias="markedForTransfer", description="Indicates whether this Licensee is marked for transfer to another entity. Used to flag licensees pending transfer operations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Licensee entity that can obtain licenses and be validated. The licensee's active status determines whether it can acquire new licenses and participate in validation processes."""
 
     # Construct request model with validation
@@ -1755,7 +1898,7 @@ async def create_licensee(
 
 # Tags: Licensee
 @mcp.tool()
-async def get_licensee(licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier assigned to the licensee within the vendor's product ecosystem. This value is either vendor-assigned during licensee creation or auto-generated by NetLicensing, and becomes read-only once the first license is issued.")) -> dict[str, Any]:
+async def get_licensee(licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier assigned to the licensee within the vendor's product ecosystem. This value is either vendor-assigned during licensee creation or auto-generated by NetLicensing, and becomes read-only once the first license is issued.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific licensee by their unique identifier. Returns complete licensee details including licensing status and associated metadata."""
 
     # Construct request model with validation
@@ -1796,7 +1939,7 @@ async def update_licensee(
     active: bool | None = Field(None, description="Enable or disable the Licensee. When set to false, the Licensee cannot obtain new Licenses and validation checks are disabled."),
     name: str | None = Field(None, description="Display name or label for the Licensee."),
     marked_for_transfer: bool | None = Field(None, alias="markedForTransfer", description="Flag indicating whether this Licensee is eligible for transfer to another Vendor or account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing Licensee. Modify activation status, name, or transfer eligibility and receive the updated Licensee object."""
 
     # Construct request model with validation
@@ -1839,7 +1982,7 @@ async def update_licensee(
 async def delete_licensee(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The unique identifier for the licensee to delete. This number is unique across all products for a given vendor."),
     force_cascade: bool | None = Field(None, alias="forceCascade", description="When enabled, forces deletion of the licensee and all its dependent objects and descendants. Use with caution as this operation cannot be undone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a licensee by its unique number. Optionally cascade the deletion to remove all dependent objects and descendants."""
 
     # Construct request model with validation
@@ -1886,7 +2029,7 @@ async def validate_licensee(
     node_secret: str | None = Field(None, alias="nodeSecret", description="A unique secret value for node-locked licensing models. Used to identify and validate the specific node."),
     session_id: str | None = Field(None, alias="sessionId", description="A unique session identifier for floating licensing models. Used to track and manage the session within the available pool."),
     action: Literal["checkOut", "checkIn"] | None = Field(None, description="The session action for floating licensing models. Use 'checkOut' to allocate a session from the pool or 'checkIn' to return a session to the pool."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validates the active licenses for a specific licensee, supporting both node-locked and floating licensing models. Use this to verify license status and manage session allocation for floating licenses."""
 
     # Construct request model with validation
@@ -1929,7 +2072,7 @@ async def validate_licensee(
 async def transfer_licenses_between_licensees(
     licensee_number: str = Field(..., alias="licenseeNumber", description="The destination licensee number that will receive the transferred licenses. Must be a valid licensee identifier with a maximum length of 1000 characters."),
     source_licensee_number: str = Field(..., alias="sourceLicenseeNumber", description="The source licensee number from which licenses will be transferred. Must be a valid licensee identifier with a maximum length of 1000 characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transfer licenses from a source licensee to a destination licensee. This operation moves all or specified licenses between two licensee accounts."""
 
     # Construct request model with validation
@@ -1969,7 +2112,7 @@ async def transfer_licenses_between_licensees(
 
 # Tags: License
 @mcp.tool()
-async def list_licenses() -> dict[str, Any]:
+async def list_licenses() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licenses associated with the current vendor account."""
 
     # Extract parameters for API call
@@ -2006,7 +2149,7 @@ async def create_license(
     start_date: str | None = Field(None, alias="startDate", description="The date and time when the license becomes effective. Required for 'TIMEVOLUME' license type. Must be provided in ISO 8601 date-time format."),
     hidden: bool | None = Field(None, description="If set to true, this license will not be displayed in the NetLicensing Shop as a purchased license. If not specified, the value from the license template will be used."),
     used_quantity: str | None = Field(None, alias="usedQuantity", description="The quantity of the licensed resource already consumed. Required for 'Pay-per-Use' licensing model to track usage."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new license by associating a licensee with a license template. The license inherits default properties from the template unless explicitly overridden."""
 
     # Construct request model with validation
@@ -2045,7 +2188,7 @@ async def create_license(
 
 # Tags: License
 @mcp.tool()
-async def get_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or auto-generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any]:
+async def get_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or auto-generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific license by its unique identifier. Returns complete license details including status, product information, and licensee data."""
 
     # Construct request model with validation
@@ -2090,7 +2233,7 @@ async def update_license(
     time_volume_period: str | None = Field(None, alias="timeVolumePeriod", description="The time period duration for TIMEVOLUME license types (e.g., monthly, yearly, or custom interval)."),
     hidden: bool | None = Field(None, description="When set to true, this license will not be displayed in the NetLicensing Shop as a purchased license. If not specified, the setting from the License Template is used."),
     used_quantity: str | None = Field(None, alias="usedQuantity", description="The quantity of the licensed resource that has been consumed or used. Required and must be tracked for Pay-per-Use license models."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing license by its unique license number. Modify license properties such as activation status, name, validity period, and usage tracking."""
 
     # Construct request model with validation
@@ -2130,7 +2273,7 @@ async def update_license(
 
 # Tags: License
 @mcp.tool()
-async def delete_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any]:
+async def delete_license(license_number: str = Field(..., alias="licenseNumber", description="The unique license identifier assigned by the vendor or generated by NetLicensing. This value is immutable after the associated creation transaction is closed.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a license by its unique identifier. Once deleted, the license cannot be recovered."""
 
     # Construct request model with validation
@@ -2166,7 +2309,7 @@ async def delete_license(license_number: str = Field(..., alias="licenseNumber",
 
 # Tags: Transaction
 @mcp.tool()
-async def list_transactions() -> dict[str, Any]:
+async def list_transactions() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all transactions associated with the current vendor account."""
 
     # Extract parameters for API call
@@ -2199,7 +2342,7 @@ async def create_transaction(
     source: Literal["SHOP"] = Field(..., description="The origin system for this transaction. Must be set to SHOP, indicating this is a point-of-sale transaction for internal use."),
     licensee_number: str | None = Field(None, alias="licenseeNumber", description="Optional identifier for the licensee associated with this transaction."),
     payment_method: str | None = Field(None, alias="paymentMethod", description="Optional payment method used for this transaction (e.g., credit card, cash, digital wallet)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new transaction in the system. Transactions are always initialized in an active state and require a status and source to be specified."""
 
     # Construct request model with validation
@@ -2238,7 +2381,7 @@ async def create_transaction(
 
 # Tags: Transaction
 @mcp.tool()
-async def get_transaction(transaction_number: str = Field(..., alias="transactionNumber", description="The unique transaction identifier assigned by the vendor. This number is globally unique across all products within the vendor's system and is used to retrieve the specific transaction record.")) -> dict[str, Any]:
+async def get_transaction(transaction_number: str = Field(..., alias="transactionNumber", description="The unique transaction identifier assigned by the vendor. This number is globally unique across all products within the vendor's system and is used to retrieve the specific transaction record.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific transaction by its unique identifier. Returns complete transaction details including all associated metadata and status information."""
 
     # Construct request model with validation
@@ -2280,7 +2423,7 @@ async def update_transaction(
     status: Literal["CANCELLED", "CLOSED", "PENDING"] | None = Field(None, description="The current state of the transaction. Valid states are: PENDING (awaiting processing), CLOSED (completed), or CANCELLED (voided)."),
     source: Literal["SHOP"] | None = Field(None, description="The origin system for the transaction. Currently only SHOP is supported; AUTO transactions are reserved for internal system use only."),
     payment_method: str | None = Field(None, alias="paymentMethod", description="The payment method used for the transaction (e.g., credit card, debit card, digital wallet)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update specific properties of an existing transaction identified by its transaction number. Returns the updated transaction with all changes applied."""
 
     # Construct request model with validation
@@ -2320,7 +2463,7 @@ async def update_transaction(
 
 # Tags: Token
 @mcp.tool()
-async def list_tokens() -> dict[str, Any]:
+async def list_tokens() -> dict[str, Any] | ToolResult:
     """Retrieve all authentication tokens associated with the current vendor account. Use this to view and manage API credentials."""
 
     # Extract parameters for API call
@@ -2359,7 +2502,7 @@ async def create_token(
     predefined_shopping_item: str | None = Field(None, alias="predefinedShoppingItem", description="The shopping item name for SHOP tokens only. Displayed to the customer during the checkout process."),
     success_url_title: str | None = Field(None, alias="successURLTitle", description="The link title for SHOP tokens only, displayed to the customer after successful checkout completion."),
     cancel_url_title: str | None = Field(None, alias="cancelURLTitle", description="The link title for SHOP tokens only, displayed to the customer if they cancel the checkout process."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate authentication or shop tokens for different use cases. The token type determines which additional parameters are required: APIKEY tokens for programmatic access, SHOP tokens for customer checkout flows, or DEFAULT tokens for licensee login actions."""
 
     # Construct request model with validation
@@ -2398,7 +2541,7 @@ async def create_token(
 
 # Tags: Token
 @mcp.tool()
-async def get_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to retrieve, provided as a string value.")) -> dict[str, Any]:
+async def get_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to retrieve, provided as a string value.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific token by its token number. Use this operation to fetch details about an individual token in the system."""
 
     # Construct request model with validation
@@ -2434,7 +2577,7 @@ async def get_token(token_number: str = Field(..., alias="tokenNumber", descript
 
 # Tags: Token
 @mcp.tool()
-async def delete_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to delete, provided as a string.")) -> dict[str, Any]:
+async def delete_token(token_number: str = Field(..., alias="tokenNumber", description="The unique identifier of the token to delete, provided as a string.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a token by its number. This operation removes the token from the system and cannot be undone."""
 
     # Construct request model with validation
@@ -2470,7 +2613,7 @@ async def delete_token(token_number: str = Field(..., alias="tokenNumber", descr
 
 # Tags: Payment Method
 @mcp.tool()
-async def list_payment_methods() -> dict[str, Any]:
+async def list_payment_methods() -> dict[str, Any] | ToolResult:
     """Retrieve all payment methods configured for the current vendor account. Returns a complete list of available payment options."""
 
     # Extract parameters for API call
@@ -2497,7 +2640,7 @@ async def list_payment_methods() -> dict[str, Any]:
 
 # Tags: Payment Method
 @mcp.tool()
-async def get_payment_method(payment_method_number: str = Field(..., alias="paymentMethodNumber", description="The unique identifier for the payment method to retrieve.")) -> dict[str, Any]:
+async def get_payment_method(payment_method_number: str = Field(..., alias="paymentMethodNumber", description="The unique identifier for the payment method to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific payment method using its unique payment method number."""
 
     # Construct request model with validation
@@ -2537,7 +2680,7 @@ async def update_payment_method(
     payment_method_number: str = Field(..., alias="paymentMethodNumber", description="The unique identifier of the payment method to update."),
     active: bool | None = Field(None, description="Set to false to disable the payment method, or true to enable it. If not provided, the current active status is preserved."),
     paypal_subject: str | None = Field(None, description="The email address associated with the PayPal account. Required only when updating PayPal-based payment methods."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing payment method, such as enabling/disabling it or modifying PayPal account details. Returns the updated payment method."""
 
     # Construct request model with validation
@@ -2577,7 +2720,7 @@ async def update_payment_method(
 
 # Tags: Utility
 @mcp.tool()
-async def list_licensing_models() -> dict[str, Any]:
+async def list_licensing_models() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all licensing models supported by the service. Use this to understand available licensing options for your integration."""
 
     # Extract parameters for API call
@@ -2604,7 +2747,7 @@ async def list_licensing_models() -> dict[str, Any]:
 
 # Tags: Utility
 @mcp.tool()
-async def list_license_types() -> dict[str, Any]:
+async def list_license_types() -> dict[str, Any] | ToolResult:
     """Retrieve a complete list of all license types supported by the service. Use this to understand available licensing options for your integration."""
 
     # Extract parameters for API call

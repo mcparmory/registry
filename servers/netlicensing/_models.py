@@ -1,7 +1,7 @@
 """
 Netlicensing MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:26:21 UTC
+Generated: 2026-04-23 21:29:11 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

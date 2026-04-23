@@ -1,6 +1,6 @@
 # NetLicensing - Dependencies
-# Generated: 2026-04-14 18:26:21 UTC
-fastmcp>=3.1.0
+# Generated: 2026-04-23 21:29:11 UTC
+fastmcp>=3.2.4
 httpx>=0.27.0,<1.0.0
 pydantic>=2.0.0,<3.0.0
 python-dotenv>=1.0.0,<2.0.0
