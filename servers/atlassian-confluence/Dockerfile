@@ -42,9 +42,9 @@ RUN groupadd --gid 1000 mcp && \
 WORKDIR /app
 
 LABEL org.opencontainers.image.title="Atlassian Confluence MCP Server" \
-      org.opencontainers.image.vendor="MCP Blacksmith" \
-      org.opencontainers.image.source="https://mcpblacksmith.com"
-
+      org.opencontainers.image.vendor="MCP Armory" \
+      org.opencontainers.image.source="https://github.com/mcparmory/registry" \
+      io.modelcontextprotocol.server.name="com.mcparmory/atlassian-confluence"
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 

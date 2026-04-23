@@ -5,7 +5,7 @@ Atlassian Confluence MCP Server
 API Info:
 - Terms of Service: https://atlassian.com/terms/
 
-Generated: 2026-04-14 18:14:52 UTC
+Generated: 2026-04-23 20:59:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,9 +41,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "//your-domain.atlassian.net")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "your_domain": os.getenv("SERVER_YOUR_DOMAIN", ""),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{your_domain}.atlassian.net/wiki".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Atlassian Confluence"
 SERVER_VERSION = "1.0.0"
 
@@ -470,12 +477,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +529,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +575,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -935,16 +1053,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -958,6 +1077,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1000,6 +1120,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1011,7 +1146,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1166,7 +1300,7 @@ async def list_audit_records(
     end_date: str | None = Field(None, alias="endDate", description="Filter results to records on or before this date. Specify as epoch time in milliseconds."),
     search_string: str | None = Field(None, alias="searchString", description="Filter results to records with string property values matching this search term."),
     limit: str | None = Field(None, description="Maximum number of records to return per page. System limits may restrict the actual number returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve audit log records for administrative events such as space exports, group membership changes, and app installations. Requires Confluence Administrator global permission."""
 
     _limit = _parse_int(limit)
@@ -1206,7 +1340,7 @@ async def list_audit_records(
 
 # Tags: Content
 @mcp.tool()
-async def archive_pages(pages: list[_models.ArchivePagesBodyPagesItem] | None = Field(None, description="List of content IDs identifying the pages to archive. Each ID must resolve to a page object that is not already archived. Pages can belong to different spaces. Requires 'Archive' permission in each page's corresponding space.")) -> dict[str, Any]:
+async def archive_pages(pages: list[_models.ArchivePagesBodyPagesItem] | None = Field(None, description="List of content IDs identifying the pages to archive. Each ID must resolve to a page object that is not already archived. Pages can belong to different spaces. Requires 'Archive' permission in each page's corresponding space.")) -> dict[str, Any] | ToolResult:
     """Archives a list of pages by their content IDs. The archival process is asynchronous; use the /longtask/<taskId> endpoint to monitor progress."""
 
     # Construct request model with validation
@@ -1252,7 +1386,7 @@ async def publish_blueprint_draft(
     key: str = Field(..., description="The space key where the published page will be created. This identifies the target Confluence space."),
     status: str | None = Field(None, description="The current status of the draft being published. Defaults to 'draft' and typically does not need to be specified."),
     status2: Literal["current"] | None = Field(None, alias="status", description="The target status for the published content. Set to 'current' to publish the draft as a live page, or omit to use the default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Publishes a legacy blueprint draft page to make it live in Confluence. Requires permission to view the draft and 'Add' permission for the target space."""
 
     _number = _parse_int(number)
@@ -1306,7 +1440,7 @@ async def publish_blueprint_draft_shared(
     key: str = Field(..., description="The key identifier of the space where the content will be published."),
     status: str | None = Field(None, description="The current status of the draft content. This should remain set to 'draft' and typically does not need to be modified."),
     status2: Literal["current"] | None = Field(None, alias="status", description="The target status for the published content. Set to 'current' to publish the draft as active content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Publishes a shared draft page created from a blueprint template. Requires permission to view the draft and 'Add' permission for the target space."""
 
     _number = _parse_int(number)
@@ -1358,7 +1492,7 @@ async def search_content(
     cqlcontext_space_key: str | None = Field(None, description="Key of the space to search against. Optional."),
     cqlcontext_content_id: str | None = Field(None, description="ID of the content to search against. Optional. Must be in the space specified by cqlcontext_space_key."),
     cqlcontext_content_statuses: list[str] | None = Field(None, description="Content statuses to search against. Optional. Array of status strings (e.g., ['current', 'archived'])."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search Confluence content using CQL (Confluence Query Language) to find pages, blog posts, and other content matching your query criteria. Results are paginated and support cursor-based navigation for retrieving additional pages."""
 
     # Call helper functions
@@ -1401,7 +1535,7 @@ async def search_content(
 
 # Tags: Experimental
 @mcp.tool()
-async def delete_page_tree(id_: str = Field(..., alias="id", description="The content ID of the root page whose entire tree (including all descendant pages) should be deleted.")) -> dict[str, Any]:
+async def delete_page_tree(id_: str = Field(..., alias="id", description="The content ID of the root page whose entire tree (including all descendant pages) should be deleted.")) -> dict[str, Any] | ToolResult:
     """Asynchronously delete a page and all its descendants by moving them to the space's trash. Only supported for pages with current status. Returns a task ID to track the deletion progress."""
 
     # Construct request model with validation
@@ -1441,7 +1575,7 @@ async def move_page(
     page_id: str = Field(..., alias="pageId", description="The ID of the page to be moved."),
     position: Literal["before", "after", "append"] = Field(..., description="The position to move the page relative to the target page. Use 'before' or 'after' to place the page as a sibling, or 'append' to make it a child of the target."),
     target_id: str = Field(..., alias="targetId", description="The ID of the target page that serves as the reference point for the move operation. Avoid using 'before' or 'after' positions when the target is a top-level page, as this can create pages that are difficult to locate in the UI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a page to a new location in the wiki hierarchy relative to a target page. Supports positioning before, after, or as a child of the target page."""
 
     # Construct request model with validation
@@ -1481,7 +1615,7 @@ async def add_attachment(
     id_: str = Field(..., alias="id", description="The ID of the content to which the attachment will be added."),
     file_: str = Field(..., alias="file", description="The file to attach. The file will be uploaded as binary data."),
     minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added. Set to 'false' or omit to generate notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new attachment to a piece of content. To update an existing attachment instead, use the create or update attachments operation. Requires X-Atlassian-Token: nocheck header to prevent XSRF attacks."""
 
     # Construct request model with validation
@@ -1514,6 +1648,7 @@ async def add_attachment(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file", "minorEdit"],
         headers=_http_headers,
     )
 
@@ -1525,7 +1660,7 @@ async def upload_attachment(
     id_: str = Field(..., alias="id", description="The ID of the content to attach the file to."),
     file_: str = Field(..., alias="file", description="The file to upload as an attachment. The file will be sent as binary data in the multipart request."),
     minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is added or updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a new attachment to content or creates a new version of an existing attachment. Supports optional minor edit mode to suppress notifications."""
 
     # Construct request model with validation
@@ -1558,6 +1693,7 @@ async def upload_attachment(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file", "minorEdit"],
         headers=_http_headers,
     )
 
@@ -1570,7 +1706,7 @@ async def replace_attachment_data(
     attachment_id: str = Field(..., alias="attachmentId", description="The ID of the attachment whose data will be replaced."),
     file_: str = Field(..., alias="file", description="The binary file data to upload as the new attachment content."),
     minor_edit: str = Field(..., alias="minorEdit", description="Set to 'true' to suppress notification emails and activity stream updates when the attachment is updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace the binary data of an attachment by its ID. Optionally include a comment and mark as a minor edit to suppress notifications."""
 
     # Construct request model with validation
@@ -1603,6 +1739,7 @@ async def replace_attachment_data(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file", "minorEdit"],
         headers=_http_headers,
     )
 
@@ -1613,7 +1750,7 @@ async def replace_attachment_data(
 async def download_attachment(
     id_: str = Field(..., alias="id", description="The unique identifier of the content object to which the attachment is associated."),
     attachment_id: str = Field(..., alias="attachmentId", description="The unique identifier of the attachment to download."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a download URI for an attachment associated with a piece of content. The client is redirected to a URL that serves the attachment's binary data."""
 
     # Construct request model with validation
@@ -1653,7 +1790,7 @@ async def get_macro_body(
     id_: str = Field(..., alias="id", description="The ID of the content that contains the macro."),
     version: str = Field(..., description="The version of the content containing the macro. Use 0 to retrieve the macro body from the latest content version."),
     macro_id: str = Field(..., alias="macroId", description="The ID of the macro to retrieve. This is typically a UUID generated by Confluence (e.g., 50884bd9-0cb8-41d5-98be-f80943c14f96) or the local ID of a Forge macro node. Query the content with expanded storage format body to locate the macro ID if unknown."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the body of a macro in storage format, including macro name, body content, and parameters. Returns macro metadata for the specified macro ID within a particular content version."""
 
     _version = _parse_int(version)
@@ -1697,7 +1834,7 @@ async def get_macro_body_converted(
     macro_id: str = Field(..., alias="macroId", description="The ID of the macro to retrieve. For Forge macros, this is the local ID of the ADF node. For other macros, this is a UUID-format identifier generated by Confluence. Query the content with expanded body storage format to find the macro ID if needed."),
     to: str = Field(..., description="The content representation format to return the macro body in."),
     embedded_content_render: Literal["current", "version-at-save"] | None = Field(None, alias="embeddedContentRender", description="Controls how embedded content (such as attachments) is rendered. Use 'current' to render with the latest version, or 'version-at-save' to render with the version that existed at the time of save."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the body of a macro in a specified content representation format. Returns macro metadata including name, body, and parameters for a given macro ID and content version."""
 
     _version = _parse_int(version)
@@ -1745,7 +1882,7 @@ async def convert_macro_body_async(
     to: Literal["export_view", "view", "styled_view"] = Field(..., description="The target content representation format for the macro conversion."),
     allow_cache: bool | None = Field(None, alias="allowCache", description="Whether to cache and reuse conversion results for identical requests. When enabled, identical requests return the same task ID and reuse cached results if available."),
     embedded_content_render: Literal["current", "version-at-save"] | None = Field(None, alias="embeddedContentRender", description="Determines which version of embedded content (such as attachments) to render: the current version or the version at the time of save."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Asynchronously converts a macro body to a specified content representation format. Returns a task ID that can be used to retrieve the conversion result, which remains available for 5 minutes after completion."""
 
     _version = _parse_int(version)
@@ -1789,7 +1926,7 @@ async def convert_macro_body_async(
 async def add_labels_to_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to which labels will be added."),
     body: _models.LabelCreateArray | _models.LabelCreate = Field(..., description="A collection of labels to add to the content. Each label is a key-value pair where the key identifies the label namespace and the value specifies the label name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more labels to existing content without removing previously assigned labels. This operation is additive and preserves all existing labels on the content."""
 
     # Construct request model with validation
@@ -1832,7 +1969,7 @@ async def add_labels_to_content(
 async def remove_label_from_content(
     id_: str = Field(..., alias="id", description="The unique identifier of the content from which the label will be removed."),
     name: str = Field(..., description="The name of the label to remove from the content. This parameter supports label names containing forward slashes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a label from content by specifying the label name as a query parameter. Use this method when the label name contains forward slashes, which are not supported in the path-based removal endpoint."""
 
     # Construct request model with validation
@@ -1874,7 +2011,7 @@ async def remove_label_from_content(
 async def remove_label_from_content_by_path(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item from which the label will be removed."),
     label: str = Field(..., description="The name of the label to remove from the content. This method does not support label names containing forward slashes due to path parameter security restrictions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a label from a piece of content by specifying the label name as a path parameter. Use this method when the label name contains no forward slashes; otherwise use the query parameter variant."""
 
     # Construct request model with validation
@@ -1913,7 +2050,7 @@ async def remove_label_from_content_by_path(
 async def list_page_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the page whose watches you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of watch records to return in a single response. The system may apply additional limits regardless of this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all watches for a specific page. Users who watch a page receive notifications when the page is updated."""
 
     _limit = _parse_int(limit)
@@ -1957,7 +2094,7 @@ async def list_page_watches(
 async def list_space_watches(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose parent space watches should be retrieved."),
     limit: str | None = Field(None, description="The maximum number of watch records to return in a single response page. The system may enforce additional limits on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all space watches for the space containing the specified content. Users who watch a space receive notifications when any content in that space is updated."""
 
     _limit = _parse_int(limit)
@@ -2007,7 +2144,7 @@ async def copy_page_hierarchy(
     copy_labels: bool | None = Field(None, alias="copyLabels", description="Whether to copy labels from the source page and its descendants to the destination hierarchy."),
     copy_custom_contents: bool | None = Field(None, alias="copyCustomContents", description="Whether to copy custom contents from the source page and its descendants to the destination hierarchy."),
     copy_descendants: bool | None = Field(None, alias="copyDescendants", description="Whether to copy all descendant pages in the hierarchy. When false, only the source page is copied without its children."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copy an entire page hierarchy including all descendant pages, with optional copying of attachments, permissions, properties, labels, and custom contents. Returns a long-running task ID to track the copy operation progress."""
 
     # Construct request model with validation
@@ -2060,7 +2197,7 @@ async def copy_page(
     copy_labels: bool | None = Field(None, alias="copyLabels", description="Whether to copy labels from the source page to the destination page."),
     copy_custom_contents: bool | None = Field(None, alias="copyCustomContents", description="Whether to copy custom contents from the source page to the destination page."),
     page_title: str | None = Field(None, alias="pageTitle", description="Optional title to replace the source page title in the destination page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copies a single page with its associated properties, permissions, attachments, and custom contents to a specified destination (space, parent page, parent content, or existing page)."""
 
     # Construct request model with validation
@@ -2109,7 +2246,7 @@ async def verify_content_permission(
     type_: Literal["user", "group"] = Field(..., alias="type", description="The subject type being checked: either a user or group."),
     identifier: str = Field(..., description="The subject identifier. For users, provide the account ID or 'anonymous' for unauthenticated users. For groups, provide the group ID."),
     operation: Literal["read", "update", "delete"] = Field(..., description="The content operation to verify permission for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify if a user or group has permission to perform a specific operation on content. Checks site permissions, space permissions, and content restrictions to determine access."""
 
     # Construct request model with validation
@@ -2152,7 +2289,7 @@ async def verify_content_permission(
 async def list_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all access restrictions applied to a piece of content, including user and group-level permissions. Requires permission to view the content."""
 
     _limit = _parse_int(limit)
@@ -2196,7 +2333,7 @@ async def list_content_restrictions(
 async def add_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which restrictions will be added."),
     body: _models.AddRestrictionsBodyV0 | list[_models.ContentRestrictionUpdate] = Field(..., description="The restriction configuration object specifying the users or groups to restrict and the restriction type to apply."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds access restrictions to a piece of content. This operation appends new restrictions without modifying any existing ones. Requires permission to edit the target content."""
 
     # Construct request model with validation
@@ -2239,7 +2376,7 @@ async def add_content_restrictions(
 async def replace_content_restrictions(
     id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions should be updated."),
     body: _models.UpdateRestrictionsBodyV0 | list[_models.ContentRestrictionUpdate] = Field(..., description="The restriction configuration object containing the new restrictions to apply. This replaces all existing restrictions for the content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all existing restrictions for a piece of content with new restrictions. This operation removes current restrictions and applies the restrictions specified in the request body."""
 
     # Construct request model with validation
@@ -2279,7 +2416,7 @@ async def replace_content_restrictions(
 
 # Tags: Content restrictions
 @mcp.tool()
-async def remove_content_restrictions(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions should be removed.")) -> dict[str, Any]:
+async def remove_content_restrictions(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions should be removed.")) -> dict[str, Any] | ToolResult:
     """Removes all read and update restrictions from a piece of content, making it accessible according to default permissions. Requires permission to edit the content."""
 
     # Construct request model with validation
@@ -2315,7 +2452,7 @@ async def remove_content_restrictions(id_: str = Field(..., alias="id", descript
 
 # Tags: Content restrictions
 @mcp.tool()
-async def list_content_restrictions_by_operation(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions are being queried.")) -> dict[str, Any]:
+async def list_content_restrictions_by_operation(id_: str = Field(..., alias="id", description="The unique identifier of the content whose restrictions are being queried.")) -> dict[str, Any] | ToolResult:
     """Retrieves restrictions on content organized by operation type. Returns restriction details with operations as properties rather than array items, requiring permission to view the specified content."""
 
     # Construct request model with validation
@@ -2355,7 +2492,7 @@ async def get_content_restriction_for_operation(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to query for restrictions."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation for which to retrieve restrictions."),
     limit: str | None = Field(None, description="The maximum number of users and groups to return per page in the restrictions list. System limits may further restrict this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves access restrictions for a specific content item based on the operation type (read or update). Returns the users and groups with restrictions applied to that content."""
 
     _limit = _parse_int(limit)
@@ -2400,7 +2537,7 @@ async def check_group_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item to check restrictions for."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation the restriction applies to."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group to check for the content restriction."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether a content restriction applies to a specific group. Returns true if the group has the specified restriction (read or update) on the content, though this does not guarantee group access due to other permission factors."""
 
     # Construct request model with validation
@@ -2440,7 +2577,7 @@ async def grant_group_content_restriction(
     id_: str = Field(..., alias="id", description="The ID of the content to which the restriction applies."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The operation type that the restriction applies to, determining whether the group gains read or update access."),
     group_id: str = Field(..., alias="groupId", description="The ID of the group to add to the content restriction."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant read or update permission to a group for a piece of content by adding the group to the content restriction. Requires permission to edit the content."""
 
     # Construct request model with validation
@@ -2480,7 +2617,7 @@ async def revoke_group_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which the restriction applies."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of operation for which the group restriction is being removed."),
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group to remove from the content restriction."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a group's access restriction for a piece of content by removing them from a specific operation restriction (read or update). Requires permission to edit the content."""
 
     # Construct request model with validation
@@ -2520,7 +2657,7 @@ async def check_content_restriction_for_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the content (page, blog post, etc.) to check restrictions for."),
     operation_key: str = Field(..., alias="operationKey", description="The type of operation being restricted (e.g., 'read', 'update', 'delete'). Determines which restriction rule to evaluate."),
     account_id: str | None = Field(None, alias="accountId", description="The unique account ID of the user across all Atlassian products. Used to determine if the restriction applies to this specific user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether a specific content restriction applies to a user. Returns true if the restriction is enforced for that user, though this does not guarantee access due to inherited restrictions, space permissions, or product access levels."""
 
     # Construct request model with validation
@@ -2563,7 +2700,7 @@ async def grant_user_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content to which the restriction applies."),
     operation_key: str = Field(..., alias="operationKey", description="The operation type that the restriction applies to (e.g., read, update)."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to grant permission to. This uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant a user read or update permission for content by adding them to a content restriction. Requires permission to edit the content."""
 
     # Construct request model with validation
@@ -2606,7 +2743,7 @@ async def revoke_user_content_restriction(
     id_: str = Field(..., alias="id", description="The unique identifier of the content item from which the user restriction will be removed."),
     operation_key: Literal["read", "update"] = Field(..., alias="operationKey", description="The type of permission restriction to remove from the user."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user whose restriction will be removed. This uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a user's content restriction by removing their read or update permission for a specific piece of content. Requires permission to edit the content."""
 
     # Construct request model with validation
@@ -2645,7 +2782,7 @@ async def revoke_user_content_restriction(
 
 # Tags: Content states
 @mcp.tool()
-async def get_content_state(id_: str = Field(..., alias="id", description="The unique identifier of the content item whose state you want to retrieve.")) -> dict[str, Any]:
+async def get_content_state(id_: str = Field(..., alias="id", description="The unique identifier of the content item whose state you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current state of a content item, supporting draft, current, or archived versions. Requires permission to view the specified content."""
 
     # Construct request model with validation
@@ -2687,7 +2824,7 @@ async def publish_content_with_state(
     id_2: str | None = Field(None, alias="id", description="The numeric identifier of the state to apply. Use 0, 1, or 2 for default space states, or provide the ID of a custom state. If provided along with name and color, this ID takes precedence."),
     name: str | None = Field(None, description="The display name for a custom state. If a custom state with this name and color already exists for the current user, that existing state will be reused. Maximum 20 characters."),
     color: str | None = Field(None, description="The color for a custom state in 6-digit hexadecimal format (e.g., #ff7452 for red). Must be paired with a name to create or reuse a custom state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set the content state for a piece of content and publish a new version with that state. This creates a new version without modifying the content body, allowing you to apply state changes (default or custom) to either draft or current versions."""
 
     _id_2 = _parse_int(id_2)
@@ -2731,7 +2868,7 @@ async def publish_content_with_state(
 
 # Tags: Content states
 @mcp.tool()
-async def publish_content_without_state(id_: str = Field(..., alias="id", description="The unique identifier of the content whose state should be removed and republished.")) -> dict[str, Any]:
+async def publish_content_without_state(id_: str = Field(..., alias="id", description="The unique identifier of the content whose state should be removed and republished.")) -> dict[str, Any] | ToolResult:
     """Removes the content state and publishes a new version of the content without modifying its body. This operation creates a new version with an updated status while preserving the existing content."""
 
     # Construct request model with validation
@@ -2767,7 +2904,7 @@ async def publish_content_without_state(id_: str = Field(..., alias="id", descri
 
 # Tags: Content states
 @mcp.tool()
-async def list_available_content_states(id_: str = Field(..., alias="id", description="The unique identifier of the content for which to retrieve available state transitions. Requires permission to edit the content.")) -> dict[str, Any]:
+async def list_available_content_states(id_: str = Field(..., alias="id", description="The unique identifier of the content for which to retrieve available state transitions. Requires permission to edit the content.")) -> dict[str, Any] | ToolResult:
     """Retrieves the content states available for a specific piece of content to transition to. Returns all enabled space content states plus up to 3 most recently published custom content states; use the content-states endpoint to retrieve all custom states."""
 
     # Construct request model with validation
@@ -2809,7 +2946,7 @@ async def restore_content_version(
     version_number: str = Field(..., alias="versionNumber", description="The version number to restore as the current version. Must be a positive integer representing a historical version."),
     message: str = Field(..., description="A descriptive message or changelog entry for the restored version."),
     restore_title: bool | None = Field(None, alias="restoreTitle", description="When true, the restored version's title will become the current content title. When false, only the content body is restored while preserving the current title."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a historical version of content as the latest version by creating a new version with the content from the specified historical version. Requires permission to update the content."""
 
     _version_number = _parse_int(version_number)
@@ -2854,7 +2991,7 @@ async def restore_content_version(
 async def delete_content_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the content from which the version will be deleted."),
     version_number: str = Field(..., alias="versionNumber", description="The version number to delete, starting from 1 up to the current version number."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a historical version of content. The changes from the deleted version are automatically rolled up into the next version. Note that the current version cannot be deleted."""
 
     _version_number = _parse_int(version_number)
@@ -2892,7 +3029,7 @@ async def delete_content_version(
 
 # Tags: Content states
 @mcp.tool()
-async def list_custom_content_states() -> dict[str, Any]:
+async def list_custom_content_states() -> dict[str, Any] | ToolResult:
     """Retrieve all custom content states that have been created by the authenticated user. This operation requires user authentication to access personalized content state configurations."""
 
     # Extract parameters for API call
@@ -2926,7 +3063,7 @@ async def convert_content_body_async(
     content_id_context: str | None = Field(None, alias="contentIdContext", description="Content ID used to resolve embedded content (page includes, files, links) within the same space. When provided, takes precedence over spaceKeyContext for context resolution."),
     allow_cache: bool | None = Field(None, alias="allowCache", description="Enable caching to reuse conversion results for identical requests. When true, identical requests return the same task ID and reuse cached results; when false, each request creates a new conversion task."),
     embedded_content_render: Literal["current", "version-at-save"] | None = Field(None, alias="embeddedContentRender", description="Rendering mode for embedded content. Use 'current' for the latest version or 'version-at-save' for the version at the time of save."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Asynchronously convert content body between different formats (storage, editor, atlas_doc_format, view variants). Returns an asyncId to retrieve the conversion result, which remains available for 5 minutes after completion."""
 
     # Construct request model with validation
@@ -2968,7 +3105,7 @@ async def convert_content_body_async(
 
 # Tags: Content body
 @mcp.tool()
-async def get_async_content_conversion(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous conversion task whose result or status you want to retrieve.")) -> dict[str, Any]:
+async def get_async_content_conversion(id_: str = Field(..., alias="id", description="The unique identifier of the asynchronous conversion task whose result or status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the converted content body for a completed asynchronous conversion task, or check the current status if the task is still processing. Completed results are available for up to 5 minutes or until a new conversion request is made with caching disabled."""
 
     # Construct request model with validation
@@ -3004,7 +3141,7 @@ async def get_async_content_conversion(id_: str = Field(..., alias="id", descrip
 
 # Tags: Content body
 @mcp.tool()
-async def get_bulk_content_conversion_results(ids: list[str] = Field(..., description="List of asyncIds from conversion tasks to retrieve results for. Maximum 50 task IDs per request. Order is preserved in the response.")) -> dict[str, Any]:
+async def get_bulk_content_conversion_results(ids: list[str] = Field(..., description="List of asyncIds from conversion tasks to retrieve results for. Maximum 50 task IDs per request. Order is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Retrieve completed content body conversion results for multiple asynchronous tasks. Results are available for up to 5 minutes after task completion or until a new conversion request is made with caching disabled."""
 
     # Construct request model with validation
@@ -3042,7 +3179,7 @@ async def get_bulk_content_conversion_results(ids: list[str] = Field(..., descri
 
 # Tags: Content body
 @mcp.tool()
-async def convert_content_bodies_async_bulk(conversion_inputs: list[_models.ContentBodyConversionInput] | None = Field(None, alias="conversionInputs", description="Array of content body conversion specifications. Each item defines a source content body and target format. Order is preserved in the response. Maximum 10 items per request.")) -> dict[str, Any]:
+async def convert_content_bodies_async_bulk(conversion_inputs: list[_models.ContentBodyConversionInput] | None = Field(None, alias="conversionInputs", description="Array of content body conversion specifications. Each item defines a source content body and target format. Order is preserved in the response. Maximum 10 items per request.")) -> dict[str, Any] | ToolResult:
     """Asynchronously converts multiple content bodies between supported formats in bulk, with a maximum of 10 conversions per request. Conversion tasks remain available for polling for up to 5 minutes after completion."""
 
     # Construct request model with validation
@@ -3084,7 +3221,7 @@ async def list_label_contents(
     name: str = Field(..., description="The name of the label to query for associated contents."),
     type_: Literal["page", "blogpost", "attachment", "page_template"] | None = Field(None, alias="type", description="Filter results to only include specific content types."),
     limit: str | None = Field(None, description="Maximum number of results to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve label information and all contents associated with that label. Only contents the user has permission to view are returned."""
 
     _limit = _parse_int(limit)
@@ -3127,7 +3264,7 @@ async def list_label_contents(
 async def list_groups(
     limit: str | None = Field(None, description="Maximum number of groups to return per page. The system may enforce fixed limits below the requested value."),
     access_type: Literal["user", "admin", "site-admin"] | None = Field(None, alias="accessType", description="Filter results by group permission level within the Confluence site."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all user groups from the Confluence site, ordered alphabetically by group name. Requires 'Can use' global permission to access the Confluence site."""
 
     _limit = _parse_int(limit)
@@ -3167,7 +3304,7 @@ async def list_groups(
 
 # Tags: Group
 @mcp.tool()
-async def create_group(name: str = Field(..., description="The name of the user group to create. Must be unique within the Confluence instance.")) -> dict[str, Any]:
+async def create_group(name: str = Field(..., description="The name of the user group to create. Must be unique within the Confluence instance.")) -> dict[str, Any] | ToolResult:
     """Creates a new user group in Confluence. Requires site administrator permissions."""
 
     # Construct request model with validation
@@ -3205,7 +3342,7 @@ async def create_group(name: str = Field(..., description="The name of the user 
 
 # Tags: Group
 @mcp.tool()
-async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any]:
+async def get_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a user group by its unique identifier. Requires permission to access the Confluence site."""
 
     # Construct request model with validation
@@ -3243,7 +3380,7 @@ async def get_group(id_: str = Field(..., alias="id", description="The unique id
 
 # Tags: Group
 @mcp.tool()
-async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any]:
+async def delete_group(id_: str = Field(..., alias="id", description="The unique identifier of the group to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a user group from the Confluence instance. Requires site administrator permissions."""
 
     # Construct request model with validation
@@ -3284,7 +3421,7 @@ async def delete_group(id_: str = Field(..., alias="id", description="The unique
 async def search_groups(
     query: str = Field(..., description="The search term used to find matching groups. Supports partial matching against group names and identifiers."),
     limit: str | None = Field(None, description="The maximum number of groups to return in the results. Limited to a maximum of 200 groups per request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for groups using a partial query string. Returns matching groups up to the specified limit."""
 
     _limit = _parse_int(limit)
@@ -3327,7 +3464,7 @@ async def search_groups(
 async def list_group_members(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of users to return per page of results. The system may apply fixed limits that restrict this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all users that are members of a specified group. Requires permission to access the Confluence site."""
 
     _limit = _parse_int(limit)
@@ -3371,7 +3508,7 @@ async def list_group_members(
 async def add_user_to_group(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group to which the user will be added."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the user to be added to the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user as a member to a group by its groupId. Requires site admin permissions."""
 
     # Construct request model with validation
@@ -3415,7 +3552,7 @@ async def add_user_to_group(
 async def remove_user_from_group(
     group_id: str = Field(..., alias="groupId", description="The unique identifier of the group from which the user will be removed."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the user to remove from the group. This uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a group by group ID. Requires site admin permissions."""
 
     # Construct request model with validation
@@ -3453,7 +3590,7 @@ async def remove_user_from_group(
 
 # Tags: Long-running task
 @mcp.tool()
-async def get_longtask(id_: str = Field(..., alias="id", description="The unique identifier of the long-running task to retrieve status information for.")) -> dict[str, Any]:
+async def get_longtask(id_: str = Field(..., alias="id", description="The unique identifier of the long-running task to retrieve status information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status of an active long-running task such as a space export, including elapsed time and completion percentage. Requires 'Can use' global permission to access the Confluence site."""
 
     # Construct request model with validation
@@ -3495,7 +3632,7 @@ async def list_related_entities(
     source_key: str = Field(..., alias="sourceKey", description="The identifier for the source entity. For users, use 'current' for the logged-in user, an account ID, or a deprecated user key. For content, use the content ID. For spaces, use the space key."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The type of the target entity in the relationship."),
     limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all target entities that have a specific relationship type with a source entity. Relationships are directional, so results depend on the relationship direction defined."""
 
     _limit = _parse_int(limit)
@@ -3542,7 +3679,7 @@ async def check_relationship(
     source_key: str = Field(..., alias="sourceKey", description="The identifier for the source entity. Use 'current' for the logged-in user, an account ID or user key for users, a content ID for content, or a space key for spaces."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The type of the target entity in the relationship. Must be 'space' or 'content' if checking a 'favourite' relationship."),
     target_key: str = Field(..., alias="targetKey", description="The identifier for the target entity. Use 'current' for the logged-in user, an account ID or user key for users, a content ID for content, or a space key for spaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a specific relationship exists between two entities. Relationships are directional, so the source and target entities matter. For example, you can check if a user has marked a page as a favorite."""
 
     # Construct request model with validation
@@ -3584,7 +3721,7 @@ async def create_relationship(
     source_key: str = Field(..., alias="sourceKey", description="The identifier for the source entity. For users, specify 'current' (logged-in user), account ID, or deprecated user key. For content, specify the content ID. For spaces, specify the space key."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The type of the target entity in the relationship. Must be 'space' or 'content' when creating a 'favourite' relationship."),
     target_key: str = Field(..., alias="targetKey", description="The identifier for the target entity. For users, specify 'current' (logged-in user), account ID, or deprecated user key. For content, specify the content ID. For spaces, specify the space key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a relationship between two Confluence entities (user, space, or content). Supports built-in relationships like 'favourite' (save for later) as well as custom relationship types."""
 
     # Construct request model with validation
@@ -3626,7 +3763,7 @@ async def delete_relationship(
     source_key: str = Field(..., alias="sourceKey", description="The identifier for the source entity. Use 'current' for the logged-in user, account ID or user key for users, content ID for content, or space key for spaces."),
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The type of the target entity in the relationship. Must be 'space' or 'content' for favourite relationships."),
     target_key: str = Field(..., alias="targetKey", description="The identifier for the target entity. Use 'current' for the logged-in user, account ID or user key for users, content ID for content, or space key for spaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a relationship between two Confluence entities (user, space, or content). For favourite relationships, users can only delete their own, while space administrators can delete any user's favourites."""
 
     # Construct request model with validation
@@ -3668,7 +3805,7 @@ async def list_related_sources(
     target_type: Literal["user", "content", "space"] = Field(..., alias="targetType", description="The entity type of the target entity."),
     target_key: str = Field(..., alias="targetKey", description="The identifier of the target entity. For users, provide 'current' for the logged-in user, a user key, or an account ID. For content, provide the content ID. For spaces, provide the space key."),
     limit: str | None = Field(None, description="The maximum number of relationships to return per page. The system may enforce additional limits on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all source entities that have a specific relationship type to a target entity. Relationships are directional, so this finds sources pointing to the specified target."""
 
     _limit = _parse_int(limit)
@@ -3726,7 +3863,7 @@ async def search_content_global(
     status: str | None = Field(None, description="Content status filter (e.g., 'current', 'archived'). Optional."),
     label: str | None = Field(None, description="Label to filter by. Optional."),
     ancestor_id: str | None = Field(None, description="Content ID of ancestor to filter by. Optional."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search Confluence content using Confluence Query Language (CQL). Returns matching pages, blog posts, and other content objects with support for pagination via cursor-based navigation."""
 
     # Call helper functions
@@ -3773,7 +3910,7 @@ async def search_users(
     cql: str = Field(..., description="CQL query string to filter users. Supports user-specific fields including user, user.fullname, user.accountid, and user.userkey. Use operators like IN, NOT IN, and != for advanced filtering."),
     limit: str | None = Field(None, description="Maximum number of user objects to return per page. System limits may restrict the actual number returned."),
     site_permission_type_filter: Literal["all", "externalCollaborator", "none"] | None = Field(None, alias="sitePermissionTypeFilter", description="Filter users by permission type. Use 'none' for licensed users, 'externalCollaborator' for external/guest users, or 'all' to include all permission types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for Confluence users using Confluence Query Language (CQL) with support for user-specific fields like account ID, full name, and user key. Some user fields may be null depending on privacy settings."""
 
     _limit = _parse_int(limit)
@@ -3819,7 +3956,7 @@ async def create_space(
     alias: str | None = Field(None, description="This field will be used as the new identifier for the space in confluence page URLs.\nIf the property is not provided the alias will be the provided key.\nThis property is experimental and may be changed or removed in the future."),
     value: str | None = Field(None, description="The space description."),
     permissions: list[_models.SpacePermissionCreate] | None = Field(None, description="The permissions for the new space. If no permissions are provided, the\n[Confluence default space permissions](https://confluence.atlassian.com/x/UAgzKw#CreateaSpace-Spacepermissions)\nare applied. Note that if permissions are provided, the space is\ncreated with only the provided set of permissions, not\nincluding the default space permissions. Space permissions\ncan be modified after creation using the space permissions\nendpoints, and a private space can be created using the\ncreate private space endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new space in Confluence. Requires 'Create Space(s)' global permission. Note that space labels cannot be set during creation."""
 
     # Construct request model with validation
@@ -3864,7 +4001,7 @@ async def create_private_space(
     alias: str | None = Field(None, description="This field will be used as the new identifier for the space in confluence page URLs.\nIf the property is not provided the alias will be the provided key.\nThis property is experimental and may be changed or removed in the future."),
     value: str | None = Field(None, description="The space description."),
     permissions: list[_models.SpacePermissionCreate] | None = Field(None, description="The permissions for the new space. If no permissions are provided, the\n[Confluence default space permissions](https://confluence.atlassian.com/x/UAgzKw#CreateaSpace-Spacepermissions)\nare applied. Note that if permissions are provided, the space is\ncreated with only the provided set of permissions, not\nincluding the default space permissions. Space permissions\ncan be modified after creation using the space permissions\nendpoints, and a private space can be created using the\ncreate private space endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new private space visible only to the creator. Requires 'Create Space(s)' global permission."""
 
     # Construct request model with validation
@@ -3907,7 +4044,7 @@ async def update_space(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space to update."),
     name: str | None = Field(None, description="The new name for the space.", max_length=200),
     type_: str | None = Field(None, alias="type", description="The new type classification for the space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a space's name, description, or homepage. Requires 'Admin' permission for the space. Note that permissions and space labels cannot be modified through this API."""
 
     # Construct request model with validation
@@ -3946,7 +4083,7 @@ async def update_space(
 
 # Tags: Space
 @mcp.tool()
-async def delete_space(space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space to delete. This is the space's short name used in URLs and references.")) -> dict[str, Any]:
+async def delete_space(space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space to delete. This is the space's short name used in URLs and references.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a space without sending it to trash. The deletion occurs as a long-running task, so the space may not be immediately deleted when the response is returned. Poll the status link in the response to monitor task completion."""
 
     # Construct request model with validation
@@ -3987,7 +4124,7 @@ async def grant_custom_content_permission(
     type_: Literal["user", "group"] = Field(..., alias="type", description="The type of principal receiving the permission: either a user account or a group."),
     identifier: str = Field(..., description="The unique identifier of the principal. For users, provide the accountId or 'anonymous' for anonymous access. For groups, provide the groupId."),
     operations: list[_models.AddCustomContentPermissionsBodyOperationsItem] = Field(..., description="An array of permission operations to grant to the specified principal. Each operation defines what actions are permitted on custom content within the space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a new custom content permission to a user or group within a Confluence space. Only apps can modify app-specific permissions, and the requesting user must have Admin permission for the space."""
 
     # Construct request model with validation
@@ -4030,7 +4167,7 @@ async def grant_custom_content_permission(
 async def delete_space_permission(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space from which the permission will be removed."),
     id_: int = Field(..., alias="id", description="The unique identifier of the permission record to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific permission from a space. Deleting Read Space permission for a user or group will cascade and remove all other space permissions for that user or group."""
 
     # Construct request model with validation
@@ -4066,7 +4203,7 @@ async def delete_space_permission(
 
 # Tags: Content states
 @mcp.tool()
-async def list_space_content_states(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose suggested content states should be retrieved.")) -> dict[str, Any]:
+async def list_space_content_states(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose suggested content states should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the content states that are suggested for use within a specific Confluence space. Requires 'View' permission for the space."""
 
     # Construct request model with validation
@@ -4106,7 +4243,7 @@ async def list_space_content_by_state(
     space_key: str = Field(..., alias="spaceKey", description="The key identifier of the space to query for content with the specified state."),
     state_id: str = Field(..., alias="state-id", description="The numeric identifier of the content state to filter results by."),
     limit: str | None = Field(None, description="Maximum number of results to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all content in a space filtered by a specific content state. Requires 'View' permission for the space. Note: When using expand parameter with body.export_view and/or body.styled_view, the limit is restricted to a maximum of 25."""
 
     _state_id = _parse_int(state_id)
@@ -4148,7 +4285,7 @@ async def list_space_content_by_state(
 
 # Tags: Themes
 @mcp.tool()
-async def get_space_theme(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose theme should be retrieved.")) -> dict[str, Any]:
+async def get_space_theme(space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space whose theme should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the theme configuration for a space. If no custom theme is set, the space inherits the global look and feel settings."""
 
     # Construct request model with validation
@@ -4187,7 +4324,7 @@ async def get_space_theme(space_key: str = Field(..., alias="spaceKey", descript
 async def apply_space_theme(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space where the theme will be applied."),
     theme_key: str = Field(..., alias="themeKey", description="The unique identifier key of the theme to apply to the space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Apply a theme to a Confluence space. Requires 'Admin' permission for the space. To reset to the default theme, use the reset_space_theme operation instead."""
 
     # Construct request model with validation
@@ -4229,7 +4366,7 @@ async def apply_space_theme(
 async def list_space_watchers(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space for which to retrieve watchers."),
     limit: str | None = Field(None, description="The maximum number of watchers to return in the response. The actual limit may be restricted by system configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of users watching a specific space. Use this to see who is monitoring updates to a space."""
 
     # Construct request model with validation
@@ -4271,7 +4408,7 @@ async def list_space_watchers(
 async def list_space_labels(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space from which to retrieve labels."),
     limit: str | None = Field(None, description="The maximum number of labels to return in a single page of results. The system may enforce additional limits on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all labels associated with a Confluence space, with optional filtering and pagination support."""
 
     _limit = _parse_int(limit)
@@ -4315,7 +4452,7 @@ async def list_space_labels(
 async def add_space_labels(
     space_key: str = Field(..., alias="spaceKey", description="The unique key identifier of the space where labels will be added."),
     body: list[_models.LabelCreate] = Field(..., description="An array of label objects to add to the space. Each label in the array will be appended to the space's existing labels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more labels to a space without removing existing labels. This operation appends new labels to the space's current label set."""
 
     # Construct request model with validation
@@ -4358,7 +4495,7 @@ async def add_space_labels(
 async def remove_label_from_space(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier (key) of the space from which the label should be removed."),
     name: str = Field(..., description="The name of the label to remove from the space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a label from a space. This operation deletes the association between a specific label and the space identified by its key."""
 
     # Construct request model with validation
@@ -4419,7 +4556,7 @@ async def create_template(
     atlas_doc_format_representation: Literal["view", "export_view", "styled_view", "storage", "editor", "editor2", "anonymous_export_view", "wiki", "atlas_doc_format", "plain", "raw"] = Field(..., alias="atlas_doc_formatRepresentation", description="The content representation format for the atlas_doc_format body."),
     anonymous_export_view_representation: Literal["view", "export_view", "styled_view", "storage", "editor", "editor2", "anonymous_export_view", "wiki", "atlas_doc_format", "plain", "raw"] = Field(..., alias="anonymous_export_viewRepresentation", description="The content representation format for the anonymous_export_view body."),
     key: str = Field(..., description="The unique key identifier for the template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new content template for a space or globally. Requires 'Admin' permission for the space or 'Confluence Administrator' global permission. Note: blueprint templates cannot be created via this API."""
 
     # Construct request model with validation
@@ -4492,7 +4629,7 @@ async def update_template(
     atlas_doc_format_representation: Literal["view", "export_view", "styled_view", "storage", "editor", "editor2", "anonymous_export_view", "wiki", "atlas_doc_format", "plain", "raw"] = Field(..., alias="atlas_doc_formatRepresentation", description="The content representation format for the atlas_doc_format body."),
     anonymous_export_view_representation: Literal["view", "export_view", "styled_view", "storage", "editor", "editor2", "anonymous_export_view", "wiki", "atlas_doc_format", "plain", "raw"] = Field(..., alias="anonymous_export_viewRepresentation", description="The content representation format for the anonymous_export_view body."),
     key: str = Field(..., description="The template key identifier used for internal reference."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing content template with new content and metadata. Requires 'Admin' permission for space templates or 'Confluence Administrator' global permission for global templates. Blueprint templates cannot be updated via this API."""
 
     # Construct request model with validation
@@ -4545,7 +4682,7 @@ async def update_template(
 async def list_blueprint_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to query for templates. Omit this parameter to retrieve global blueprint templates instead of space-specific ones."),
     limit: str | None = Field(None, description="The maximum number of templates to return in a single response. The system may enforce additional limits on this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all blueprint templates available globally or within a specific space. Global templates are inherited by all spaces, while space-specific templates can be customized independently."""
 
     _limit = _parse_int(limit)
@@ -4588,7 +4725,7 @@ async def list_blueprint_templates(
 async def list_templates(
     space_key: str | None = Field(None, alias="spaceKey", description="The space key to retrieve templates from. Omit this parameter to retrieve global templates instead of space-specific templates."),
     limit: str | None = Field(None, description="The maximum number of templates to return per page. The system may enforce lower limits than requested."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all content templates, either globally or within a specific space. Requires 'View' permission for space templates or 'Can use' global permission for global templates."""
 
     _limit = _parse_int(limit)
@@ -4628,7 +4765,7 @@ async def list_templates(
 
 # Tags: Template
 @mcp.tool()
-async def get_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the content template to retrieve.")) -> dict[str, Any]:
+async def get_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the content template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a content template with its metadata, including name, space or blueprint location, and template body. Requires 'View' permission for space templates or 'Can use' global permission for global templates."""
 
     # Construct request model with validation
@@ -4664,7 +4801,7 @@ async def get_template(content_template_id: str = Field(..., alias="contentTempl
 
 # Tags: Template
 @mcp.tool()
-async def delete_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the template to be deleted.")) -> dict[str, Any]:
+async def delete_template(content_template_id: str = Field(..., alias="contentTemplateId", description="The unique identifier of the template to be deleted.")) -> dict[str, Any] | ToolResult:
     """Deletes a template, with behavior varying by template type: content templates are removed, modified space-level or global-level blueprint templates revert to their parent templates, and unmodified blueprint templates cannot be deleted. Requires 'Admin' permission for space templates or 'Confluence Administrator' global permission for global templates."""
 
     # Construct request model with validation
@@ -4700,7 +4837,7 @@ async def delete_template(content_template_id: str = Field(..., alias="contentTe
 
 # Tags: Users
 @mcp.tool()
-async def get_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a required identifier to retrieve the specific user's information.")) -> dict[str, Any]:
+async def get_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a required identifier to retrieve the specific user's information.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific user, including display name, account ID, profile picture, and other profile data. Information returned may be restricted based on the user's profile visibility settings."""
 
     # Construct request model with validation
@@ -4738,7 +4875,7 @@ async def get_user(account_id: str = Field(..., alias="accountId", description="
 
 # Tags: Users
 @mcp.tool()
-async def get_anonymous_user() -> dict[str, Any]:
+async def get_anonymous_user() -> dict[str, Any] | ToolResult:
     """Retrieves information about how anonymous users are represented in Confluence, including their profile picture and display name. Requires 'Can use' global permission to access the Confluence site."""
 
     # Extract parameters for API call
@@ -4765,7 +4902,7 @@ async def get_anonymous_user() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the currently authenticated user's profile information, including display name, user key, account ID, and profile picture. Requires 'Can use' global permission to access the Confluence site."""
 
     # Extract parameters for API call
@@ -4795,7 +4932,7 @@ async def get_current_user() -> dict[str, Any]:
 async def list_user_groups(
     account_id: str = Field(..., alias="accountId", description="The account ID that uniquely identifies the user across all Atlassian products."),
     limit: str | None = Field(None, description="The maximum number of groups to return per page. This value may be restricted by system limits."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all groups that a user is a member of. Requires permission to access the Confluence site."""
 
     _limit = _parse_int(limit)
@@ -4835,7 +4972,7 @@ async def list_user_groups(
 
 # Tags: Users
 @mcp.tool()
-async def list_users(account_id: str = Field(..., alias="accountId", description="Comma-separated list of account IDs identifying the users to retrieve. Maximum of 100 IDs per request; excess IDs are ignored.")) -> dict[str, Any]:
+async def list_users(account_id: str = Field(..., alias="accountId", description="Comma-separated list of account IDs identifying the users to retrieve. Maximum of 100 IDs per request; excess IDs are ignored.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for multiple users by their account IDs. Returns up to 100 user records per request; additional IDs beyond the limit are ignored."""
 
     # Construct request model with validation
@@ -4876,7 +5013,7 @@ async def list_users(account_id: str = Field(..., alias="accountId", description
 async def check_content_watch_status(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user whose watch status should be checked. If not provided, the currently authenticated user's status is returned. The accountId uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a user is watching a specific piece of content. Requires 'Confluence Administrator' permission if checking another user's status, otherwise only 'Can use' permission is needed."""
 
     # Construct request model with validation
@@ -4918,7 +5055,7 @@ async def check_content_watch_status(
 async def watch_content(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to add the watcher to."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to add as a watcher. If not provided, the currently logged-in user will be used. Requires 'Confluence Administrator' global permission when specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user as a watcher to a piece of content in Confluence. The watcher can be specified by account ID, or if not specified, the currently logged-in user will be added as a watcher."""
 
     # Construct request model with validation
@@ -4961,7 +5098,7 @@ async def unwatch_content(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content from which to remove the watcher."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token required for this DELETE operation."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to remove as a watcher. If not provided, the currently logged-in user is removed. The accountId uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user as a watcher from content. Specify a user by accountId, or omit to remove the currently logged-in user. Requires 'Confluence Administrator' permission if specifying another user, otherwise standard site access permission."""
 
     # Construct request model with validation
@@ -5004,7 +5141,7 @@ async def unwatch_content(
 async def check_label_watch_status(
     label_name: str = Field(..., alias="labelName", description="The name of the label to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to check. If not provided, the currently logged-in user is used. Required if checking another user's watch status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a user is watching a specific label in Confluence. If no user is specified, the currently logged-in user is checked."""
 
     # Construct request model with validation
@@ -5047,7 +5184,7 @@ async def watch_label(
     label_name: str = Field(..., alias="labelName", description="The name of the label to watch."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token. Must be set to 'no-check' for this operation."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to add as a watcher. If not provided, the currently authenticated user is used. Required only if you have 'Confluence Administrator' permission; otherwise, the authenticated user is assumed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Subscribe a user as a watcher to a label in Confluence. The watcher will receive notifications for changes to the label. If no user is specified, the currently authenticated user is subscribed."""
 
     # Construct request model with validation
@@ -5090,7 +5227,7 @@ async def watch_label(
 async def unwatch_label(
     label_name: str = Field(..., alias="labelName", description="The name of the label from which to remove the watcher."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to remove as a watcher. If not specified, the currently logged-in user will be used. Required only if removing a different user (requires Confluence Administrator permission)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user as a watcher from a label in Confluence. If no user is specified, the currently logged-in user will be removed as a watcher."""
 
     # Construct request model with validation
@@ -5132,7 +5269,7 @@ async def unwatch_label(
 async def check_space_watch_status(
     space_key: str = Field(..., alias="spaceKey", description="The unique identifier key of the space to check watch status for."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to check watch status for. If not provided, the currently logged-in user is used. Requires 'Confluence Administrator' permission when specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check whether a user is watching a specific space. Identifies the user via account ID query parameter or uses the currently logged-in user if not specified."""
 
     # Construct request model with validation
@@ -5175,7 +5312,7 @@ async def watch_space(
     space_key: str = Field(..., alias="spaceKey", description="The key identifier of the space to add the watcher to."),
     x_atlassian_token: str = Field(..., alias="X-Atlassian-Token", description="XSRF protection token. Must be set to 'no-check' for this operation."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to add as a watcher. If not provided, the currently logged-in user will be used. Required only when adding a watcher other than yourself."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user as a watcher to a Confluence space. If no user is specified, the currently logged-in user will be added as a watcher."""
 
     # Construct request model with validation
@@ -5218,7 +5355,7 @@ async def watch_space(
 async def unwatch_space(
     space_key: str = Field(..., alias="spaceKey", description="The key that uniquely identifies the space from which to remove the watcher."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user to remove as a watcher. If not provided, the currently logged-in user will be removed. The accountId uniquely identifies the user across all Atlassian products."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user as a watcher from a space. Specify a user by accountId, or omit to remove the currently logged-in user. Requires 'Confluence Administrator' permission if removing another user, otherwise requires site access permission."""
 
     # Construct request model with validation
@@ -5257,7 +5394,7 @@ async def unwatch_space(
 
 # Tags: Users
 @mcp.tool()
-async def fetch_user_emails_bulk(account_id: list[str] = Field(..., alias="accountId", description="An array of account IDs identifying the users whose email addresses should be retrieved. Users with unavailable accounts will be excluded from the results.")) -> dict[str, Any]:
+async def fetch_user_emails_bulk(account_id: list[str] = Field(..., alias="accountId", description="An array of account IDs identifying the users whose email addresses should be retrieved. Users with unavailable accounts will be excluded from the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve email addresses for multiple users in a single batch request, bypassing profile visibility restrictions. This operation requires appropriate permissions and is subject to app approval guidelines for Connect apps or asApp() context for Forge apps."""
 
     # Construct request model with validation
@@ -5301,7 +5438,7 @@ async def fetch_user_emails_bulk(account_id: list[str] = Field(..., alias="accou
 async def get_content_views(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content whose view count should be retrieved."),
     from_date: str | None = Field(None, alias="fromDate", description="Filter results to include only views from this date forward. Specify in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the total number of views for a specific piece of content, optionally filtered from a given date onwards."""
 
     # Construct request model with validation
@@ -5343,7 +5480,7 @@ async def get_content_views(
 async def get_content_viewers(
     content_id: str = Field(..., alias="contentId", description="The unique identifier of the content to retrieve viewer analytics for."),
     from_date: str | None = Field(None, alias="fromDate", description="Filter results to include only views from this date forward. Use ISO 8601 format for the timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the total number of distinct viewers for a specific piece of content, optionally filtered by a start date."""
 
     # Construct request model with validation
@@ -5385,7 +5522,7 @@ async def get_content_viewers(
 async def list_user_properties(
     user_id: str = Field(..., alias="userId", description="The account ID of the user whose properties you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of properties to return in a single page of results. The system may enforce stricter limits than the specified maximum."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all properties associated with a user account on the Confluence site. User properties are stored at the site level and provide metadata about the user."""
 
     _limit = _parse_int(limit)
@@ -5429,7 +5566,7 @@ async def list_user_properties(
 async def get_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID of the user whose property you want to retrieve."),
     key: str = Field(..., description="The key identifying which user property to retrieve. Keys must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific property for a Confluence user by its key. User properties are stored at the site level and require 'Can use' global permission to access."""
 
     # Construct request model with validation
@@ -5469,7 +5606,7 @@ async def set_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID of the user. This uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifying this user property. Keys must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
     value: dict[str, Any] = Field(..., description="The value to store for this user property. Can be any JSON-serializable object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set a custom property for a user at the Confluence site level. User properties enable storing arbitrary metadata associated with user accounts across the Confluence instance."""
 
     # Construct request model with validation
@@ -5512,7 +5649,7 @@ async def set_user_property_value(
     user_id: str = Field(..., alias="userId", description="The account ID of the user. This uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifier for the user property. Must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
     value: dict[str, Any] = Field(..., description="The new value to assign to the user property. Can be any JSON-serializable object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates or sets a property value for a user on the Confluence site. The property key cannot be changed, only its value can be modified."""
 
     # Construct request model with validation
@@ -5554,7 +5691,7 @@ async def set_user_property_value(
 async def remove_user_property(
     user_id: str = Field(..., alias="userId", description="The account ID that uniquely identifies the user across all Atlassian products."),
     key: str = Field(..., description="The key identifying which user property to delete. Must contain only alphanumeric characters, hyphens, and underscores.", pattern="^[-_a-zA-Z0-9]+$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a user account on the Confluence site. User properties are stored at the site level and are distinct from space or content-level properties."""
 
     # Construct request model with validation

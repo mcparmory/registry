@@ -1,7 +1,7 @@
 """
 Authentication module for Atlassian Confluence MCP server.
 
-Generated: 2026-04-14 18:14:52 UTC
+Generated: 2026-04-23 20:59:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -73,46 +73,40 @@ class OAuth2Auth:
         Token URL: https://auth.atlassian.com/oauth/token
 
     Available Scopes (configure via OAUTH2_SCOPES):
-        - read:confluence-content.all
-        - read:confluence-content.permission
-        - read:confluence-content.summary
         - write:confluence-content
         - read:confluence-space.summary
         - write:confluence-space
         - write:confluence-file
         - read:confluence-props
         - write:confluence-props
-        - search:confluence
         - manage:confluence-configuration
+        - read:confluence-content.all
+        - read:confluence-content.summary
+        - search:confluence
+        - read:confluence-content.permission
+        - read:confluence-user
         - read:confluence-groups
         - write:confluence-groups
-        - read:confluence-user
         - readonly:content.attachment:confluence
         - read:content:confluence
-        - read:content-details:confluence
         - write:content:confluence
-        - delete:content:confluence
+        - read:content-details:confluence
         - read:space-details:confluence
-        - read:analytics.content:confluence
+        - delete:content:confluence
         - read:audit-log:confluence
         - write:audit-log:confluence
-        - read:configuration:confluence
-        - write:configuration:confluence
         - read:page:confluence
         - write:page:confluence
         - delete:page:confluence
-        - read:blogpost:confluence
-        - write:blogpost:confluence
-        - delete:blogpost:confluence
-        - read:whiteboard:confluence
-        - write:whiteboard:confluence
-        - delete:whiteboard:confluence
-        - read:custom-content:confluence
-        - write:custom-content:confluence
-        - delete:custom-content:confluence
         - read:attachment:confluence
         - write:attachment:confluence
         - delete:attachment:confluence
+        - read:blogpost:confluence
+        - write:blogpost:confluence
+        - delete:blogpost:confluence
+        - read:custom-content:confluence
+        - write:custom-content:confluence
+        - delete:custom-content:confluence
         - read:comment:confluence
         - write:comment:confluence
         - delete:comment:confluence
@@ -120,20 +114,15 @@ class OAuth2Auth:
         - write:template:confluence
         - read:label:confluence
         - write:label:confluence
-        - read:content.permission:confluence
-        - read:content.property:confluence
-        - write:content.property:confluence
-        - read:content.restriction:confluence
-        - write:content.restriction:confluence
-        - read:content.metadata:confluence
         - read:watcher:confluence
         - write:watcher:confluence
         - read:group:confluence
         - write:group:confluence
-        - read:inlinetask:confluence
-        - write:inlinetask:confluence
         - read:relation:confluence
         - write:relation:confluence
+        - read:user:confluence
+        - read:configuration:confluence
+        - write:configuration:confluence
         - read:space:confluence
         - write:space:confluence
         - delete:space:confluence
@@ -145,10 +134,38 @@ class OAuth2Auth:
         - write:user.property:confluence
         - read:space.setting:confluence
         - write:space.setting:confluence
-        - read:user:confluence
+        - read:analytics.content:confluence
+        - read:content.permission:confluence
+        - read:content.property:confluence
+        - write:content.property:confluence
+        - read:content.restriction:confluence
+        - write:content.restriction:confluence
+        - read:content.metadata:confluence
+        - read:inlinetask:confluence
+        - write:inlinetask:confluence
+        - read:task:confluence
+        - write:task:confluence
+        - read:permission:confluence
+        - read:whiteboard:confluence
+        - write:whiteboard:confluence
+        - delete:whiteboard:confluence
+        - read:database:confluence
+        - write:database:confluence
+        - delete:database:confluence
+        - read:embed:confluence
+        - write:embed:confluence
+        - delete:embed:confluence
+        - read:folder:confluence
+        - write:folder:confluence
+        - delete:folder:confluence
+        - read:app-data:confluence
+        - write:app-data:confluence
+        - read:email-address:confluence
+        - read:hierarchical-content:confluence
+        - read:forge-app:confluence
+        - write:forge-app:confluence
         - moderate:core-content:confluence
         - moderate:comment:confluence
-        - read:email-address:confluence
     """
 
     def __init__(self):
@@ -677,7 +694,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "check_space_watch_status": [["oAuthDefinitions"], ["basicAuth"]],
     "watch_space": [["oAuthDefinitions"], ["basicAuth"]],
     "unwatch_space": [["oAuthDefinitions"], ["basicAuth"]],
-    "fetch_user_emails_bulk": [],
+    "fetch_user_emails_bulk": [["oAuthDefinitions"], ["basicAuth"]],
     "get_content_views": [["oAuthDefinitions"], ["basicAuth"]],
     "get_content_viewers": [["oAuthDefinitions"], ["basicAuth"]],
     "list_user_properties": [["oAuthDefinitions"], ["basicAuth"]],
