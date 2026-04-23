@@ -1,7 +1,7 @@
 """
 Authentication module for OpenCage Geocoding MCP server.
 
-Generated: 2026-04-14 18:27:49 UTC
+Generated: 2026-04-23 21:33:08 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
