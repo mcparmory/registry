@@ -1,6 +1,7 @@
 # Google Maps Platform MCP Server
+<!-- mcp-name: com.mcparmory/google-maps -->
 
-Base URL: https://www.googleapis.com
+Base URL: https://maps.googleapis.com
 | | |
 |---|---|
 | **Category** | Maps & Location |
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/google-maps`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/google-maps:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t google-maps .
 docker run -p 8000:8000 --env-file .env google-maps
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

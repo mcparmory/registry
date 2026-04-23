@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Google Maps Platform MCP Server
-Generated: 2026-04-14 18:23:44 UTC
+Generated: 2026-04-23 21:21:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,26 +36,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "https://www.googleapis.com")
+BASE_URL = os.getenv("BASE_URL", "https://maps.googleapis.com")
 OPERATION_URL_MAP: dict[str, str] = {
-    "calculate_directions": os.getenv("SERVER_URL_CALCULATE_DIRECTIONS", "https://maps.googleapis.com"),
-    "get_elevation": os.getenv("SERVER_URL_GET_ELEVATION", "https://maps.googleapis.com"),
-    "geocode_address": os.getenv("SERVER_URL_GEOCODE_ADDRESS", "https://maps.googleapis.com"),
-    "get_timezone": os.getenv("SERVER_URL_GET_TIMEZONE", "https://maps.googleapis.com"),
+    "locate_device": os.getenv("SERVER_URL_LOCATE_DEVICE", "https://www.googleapis.com"),
     "snap_coordinates_to_roads": os.getenv("SERVER_URL_SNAP_COORDINATES_TO_ROADS", "https://roads.googleapis.com"),
     "snap_points_to_roads": os.getenv("SERVER_URL_SNAP_POINTS_TO_ROADS", "https://roads.googleapis.com"),
-    "calculate_distance_matrix": os.getenv("SERVER_URL_CALCULATE_DISTANCE_MATRIX", "https://maps.googleapis.com"),
-    "get_place_details": os.getenv("SERVER_URL_GET_PLACE_DETAILS", "https://maps.googleapis.com"),
-    "search_place_by_text": os.getenv("SERVER_URL_SEARCH_PLACE_BY_TEXT", "https://maps.googleapis.com"),
-    "search_nearby_places": os.getenv("SERVER_URL_SEARCH_NEARBY_PLACES", "https://maps.googleapis.com"),
-    "search_places_by_text": os.getenv("SERVER_URL_SEARCH_PLACES_BY_TEXT", "https://maps.googleapis.com"),
-    "get_place_photo": os.getenv("SERVER_URL_GET_PLACE_PHOTO", "https://maps.googleapis.com"),
-    "get_query_suggestions": os.getenv("SERVER_URL_GET_QUERY_SUGGESTIONS", "https://maps.googleapis.com"),
-    "autocomplete_place": os.getenv("SERVER_URL_AUTOCOMPLETE_PLACE", "https://maps.googleapis.com"),
-    "get_street_view": os.getenv("SERVER_URL_GET_STREET_VIEW", "https://maps.googleapis.com"),
-    "get_street_view_metadata": os.getenv("SERVER_URL_GET_STREET_VIEW_METADATA", "https://maps.googleapis.com"),
 }
 SERVER_NAME = "Google Maps Platform"
 SERVER_VERSION = "1.0.0"
@@ -484,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -511,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
     # Per-operation URL override (OAS 3.0 path/operation-level servers)
@@ -557,18 +575,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -640,7 +727,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -688,6 +783,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -750,7 +849,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -776,10 +883,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -873,16 +978,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -896,6 +1002,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -938,6 +1045,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -949,7 +1071,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1098,7 +1219,7 @@ async def locate_device(
     consider_ip: str | None = Field(None, alias="considerIp", description="Whether to use IP address geolocation as a fallback when cell tower and WiFi signals are unavailable. Defaults to true; set to false to disable IP-based fallback."),
     cell_towers: list[_models.CellTower] | None = Field(None, alias="cellTowers", description="An array of cell tower objects detected by the device. Each object should contain signal strength and tower identification data. Order does not affect results."),
     wifi_access_points: list[_models.WiFiAccessPoint] | None = Field(None, alias="wifiAccessPoints", description="An array of at least two WiFi access point objects detected by the device. Each object should contain BSSID and signal strength data. More access points improve accuracy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Determines a device's geographic location based on detected cell towers and WiFi access points. Returns coordinates with an accuracy radius, with optional fallback to IP-based geolocation."""
 
     # Construct request model with validation
@@ -1149,7 +1270,7 @@ async def calculate_directions(
     traffic_model: Literal["best_guess", "pessimistic", "optimistic"] | None = Field(None, description="Traffic prediction model for driving directions with a departure time. Choose 'best_guess' (default) for balanced predictions, 'pessimistic' for longer estimates, or 'optimistic' for shorter estimates."),
     transit_mode: str | None = Field(None, description="Preferred transit modes to prioritize in the route calculation. Supports 'bus', 'subway', 'train', 'tram', or 'rail' (combines train, tram, and subway). Multiple modes can be combined using pipe separators."),
     transit_routing_preference: Literal["less_walking", "fewer_transfers"] | None = Field(None, description="Transit routing preference to bias results. Choose 'less_walking' to minimize walking distance or 'fewer_transfers' to reduce the number of transit transfers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate directions and distances between locations using various transportation modes. Supports multiple routes, waypoints, and real-time traffic data for driving directions."""
 
     # Construct request model with validation
@@ -1185,7 +1306,7 @@ async def calculate_directions(
 
 # Tags: Elevation API
 @mcp.tool()
-async def get_elevation(samples: float | None = Field(None, description="Number of elevation samples to return along a path. Required when querying elevation along a path instead of discrete locations. Specifies how many evenly-distributed points along the path should be sampled for elevation data.")) -> dict[str, Any]:
+async def get_elevation(samples: float | None = Field(None, description="Number of elevation samples to return along a path. Required when querying elevation along a path instead of discrete locations. Specifies how many evenly-distributed points along the path should be sampled for elevation data.")) -> dict[str, Any] | ToolResult:
     """Retrieve elevation data for specific locations or sample elevation along a path. The API returns elevation values relative to local mean sea level, with interpolated values for locations where exact measurements aren't available."""
 
     # Construct request model with validation
@@ -1230,7 +1351,7 @@ async def geocode_address(
     result_type: list[Literal["administrative_area_level_1", "administrative_area_level_2", "administrative_area_level_3", "administrative_area_level_4", "administrative_area_level_5", "airport", "colloquial_area", "country", "intersection", "locality", "natural_feature", "neighborhood", "park", "plus_code", "political", "postal_code", "premise", "route", "street_address", "sublocality", "subpremise"]] | None = Field(None, description="Filter results by address type using pipe-separated values. Supported types include street_address, route, intersection, locality, administrative areas (level 1-5), postal_code, country, airport, park, point_of_interest, and others. Acts as a post-search filter on returned results."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="Language code for result formatting. Defaults to English. Supports ISO 639-1 language codes with optional region variants (e.g., en-GB, pt-BR). Street addresses are returned in local language when possible; other components use the preferred language."),
     region: Literal["ac", "ad", "ae", "af", "ag", "ai", "al", "am", "an", "ao", "aq", "ar", "as", "at", "au", "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bl", "bm", "bn", "bo", "bq", "br", "bs", "bt", "bv", "bw", "by", "bz", "ca", "cc", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cw", "cx", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "eh", "en", "er", "es", "et", "eu", "fi", "fj", "fk", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gs", "gt", "gu", "gw", "gy", "hk", "hm", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "io", "iq", "ir", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "km", "kn", "kp", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "lr", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mf", "mg", "mh", "mk", "ml", "mm", "mn", "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "nf", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pm", "pn", "pr", "ps", "pt", "pw", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh", "si", "sj", "sk", "sl", "sm", "sn", "so", "sr", "ss", "st", "su", "sv", "sx", "sy", "sz", "tc", "td", "tf", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tp", "tr", "tt", "tv", "tw", "tz", "ua", "ug", "uk", "um", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi", "vn", "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw"] | None = Field(None, description="Region code (ccTLD format) to bias results toward a specific country or region. Uses two-character country code top-level domains (e.g., 'uk' for United Kingdom, 'us' for United States). Influences result selection and ordering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert addresses to geographic coordinates (geocoding) or coordinates to human-readable addresses (reverse geocoding). Supports street addresses, plus codes, and place IDs across multiple countries with varying accuracy levels."""
 
     # Construct request model with validation
@@ -1275,7 +1396,7 @@ async def get_timezone(
     location: str = Field(..., description="The geographic coordinates as a comma-separated latitude,longitude pair (e.g., 39.6034810,-119.6822510). Required to identify the location for time zone lookup."),
     timestamp: float = Field(..., description="The target date and time as a Unix timestamp (seconds since January 1, 1970 UTC). Used to determine whether daylight savings time applies at the specified location. Historical time zone changes are not considered."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="The language for the time zone name and results. Supports 40+ languages including major variants like English, Spanish, Chinese, and others. Defaults to English if not specified or falls back to the Accept-Language header preference."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the time zone information for a specific geographic location, including the time zone name, UTC offset, and daylight savings offset for a given date and time."""
 
     # Construct request model with validation
@@ -1314,7 +1435,7 @@ async def get_timezone(
 async def snap_coordinates_to_roads(
     path: list[str] = Field(..., description="A sequence of latitude/longitude coordinate pairs representing the GPS path to be snapped. Coordinates are formatted as comma-separated lat/lon values and separated by pipe characters (e.g., lat1,lon1|lat2,lon2). For best results, consecutive points should be within 300 meters of each other to ensure accurate snapping and handle GPS signal loss or noise."),
     interpolate: bool | None = Field(None, description="When enabled, generates additional interpolated points along the snapped road geometry to create a smooth, continuous path that follows road curves and geometry. The resulting path will typically contain more points than the original input. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Snaps GPS coordinates to the most likely road geometry, returning corrected points that align with actual road paths. Optionally interpolates additional points to create a smooth path following road geometry."""
 
     # Construct request model with validation
@@ -1353,7 +1474,7 @@ async def snap_coordinates_to_roads(
 
 # Tags: Roads API
 @mcp.tool()
-async def snap_points_to_roads(points: list[str] = Field(..., description="A list of GPS coordinates to snap to roads, provided as latitude/longitude pairs separated by pipes. Each coordinate pair should be comma-separated (e.g., latitude,longitude|latitude,longitude). Supports up to 100 points; the points do not need to form a continuous path.")) -> dict[str, Any]:
+async def snap_points_to_roads(points: list[str] = Field(..., description="A list of GPS coordinates to snap to roads, provided as latitude/longitude pairs separated by pipes. Each coordinate pair should be comma-separated (e.g., latitude,longitude|latitude,longitude). Supports up to 100 points; the points do not need to form a continuous path.")) -> dict[str, Any] | ToolResult:
     """Snaps GPS coordinates to the nearest road segments. Accepts up to 100 latitude/longitude points and returns the closest matching road for each point, useful for map matching and route analysis."""
 
     # Construct request model with validation
@@ -1403,7 +1524,7 @@ async def calculate_distance_matrix(
     traffic_model: Literal["best_guess", "pessimistic", "optimistic"] | None = Field(None, description="Traffic prediction model for driving directions with departure times. 'best_guess' (default) balances historical and live traffic; 'pessimistic' estimates longer times; 'optimistic' estimates shorter times. Only applies to driving mode with specified departure_time."),
     transit_mode: str | None = Field(None, description="Preferred transit modes to favor in route calculation. Supports bus, subway, train, tram, and rail (combination of train/tram/subway). Multiple modes can be specified separated by pipe characters. Only applies to transit mode."),
     transit_routing_preference: Literal["less_walking", "fewer_transfers"] | None = Field(None, description="Transit route preferences to bias results. Choose 'less_walking' to minimize walking distance or 'fewer_transfers' to reduce transfer count. Only applies to transit mode."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate travel distances and durations between multiple origin and destination points using various transportation modes. Returns a matrix of distance and time values for each origin-destination pair based on Google Maps routing."""
 
     # Construct request model with validation
@@ -1451,7 +1572,7 @@ async def get_place_details(
     region: Literal["ac", "ad", "ae", "af", "ag", "ai", "al", "am", "an", "ao", "aq", "ar", "as", "at", "au", "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bl", "bm", "bn", "bo", "bq", "br", "bs", "bt", "bv", "bw", "by", "bz", "ca", "cc", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cw", "cx", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "eh", "en", "er", "es", "et", "eu", "fi", "fj", "fk", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gs", "gt", "gu", "gw", "gy", "hk", "hm", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "io", "iq", "ir", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "km", "kn", "kp", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "lr", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mf", "mg", "mh", "mk", "ml", "mm", "mn", "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "nf", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pm", "pn", "pr", "ps", "pt", "pw", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh", "si", "sj", "sk", "sl", "sm", "sn", "so", "sr", "ss", "st", "su", "sv", "sx", "sy", "sz", "tc", "td", "tf", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tp", "tr", "tt", "tv", "tw", "tz", "ua", "ug", "uk", "um", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi", "vn", "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw"] | None = Field(None, description="Two-character country/region code (ccTLD format, e.g., us, gb, de) to bias results toward a specific region. Defaults to 'en'. Influences address interpretation and result prioritization."),
     reviews_sort: str | None = Field(None, description="Sort order for returned reviews: 'most_relevant' (default, language-aware) or 'newest' (chronological). Recommend displaying the sort method to end users."),
     reviews_no_translations: bool | None = Field(None, description="Set to true to return reviews in their original language without translation, or false/omitted to enable translation using the specified or preferred language."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive information about a specific place including address, contact details, opening hours, ratings, and reviews. Use a place ID from a prior search to fetch detailed establishment or location data."""
 
     # Construct request model with validation
@@ -1496,7 +1617,7 @@ async def search_place_by_text(
     fields: list[str] | None = Field(None, description="Comma-separated list of place data fields to return in the response. Omitting this parameter returns only the place_id. Fields are categorized as Basic (no additional charge), Contact, or Atmosphere (higher billing rates). Use forward slash notation for compound fields (e.g., opening_hours/open_now). Specify '*' to request all available fields.", min_length=1),
     locationbias: str | None = Field(None, description="Optional geographic bias to prefer results in a specific area. Specify 'ipbias' to use IP-based biasing, a circular area using 'circle:radius_meters@latitude,longitude', or a rectangular area using 'rectangle:south,west|north,east'. If omitted, IP address biasing is applied by default."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="The language for returned results. Defaults to English. Affects how addresses and place names are displayed, with the API attempting to provide locally-readable transliterations when applicable. Supports 40+ language codes including regional variants (e.g., en-GB, pt-BR)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for a place using text input such as a name, address, or phone number. Returns matching places with optional detailed information based on requested fields."""
 
     # Construct request model with validation
@@ -1543,7 +1664,7 @@ async def search_nearby_places(
     rankby: Literal["prominence", "distance"] | None = Field(None, description="Determines result ordering: 'prominence' (default) ranks by importance and requires the radius parameter, while 'distance' orders by proximity and requires at least one of keyword, name, or type but disallows radius."),
     type_: str | None = Field(None, alias="type", description="Restrict results to a single place type (e.g., 'hospital', 'pharmacy'). Only the first type is used if multiple are provided. Combining the same value as both keyword and type may return no results."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="Language for result content, supporting 40+ languages including regional variants (e.g., 'en', 'es', 'zh-CN'). Defaults to 'en' if not specified. The API uses the Accept-Language header as a fallback and returns street addresses in the local language when possible."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for places within a specified geographic area. Refine results by keywords, place types, or business status to discover relevant locations near a given coordinate."""
 
     # Construct request model with validation
@@ -1586,7 +1707,7 @@ async def search_places_by_text(
     type_: str | None = Field(None, alias="type", description="Restrict results to a single place type from the supported types list. If multiple types are provided, only the first is used; others are ignored."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="Language code for result content. Defaults to English. Affects how addresses and place names are returned and transliterated. The API uses the Accept-Language header if not specified."),
     region: Literal["ac", "ad", "ae", "af", "ag", "ai", "al", "am", "an", "ao", "aq", "ar", "as", "at", "au", "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bl", "bm", "bn", "bo", "bq", "br", "bs", "bt", "bv", "bw", "by", "bz", "ca", "cc", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cw", "cx", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "eh", "en", "er", "es", "et", "eu", "fi", "fj", "fk", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gs", "gt", "gu", "gw", "gy", "hk", "hm", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "io", "iq", "ir", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "km", "kn", "kp", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "lr", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mf", "mg", "mh", "mk", "ml", "mm", "mn", "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "nf", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pm", "pn", "pr", "ps", "pt", "pw", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh", "si", "sj", "sk", "sl", "sm", "sn", "so", "sr", "ss", "st", "su", "sv", "sx", "sy", "sz", "tc", "td", "tf", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tp", "tr", "tt", "tv", "tw", "tz", "ua", "ug", "uk", "um", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi", "vn", "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw"] | None = Field(None, description="Two-character region code (ccTLD format, e.g., 'us', 'gb', 'uk') to bias results to a specific country or region. Defaults to 'en'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for places using a text query string, optionally filtered by location radius, type, and opening status. Returns a ranked list of matching places with basic information."""
 
     # Construct request model with validation
@@ -1622,7 +1743,7 @@ async def search_places_by_text(
 
 # Tags: Places API
 @mcp.tool()
-async def get_place_photo(photo_reference: str = Field(..., description="A unique identifier for the photo, obtained from Place Search, Nearby Search, Text Search, or Place Details requests. This reference is required to retrieve the actual photo image.")) -> dict[str, Any]:
+async def get_place_photo(photo_reference: str = Field(..., description="A unique identifier for the photo, obtained from Place Search, Nearby Search, Text Search, or Place Details requests. This reference is required to retrieve the actual photo image.")) -> dict[str, Any] | ToolResult:
     """Retrieve a high-quality photo for a place using a photo reference. Returns the image data that can be resized and displayed in your application, with attribution requirements included when necessary."""
 
     # Construct request model with validation
@@ -1663,7 +1784,7 @@ async def get_query_suggestions(
     radius: float = Field(..., description="The search radius in meters within which to prefer returning results. Maximum of 50,000 meters. Results outside this radius may still be returned. Helps bias suggestions to a geographic area when combined with a location."),
     offset: float | None = Field(None, description="Optional character position in the input text where matching should stop. Useful for matching against partial input (e.g., matching \"Goo\" when input is \"Google\"). Typically set to the text caret position. If omitted, the entire input term is used for matching."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="The language for returned results. Defaults to English. Supports 40+ languages including regional variants (e.g., en-GB, pt-BR). If not specified, the API attempts to use the language from the Accept-Language header."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Get autocomplete suggestions for geographic queries as users type. Returns predicted queries based on categorical searches like "pizza near New York", matching both full words and substrings."""
 
     # Construct request model with validation
@@ -1712,7 +1833,7 @@ async def autocomplete_place(
     types: str | None = Field(None, description="Filter results to specific place types. Specify up to 5 types separated by pipe characters (e.g., book_store|cafe), or use a single type collection filter. See supported types documentation for valid values."),
     language: Literal["ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "en-AU", "en-GB", "es", "eu", "fa", "fi", "fil", "fr", "gl", "gu", "hi", "hr", "hu", "id", "it", "iw", "ja", "kn", "ko", "lt", "lv", "ml", "mr", "nl", "no", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "ta", "te", "th", "tl", "tr", "uk", "vi", "zh-CN", "zh-TW"] | None = Field(None, description="The language for returned results. Defaults to English. Affects how place names and addresses are translated and formatted. See supported languages list for valid codes."),
     region: Literal["ac", "ad", "ae", "af", "ag", "ai", "al", "am", "an", "ao", "aq", "ar", "as", "at", "au", "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bl", "bm", "bn", "bo", "bq", "br", "bs", "bt", "bv", "bw", "by", "bz", "ca", "cc", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cw", "cx", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "eh", "en", "er", "es", "et", "eu", "fi", "fj", "fk", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gs", "gt", "gu", "gw", "gy", "hk", "hm", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "io", "iq", "ir", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "km", "kn", "kp", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "lr", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mf", "mg", "mh", "mk", "ml", "mm", "mn", "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "nf", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pm", "pn", "pr", "ps", "pt", "pw", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh", "si", "sj", "sk", "sl", "sm", "sn", "so", "sr", "ss", "st", "su", "sv", "sx", "sy", "sz", "tc", "td", "tf", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tp", "tr", "tt", "tv", "tw", "tz", "ua", "ug", "uk", "um", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi", "vn", "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw"] | None = Field(None, description="The region code as a ccTLD (country code top-level domain) to bias results and interpretation. Defaults to 'en'. Use two-character codes like 'uk' for United Kingdom or 'de' for Germany."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Get place predictions as a user types a geographic search query. Returns matching businesses, addresses, and points of interest based on the input text, with optional geographic filtering and biasing."""
 
     # Construct request model with validation
@@ -1755,7 +1876,7 @@ async def get_street_view(
     pano: str | None = Field(None, description="Targets a specific panorama by its unique identifier. Panorama IDs are generally persistent but may change as Street View imagery is updated."),
     pitch: float | None = Field(None, description="Adjusts the vertical camera angle relative to the Street View vehicle. Positive values tilt upward (90 degrees points straight up), negative values tilt downward (-90 degrees points straight down). Defaults to 0 for horizontal orientation."),
     source: Literal["default", "outdoor"] | None = Field(None, description="Restricts Street View results to specific imagery sources. Use 'default' to search all available sources, or 'outdoor' to exclude indoor collections. Note that outdoor panoramas may not exist for all locations, and PhotoSpheres are excluded from outdoor searches due to unknown indoor/outdoor classification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a static Street View image for a specified location or panorama. Returns a static image without interactive elements, useful for embedding Street View imagery in web pages."""
 
     # Construct request model with validation
@@ -1797,7 +1918,7 @@ async def get_street_view_metadata(
     pitch: float | None = Field(None, description="The vertical angle of the camera relative to the Street View vehicle, ranging from -90 degrees (straight down) to 90 degrees (straight up), with 0 as the default horizontal position."),
     size: str | None = Field(None, description="The output image dimensions specified as width by height in pixels (e.g., 600x400 for a 600-pixel wide by 400-pixel high image)."),
     source: Literal["default", "outdoor"] | None = Field(None, description="Limits Street View searches to specific sources: use 'default' to search all available sources, or 'outdoor' to search only outdoor collections and exclude indoor panoramas. Note that outdoor panoramas may not exist for all locations, and PhotoSpheres are excluded from outdoor searches since their indoor/outdoor status cannot be determined."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata about a Street View panorama at a specific location or panorama ID, including availability, coordinates, panorama ID, capture date, and copyright information to customize error handling in your application."""
 
     # Construct request model with validation
