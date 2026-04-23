@@ -1,4 +1,5 @@
 # Alchemy NFT MCP Server
+<!-- mcp-name: com.mcparmory/alchemy-nft -->
 
 Base URL: https://eth-mainnet.g.alchemy.com/nft
 | | |
@@ -50,7 +51,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY` — API Key Authentication (apiKey)
+- `API_KEY` — API Key Authentication (Authorization)
 Do not commit credentials to version control.
 
 ---
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/alchemy-nft`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/alchemy-nft:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t alchemy-nft .
 docker run -p 8000:8000 --env-file .env alchemy-nft
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

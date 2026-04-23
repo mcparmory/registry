@@ -1,7 +1,7 @@
 """
 Authentication module for Alchemy NFT MCP server.
 
-Generated: 2026-04-14 18:13:29 UTC
+Generated: 2026-04-23 20:56:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -107,32 +107,32 @@ This dictionary defines which authentication schemes are required for each opera
 using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
-    "list_nfts_by_owner": [["api_key"]],
-    "list_nfts_for_contract": [["api_key"]],
-    "list_nfts_for_collection": [["api_key"]],
-    "get_nft_metadata": [["api_key"]],
-    "batch_retrieve_nft_metadata": [["api_key"]],
-    "get_nft_contract_metadata": [["api_key"]],
-    "get_collection_metadata": [["api_key"]],
-    "batch_get_contract_metadata": [["api_key"]],
-    "get_nft_owners": [["api_key"]],
-    "list_nft_contract_owners": [["api_key"]],
-    "list_spam_contracts": [["api_key"]],
-    "check_spam_contract": [["api_key"]],
-    "check_nft_airdrop": [["api_key"]],
-    "get_nft_collection_attribute_summary": [["api_key"]],
-    "get_nft_collection_floor_prices": [["api_key"]],
-    "search_contract_metadata": [["api_key"]],
-    "check_nft_holder": [["api_key"]],
-    "calculate_nft_attribute_rarity": [["api_key"]],
-    "list_nft_sales": [["api_key"]],
-    "list_nft_contracts_by_owner": [["api_key"]],
-    "list_nft_collections_by_owner": [["api_key"]],
-    "report_spam_address": [["api_key"]],
-    "refresh_nft_metadata": [["api_key"]],
-    "list_nfts": [["api_key"]],
-    "get_token_owners": [["api_key"]],
-    "list_nft_collection_owners": [["api_key"]],
-    "check_token_airdrop": [["api_key"]],
-    "check_wallet_nft_collection_ownership": [["api_key"]]
+    "list_nfts_by_owner": [["ApiKeyAuth"]],
+    "list_nfts_for_contract": [["ApiKeyAuth"]],
+    "list_nfts_for_collection": [["ApiKeyAuth"]],
+    "get_nft_metadata": [["ApiKeyAuth"]],
+    "batch_retrieve_nft_metadata": [["ApiKeyAuth"]],
+    "get_nft_contract_metadata": [["ApiKeyAuth"]],
+    "get_collection_metadata": [["ApiKeyAuth"]],
+    "batch_get_contract_metadata": [["ApiKeyAuth"]],
+    "get_nft_owners": [["ApiKeyAuth"]],
+    "list_nft_contract_owners": [["ApiKeyAuth"]],
+    "list_spam_contracts": [["ApiKeyAuth"]],
+    "check_spam_contract": [["ApiKeyAuth"]],
+    "check_nft_airdrop": [["ApiKeyAuth"]],
+    "get_nft_collection_attribute_summary": [["ApiKeyAuth"]],
+    "get_nft_collection_floor_prices": [["ApiKeyAuth"]],
+    "search_contract_metadata": [["ApiKeyAuth"]],
+    "check_nft_holder": [["ApiKeyAuth"]],
+    "calculate_nft_attribute_rarity": [["ApiKeyAuth"]],
+    "list_nft_sales": [["ApiKeyAuth"]],
+    "list_nft_contracts_by_owner": [["ApiKeyAuth"]],
+    "list_nft_collections_by_owner": [["ApiKeyAuth"]],
+    "report_spam_address": [["ApiKeyAuth"]],
+    "refresh_nft_metadata": [["ApiKeyAuth"]],
+    "list_nfts": [["ApiKeyAuth"]],
+    "get_token_owners": [["ApiKeyAuth"]],
+    "list_nft_collection_owners": [["ApiKeyAuth"]],
+    "check_token_airdrop": [["ApiKeyAuth"]],
+    "check_wallet_nft_collection_ownership": [["ApiKeyAuth"]]
 }

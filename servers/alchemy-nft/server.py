@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Alchemy NFT MCP Server
-Generated: 2026-04-14 18:13:29 UTC
+Generated: 2026-04-23 20:56:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://eth-mainnet.g.alchemy.com/nft")
@@ -467,12 +469,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -494,7 +521,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -536,18 +567,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -619,7 +714,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -667,6 +770,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -729,7 +836,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -755,10 +870,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -823,16 +936,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -846,6 +960,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -888,6 +1003,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -899,26 +1029,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'api_key',
+    'ApiKeyAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["api_key"] = _auth.APIKeyAuth(env_var="API_KEY", location="path", param_name="apiKey")
-    logging.info("Authentication configured: api_key")
+    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Authorization")
+    logging.info("Authentication configured: ApiKeyAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for api_key not configured: {error_msg}")
-    _auth_handlers["api_key"] = None
+    logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
+    _auth_handlers["ApiKeyAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1048,7 +1177,7 @@ async def list_nfts_by_owner(
     order_by: Literal["transferTime"] | None = Field(None, alias="orderBy", description="Sort NFTs in the response by transfer time (newest first) or by default contract address and token ID. Transfer time ordering is available on major networks including Ethereum, Polygon, Arbitrum, Optimism, and Base."),
     spam_confidence_level: Literal["VERY_HIGH", "HIGH", "MEDIUM", "LOW"] | None = Field(None, alias="spamConfidenceLevel", description="Filter out suspected spam NFTs based on confidence level. Higher levels (VERY_HIGH, HIGH) remove more spam but may exclude legitimate tokens. Defaults vary by network and requires a paid tier."),
     page_size: int | None = Field(None, alias="pageSize", description="Number of NFTs to return per page, up to a maximum of 100. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFTs currently owned by a specified wallet address. Supports Ethereum, Polygon, Arbitrum, Optimism, Base, and other major networks with optional filtering, metadata inclusion, and custom ordering."""
 
     # Construct request model with validation
@@ -1064,14 +1193,14 @@ async def list_nfts_by_owner(
     _http_path = "/v3/{apiKey}/getNFTsForOwner"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nfts_by_owner")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nfts_by_owner", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nfts_by_owner", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1080,6 +1209,7 @@ async def list_nfts_by_owner(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1092,7 +1222,7 @@ async def list_nfts_for_contract(
     with_metadata: bool | None = Field(None, alias="withMetadata", description="Whether to include full NFT metadata in the response. Set to false to reduce payload size and improve response speed if metadata is not needed."),
     start_token: str | None = Field(None, alias="startToken", description="Token ID offset for pagination, allowing you to start from a specific position or fetch multiple token ranges in parallel. Accepts hexadecimal or decimal format."),
     limit: int | None = Field(None, description="Maximum number of NFTs to return per request. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFTs associated with a specific NFT contract address. Supports ERC721 and ERC1155 standards across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
 
     # Construct request model with validation
@@ -1108,14 +1238,14 @@ async def list_nfts_for_contract(
     _http_path = "/v3/{apiKey}/getNFTsForContract"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nfts_for_contract")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nfts_for_contract", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nfts_for_contract", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1124,6 +1254,7 @@ async def list_nfts_for_contract(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1137,7 +1268,7 @@ async def list_nfts_for_collection(
     limit: int | None = Field(None, description="Maximum number of NFTs to return per request. Defaults to 100."),
     contract_address: str | None = Field(None, alias="contractAddress", description="String - Contract address for the NFT contract (ERC721 and ERC1155 supported)."),
     collection_slug: str | None = Field(None, alias="collectionSlug", description="String - OpenSea slug for the NFT collection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFTs associated with a specific NFT collection across Ethereum and supported Layer 2 networks including Polygon, Arbitrum, Optimism, and Base. Supports pagination and optional metadata inclusion."""
 
     # Construct request model with validation
@@ -1153,14 +1284,14 @@ async def list_nfts_for_collection(
     _http_path = "/v3/{apiKey}/getNFTsForCollection"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nfts_for_collection")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nfts_for_collection", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nfts_for_collection", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1169,6 +1300,7 @@ async def list_nfts_for_collection(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1180,7 +1312,7 @@ async def get_nft_metadata(
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Must be a valid ERC721 or ERC1155 contract address."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the NFT token. Can be provided in either hexadecimal or decimal format."),
     token_type: str | None = Field(None, alias="tokenType", description="The token standard type: either 'ERC721' or 'ERC1155'. Specifying this improves query performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific NFT by its token ID and contract address. Supports ERC721 and ERC1155 tokens across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
 
     # Construct request model with validation
@@ -1196,14 +1328,14 @@ async def get_nft_metadata(
     _http_path = "/v3/{apiKey}/getNFTMetadata"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nft_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_nft_metadata", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_nft_metadata", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1212,6 +1344,7 @@ async def get_nft_metadata(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1221,7 +1354,7 @@ async def get_nft_metadata(
 async def batch_retrieve_nft_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     tokens: list[_models.GetNftMetadataBatchV3BodyTokensItem] = Field(..., description="Array of token objects to fetch metadata for, with a maximum of 100 items per request. Each token object should specify the contract address and token ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for multiple NFT contracts in a single request. Supports up to 100 tokens across Ethereum, Polygon, Arbitrum, Optimism, Base, World Chain, and other supported networks."""
 
     # Construct request model with validation
@@ -1237,14 +1370,14 @@ async def batch_retrieve_nft_metadata(
     _http_path = "/v3/{apiKey}/getNFTMetadataBatch"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("batch_retrieve_nft_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("batch_retrieve_nft_metadata", "POST", _http_path, _request_id, _redact)
+    _log_tool_invocation("batch_retrieve_nft_metadata", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1253,6 +1386,7 @@ async def batch_retrieve_nft_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1262,7 +1396,7 @@ async def batch_retrieve_nft_metadata(
 async def get_nft_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract. Must be a valid contract address for ERC721 or ERC1155 token standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve high-level metadata for an NFT contract or collection, including details about the contract itself. Supports ERC721 and ERC1155 contracts across Ethereum and multiple Layer 2 networks."""
 
     # Construct request model with validation
@@ -1278,14 +1412,14 @@ async def get_nft_contract_metadata(
     _http_path = "/v3/{apiKey}/getContractMetadata"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nft_contract_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_nft_contract_metadata", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_nft_contract_metadata", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1294,6 +1428,7 @@ async def get_nft_contract_metadata(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1303,7 +1438,7 @@ async def get_nft_contract_metadata(
 async def get_collection_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     collection_slug: str = Field(..., alias="collectionSlug", description="The OpenSea collection slug—a URL-friendly identifier for the NFT collection (e.g., 'boredapeyachtclub')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve high-level metadata and contract information for an NFT collection using its OpenSea slug. Supported across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
 
     # Construct request model with validation
@@ -1319,14 +1454,14 @@ async def get_collection_metadata(
     _http_path = "/v3/{apiKey}/getCollectionMetadata"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_collection_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_collection_metadata", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_collection_metadata", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1335,6 +1470,7 @@ async def get_collection_metadata(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1344,7 +1480,7 @@ async def get_collection_metadata(
 async def batch_get_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_addresses: list[str] | None = Field(None, alias="contractAddresses", description="Array of contract addresses to retrieve metadata for. Each address should be a valid Ethereum address format. If not provided, defaults to a sample set of addresses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for multiple contract addresses in a single request. Efficiently fetch contract information such as name, symbol, and decimals for a batch of addresses."""
 
     # Construct request model with validation
@@ -1360,14 +1496,14 @@ async def batch_get_contract_metadata(
     _http_path = "/v3/{apiKey}/getContractMetadataBatch"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("batch_get_contract_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("batch_get_contract_metadata", "POST", _http_path, _request_id, _redact)
+    _log_tool_invocation("batch_get_contract_metadata", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1376,6 +1512,7 @@ async def batch_get_contract_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1386,7 +1523,7 @@ async def get_nft_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Must be a valid ERC721 or ERC1155 contract address."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the token within the contract. Can be provided in either hexadecimal or decimal format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current owner(s) of a specific NFT token. Supports ERC721 and ERC1155 contracts across Ethereum, Polygon, Arbitrum, Optimism, Base, World Chain, and other supported networks."""
 
     # Construct request model with validation
@@ -1402,14 +1539,14 @@ async def get_nft_owners(
     _http_path = "/v3/{apiKey}/getOwnersForNFT"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nft_owners")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_nft_owners", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_nft_owners", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1418,6 +1555,7 @@ async def get_nft_owners(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1428,7 +1566,7 @@ async def list_nft_contract_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract to query. Must be a valid ERC721 or ERC1155 contract address."),
     with_token_balances: bool | None = Field(None, alias="withTokenBalances", description="When enabled, includes the token balance for each token ID owned by each address. Disabled by default for faster responses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all wallet addresses that own NFTs from a specific contract. Supports ERC721 and ERC1155 tokens across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
 
     # Construct request model with validation
@@ -1444,14 +1582,14 @@ async def list_nft_contract_owners(
     _http_path = "/v3/{apiKey}/getOwnersForContract"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nft_contract_owners")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nft_contract_owners", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nft_contract_owners", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1460,6 +1598,7 @@ async def list_nft_contract_owners(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1468,20 +1607,20 @@ async def list_nft_contract_owners(
 @mcp.tool()
 async def list_spam_contracts(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all spam contracts identified and marked by Alchemy. This endpoint is available only on paid tier accounts and supports multiple blockchain networks including Ethereum, Polygon, Arbitrum, Optimism, Base, and others."""
 
     # Extract parameters for API call
     _http_path = "/v3/{apiKey}/getSpamContracts"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_spam_contracts")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_spam_contracts", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_spam_contracts", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1489,6 +1628,7 @@ async def list_spam_contracts(
         method="GET",
         path=_http_path,
         request_id=_request_id,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1498,7 +1638,7 @@ async def list_spam_contracts(
 async def check_spam_contract(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain address of the NFT contract to check. Supports ERC721 and ERC1155 contract standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether a specific NFT contract is flagged as spam by Alchemy. This helps identify potentially fraudulent or low-quality NFT collections across supported blockchain networks."""
 
     # Construct request model with validation
@@ -1514,14 +1654,14 @@ async def check_spam_contract(
     _http_path = "/v3/{apiKey}/isSpamContract"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_spam_contract")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("check_spam_contract", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("check_spam_contract", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1530,6 +1670,7 @@ async def check_spam_contract(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1540,7 +1681,7 @@ async def check_nft_airdrop(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Supports both ERC721 and ERC1155 token standards."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the token within the contract. Can be provided in either hexadecimal or decimal format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Determines whether a specific NFT token was received as an airdrop, defined as an NFT minted to a user address in a transaction sent by a different address. Available on Ethereum mainnet and Polygon (mainnet, amoy, and mumbai)."""
 
     # Construct request model with validation
@@ -1556,14 +1697,14 @@ async def check_nft_airdrop(
     _http_path = "/v3/{apiKey}/isAirdropNFT"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_nft_airdrop")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("check_nft_airdrop", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("check_nft_airdrop", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1572,6 +1713,7 @@ async def check_nft_airdrop(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1581,7 +1723,7 @@ async def check_nft_airdrop(
 async def get_nft_collection_attribute_summary(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection to analyze. Supports both ERC721 and ERC1155 token standards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a summary of attribute prevalence and distribution for an NFT collection. This endpoint analyzes trait frequency across all NFTs in a contract to provide insights into attribute rarity and composition. Available on Ethereum mainnet and Polygon (mainnet and Mumbai)."""
 
     # Construct request model with validation
@@ -1597,14 +1739,14 @@ async def get_nft_collection_attribute_summary(
     _http_path = "/v3/{apiKey}/summarizeNFTAttributes"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nft_collection_attribute_summary")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_nft_collection_attribute_summary", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_nft_collection_attribute_summary", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1613,6 +1755,7 @@ async def get_nft_collection_attribute_summary(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1622,7 +1765,7 @@ async def get_nft_collection_attribute_summary(
 async def get_nft_collection_floor_prices(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection (supports both ERC721 and ERC1155 standards). This identifies which collection's floor prices to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current floor prices for an NFT collection across supported marketplaces (OpenSea and Looksrare on Ethereum mainnet). Use this to monitor pricing trends and compare floor prices across different trading platforms."""
 
     # Construct request model with validation
@@ -1638,14 +1781,14 @@ async def get_nft_collection_floor_prices(
     _http_path = "/v3/{apiKey}/getFloorPrice"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_nft_collection_floor_prices")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_nft_collection_floor_prices", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_nft_collection_floor_prices", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1654,6 +1797,7 @@ async def get_nft_collection_floor_prices(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1663,7 +1807,7 @@ async def get_nft_collection_floor_prices(
 async def search_contract_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     query: str = Field(..., description="The search keyword or phrase to find within contract metadata fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for keywords across metadata of ERC-721 and ERC-1155 smart contracts. Currently available on Ethereum, Polygon, Arbitrum, Optimism, and Base networks."""
 
     # Construct request model with validation
@@ -1679,14 +1823,14 @@ async def search_contract_metadata(
     _http_path = "/v3/{apiKey}/searchContractMetadata"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_contract_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("search_contract_metadata", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("search_contract_metadata", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1695,6 +1839,7 @@ async def search_contract_metadata(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1705,7 +1850,7 @@ async def check_nft_holder(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     wallet: str = Field(..., description="The wallet address to check for NFT holdings from the specified contract."),
     contract_address: str = Field(..., alias="contractAddress", description="The NFT contract address to check against. Must be a valid ERC721 or ERC1155 contract."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify whether a wallet address holds any NFTs from a specific contract. Supports ERC721 and ERC1155 tokens across Ethereum and multiple Layer 2 networks including Polygon, Arbitrum, Optimism, and Base."""
 
     # Construct request model with validation
@@ -1721,14 +1866,14 @@ async def check_nft_holder(
     _http_path = "/v3/{apiKey}/isHolderOfContract"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_nft_holder")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("check_nft_holder", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("check_nft_holder", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1737,6 +1882,7 @@ async def check_nft_holder(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1747,7 +1893,7 @@ async def calculate_nft_attribute_rarity(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection. Supports both ERC721 and ERC1155 token standards."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the NFT token within the contract. Can be provided in either hexadecimal or decimal format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculates the rarity score for each attribute of a specific NFT by analyzing how uncommon each attribute is within the collection. Available on Ethereum mainnet and Polygon (mainnet and Mumbai testnet)."""
 
     # Construct request model with validation
@@ -1763,14 +1909,14 @@ async def calculate_nft_attribute_rarity(
     _http_path = "/v3/{apiKey}/computeRarity"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("calculate_nft_attribute_rarity")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("calculate_nft_attribute_rarity", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("calculate_nft_attribute_rarity", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1779,6 +1925,7 @@ async def calculate_nft_attribute_rarity(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1794,7 +1941,7 @@ async def list_nft_sales(
     token_id: str | None = Field(None, alias="tokenId", description="Filter sales to a specific NFT token ID within the collection. Omit to return sales for all token IDs in the collection."),
     taker: Literal["BUYER", "SELLER"] | None = Field(None, description="Filter by the participant role in the trade. Use 'BUYER' to return sales where the specified address was the buyer, or 'SELLER' for the seller role. Omit to return both buyer and seller trades."),
     limit: int | None = Field(None, description="Maximum number of NFT sales to return in the response. Accepts values up to 1000, which is also the default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves NFT sales transactions that have occurred through on-chain marketplaces. Supports filtering by block range, marketplace, collection, token ID, and trade participant role. Available on Ethereum (Seaport, Wyvern, X2Y2, Blur, LooksRare, Cryptopunks), Polygon (Seaport), and Optimism (Seaport) mainnets."""
 
     # Construct request model with validation
@@ -1810,14 +1957,14 @@ async def list_nft_sales(
     _http_path = "/v3/{apiKey}/getNFTSales"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nft_sales")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nft_sales", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nft_sales", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1826,6 +1973,7 @@ async def list_nft_sales(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1839,7 +1987,7 @@ async def list_nft_contracts_by_owner(
     with_metadata: bool | None = Field(None, alias="withMetadata", description="Include detailed NFT metadata in the response. Disabling this reduces payload size and may improve response speed. Defaults to true."),
     order_by: Literal["transferTime"] | None = Field(None, alias="orderBy", description="Sort contracts by transfer time (newest first) or by default contract address and token ID ordering. Transfer time ordering is supported on major networks including Ethereum, Optimism, Polygon, Base, and Arbitrum."),
     spam_confidence_level: Literal["VERY_HIGH", "HIGH", "MEDIUM", "LOW"] | None = Field(None, alias="spamConfidenceLevel", description="Filter out spam contracts based on confidence level. Higher confidence levels filter more aggressively (e.g., HIGH filters both HIGH and VERY_HIGH confidence spam). Defaults vary by network: VERY_HIGH for Ethereum Mainnet, MEDIUM for Polygon. Available only on paid tier accounts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFT contracts owned by a specified address. Optionally returns detailed metadata and supports filtering by spam confidence level and custom ordering."""
 
     # Construct request model with validation
@@ -1855,14 +2003,14 @@ async def list_nft_contracts_by_owner(
     _http_path = "/v3/{apiKey}/getContractsForOwner"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nft_contracts_by_owner")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nft_contracts_by_owner", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nft_contracts_by_owner", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1871,6 +2019,7 @@ async def list_nft_contracts_by_owner(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1882,7 +2031,7 @@ async def list_nft_collections_by_owner(
     owner: str = Field(..., description="The wallet address to query for NFT collections. Accepts standard Ethereum addresses or ENS names (on Ethereum Mainnet only)."),
     page_size: int | None = Field(None, alias="pageSize", description="Number of collections to return per page, ranging from 1 to 100. Defaults to 100 for maximum results per request."),
     with_metadata: bool | None = Field(None, alias="withMetadata", description="Include full NFT metadata in the response when enabled. Disable to reduce payload size and improve response speed if metadata is not needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFT collections owned by a specified address on Ethereum. Returns collection details with optional metadata to support portfolio analysis and collection discovery."""
 
     # Construct request model with validation
@@ -1898,14 +2047,14 @@ async def list_nft_collections_by_owner(
     _http_path = "/v3/{apiKey}/getCollectionsForOwner"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nft_collections_by_owner")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nft_collections_by_owner", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nft_collections_by_owner", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1914,6 +2063,7 @@ async def list_nft_collections_by_owner(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1924,7 +2074,7 @@ async def report_spam_address(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     address: str = Field(..., description="The blockchain address to report, provided as a hexadecimal string (e.g., starting with 0x)."),
     is_spam: bool = Field(..., alias="isSpam", description="Set to true to mark the address as spam, or false to remove a previous spam report."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Report a blockchain address as spam to help protect the network. This operation flags addresses suspected of malicious activity on supported chains including Ethereum, Polygon, Base, Arbitrum, Optimism, and others."""
 
     # Construct request model with validation
@@ -1940,14 +2090,14 @@ async def report_spam_address(
     _http_path = "/v3/{apiKey}/reportSpam"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("report_spam_address")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("report_spam_address", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("report_spam_address", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1956,6 +2106,7 @@ async def report_spam_address(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -1966,7 +2117,7 @@ async def refresh_nft_metadata(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection containing the token you want to refresh. Must be a valid Ethereum-format address."),
     token_id: str = Field(..., alias="tokenId", description="The unique token ID within the specified contract that you want to refresh. Must correspond to an existing token in the contract."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submits a request to refresh the cached metadata for a specific NFT token. Supported on Ethereum (Mainnet & Sepolia), Polygon (Mainnet, Mumbai & Amoy), Arbitrum One, Optimism, and Base mainnets."""
 
     # Construct request model with validation
@@ -1982,14 +2133,14 @@ async def refresh_nft_metadata(
     _http_path = "/v3/{apiKey}/refreshNftMetadata"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("refresh_nft_metadata")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("refresh_nft_metadata", "POST", _http_path, _request_id, _redact)
+    _log_tool_invocation("refresh_nft_metadata", "POST", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -1998,6 +2149,7 @@ async def refresh_nft_metadata(
         path=_http_path,
         request_id=_request_id,
         body=_http_body,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2012,7 +2164,7 @@ async def list_nfts(
     order_by: Literal["transferTime"] | None = Field(None, alias="orderBy", description="How to order NFTs in the response. Use 'transferTime' to sort by most recent transfers first (supported on major networks). If unspecified, NFTs are ordered by contract address and token ID."),
     spam_confidence_level: Literal["VERY_HIGH", "HIGH", "MEDIUM", "LOW"] | None = Field(None, alias="spamConfidenceLevel", description="Filter spam NFTs by confidence level. Choose from VERY_HIGH, HIGH, MEDIUM, or LOW—any spam at that level or higher will be excluded. Defaults vary by network (VERY_HIGH for Ethereum Mainnet, MEDIUM for Polygon). Available on paid tiers only."),
     page_size: int | None = Field(None, alias="pageSize", description="Number of NFTs to return per page, up to a maximum of 100. Defaults to 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all NFTs currently owned by a specified address, with optional filtering by contract, metadata inclusion, and spam confidence levels."""
 
     # Construct request model with validation
@@ -2028,14 +2180,14 @@ async def list_nfts(
     _http_path = "/v2/{apiKey}/getNFTs"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nfts")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nfts", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nfts", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2044,6 +2196,7 @@ async def list_nfts(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2055,7 +2208,7 @@ async def get_token_owners(
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address of the NFT collection. Must be a valid Ethereum address (e.g., ERC-721 or ERC-1155 contract)."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the token within the contract. Accepts both hexadecimal and decimal formats."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of owner records to return per page. Use this to control response size when a token has multiple owners."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the owner(s) of a specific NFT token by contract address and token ID. Supports pagination to handle multiple owners."""
 
     # Construct request model with validation
@@ -2071,14 +2224,14 @@ async def get_token_owners(
     _http_path = "/v2/{apiKey}/getOwnersForToken"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_token_owners")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("get_token_owners", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("get_token_owners", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2087,6 +2240,7 @@ async def get_token_owners(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2097,7 +2251,7 @@ async def list_nft_collection_owners(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection. Supports both ERC721 and ERC1155 token standards."),
     with_token_balances: bool | None = Field(None, alias="withTokenBalances", description="When enabled, includes the token balance for each token ID owned by each address. Disabled by default for faster responses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all wallet addresses that own NFTs from a specified ERC721 or ERC1155 contract, with optional token balance details per owner."""
 
     # Construct request model with validation
@@ -2113,14 +2267,14 @@ async def list_nft_collection_owners(
     _http_path = "/v2/{apiKey}/getOwnersForCollection"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_nft_collection_owners")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("list_nft_collection_owners", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("list_nft_collection_owners", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2129,6 +2283,7 @@ async def list_nft_collection_owners(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2139,7 +2294,7 @@ async def check_token_airdrop(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     contract_address: str = Field(..., alias="contractAddress", description="The blockchain contract address for the NFT collection. Supports both ERC721 and ERC1155 token standards."),
     token_id: str = Field(..., alias="tokenId", description="The unique identifier of the token within the contract. Can be provided in either hexadecimal or decimal format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Determines whether an NFT token was distributed as an airdrop by checking if it was minted to a user address in a transaction sent by a different address."""
 
     # Construct request model with validation
@@ -2155,14 +2310,14 @@ async def check_token_airdrop(
     _http_path = "/v2/{apiKey}/isAirdrop"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_token_airdrop")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("check_token_airdrop", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("check_token_airdrop", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2171,6 +2326,7 @@ async def check_token_airdrop(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
@@ -2181,7 +2337,7 @@ async def check_wallet_nft_collection_ownership(
     network: Literal["eth-mainnet", "eth-sepolia", "abstract-mainnet", "abstract-testnet", "anime-mainnet", "anime-sepolia", "apechain-mainnet", "apechain-curtis", "arb-mainnet", "arb-sepolia", "arbnova-mainnet", "avax-mainnet", "avax-fuji", "base-mainnet", "base-sepolia", "berachain-mainnet", "blast-mainnet", "blast-sepolia", "bnb-mainnet", "celo-mainnet", "celo-sepolia", "gnosis-mainnet", "gnosis-chiado", "lens-mainnet", "lens-sepolia", "linea-mainnet", "linea-sepolia", "polygon-mainnet", "polygon-amoy", "monad-testnet", "mythos-mainnet", "opt-mainnet", "opt-sepolia", "robinhood-testnet", "ronin-mainnet", "ronin-saigon", "rootstock-mainnet", "rootstock-testnet", "scroll-mainnet", "scroll-sepolia", "settlus-mainnet", "settlus-septestnet", "shape-mainnet", "shape-sepolia", "soneium-mainnet", "soneium-minato", "starknet-mainnet", "starknet-sepolia", "story-mainnet", "story-aeneid", "unichain-mainnet", "unichain-sepolia", "worldchain-mainnet", "worldchain-sepolia", "zetachain-mainnet", "zetachain-testnet", "zksync-mainnet", "zksync-sepolia", "zora-mainnet", "zora-sepolia"] = Field(..., description="Target blockchain network. Determines which chain to query for NFT data."),
     wallet: str = Field(..., description="The wallet address to check for NFT ownership. Can be a standard hexadecimal address or an ENS name (Ethereum Mainnet only)."),
     contract_address: str = Field(..., alias="contractAddress", description="The contract address of the NFT collection to check. Must be a valid ERC721 or ERC1155 contract address."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verifies whether a specific wallet address holds at least one NFT from a given collection. Supports both ERC721 and ERC1155 token standards, and accepts wallet addresses in ENS format on Ethereum Mainnet."""
 
     # Construct request model with validation
@@ -2197,14 +2353,14 @@ async def check_wallet_nft_collection_ownership(
     _http_path = "/v2/{apiKey}/isHolderOfCollection"
     _http_path = BASE_URL_TEMPLATE.replace("{network}", network) + _http_path
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
+    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("check_wallet_nft_collection_ownership")
-    _http_path = _http_path.replace("{apiKey}", _auth.get("path_params", {}).get("apiKey", "{apiKey}"))
+    _http_headers.update(_auth.get("headers", {}))
 
     _request_id = str(uuid.uuid4())
-    _redact = _auth.get("path_params", {}).get("apiKey", "")
-    _log_tool_invocation("check_wallet_nft_collection_ownership", "GET", _http_path, _request_id, _redact)
+    _log_tool_invocation("check_wallet_nft_collection_ownership", "GET", _http_path, _request_id)
 
     # Execute request (returns normalized dict and status code)
     _response_data, _ = await _execute_tool_request(
@@ -2213,6 +2369,7 @@ async def check_wallet_nft_collection_ownership(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
+        headers=_http_headers,
     )
 
     return _response_data
