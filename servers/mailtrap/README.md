@@ -1,11 +1,12 @@
 # Mailtrap MCP Server
+<!-- mcp-name: com.mcparmory/mailtrap -->
 
-Base URL: https://mailtrap.io
+Base URL: https://send.api.mailtrap.io
 | | |
 |---|---|
 | **Category** | Communication |
 | **Tools** | 14 |
-| **Auth** | API Key, Bearer Token |
+| **Auth** | Bearer Token |
 
 ## API Info
 - **API License:** Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) — [https://creativecommons.org/licenses/by-sa/4.0/](https://creativecommons.org/licenses/by-sa/4.0/)
@@ -18,7 +19,6 @@ Base URL: https://mailtrap.io
 ### Quick Start (recommended)
 
 ```bash
-API_KEY=YOUR_API_KEY \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 uvx mcparmory-mailtrap
 ```
@@ -27,7 +27,6 @@ uvx mcparmory-mailtrap
 
 ```bash
 pip install mcparmory-mailtrap
-API_KEY=YOUR_API_KEY \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 mcparmory-mailtrap
 ```
@@ -43,7 +42,6 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-mailtrap"],
       "env": {
-        "API_KEY": "YOUR_API_KEY",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
@@ -57,7 +55,6 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY` — API Key Authentication (Api-Token)
 - `BEARER_TOKEN` — Bearer token
 Do not commit credentials to version control.
 
@@ -92,6 +89,16 @@ Example (if server is at `/home/user/mcp-servers/mailtrap`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/mailtrap:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -99,7 +106,9 @@ docker build -t mailtrap .
 docker run -p 8000:8000 --env-file .env mailtrap
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

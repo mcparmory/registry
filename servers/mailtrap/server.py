@@ -6,7 +6,7 @@ API Info:
 - API License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0) (https://creativecommons.org/licenses/by-sa/4.0/)
 - Contact: Mailtrap Support <support@mailtrap.io> (https://docs.mailtrap.io)
 
-Generated: 2026-04-14 18:25:51 UTC
+Generated: 2026-04-23 21:27:46 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,9 +41,10 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "https://mailtrap.io")
+BASE_URL = os.getenv("BASE_URL", "https://send.api.mailtrap.io")
 SERVER_NAME = "Mailtrap"
 SERVER_VERSION = "1.0.0"
 
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -856,16 +974,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -879,6 +998,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -921,6 +1041,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -932,7 +1067,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -940,7 +1074,6 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'BearerAuth',
-    'HeaderAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -953,14 +1086,6 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for BearerAuth not configured: {error_msg}")
     _auth_handlers["BearerAuth"] = None
-try:
-    _auth_handlers["HeaderAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Api-Token")
-    logging.info("Authentication configured: HeaderAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for HeaderAuth not configured: {error_msg}")
-    _auth_handlers["HeaderAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1082,7 +1207,7 @@ mcp = FastMCP("Mailtrap", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: domains
 @mcp.tool()
-async def list_sending_domains(account_id: int = Field(..., description="The unique identifier for the account. Must be a positive integer.")) -> dict[str, Any]:
+async def list_sending_domains(account_id: int = Field(..., description="The unique identifier for the account. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all sending domains configured for an account along with their current verification status. Use this to view domain authentication and readiness for email sending."""
 
     # Construct request model with validation
@@ -1121,7 +1246,7 @@ async def list_sending_domains(account_id: int = Field(..., description="The uni
 async def create_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account. This is a positive integer that specifies which account owns the sending domain."),
     domain_name: str = Field(..., description="The domain name you want to use for sending emails (e.g., example.com). Must be a valid hostname format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a sending domain for email authentication. After creation, you'll need to add DNS records (SPF, DKIM, DMARC) and verify them before sending emails through this domain."""
 
     # Construct request model with validation
@@ -1163,7 +1288,7 @@ async def create_sending_domain(
 async def get_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain whose details and verification status you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information and verification status for a specific sending domain associated with your account."""
 
     # Construct request model with validation
@@ -1202,7 +1327,7 @@ async def get_sending_domain(
 async def delete_sending_domain(
     account_id: int = Field(..., description="The unique identifier for your account. This is a positive integer that specifies which account owns the sending domain being deleted."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain to be deleted. This is a positive integer that identifies the specific domain configuration to remove from your account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently remove a sending domain from your account. This action cannot be undone and will prevent further email transmission through this domain."""
 
     # Construct request model with validation
@@ -1242,7 +1367,7 @@ async def send_sending_domain_setup_instructions(
     account_id: int = Field(..., description="The unique identifier for the account that owns the sending domain."),
     sending_domain_id: int = Field(..., description="The unique identifier for the sending domain to configure."),
     email: str = Field(..., description="The email address where the DNS setup instructions will be sent. Must be a valid email format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send DNS configuration setup instructions to a specified email address for a sending domain. This allows domain administrators to receive the necessary steps to configure DNS records for email authentication."""
 
     # Construct request model with validation
@@ -1285,7 +1410,7 @@ async def list_suppressions(
     account_id: int = Field(..., description="The unique identifier for your account."),
     email: str | None = Field(None, description="Filter results to a specific email address. Must be a valid email format."),
     start_time: str | None = Field(None, description="Filter results to show only emails suppressed after this timestamp. Use ISO 8601 date-time format (e.g., 2025-01-01T00:00:00Z)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of suppressed email addresses for your account. Suppressed addresses will not receive any emails. Results are limited to 1000 suppressions per request and can be filtered by email address or suppression date."""
 
     # Construct request model with validation
@@ -1327,7 +1452,7 @@ async def list_suppressions(
 async def delete_suppression(
     account_id: int = Field(..., description="The unique identifier for the account containing the suppression record. Must be a positive integer."),
     suppression_id: int = Field(..., description="The unique identifier for the suppression record to delete. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an email address from the suppression list, allowing it to receive messages again. This operation permanently deletes the suppression record for the specified account."""
 
     # Construct request model with validation
@@ -1371,7 +1496,7 @@ async def get_account_sending_stats(
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to retrieve results for all sending streams."),
     categories: list[str] | None = Field(None, description="Optional list of email categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to retrieve results for all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service providers to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified ESPs are included; omit to retrieve results for all email service providers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sending statistics for an account over a specified date range, with optional filtering by sending domains, streams, categories, and email service providers."""
 
     # Construct request model with validation
@@ -1418,7 +1543,7 @@ async def get_account_sending_stats_by_domains(
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of message categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified providers are included; omit to include all providers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sending statistics for an account aggregated by sending domains over a specified date range. Use optional filters to narrow results by specific domains, sending streams, message categories, or email service providers."""
 
     # Construct request model with validation
@@ -1465,7 +1590,7 @@ async def get_sending_stats_by_categories(
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., 'transactional', 'bulk'). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of email category names to filter results (e.g., 'Welcome Email', 'Password Reset'). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., 'Google', 'Yahoo'). When provided, only statistics for the specified providers are included; omit to include all providers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sending statistics aggregated by email categories for a specified account and date range. Use optional filters to narrow results by sending domain, stream type, category name, or email service provider."""
 
     # Construct request model with validation
@@ -1512,7 +1637,7 @@ async def get_account_sending_stats_by_email_service_providers(
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types to filter results (e.g., transactional, bulk). When provided, only statistics for the specified streams are included; omit to include all streams."),
     categories: list[str] | None = Field(None, description="Optional list of email categories to filter results (e.g., Welcome Email, Password Reset). When provided, only statistics for the specified categories are included; omit to include all categories."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names to filter results (e.g., Google, Yahoo). When provided, only statistics for the specified ESPs are included; omit to include all providers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sending statistics for an account aggregated by email service providers over a specified date range. Apply optional filters by sending domain, stream type, category, or specific ESP to narrow results."""
 
     # Construct request model with validation
@@ -1559,7 +1684,7 @@ async def get_account_sending_stats_by_date(
     sending_streams: list[Literal["transactional", "bulk"]] | None = Field(None, description="Optional list of sending stream types (e.g., transactional, bulk) to filter results. When omitted, statistics for all sending streams are included."),
     categories: list[str] | None = Field(None, description="Optional list of email categories (e.g., Welcome Email, Password Reset) to filter results. When omitted, statistics for all categories are included."),
     email_service_providers: list[Literal["Google", "Yahoo", "Outlook", "Hey", "Google Workspace", "Zoho Email", "ProtonMail", "Yandex", "iCloud", "Office 365", "Amazon SES (Simple Email Service)", "Proofpoint Email Protection", "Mimecast Email Protection", "GMX.net", "Rackspace", "OVH hosted", "Linode hosted", "GoDaddy", "Symantec Email Protection", "Barracuda Email Protection", "Cisco Email Protection", "FastMail", "Naver", "Seznam", "Comcast", "Spectrum"]] | None = Field(None, description="Optional list of email service provider names (e.g., Google, Yahoo) to filter results. When omitted, statistics for all ESPs are included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve sending statistics for an account over a specified date range, with optional filtering by sending domains, streams, categories, and email service providers."""
 
     # Construct request model with validation
@@ -1602,7 +1727,7 @@ async def list_email_logs(
     account_id: int = Field(..., description="The unique identifier for the account whose email logs you want to retrieve. Must be a positive integer."),
     search_after: str | None = Field(None, description="Pagination cursor for fetching the next page of results. Use the message_id UUID value from the previous response's next_page_cursor field to continue pagination."),
     filters: _models.EmailLogsListFilters | None = Field(None, description="Filter criteria to narrow results using deep object syntax (e.g., filters[field][operator] and filters[field][value]). For array values, use bracket notation (e.g., filters[field][value][]=item1). Date range filtering is supported via filters[sent_after] and filters[sent_before] using ISO 8601 format. Unknown or invalid filters are silently ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of email logs for the account, filtered by sending domains accessible to the authenticated token. Results are sorted by sent_at in descending order."""
 
     # Construct request model with validation
@@ -1647,7 +1772,7 @@ async def list_email_logs(
 async def get_email_log_message(
     account_id: int = Field(..., description="The numeric identifier of the account that owns the email message."),
     sending_message_id: str = Field(..., description="The unique identifier (UUID) of the email message to retrieve from the log."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific email message from the account's email log by its unique message identifier. The message must belong to the specified account and an accessible sending domain."""
 
     # Construct request model with validation
