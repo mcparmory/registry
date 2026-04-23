@@ -7,7 +7,7 @@ API Info:
 - Contact: Box, Inc <devrel@box.com> (https://developer.box.com)
 - Terms of Service: https://cloud.app.box.com/s/rmwxu64h1ipr41u49w3bbuvbsa29wku9
 
-Generated: 2026-04-14 18:16:26 UTC
+Generated: 2026-04-23 21:03:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -42,6 +43,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.box.com/2.0")
@@ -485,12 +487,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -512,7 +539,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
     # Per-operation URL override (OAS 3.0 path/operation-level servers)
@@ -558,18 +589,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -641,7 +736,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -689,6 +792,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -751,7 +858,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -777,10 +892,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -932,16 +1045,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -955,6 +1069,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -997,6 +1112,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1008,7 +1138,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1152,7 +1281,7 @@ mcp = FastMCP("Box", middleware=[_JsonCoercionMiddleware()])
 async def get_file(
     file_id: str = Field(..., description="The unique identifier of the file to retrieve. The file ID can be found in the Box web app URL when viewing the file."),
     boxapi: str | None = Field(None, description="A shared link URL and optional password used to access files that have not been explicitly shared with the authenticated user. Use the format `shared_link=[link]` or `shared_link=[link]&shared_link_password=[password]` for password-protected links."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and details for a specific file by its unique identifier. Optionally supports accessing files via a shared link, including password-protected ones."""
 
     # Construct request model with validation
@@ -1193,7 +1322,7 @@ async def restore_file(
     file_id: str = Field(..., description="The unique identifier of the file to restore from the trash. The file ID can be found in the Box web app URL when viewing the file."),
     name: str | None = Field(None, description="An optional new name to assign to the file upon restoration, useful if a naming conflict exists in the destination folder."),
     parent: _models.PostFilesIdBodyParent | None = Field(None, description="An optional parent folder object specifying where the file should be restored to, used when the original parent folder has been deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a file from the trash back to its original location or a specified parent folder. An optional new parent folder can be provided if the original folder no longer exists."""
 
     # Construct request model with validation
@@ -1245,7 +1374,7 @@ async def update_file(
     can_download: Literal["open", "company"] | None = Field(None, description="Controls who can download the file: 'open' allows anyone with access, while 'company' restricts downloads to members of the owner's enterprise, overriding collaboration role permissions."),
     collections_: list[_models.PutFilesIdBodyCollectionsItem] | None = Field(None, alias="collections", description="An array of collection objects (each with an 'id') to assign the file to. Currently only the favorites collection is supported. Pass an empty array or null to remove the file from all collections."),
     tags: list[str] | None = Field(None, description="An array of string tags to associate with the file, visible in the Box web and mobile apps. To modify tags, retrieve the current list, apply changes, and submit the full updated array. Maximum 100 tags per item, each tag between 1 and 100 characters.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a file's metadata or settings, including renaming, moving to a new parent folder, managing shared links, applying locks, updating tags, and modifying collection membership."""
 
     # Construct request model with validation
@@ -1286,7 +1415,7 @@ async def update_file(
 
 # Tags: Files
 @mcp.tool()
-async def delete_file(file_id: str = Field(..., description="The unique identifier of the file to delete. Visible in the file's URL on the Box web application.")) -> dict[str, Any]:
+async def delete_file(file_id: str = Field(..., description="The unique identifier of the file to delete. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Deletes a specified file from Box, either permanently or by moving it to the trash depending on enterprise settings."""
 
     # Construct request model with validation
@@ -1326,7 +1455,7 @@ async def list_file_app_item_associations(
     file_id: str = Field(..., description="The unique identifier of the file whose app item associations should be retrieved. The file ID appears in the Box web app URL when viewing the file."),
     limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
     application_type: str | None = Field(None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all app items associated with a file, including associations inherited from ancestor folders. Association type and ID are returned even if the requesting user lacks View permission on the app item."""
 
     _limit = _parse_int(limit)
@@ -1372,7 +1501,7 @@ async def download_file(
     version: str | None = Field(None, description="The specific version ID of the file to download. If omitted, the latest version is returned."),
     range_: str | None = Field(None, alias="range", description="Specifies a partial byte range of the file to download, using the format bytes={start_byte}-{end_byte}. Useful for resumable downloads or streaming large files."),
     boxapi: str | None = Field(None, description="The shared link URL and optional password for accessing a file that has not been explicitly shared with the authenticated user. Use the format shared_link=[link] or shared_link=[link]&shared_link_password=[password] for password-protected links."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Downloads the binary content of a file from Box. Supports partial downloads via byte ranges, specific version retrieval, and access to shared link items."""
 
     # Construct request model with validation
@@ -1417,7 +1546,7 @@ async def upload_file_version(
     name: str | None = Field(None, description="An optional new name to rename the file when this new version is uploaded. If omitted, the existing file name is retained."),
     content_modified_at: str | None = Field(None, description="The date and time the file content was last modified, in ISO 8601 format. If omitted, the time of upload is used as the modification time."),
     file_: str | None = Field(None, alias="file", description="The binary content of the file to upload. This part must appear after the attributes part in the multipart request body; reversing the order will result in a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a new version of an existing file's content, optionally renaming it or setting a custom last-modified timestamp. For files over 50MB, use the Chunk Upload APIs instead."""
 
     # Construct request model with validation
@@ -1451,6 +1580,7 @@ async def upload_file_version(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -1464,7 +1594,7 @@ async def upload_file(
     content_created_at: str | None = Field(None, description="The original creation timestamp of the file in ISO 8601 format. Defaults to the upload time if not provided."),
     content_modified_at: str | None = Field(None, description="The last modified timestamp of the file in ISO 8601 format. Defaults to the upload time if not provided."),
     file_: str | None = Field(None, alias="file", description="The binary content of the file to upload. Must appear after the attributes part in the multipart request body."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a small file (under 50MB) to a specified Box folder. The attributes must be sent before the file content in the request body, or a 400 error will be returned."""
 
     # Construct request model with validation
@@ -1498,6 +1628,7 @@ async def upload_file(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -1508,7 +1639,7 @@ async def upload_file(
 async def create_upload_session(
     folder_id: str | None = Field(None, description="The ID of the destination folder where the new file will be stored upon upload completion."),
     file_name: str | None = Field(None, description="The name to assign to the new file once the upload session is complete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a chunked upload session for uploading a new file, returning a session ID and upload URLs to use for subsequent chunk uploads."""
 
     # Construct request model with validation
@@ -1549,7 +1680,7 @@ async def create_upload_session(
 async def create_file_upload_session(
     file_id: str = Field(..., description="The unique identifier of the existing file for which the upload session will be created. The file ID can be found in the file's URL in the Box web application."),
     file_name: str | None = Field(None, description="An optional new name to assign to the file upon completing the upload session, replacing the current file name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a chunked upload session for an existing file, enabling large file uploads to be split into multiple parts. Use the returned session to upload individual chunks and complete the upload."""
 
     # Construct request model with validation
@@ -1588,7 +1719,7 @@ async def create_file_upload_session(
 
 # Tags: Uploads (Chunked)
 @mcp.tool()
-async def get_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to retrieve, obtained when the upload session was created.")) -> dict[str, Any]:
+async def get_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to retrieve, obtained when the upload session was created.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and details of an active chunked file upload session. The upload session ID is obtained from the Create upload session endpoint."""
 
     # Construct request model with validation
@@ -1629,7 +1760,7 @@ async def upload_file_part(
     digest: str = Field(..., description="The RFC 3230 message digest of the uploaded chunk used to verify integrity. Must be a base64-encoded SHA1 hash formatted as `sha=<BASE64_ENCODED_DIGEST>`."),
     content_range: str = Field(..., alias="content-range", description="The inclusive byte range of this chunk within the full file, formatted as `bytes <start>-<end>/<total>`. The start must be a multiple of the session's part size, the end must be a multiple of the part size minus one, and ranges must not overlap with any previously uploaded part."),
     body: str | None = Field(None, description="The raw binary content of the file chunk being uploaded for this part."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a single binary chunk of a file as part of an active chunked upload session. Each part must conform to the byte range and part size defined when the upload session was created."""
 
     # Construct request model with validation
@@ -1670,7 +1801,7 @@ async def upload_file_part(
 
 # Tags: Uploads (Chunked)
 @mcp.tool()
-async def abort_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to abort, as returned by the Create or Get upload session endpoints.")) -> dict[str, Any]:
+async def abort_upload_session(upload_session_id: str = Field(..., description="The unique identifier of the upload session to abort, as returned by the Create or Get upload session endpoints.")) -> dict[str, Any] | ToolResult:
     """Permanently aborts an active upload session and discards all uploaded data. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -1710,7 +1841,7 @@ async def list_upload_session_parts(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session whose uploaded parts you want to list."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through large result sets. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
     limit: str | None = Field(None, description="The maximum number of uploaded parts to return in a single response. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all file chunks uploaded so far within a specific upload session, allowing you to track multipart upload progress."""
 
     _offset = _parse_int(offset)
@@ -1756,7 +1887,7 @@ async def commit_upload_session(
     upload_session_id: str = Field(..., description="The unique identifier of the upload session to commit."),
     digest: str = Field(..., description="The RFC 3230 message digest of the entire file used to verify integrity. Must be a Base64-encoded SHA1 hash formatted as `sha=<BASE64_ENCODED_DIGEST>`."),
     parts: list[_models.UploadPart] | None = Field(None, description="An ordered list of part details representing all uploaded chunks that should be assembled into the final file. Each item should describe a previously uploaded part."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Finalizes an upload session by assembling all uploaded chunks into a complete file. Must be called after all parts have been uploaded to close the session and persist the file."""
 
     # Construct request model with validation
@@ -1801,7 +1932,7 @@ async def copy_file(
     name: str | None = Field(None, description="An optional new name for the copied file. Must not exceed 255 characters; non-printable ASCII characters, forward/backward slashes, and reserved names like '.' and '..' are automatically sanitized.", max_length=255),
     version: str | None = Field(None, description="The ID of a specific file version to copy. If omitted, the latest version of the file is copied."),
     id_: str | None = Field(None, alias="id", description="The ID of the destination folder where the copied file will be placed. Use '0' to copy the file to the root folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing file, optionally placing it in a different folder, renaming it, or copying a specific version. Returns the metadata of the newly created file copy."""
 
     # Construct request model with validation
@@ -1848,7 +1979,7 @@ async def get_file_thumbnail(
     min_width: int | None = Field(None, description="The minimum desired width of the thumbnail in pixels. The returned thumbnail will be at least this wide, within the supported size range of 32 to 320 pixels.", ge=32, le=320),
     max_height: int | None = Field(None, description="The maximum desired height of the thumbnail in pixels. The returned thumbnail will not exceed this height, within the supported size range of 32 to 320 pixels.", ge=32, le=320),
     max_width: int | None = Field(None, description="The maximum desired width of the thumbnail in pixels. The returned thumbnail will not exceed this width, within the supported size range of 32 to 320 pixels.", ge=32, le=320),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a scaled-down thumbnail image of a file in PNG or JPG format. Supports various sizes for image and video file types."""
 
     # Construct request model with validation
@@ -1890,7 +2021,7 @@ async def get_file_thumbnail(
 async def list_file_collaborations(
     file_id: str = Field(..., description="The unique identifier of the file whose collaborations you want to retrieve. You can find this ID in the file's URL in the Box web application."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pending and active collaborations for a specific file, including users who currently have access or have been invited to collaborate."""
 
     _limit = _parse_int(limit)
@@ -1935,7 +2066,7 @@ async def list_file_comments(
     file_id: str = Field(..., description="The unique identifier of the file whose comments you want to retrieve. Find this ID in the file's URL on the Box web application."),
     limit: str | None = Field(None, description="The maximum number of comments to return per page. Must be between 1 and 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 are not supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of comments posted on a specific file. Useful for reviewing user feedback or discussion threads associated with a file."""
 
     _limit = _parse_int(limit)
@@ -1977,7 +2108,7 @@ async def list_file_comments(
 
 # Tags: Tasks
 @mcp.tool()
-async def list_file_tasks(file_id: str = Field(..., description="The unique identifier of the file whose tasks you want to retrieve. You can find this ID in the file's URL in the Box web application.")) -> dict[str, Any]:
+async def list_file_tasks(file_id: str = Field(..., description="The unique identifier of the file whose tasks you want to retrieve. You can find this ID in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks associated with a specific file, returning the complete list in a single response. Note that this endpoint does not support pagination."""
 
     # Construct request model with validation
@@ -2013,7 +2144,7 @@ async def list_file_tasks(file_id: str = Field(..., description="The unique iden
 
 # Tags: Trashed files
 @mcp.tool()
-async def get_trashed_file(file_id: str = Field(..., description="The unique identifier of the file to retrieve from the trash. The file ID appears in the Box web app URL when viewing the file.")) -> dict[str, Any]:
+async def get_trashed_file(file_id: str = Field(..., description="The unique identifier of the file to retrieve from the trash. The file ID appears in the Box web app URL when viewing the file.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a file that was directly moved to the trash. Note: if a parent folder was trashed instead, use the trashed folder endpoint to inspect it."""
 
     # Construct request model with validation
@@ -2049,7 +2180,7 @@ async def get_trashed_file(file_id: str = Field(..., description="The unique ide
 
 # Tags: Trashed files
 @mcp.tool()
-async def permanently_delete_trashed_file(file_id: str = Field(..., description="The unique identifier of the trashed file to permanently delete. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any]:
+async def permanently_delete_trashed_file(file_id: str = Field(..., description="The unique identifier of the trashed file to permanently delete. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a file that is currently in the trash, freeing storage and removing it from Box entirely. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -2089,7 +2220,7 @@ async def list_file_versions(
     file_id: str = Field(..., description="The unique identifier of the file whose version history you want to retrieve. The file ID can be found in the URL when viewing the file in the Box web application."),
     limit: str | None = Field(None, description="The maximum number of file versions to return per page. Accepts values up to 1000."),
     offset: str | None = Field(None, description="The zero-based index of the item at which to start the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the version history of a specific file, returning all past versions in paginated results. Version tracking is available only for Box premium accounts; use the get_file operation to retrieve the current version ID."""
 
     _limit = _parse_int(limit)
@@ -2134,7 +2265,7 @@ async def list_file_versions(
 async def get_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to retrieve. Visible in the file's URL in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a specific version of a file by its version ID. Version history is only available for Box accounts with premium subscriptions."""
 
     # Construct request model with validation
@@ -2173,7 +2304,7 @@ async def get_file_version(
 async def restore_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to restore. Visible in the file's URL in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to restore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a previously deleted version of a file, making it the current version. Supports standard file formats such as PDF, DOC, and PPTX, but not Box Notes."""
 
     # Construct request model with validation
@@ -2212,7 +2343,7 @@ async def restore_file_version(
 async def delete_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version will be deleted. The file ID can be found in the URL when viewing the file in the Box web application."),
     file_version_id: str = Field(..., description="The unique identifier of the specific file version to delete. This targets a single version entry within the file's version history."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a specific version of a file to the trash, effectively removing it from the version history. Version tracking is only available for Box accounts with premium subscriptions."""
 
     # Construct request model with validation
@@ -2252,7 +2383,7 @@ async def promote_file_version(
     file_id: str = Field(..., description="The unique identifier of the file whose version you want to promote. Visible in the file's URL in the Box web application."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the specific file version to promote to the top of the version history."),
     type_: Literal["file_version"] | None = Field(None, alias="type", description="The resource type being promoted. Must be set to 'file_version' to indicate a file version promotion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Promotes an older version of a file to the top of its version history by creating a new copy with the same contents, hash, etag, and name. Suitable for file formats like PDF, DOC, and PPTX, but not for Box Notes."""
 
     # Construct request model with validation
@@ -2294,7 +2425,7 @@ async def promote_file_version(
 async def list_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file whose metadata instances will be retrieved. The file ID can be found in the URL when viewing the file in the Box web application."),
     view: str | None = Field(None, description="Controls how taxonomy field values are represented in the response. When set to 'hydrated', taxonomy values include full taxonomy node details rather than just node identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata instances attached to a specific file. Optionally returns full taxonomy node details instead of node identifiers."""
 
     # Construct request model with validation
@@ -2333,7 +2464,7 @@ async def list_file_metadata(
 
 # Tags: Classifications on files
 @mcp.tool()
-async def get_file_classification(file_id: str = Field(..., description="The unique identifier of the file whose security classification you want to retrieve. Visible in the file's Box web URL after '/files/'.")) -> dict[str, Any]:
+async def get_file_classification(file_id: str = Field(..., description="The unique identifier of the file whose security classification you want to retrieve. Visible in the file's Box web URL after '/files/'.")) -> dict[str, Any] | ToolResult:
     """Retrieves the security classification metadata applied to a specific file. Returns the classification instance associated with the file's enterprise security policy."""
 
     # Construct request model with validation
@@ -2372,7 +2503,7 @@ async def get_file_classification(file_id: str = Field(..., description="The uni
 async def add_file_classification(
     file_id: str = Field(..., description="The unique identifier of the file to classify. The file ID can be found in the file's URL in the Box web application."),
     box__security__classification__key: str | None = Field(None, alias="Box__Security__Classification__Key", description="The classification label to apply to the file. Must match one of the available classification keys defined in the enterprise's classification template; retrieve valid keys from the classification template endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a security classification label to a file in Box. Use this to apply an enterprise-defined classification (e.g., Confidential, Sensitive) to control how the file is handled and shared."""
 
     # Construct request model with validation
@@ -2414,7 +2545,7 @@ async def add_file_classification(
 async def update_file_classification(
     file_id: str = Field(..., description="The unique identifier of the file whose classification will be updated. The file ID can be found in the file's URL in the Box web application."),
     body: list[_models.PutFilesIdMetadataEnterpriseSecurityClassification6VmVochwUWoBodyItem] | None = Field(None, description="A list containing exactly one change operation object that specifies the update to apply to the classification label. Order is significant; only a single item describing the classification change should be included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the security classification label on a file that already has a classification applied. Only classification values defined for the enterprise are accepted."""
 
     # Construct request model with validation
@@ -2454,7 +2585,7 @@ async def update_file_classification(
 
 # Tags: Classifications on files
 @mcp.tool()
-async def remove_file_classification(file_id: str = Field(..., description="The unique identifier of the file from which the classification will be removed. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any]:
+async def remove_file_classification(file_id: str = Field(..., description="The unique identifier of the file from which the classification will be removed. The file ID can be found in the URL when viewing the file in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes any existing security classification from a specified file. This permanently strips the classification metadata, and can also be called using an explicit enterprise ID in the endpoint path."""
 
     # Construct request model with validation
@@ -2495,7 +2626,7 @@ async def get_file_metadata_instance(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to retrieve, either globally available templates or templates specific to your enterprise."),
     template_key: str = Field(..., description="The unique key name of the metadata template whose instance you want to retrieve from the file."),
     view: str | None = Field(None, description="Controls how taxonomy field values are represented in the response. Set to 'hydrated' to receive full taxonomy node details instead of the default node identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata template instance applied to a file, identified by its scope and template key. Optionally returns full taxonomy node details instead of raw node identifiers."""
 
     # Construct request model with validation
@@ -2539,7 +2670,7 @@ async def create_file_metadata(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to apply, either global (Box-provided templates) or enterprise (custom templates defined by your organization)."),
     template_key: str = Field(..., description="The unique key identifying the metadata template within the given scope, corresponding to the template's defined name."),
     body: dict[str, Any] | None = Field(None, description="A JSON object containing the metadata field key-value pairs to populate on the template instance. Keys must match those defined in the template, unless using the global.properties template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies an instance of a metadata template to a file, associating structured key-value data with it. Only keys defined in the specified template are accepted, except for the global.properties template which allows arbitrary key-value pairs."""
 
     # Construct request model with validation
@@ -2584,7 +2715,7 @@ async def update_file_metadata(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to update, either globally defined templates or enterprise-specific ones."),
     template_key: str = Field(..., description="The unique key identifying the metadata template whose instance will be updated on the file."),
     body: list[_models.PutFilesIdMetadataIdIdBodyItem] | None = Field(None, description="An ordered array of JSON Patch operation objects describing the changes to apply to the metadata instance. Operations are applied in sequence and must conform to RFC 6902 JSON Patch syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing metadata instance on a file using JSON Patch operations. The metadata template must already be applied to the file, and all changes are applied atomically — if any operation fails, no changes are made."""
 
     # Construct request model with validation
@@ -2628,7 +2759,7 @@ async def delete_file_metadata(
     file_id: str = Field(..., description="The unique identifier of the file from which metadata will be removed. The file ID can be found in the URL when viewing the file in the Box web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to delete, either 'global' for Box-wide templates or 'enterprise' for templates specific to your organization."),
     template_key: str = Field(..., description="The unique key identifying the metadata template to remove from the file, corresponding to the template's defined key within the specified scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific metadata instance from a file by deleting the metadata template applied under the given scope. This permanently detaches the metadata from the file without affecting the file itself."""
 
     # Construct request model with validation
@@ -2664,7 +2795,7 @@ async def delete_file_metadata(
 
 # Tags: Skills
 @mcp.tool()
-async def list_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file whose Box Skills cards you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any]:
+async def list_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file whose Box Skills cards you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves all Box Skills metadata cards attached to a specific file. Useful for inspecting AI-generated insights such as transcripts, topics, or keywords extracted by Box Skills."""
 
     # Construct request model with validation
@@ -2703,7 +2834,7 @@ async def list_file_skills_cards(file_id: str = Field(..., description="The uniq
 async def create_skill_cards(
     file_id: str = Field(..., description="The unique identifier of the file to which Box Skill cards will be applied. The file ID can be found in the URL when viewing the file in the Box web application."),
     cards: list[_models.SkillCard] | None = Field(None, description="An array of Box Skill card objects to attach to the file. Each item should represent a valid skill card type (e.g., keyword, transcript, timeline, or status card); order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies one or more Box Skills metadata cards to a specified file, enabling AI-generated insights such as transcripts, topics, or keywords to be attached as structured metadata."""
 
     # Construct request model with validation
@@ -2745,7 +2876,7 @@ async def create_skill_cards(
 async def update_skill_cards(
     file_id: str = Field(..., description="The unique identifier of the file whose Box Skills metadata cards will be updated. Visible in the file's URL on the Box web application."),
     body: list[_models.PutFilesIdMetadataGlobalBoxSkillsCardsBodyItem] | None = Field(None, description="An array of JSON-Patch operation objects describing the changes to apply to the Box Skills metadata cards. Each object follows the RFC 6902 JSON-Patch specification, with order of operations being significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates one or more Box Skills metadata cards on a specified file using JSON-Patch operations, allowing targeted modifications to existing skill card data."""
 
     # Construct request model with validation
@@ -2785,7 +2916,7 @@ async def update_skill_cards(
 
 # Tags: Skills
 @mcp.tool()
-async def remove_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file from which Box Skills cards will be removed. The file ID can be found in the file's URL in the Box web application.")) -> dict[str, Any]:
+async def remove_file_skills_cards(file_id: str = Field(..., description="The unique identifier of the file from which Box Skills cards will be removed. The file ID can be found in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes all Box Skills cards metadata from a specified file. This clears any AI-generated skill annotations (such as transcripts, topics, or faces) associated with the file."""
 
     # Construct request model with validation
@@ -2821,7 +2952,7 @@ async def remove_file_skills_cards(file_id: str = Field(..., description="The un
 
 # Tags: Watermarks (Files)
 @mcp.tool()
-async def get_file_watermark(file_id: str = Field(..., description="The unique identifier of the file whose watermark you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any]:
+async def get_file_watermark(file_id: str = Field(..., description="The unique identifier of the file whose watermark you want to retrieve. Visible in the file's URL on the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the watermark applied to a specific file. Returns watermark details if one exists, or an error if no watermark has been applied."""
 
     # Construct request model with validation
@@ -2860,7 +2991,7 @@ async def get_file_watermark(file_id: str = Field(..., description="The unique i
 async def apply_file_watermark(
     file_id: str = Field(..., description="The unique identifier of the file to watermark. Found in the file's URL in the Box web application."),
     imprint: Literal["default"] | None = Field(None, description="The type of watermark to apply to the file. Currently only the default imprint style is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies or updates a watermark on a specified file in Box. Use this to protect file content by overlaying a visible watermark when the file is viewed or downloaded."""
 
     # Construct request model with validation
@@ -2899,7 +3030,7 @@ async def apply_file_watermark(
 
 # Tags: Watermarks (Files)
 @mcp.tool()
-async def remove_file_watermark(file_id: str = Field(..., description="The unique identifier of the file from which the watermark will be removed. Found in the file's URL in the Box web application.")) -> dict[str, Any]:
+async def remove_file_watermark(file_id: str = Field(..., description="The unique identifier of the file from which the watermark will be removed. Found in the file's URL in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Removes an existing watermark from a specified file in Box. Use this to revoke watermark protection previously applied to a file."""
 
     # Construct request model with validation
@@ -2935,7 +3066,7 @@ async def remove_file_watermark(file_id: str = Field(..., description="The uniqu
 
 # Tags: File requests
 @mcp.tool()
-async def get_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to retrieve. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any]:
+async def get_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to retrieve. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific file request, including its configuration and status. Use this to inspect an existing file request created via the Box web application."""
 
     # Construct request model with validation
@@ -2979,7 +3110,7 @@ async def update_file_request(
     is_email_required: bool | None = Field(None, description="Whether submitters must provide their email address on the file request form. If omitted, the existing setting is preserved."),
     is_description_required: bool | None = Field(None, description="Whether submitters must provide a description of the files they are uploading on the file request form. If omitted, the existing setting is preserved."),
     expires_at: str | None = Field(None, description="The expiration date and time after which the file request will no longer accept submissions and its status will automatically become inactive. Provide as an ISO 8601 date-time string. If omitted, the existing expiration is preserved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the properties of an existing file request, such as its title, description, status, and submission requirements. Use this to activate or deactivate a file request or modify its configuration."""
 
     # Construct request model with validation
@@ -3018,7 +3149,7 @@ async def update_file_request(
 
 # Tags: File requests
 @mcp.tool()
-async def delete_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to delete. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any]:
+async def delete_file_request(file_request_id: str = Field(..., description="The unique identifier of the file request to delete. This ID can be found in the URL of the file request builder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified file request from Box. This action is irreversible and removes the file request and its associated upload link."""
 
     # Construct request model with validation
@@ -3057,7 +3188,7 @@ async def delete_file_request(file_request_id: str = Field(..., description="The
 async def copy_file_request(
     file_request_id: str = Field(..., description="The unique identifier of the file request to copy. Find this ID in the URL when viewing a file request in the Box web application's file request builder."),
     body: _models.FileRequestCopyRequest | None = Field(None, description="The request body specifying the destination folder and any overrides to apply to the copied file request, such as a new title or description."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Copies an existing file request from one folder and applies it to another folder, duplicating its settings and configuration. Useful for reusing file request templates across multiple folders without manual recreation."""
 
     # Construct request model with validation
@@ -3103,7 +3234,7 @@ async def get_folder(
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort order for returned items, either ascending (ASC) or descending (DESC) alphabetically."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Note that very high offset values may be unreliable for large folders; consider restructuring large folders if pagination fails."),
     limit: str | None = Field(None, description="The maximum number of folder items to return in a single response, up to a maximum of 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and the first 100 items for a specified folder. Use the sort, direction, offset, and limit parameters to control item ordering and pagination within the folder."""
 
     _offset = _parse_int(offset)
@@ -3149,7 +3280,7 @@ async def restore_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to restore from trash. The folder ID can be found in the Box web app URL when viewing the folder."),
     name: str | None = Field(None, description="An optional new name to assign to the folder upon restoration, useful if a naming conflict exists at the destination."),
     parent: _models.PostFoldersIdBodyParent | None = Field(None, description="An optional parent folder object specifying where the folder should be restored to, used when the original parent folder no longer exists."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a folder from the trash to its original location or an optional new parent folder. During the operation, the source folder, its descendants, and the destination folder are locked to prevent concurrent move, copy, delete, or restore actions."""
 
     # Construct request model with validation
@@ -3201,7 +3332,7 @@ async def update_folder(
     is_collaboration_restricted_to_enterprise: bool | None = Field(None, description="When set to `true`, new collaboration invitations for this folder are restricted to users within the same enterprise. Existing collaborations are not affected."),
     collections_: list[_models.PutFoldersIdBodyCollectionsItem] | None = Field(None, alias="collections", description="A list of collection objects to add this folder to. Currently only the `favorites` collection is supported. Pass an empty array or `null` to remove the folder from all collections. Retrieve collection IDs using the List all collections endpoint."),
     can_non_owners_view_collaborators: bool | None = Field(None, description="When set to `false`, non-owner collaborators are prevented from viewing other collaborators on the folder and from inviting new ones. If setting this to `false`, `can_non_owners_invite` must also be set to `false`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a folder's properties such as name, description, tags, and sharing settings. Can also be used to move the folder to a new parent, manage shared links, and control collaboration permissions."""
 
     # Construct request model with validation
@@ -3243,7 +3374,7 @@ async def update_folder(
 async def delete_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to delete. The folder ID can be found in the URL when viewing the folder in the Box web app, and the root folder is always ID `0`."),
     recursive: bool | None = Field(None, description="When set to true, allows deletion of a non-empty folder by recursively deleting all of its contents along with the folder itself. If omitted or false, the request will fail if the folder contains any items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a Box folder either permanently or by moving it to the trash. Supports recursive deletion to remove folders that contain content."""
 
     # Construct request model with validation
@@ -3286,7 +3417,7 @@ async def list_folder_app_item_associations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose app item associations you want to retrieve. The folder ID appears in the URL when viewing the folder in the Box web app. The root folder is always ID 0."),
     limit: str | None = Field(None, description="The maximum number of app item associations to return per page. Must be between 1 and 1000."),
     application_type: str | None = Field(None, description="Filters results to only include app items belonging to the specified application type. When omitted, associations for all application types are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all app items associated with a folder, including associations inherited from ancestor folders. App item type and ID are visible to any user with folder access, regardless of View permission on the app item."""
 
     _limit = _parse_int(limit)
@@ -3334,7 +3465,7 @@ async def list_folder_items(
     limit: str | None = Field(None, description="The maximum number of items to return in a single page of results. Accepted values range from 1 to 1000."),
     sort: Literal["id", "name", "date", "size"] | None = Field(None, description="The secondary attribute by which to sort items within their type grouping — items are always sorted by type first (folders, then files, then web links). Sorting by this field is not supported for marker-based pagination on the root folder (ID '0')."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort direction for results, either ascending or descending alphabetical/numerical order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of files, folders, and web links contained within a specified folder. Use the dedicated Get Folder endpoint if you need metadata about the folder itself, such as its size."""
 
     _offset = _parse_int(offset)
@@ -3381,7 +3512,7 @@ async def create_folder(
     id_: str | None = Field(None, alias="id", description="The unique ID of the parent folder in which the new folder will be created. Use '0' to create the folder at the root level of the user's account."),
     folder_upload_email: _models.PostFoldersBodyFolderUploadEmail | None = Field(None, description="Optional email upload configuration for the folder, allowing files to be uploaded by sending an email to a folder-specific address."),
     sync_state: Literal["synced", "not_synced", "partially_synced"] | None = Field(None, description="Specifies the sync state of the folder for Box Sync (discontinued). Accepted values are 'synced' (fully synced), 'not_synced' (not synced), or 'partially_synced' (some contents synced). Not applicable to Box Drive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new empty folder inside a specified parent folder. The folder name must be unique within the parent (case-insensitive) and must not contain invalid characters or trailing spaces."""
 
     # Construct request model with validation
@@ -3424,7 +3555,7 @@ async def copy_folder(
     folder_id: str = Field(..., description="The unique identifier of the folder to copy. The folder ID can be found in the Box web app URL when viewing the folder. The root folder (ID '0') cannot be copied."),
     name: str | None = Field(None, description="An optional name for the copied folder. If omitted, the original folder name is used. Names must be between 1 and 255 characters, cannot contain non-printable ASCII characters, forward or backward slashes, trailing spaces, or be exactly '.' or '..'.", min_length=1, max_length=255),
     id_: str | None = Field(None, alias="id", description="The ID of the destination parent folder where the copied folder will be placed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing folder and places it inside a specified destination folder. The original folder and its contents remain unchanged."""
 
     # Construct request model with validation
@@ -3467,7 +3598,7 @@ async def copy_folder(
 async def list_folder_collaborations(
     folder_id: str = Field(..., description="The unique identifier of the folder whose collaborations you want to retrieve. Find this ID in the Box web app by opening the folder and copying the numeric ID from the URL."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return in a single page of results. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all active and pending collaborations for a specified folder, returning details on users who currently have access or have been invited to collaborate."""
 
     _limit = _parse_int(limit)
@@ -3508,7 +3639,7 @@ async def list_folder_collaborations(
 
 # Tags: Trashed folders
 @mcp.tool()
-async def get_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the trashed folder to retrieve. Only folders directly moved to the trash are accessible; folders implicitly trashed via a parent cannot be retrieved by their own ID.")) -> dict[str, Any]:
+async def get_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the trashed folder to retrieve. Only folders directly moved to the trash are accessible; folders implicitly trashed via a parent cannot be retrieved by their own ID.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a specific folder that has been directly moved to the trash. Note: if a parent folder was trashed instead, only that parent folder can be retrieved via this endpoint."""
 
     # Construct request model with validation
@@ -3544,7 +3675,7 @@ async def get_trashed_folder(folder_id: str = Field(..., description="The unique
 
 # Tags: Trashed folders
 @mcp.tool()
-async def permanently_delete_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the folder to permanently delete from trash. The folder ID can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any]:
+async def permanently_delete_trashed_folder(folder_id: str = Field(..., description="The unique identifier of the folder to permanently delete from trash. The folder ID can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder that is currently in the trash, freeing storage and removing it from Box entirely. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -3583,7 +3714,7 @@ async def permanently_delete_trashed_folder(folder_id: str = Field(..., descript
 async def list_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder whose metadata instances will be retrieved. Find this ID in the Box web app URL when viewing the folder."),
     view: str | None = Field(None, description="Controls how taxonomy field values are represented in the response. By default, taxonomy values are returned as node identifiers (API view); set to `hydrated` to return full taxonomy node details instead."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata instances attached to a given folder. Cannot be used on the root folder (ID `0`)."""
 
     # Construct request model with validation
@@ -3622,7 +3753,7 @@ async def list_folder_metadata(
 
 # Tags: Classifications on folders
 @mcp.tool()
-async def get_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder whose classification metadata you want to retrieve. The root folder of a Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any]:
+async def get_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder whose classification metadata you want to retrieve. The root folder of a Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the security classification metadata applied to a specific folder. Returns the classification instance associated with the folder's enterprise security policy."""
 
     # Construct request model with validation
@@ -3661,7 +3792,7 @@ async def get_folder_classification(folder_id: str = Field(..., description="The
 async def add_folder_classification(
     folder_id: str = Field(..., description="The unique identifier of the folder to classify. The ID can be found in the folder's URL in the Box web app; the root folder is always ID '0'."),
     box__security__classification__key: str | None = Field(None, alias="Box__Security__Classification__Key", description="The classification label to apply to the folder. Must match an existing classification key from the enterprise's security classification template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies a security classification label to a specified folder. The classification must exist in the enterprise's classification template."""
 
     # Construct request model with validation
@@ -3703,7 +3834,7 @@ async def add_folder_classification(
 async def update_folder_classification(
     folder_id: str = Field(..., description="The unique identifier of the folder whose classification will be updated. The folder ID can be found in the URL when viewing the folder in the Box web app. The root folder is always ID '0'."),
     body: list[_models.PutFoldersIdMetadataEnterpriseSecurityClassification6VmVochwUWoBodyItem] | None = Field(None, description="A list containing exactly one JSON Patch operation object describing the change to apply to the classification label. Only a single update operation is supported per request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the security classification label on a folder that already has a classification applied. Only classification values defined for the enterprise are accepted."""
 
     # Construct request model with validation
@@ -3743,7 +3874,7 @@ async def update_folder_classification(
 
 # Tags: Classifications on folders
 @mcp.tool()
-async def remove_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder from which the classification will be removed. The root folder of a Box account is always represented by ID '0'.")) -> dict[str, Any]:
+async def remove_folder_classification(folder_id: str = Field(..., description="The unique identifier of the folder from which the classification will be removed. The root folder of a Box account is always represented by ID '0'.")) -> dict[str, Any] | ToolResult:
     """Removes any existing security classification from a specified folder. This operation clears all classification metadata applied via the enterprise security classification schema."""
 
     # Construct request model with validation
@@ -3783,7 +3914,7 @@ async def get_folder_metadata_instance(
     folder_id: str = Field(..., description="The unique identifier of the folder whose metadata instance you want to retrieve. Find this ID in the Box web app URL when viewing the folder. The root folder is always ID `0`, but is not supported by this operation."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to retrieve, either `global` for Box-wide templates or `enterprise` for templates defined within your organization."),
     template_key: str = Field(..., description="The unique key name of the metadata template whose instance you want to retrieve from the folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata template instance applied to a folder, returning its field values and associated metadata. Cannot be used on the root folder (ID `0`)."""
 
     # Construct request model with validation
@@ -3824,7 +3955,7 @@ async def create_folder_metadata(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template to apply, either `global` for Box-wide templates or `enterprise` for templates defined within your enterprise."),
     template_key: str = Field(..., description="The unique key name of the metadata template to apply to the folder. Use `properties` for the global free-form key-value template, which accepts any key-value pair."),
     body: dict[str, Any] | None = Field(None, description="The metadata key-value pairs to store on the folder, conforming to the fields defined in the specified template. The `global.properties` template accepts any arbitrary key-value pairs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies an instance of a metadata template to a folder, attaching structured key-value data based on the specified template. Note that the enterprise must have Cascading Folder Level Metadata enabled in the admin console for the metadata to appear in the Box web app."""
 
     # Construct request model with validation
@@ -3869,7 +4000,7 @@ async def update_folder_metadata(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, either globally defined or specific to the enterprise account."),
     template_key: str = Field(..., description="The unique key name of the metadata template to update on the folder."),
     body: list[_models.PutFoldersIdMetadataIdIdBodyItem] | None = Field(None, description="A JSON Patch array of operation objects describing the changes to apply to the metadata instance. Operations are applied atomically — if any operation fails, no changes are made."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a metadata instance on a folder using JSON Patch operations, applied atomically. The metadata template must already be applied to the folder, and all changes must conform to the template schema."""
 
     # Construct request model with validation
@@ -3913,7 +4044,7 @@ async def delete_folder_metadata(
     folder_id: str = Field(..., description="The unique identifier of the folder from which metadata will be removed. The root folder of a Box account is always represented by ID '0'; other folder IDs can be found in the URL when viewing the folder in the web application."),
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining whether it is a globally available template or one specific to the enterprise account."),
     template_key: str = Field(..., description="The unique key name of the metadata template instance to remove from the folder, identifying which template's data should be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific metadata instance from a folder by deleting the metadata template instance identified by its scope and template key. This action permanently detaches the metadata from the folder."""
 
     # Construct request model with validation
@@ -3954,7 +4085,7 @@ async def list_trash_items(
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for offset-based pagination. Offsets exceeding 10000 will result in a 400 error."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort direction for results, either ascending or descending alphabetical order. Items are always grouped by type first (folders, then files, then web links) before this ordering is applied."),
     sort: Literal["name", "date", "size"] | None = Field(None, description="The secondary attribute by which to sort items within each type group. Items are always sorted by type first; this parameter is not supported when using marker-based pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all files and folders currently in the trash. Supports offset-based and marker-based pagination, and allows sorting and filtering by specific attributes using the fields parameter."""
 
     _limit = _parse_int(limit)
@@ -3995,7 +4126,7 @@ async def list_trash_items(
 
 # Tags: Watermarks (Folders)
 @mcp.tool()
-async def get_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder whose watermark you want to retrieve. The root folder of a Box account is always represented by the ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any]:
+async def get_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder whose watermark you want to retrieve. The root folder of a Box account is always represented by the ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web application.")) -> dict[str, Any] | ToolResult:
     """Retrieves the watermark applied to a specific folder in Box. Returns watermark details if one exists, or a 404 if no watermark has been applied."""
 
     # Construct request model with validation
@@ -4034,7 +4165,7 @@ async def get_folder_watermark(folder_id: str = Field(..., description="The uniq
 async def apply_folder_watermark(
     folder_id: str = Field(..., description="The unique identifier of the folder to watermark. The folder ID can be found in the URL when viewing the folder in the Box web app. The root folder of any Box account is always ID `0`."),
     imprint: Literal["default"] | None = Field(None, description="The type of watermark imprint to apply to the folder. Currently only the default imprint style is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies or updates a watermark on a specified folder in Box. Use this to protect folder contents by overlaying a visible watermark imprint."""
 
     # Construct request model with validation
@@ -4073,7 +4204,7 @@ async def apply_folder_watermark(
 
 # Tags: Watermarks (Folders)
 @mcp.tool()
-async def remove_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder from which the watermark will be removed. The root folder of a Box account is always represented by the ID '0'.")) -> dict[str, Any]:
+async def remove_folder_watermark(folder_id: str = Field(..., description="The unique identifier of the folder from which the watermark will be removed. The root folder of a Box account is always represented by the ID '0'.")) -> dict[str, Any] | ToolResult:
     """Removes the watermark from a specified folder in Box. Once removed, the folder's content will no longer display watermark overlays."""
 
     # Construct request model with validation
@@ -4109,7 +4240,7 @@ async def remove_folder_watermark(folder_id: str = Field(..., description="The u
 
 # Tags: Folder Locks
 @mcp.tool()
-async def list_folder_locks(folder_id: str = Field(..., description="The unique identifier of the folder whose locks you want to retrieve. You can find this ID in the folder's URL in the Box web application; the root folder is always ID `0`.")) -> dict[str, Any]:
+async def list_folder_locks(folder_id: str = Field(..., description="The unique identifier of the folder whose locks you want to retrieve. You can find this ID in the folder's URL in the Box web application; the root folder is always ID `0`.")) -> dict[str, Any] | ToolResult:
     """Retrieves all lock details for a specified folder, including lock type and restrictions. You must be authenticated as the owner or co-owner of the folder to use this endpoint."""
 
     # Construct request model with validation
@@ -4151,7 +4282,7 @@ async def lock_folder(
     move: bool | None = Field(None, description="Whether to lock the folder against move operations, preventing it from being relocated within the file system."),
     delete: bool | None = Field(None, description="Whether to lock the folder against deletion, preventing it from being permanently removed."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the folder on which to apply the lock."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a lock on a folder to prevent it from being moved and/or deleted. You must be the owner or co-owner of the folder to perform this action."""
 
     # Construct request model with validation
@@ -4190,7 +4321,7 @@ async def lock_folder(
 
 # Tags: Folder Locks
 @mcp.tool()
-async def delete_folder_lock(folder_lock_id: str = Field(..., description="The unique identifier of the folder lock to delete.")) -> dict[str, Any]:
+async def delete_folder_lock(folder_lock_id: str = Field(..., description="The unique identifier of the folder lock to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes a specific folder lock, removing any restrictions it imposed on the folder. You must be authenticated as the owner or co-owner of the folder to perform this action."""
 
     # Construct request model with validation
@@ -4229,7 +4360,7 @@ async def delete_folder_lock(folder_lock_id: str = Field(..., description="The u
 async def find_metadata_template_by_instance(
     metadata_instance_id: str = Field(..., description="The unique UUID of a metadata template instance used to identify and retrieve the associated template definition."),
     limit: str | None = Field(None, description="The maximum number of metadata templates to return in a single page of results. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Finds a metadata template by looking up the ID of one of its existing instances. Useful when you have an instance ID and need to retrieve the template definition it was created from."""
 
     _limit = _parse_int(limit)
@@ -4269,7 +4400,7 @@ async def find_metadata_template_by_instance(
 
 # Tags: Classifications
 @mcp.tool()
-async def list_classifications() -> dict[str, Any]:
+async def list_classifications() -> dict[str, Any] | ToolResult:
     """Retrieves the enterprise security classification metadata template and returns all classification labels available to the enterprise. Can also be accessed by specifying the enterprise ID explicitly in the URL."""
 
     # Extract parameters for API call
@@ -4299,7 +4430,7 @@ async def list_classifications() -> dict[str, Any]:
 async def get_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, either 'global' for Box-wide templates or 'enterprise' for templates specific to your organization."),
     template_key: str = Field(..., description="The unique key identifying the metadata template within its scope. To discover available template keys, list all templates for an enterprise or globally, or list templates applied to a file or folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata template by its scope and template key. Use this to fetch full template details including its fields and configuration."""
 
     # Construct request model with validation
@@ -4339,7 +4470,7 @@ async def update_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining its visibility and ownership — either globally available or restricted to the enterprise."),
     template_key: str = Field(..., description="The unique key identifying the metadata template within the given scope."),
     body: list[_models.PutMetadataTemplatesIdIdSchemaBodyItem] | None = Field(None, description="An ordered array of JSON-Patch (RFC 6902) operation objects describing the changes to apply to the metadata template. Each item specifies an operation type, target path, and value as needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing metadata template by applying a series of JSON-Patch operations atomically. All changes succeed or fail together — no partial updates are applied if any operation encounters an error."""
 
     # Construct request model with validation
@@ -4382,7 +4513,7 @@ async def update_metadata_template(
 async def delete_metadata_template(
     scope: Literal["global", "enterprise"] = Field(..., description="The scope of the metadata template, determining whether it applies globally across all enterprises or is specific to your enterprise."),
     template_key: str = Field(..., description="The unique key name identifying the metadata template within the specified scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a metadata template and all of its associated instances. This action is irreversible and removes the template across all content it was applied to."""
 
     # Construct request model with validation
@@ -4418,7 +4549,7 @@ async def delete_metadata_template(
 
 # Tags: Metadata templates
 @mcp.tool()
-async def get_metadata_template_by_id(template_id: str = Field(..., description="The unique identifier of the metadata template to retrieve.")) -> dict[str, Any]:
+async def get_metadata_template_by_id(template_id: str = Field(..., description="The unique identifier of the metadata template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata template by its unique ID. Use this to inspect template structure, fields, and configuration for a known template."""
 
     # Construct request model with validation
@@ -4454,7 +4585,7 @@ async def get_metadata_template_by_id(template_id: str = Field(..., description=
 
 # Tags: Metadata templates
 @mcp.tool()
-async def list_global_metadata_templates(limit: str | None = Field(None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.")) -> dict[str, Any]:
+async def list_global_metadata_templates(limit: str | None = Field(None, description="The maximum number of metadata templates to return per page. Accepts values up to 1000; omit to use the default page size.")) -> dict[str, Any] | ToolResult:
     """Retrieves all generic, global metadata templates available to every enterprise using Box. These templates are not organization-specific and can be applied universally across all Box accounts."""
 
     _limit = _parse_int(limit)
@@ -4494,7 +4625,7 @@ async def list_global_metadata_templates(limit: str | None = Field(None, descrip
 
 # Tags: Metadata templates
 @mcp.tool()
-async def list_enterprise_metadata_templates(limit: str | None = Field(None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.")) -> dict[str, Any]:
+async def list_enterprise_metadata_templates(limit: str | None = Field(None, description="Maximum number of metadata templates to return per page. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata templates created for use within the authenticated user's enterprise. Returns a paginated list of enterprise-scoped templates available for applying structured metadata to content."""
 
     _limit = _parse_int(limit)
@@ -4541,7 +4672,7 @@ async def create_metadata_template(
     hidden: bool | None = Field(None, description="Controls whether the template is visible in the Box web app UI. Set to true to hide it and restrict usage to API access only."),
     fields: list[_models.PostMetadataTemplatesSchemaBodyFieldsItem] | None = Field(None, description="An ordered list of field definitions that make up the template. Each field can be of type text, date, number, single-select, or multi-select list, and the order provided determines display order."),
     copy_instance_on_item_copy: bool | None = Field(None, alias="copyInstanceOnItemCopy", description="Determines whether metadata instances attached to a file or folder are automatically copied when that item is copied. Defaults to false, meaning metadata is not copied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new metadata template that can be applied to files and folders within an enterprise, defining custom fields for organizing and categorizing content."""
 
     # Construct request model with validation
@@ -4583,7 +4714,7 @@ async def initialize_classifications(
     hidden: bool | None = Field(None, description="Controls whether the classification template is hidden from users on web and mobile devices. Set to true to restrict visibility, or false to make classifications available for selection."),
     copy_instance_on_item_copy: bool | None = Field(None, alias="copyInstanceOnItemCopy", description="Controls whether the assigned classification is automatically copied to a new item when a file or folder is copied. Set to true to propagate classifications on copy, or false to leave the copy unclassified."),
     fields: list[_models.PostMetadataTemplatesSchemaClassificationsBodyFieldsItem] | None = Field(None, description="Defines the classification values available in the template. Exactly one field object must be provided, containing all valid classification options as enumerated values within that field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initializes the classification metadata template for an enterprise with an initial set of classifications. Use this only when no classification template exists yet; if one already exists, use the add classifications endpoint instead."""
 
     # Construct request model with validation
@@ -4625,7 +4756,7 @@ async def list_metadata_cascade_policies(
     folder_id: str = Field(..., description="The ID of the folder for which to retrieve metadata cascade policies. Must be a valid non-root folder; the root folder with ID `0` is not supported."),
     owner_enterprise_id: str | None = Field(None, description="The ID of the enterprise whose metadata cascade policies should be returned. Defaults to the currently authenticated enterprise if not provided."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for paginating through results. Must not exceed 10000; requests with a higher offset will be rejected with a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata cascade policies applied to a specific folder, which automatically apply metadata templates to items within that folder. Cannot be used on the root folder (ID `0`)."""
 
     _offset = _parse_int(offset)
@@ -4668,7 +4799,7 @@ async def list_metadata_cascade_policies(
 async def create_metadata_cascade_policy(
     folder_id: str | None = Field(None, description="The unique identifier of the folder to which the cascade policy will be applied. The folder must already have an instance of the target metadata template applied to it."),
     metadata_template: str | None = Field(None, description="The metadata template identifier in 'scope/templateKey' format (e.g., 'enterprise_12345/contractTemplate')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a metadata cascade policy that automatically applies a metadata template from a specified folder down to all files within it. The folder must already have an instance of the target metadata template applied before the policy can take effect."""
 
     # Call helper functions
@@ -4709,7 +4840,7 @@ async def create_metadata_cascade_policy(
 
 # Tags: Metadata cascade policies
 @mcp.tool()
-async def get_metadata_cascade_policy(metadata_cascade_policy_id: str = Field(..., description="The unique identifier of the metadata cascade policy to retrieve.")) -> dict[str, Any]:
+async def get_metadata_cascade_policy(metadata_cascade_policy_id: str = Field(..., description="The unique identifier of the metadata cascade policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific metadata cascade policy assigned to a folder. Use this to inspect how metadata templates are being propagated from a folder to its contents."""
 
     # Construct request model with validation
@@ -4748,7 +4879,7 @@ async def get_metadata_cascade_policy(metadata_cascade_policy_id: str = Field(..
 async def apply_metadata_cascade_policy(
     metadata_cascade_policy_id: str = Field(..., description="The unique identifier of the metadata cascade policy to force-apply to the folder's children."),
     conflict_resolution: Literal["none", "overwrite"] | None = Field(None, description="Determines how to handle conflicts when a child file already has an instance of the metadata template applied. Use 'none' to preserve existing values on the child, or 'overwrite' to replace them with the cascaded values from the folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Force-applies a metadata cascade policy to all existing children within a folder, ensuring inherited metadata values are propagated down. Useful after creating a new cascade policy to retroactively enforce metadata on files already present in the folder."""
 
     # Construct request model with validation
@@ -4794,7 +4925,7 @@ async def query_items_by_metadata(
     ancestor_folder_id: str | None = Field(None, description="The ID of the folder to scope the query to. Use `0` to search across all accessible folders, or provide a specific folder ID to restrict results to that folder and its subfolders."),
     order_by: list[_models.PostMetadataQueriesExecuteReadBodyOrderByItem] | None = Field(None, description="An ordered list of metadata template fields and sort directions to apply to the results. All items in the array must use the same sort direction."),
     limit: int | None = Field(None, description="The maximum number of results to return in a single request, between 0 and 100. This is an upper boundary and does not guarantee a minimum number of results.", ge=0, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for files and folders using SQL-like syntax against a specific metadata template. Use the `fields` attribute to include additional metadata fields in the results."""
 
     # Construct request model with validation
@@ -4832,7 +4963,7 @@ async def query_items_by_metadata(
 
 # Tags: Comments
 @mcp.tool()
-async def get_comment(comment_id: str = Field(..., description="The unique identifier of the comment to retrieve.")) -> dict[str, Any]:
+async def get_comment(comment_id: str = Field(..., description="The unique identifier of the comment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the message, metadata, and author information for a specific comment. Use this to fetch the full details of a single comment by its unique identifier."""
 
     # Construct request model with validation
@@ -4871,7 +5002,7 @@ async def get_comment(comment_id: str = Field(..., description="The unique ident
 async def update_comment(
     comment_id: str = Field(..., description="The unique identifier of the comment to update."),
     message: str | None = Field(None, description="The new text content to replace the comment's existing message."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the message text of an existing comment. Use this to edit or correct the content of a previously posted comment."""
 
     # Construct request model with validation
@@ -4910,7 +5041,7 @@ async def update_comment(
 
 # Tags: Comments
 @mcp.tool()
-async def delete_comment(comment_id: str = Field(..., description="The unique identifier of the comment to permanently delete.")) -> dict[str, Any]:
+async def delete_comment(comment_id: str = Field(..., description="The unique identifier of the comment to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a comment by its unique identifier. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -4950,7 +5081,7 @@ async def create_comment(
     tagged_message: str | None = Field(None, description="The text of the comment using mention syntax to tag another user, formatted as `@[user_id:display_name]` anywhere in the message. Use the plain `message` parameter instead if no user mentions are needed."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the file or comment this comment will be attached to."),
     type_: Literal["file", "comment"] | None = Field(None, alias="type", description="Specifies whether the comment is being placed on a file or as a reply to an existing comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new comment on a file or as a reply to an existing comment. Supports mentioning other users via a tagged message syntax to trigger email notifications."""
 
     # Construct request model with validation
@@ -4989,7 +5120,7 @@ async def create_comment(
 
 # Tags: Collaborations
 @mcp.tool()
-async def get_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to retrieve.")) -> dict[str, Any]:
+async def get_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a single collaboration by its unique identifier. Use this to inspect collaboration settings, permissions, and associated users or groups."""
 
     # Construct request model with validation
@@ -5031,7 +5162,7 @@ async def update_collaboration(
     status: Literal["pending", "accepted", "rejected"] | None = Field(None, description="Sets the status of a pending collaboration invitation to accept or reject it. Only applicable to collaborations currently in a pending state."),
     expires_at: str | None = Field(None, description="The date and time at which the collaboration will be automatically removed from the item, specified in ISO 8601 format. Requires the 'Automatically remove invited collaborators' setting to be enabled in the Admin Console, and the collaboration must have been created after that setting was enabled."),
     can_view_path: bool | None = Field(None, description="When true, allows the invited collaborator to see the full parent folder path to the collaborated item without gaining access to parent folder contents. Only applicable to folder collaborations; only an owner can update this setting on existing collaborations, and it is recommended to limit collaborations with this enabled to 1,000 per user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing collaboration on a Box item, allowing you to change the collaborator's role, accept or reject a pending invitation, set an expiration date, or toggle parent path visibility."""
 
     # Construct request model with validation
@@ -5070,7 +5201,7 @@ async def update_collaboration(
 
 # Tags: Collaborations
 @mcp.tool()
-async def delete_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to delete.")) -> dict[str, Any]:
+async def delete_collaboration(collaboration_id: str = Field(..., description="The unique identifier of the collaboration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a collaboration by its unique identifier. This action cannot be undone and will revoke the associated access or shared relationship."""
 
     # Construct request model with validation
@@ -5110,7 +5241,7 @@ async def list_pending_collaborations(
     status: Literal["pending"] = Field(..., description="Filters collaborations by their current status. Only pending invites are supported by this endpoint."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through results. Must not exceed 10,000; requests beyond this limit will return a 400 error."),
     limit: str | None = Field(None, description="Limits the number of collaboration records returned in a single page. Accepts values up to 1,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pending collaboration invites for the authenticated user. Returns a paginated list of collaborations awaiting the user's response."""
 
     _offset = _parse_int(offset)
@@ -5162,7 +5293,7 @@ async def create_collaboration(
     is_access_only: bool | None = Field(None, description="When true, the collaborator can access the shared item but it will not appear in their All Files list and the root folder path will be hidden."),
     can_view_path: bool | None = Field(None, description="When true, allows the collaborator to see the full parent folder path to the shared folder without gaining access to parent folder contents. Only applicable to folder collaborations, and only owners or co-owners can set this. Limit use to 1,000 collaborations per user to avoid performance impact."),
     expires_at: str | None = Field(None, description="The date and time at which the collaboration will be automatically removed from the item, provided in ISO 8601 format. Requires the expiry extension setting to be enabled in the Admin Console Enterprise Settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grants a single user or group access to a file or folder by creating a collaboration with a specified role. Collaborators can be identified by user ID, group ID, or email address."""
 
     # Construct request model with validation
@@ -5225,7 +5356,7 @@ async def search_content(
     include_recent_shared_links: bool | None = Field(None, description="When set to true, includes items the user recently accessed via a shared link in the results. Enabling this changes the response format to include shared link metadata."),
     deleted_user_ids: list[str] | None = Field(None, description="Restricts results to items deleted by the specified users, provided as an array of user ID strings. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards."),
     deleted_at_range: list[str] | None = Field(None, description="Restricts results to items deleted within a date range, provided as an array of two RFC3339 timestamp strings representing start and end dates. Requires `trash_content` to be set to `trashed_only`. Only available for data from 2023-02-01 onwards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for files, folders, web links, and shared files across the authenticated user's content or the entire enterprise, with support for rich filtering by metadata, date ranges, file type, ownership, and more."""
 
     _limit = _parse_int(limit)
@@ -5282,7 +5413,7 @@ async def create_task(
     message: str | None = Field(None, description="An optional message displayed to task assignees providing context or instructions for the task."),
     due_at: str | None = Field(None, description="The deadline by which the task should be completed, specified as an ISO 8601 date-time string. Defaults to null if omitted."),
     completion_rule: Literal["all_assignees", "any_assignee"] | None = Field(None, description="Determines how many assignees must act on the task before it is considered complete: 'all_assignees' requires every assignee to respond, while 'any_assignee' requires only one."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new task on a specified file, optionally configuring the action type, due date, message, and completion rules. The task must be assigned to users separately after creation."""
 
     # Construct request model with validation
@@ -5321,7 +5452,7 @@ async def create_task(
 
 # Tags: Tasks
 @mcp.tool()
-async def get_task(task_id: str = Field(..., description="The unique identifier of the task to retrieve.")) -> dict[str, Any]:
+async def get_task(task_id: str = Field(..., description="The unique identifier of the task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific task by its unique identifier. Use this to fetch the current state, metadata, and attributes of a single task."""
 
     # Construct request model with validation
@@ -5363,7 +5494,7 @@ async def update_task(
     message: str | None = Field(None, description="The instructional message displayed to task assignees describing what they need to do."),
     due_at: str | None = Field(None, description="The deadline by which the task should be completed, specified as an ISO 8601 date-time string."),
     completion_rule: Literal["all_assignees", "any_assignee"] | None = Field(None, description="Determines how many assignees must complete the task before it is marked as completed: 'all_assignees' requires every assignee to act, while 'any_assignee' requires only one."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing task's configuration or completion state, including its action type, message, due date, and assignee completion rules."""
 
     # Construct request model with validation
@@ -5402,7 +5533,7 @@ async def update_task(
 
 # Tags: Tasks
 @mcp.tool()
-async def delete_task(task_id: str = Field(..., description="The unique identifier of the task to be deleted.")) -> dict[str, Any]:
+async def delete_task(task_id: str = Field(..., description="The unique identifier of the task to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a task from its associated file. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5438,7 +5569,7 @@ async def delete_task(task_id: str = Field(..., description="The unique identifi
 
 # Tags: Task assignments
 @mcp.tool()
-async def list_task_assignments(task_id: str = Field(..., description="The unique identifier of the task whose assignments you want to retrieve.")) -> dict[str, Any]:
+async def list_task_assignments(task_id: str = Field(..., description="The unique identifier of the task whose assignments you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all assignments associated with a specific task, returning the list of users or groups assigned to it."""
 
     # Construct request model with validation
@@ -5479,7 +5610,7 @@ async def assign_task(
     assign_to_id: str | None = Field(None, alias="assign_toId", description="The unique identifier of the user to assign the task to. Use the `login` parameter instead to specify the user by email address."),
     type_: Literal["task"] | None = Field(None, alias="type", description="The type of the item being assigned. Must always be set to 'task'."),
     login: str | None = Field(None, description="The email address of the user to assign the task to. Use the `id` parameter instead to specify the user by their unique user ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns a task to a specific user by user ID or email address. A task can be assigned to multiple users by creating separate assignments."""
 
     # Construct request model with validation
@@ -5518,7 +5649,7 @@ async def assign_task(
 
 # Tags: Task assignments
 @mcp.tool()
-async def get_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to retrieve.")) -> dict[str, Any]:
+async def get_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific task assignment, including its status, assignee, and associated task. Use this to inspect the current state of a single task assignment by its unique identifier."""
 
     # Construct request model with validation
@@ -5558,7 +5689,7 @@ async def update_task_assignment(
     task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to update."),
     message: str | None = Field(None, description="An optional message from the assignee to accompany the task assignment update."),
     resolution_state: Literal["completed", "incomplete", "approved", "rejected"] | None = Field(None, description="The resolution state to set for the task assignment. For tasks with action type 'complete', valid values are 'incomplete' or 'completed'. For tasks with action type 'review', valid values are 'incomplete', 'approved', or 'rejected'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a task assignment for a specific user, allowing changes to the resolution state or an optional assignee message. Supported resolution states depend on the task's action type (complete or review)."""
 
     # Construct request model with validation
@@ -5597,7 +5728,7 @@ async def update_task_assignment(
 
 # Tags: Task assignments
 @mcp.tool()
-async def delete_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to delete.")) -> dict[str, Any]:
+async def delete_task_assignment(task_assignment_id: str = Field(..., description="The unique identifier of the task assignment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a specific task assignment, unassigning the user from the associated task. This action permanently deletes the assignment record."""
 
     # Construct request model with validation
@@ -5633,7 +5764,7 @@ async def delete_task_assignment(task_assignment_id: str = Field(..., descriptio
 
 # Tags: Shared links (Files)
 @mcp.tool()
-async def get_shared_link_file(boxapi: str = Field(..., description="Authorization header value containing the shared link URL and an optional password, formatted as a key-value pair string using the shared_link and shared_link_password keys.")) -> dict[str, Any]:
+async def get_shared_link_file(boxapi: str = Field(..., description="Authorization header value containing the shared link URL and an optional password, formatted as a key-value pair string using the shared_link and shared_link_password keys.")) -> dict[str, Any] | ToolResult:
     """Retrieves file information for a given shared link, supporting links originating from within or outside the current enterprise. Optionally returns shared link permission options when requested via the fields query parameter."""
 
     # Construct request model with validation
@@ -5672,7 +5803,7 @@ async def get_shared_link_file(boxapi: str = Field(..., description="Authorizati
 async def get_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file whose shared link information you want to retrieve. The file ID can be found in the file's URL in the Box web application."),
     fields: str = Field(..., description="Specifies which fields to include in the response; must be set to request shared link data to be returned for the file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the shared link details for a specific file, including its URL, access level, and permissions. Use this to inspect or confirm the sharing configuration of a file."""
 
     # Construct request model with validation
@@ -5721,7 +5852,7 @@ async def add_file_shared_link(
     can_download: bool | None = Field(None, description="Whether the shared link permits downloading the file. Can only be set when access is 'open' or 'company'."),
     can_preview: bool | None = Field(None, description="Whether the shared link permits previewing the file. This value is always true and applies to all items within a folder when set on a folder shared link."),
     can_edit: bool | None = Field(None, description="Whether the shared link permits editing the file. Can only be set when access is 'open' or 'company', and requires can_download to also be true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a shared link on a file, controlling access level, permissions, expiration, and optional password protection. Returns the file with the shared link fields populated."""
 
     # Construct request model with validation
@@ -5774,7 +5905,7 @@ async def update_file_shared_link(
     can_download: bool | None = Field(None, description="Whether the shared link permits downloading of the file. Can only be set when access is 'open' or 'company'."),
     can_preview: bool | None = Field(None, description="Whether the shared link permits previewing of the file. This value is always true and applies to all items within a folder when set on a folder shared link."),
     can_edit: bool | None = Field(None, description="Whether the shared link permits editing of the file. Can only be set when access is 'open' or 'company', and requires can_download to also be true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the shared link settings on a specific file, including access level, password protection, expiration, and permissions. Use this to modify an existing shared link or configure a new one on the file."""
 
     # Construct request model with validation
@@ -5821,7 +5952,7 @@ async def remove_file_shared_link(
     file_id: str = Field(..., description="The unique identifier of the file from which the shared link will be removed. The file ID can be found in the URL when viewing the file in the Box web application."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to confirm the shared link has been removed and retrieve the updated link state."),
     shared_link: dict[str, Any] | None = Field(None, description="Set this field to null to remove the shared link from the file. Omitting this field or providing any non-null value will not remove the link."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an existing shared link from a file, revoking any previously granted public or shared access. Returns the updated file metadata with the shared link field cleared."""
 
     # Construct request model with validation
@@ -5863,7 +5994,7 @@ async def remove_file_shared_link(
 
 # Tags: Shared links (Folders)
 @mcp.tool()
-async def get_folder_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string using the pattern shared_link=[link]&shared_link_password=[password].")) -> dict[str, Any]:
+async def get_folder_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string using the pattern shared_link=[link]&shared_link_password=[password].")) -> dict[str, Any] | ToolResult:
     """Retrieves folder metadata using a shared link, supporting links from within the current enterprise or external ones. Useful when only a shared link is available and full folder details are needed."""
 
     # Construct request model with validation
@@ -5902,7 +6033,7 @@ async def get_folder_from_shared_link(boxapi: str = Field(..., description="Auth
 async def get_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder whose shared link you want to retrieve. The root folder of a Box account is always ID '0'; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     fields: str = Field(..., description="Must be set to 'shared_link' to explicitly request that shared link fields are included in the response. This field is required by the API to return shared link data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the shared link details for a specific folder, including its URL, access level, and permissions. Use this to inspect or verify the sharing configuration of a folder."""
 
     # Construct request model with validation
@@ -5951,7 +6082,7 @@ async def add_folder_shared_link(
     can_download: bool | None = Field(None, description="Whether recipients of the shared link are permitted to download files in the folder. Can only be set when access is `open` or `company`."),
     can_preview: bool | None = Field(None, description="Whether recipients of the shared link are permitted to preview files in the folder. This value is always `true` and applies to all items within the folder."),
     can_edit: bool | None = Field(None, description="Whether recipients of the shared link are permitted to edit items. For folders, this value can only be `false`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds or updates a shared link on a folder, controlling access level, password protection, expiration, and permissions for viewing or downloading folder contents."""
 
     # Construct request model with validation
@@ -6004,7 +6135,7 @@ async def update_folder_shared_link(
     can_download: bool | None = Field(None, description="Whether the shared link permits downloading of files. Can only be enabled when access is set to `open` or `company`."),
     can_preview: bool | None = Field(None, description="Whether the shared link permits previewing of files. This value is always `true` for folders and applies to all items within the folder."),
     can_edit: bool | None = Field(None, description="Whether the shared link permits editing of items. For folders, this value can only be set to `false`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the shared link settings on a specific folder, allowing you to configure access level, password protection, expiration, and permissions for the link."""
 
     # Construct request model with validation
@@ -6051,7 +6182,7 @@ async def remove_folder_shared_link(
     folder_id: str = Field(..., description="The unique identifier of the folder from which the shared link will be removed. The root folder of a Box account is always represented by the ID '0'."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response. Must include 'shared_link' to confirm the shared link has been removed from the folder."),
     shared_link: dict[str, Any] | None = Field(None, description="The shared link configuration object. Set this to null to remove the shared link from the folder and revoke any previously granted access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an existing shared link from a folder, revoking public or shared access. The shared_link field must be set to null to complete the removal."""
 
     # Construct request model with validation
@@ -6098,7 +6229,7 @@ async def create_web_link(
     id_: str | None = Field(None, alias="id", description="The ID of the parent folder where the web link will be created. Use '0' to target the root folder."),
     name: str | None = Field(None, description="A display name for the web link as it appears in the folder. If omitted, the URL is used as the name."),
     description: str | None = Field(None, description="An optional human-readable description providing additional context about the web link's destination or purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a web link object inside a specified folder, storing a URL as a navigable item within Box. Useful for bookmarking external resources directly within a folder hierarchy."""
 
     # Construct request model with validation
@@ -6137,7 +6268,7 @@ async def create_web_link(
 
 # Tags: Web links
 @mcp.tool()
-async def get_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve.")) -> dict[str, Any]:
+async def get_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific web link, including its URL, name, and associated metadata. Useful for inspecting or displaying a saved web link by its unique identifier."""
 
     # Construct request model with validation
@@ -6177,7 +6308,7 @@ async def restore_web_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link to restore from the trash."),
     name: str | None = Field(None, description="An optional new name to assign to the web link upon restoration, useful if a naming conflict exists in the destination folder."),
     parent: _models.PostWebLinksIdBodyParent | None = Field(None, description="An optional parent folder object specifying an alternative destination to restore the web link into, used when the original parent folder has been deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a web link from the trash back to its original location or an alternative parent folder. An optional new name and parent folder can be specified if the original folder no longer exists."""
 
     # Construct request model with validation
@@ -6226,7 +6357,7 @@ async def update_web_link(
     password: str | None = Field(None, description="A password required to access the shared link. Must be at least eight characters and include a number, uppercase letter, or non-alphanumeric character. Can only be set when access is 'open'; set to null to remove an existing password."),
     vanity_name: str | None = Field(None, description="A custom vanity slug appended to the shared link URL path. Must be at least 12 characters. Avoid using vanity names for sensitive content as they are easier to guess than standard shared links.", min_length=12),
     unshared_at: str | None = Field(None, description="The ISO 8601 datetime at which the shared link expires and becomes inaccessible. Must be a future datetime and can only be set by users on paid accounts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing web link object, allowing changes to its URL, name, description, parent location, and shared link settings such as access level, password, vanity name, and expiration."""
 
     # Construct request model with validation
@@ -6266,7 +6397,7 @@ async def update_web_link(
 
 # Tags: Web links
 @mcp.tool()
-async def delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to delete.")) -> dict[str, Any]:
+async def delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a web link by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -6302,7 +6433,7 @@ async def delete_web_link(web_link_id: str = Field(..., description="The unique 
 
 # Tags: Trashed web links
 @mcp.tool()
-async def get_trashed_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve from the trash.")) -> dict[str, Any]:
+async def get_trashed_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to retrieve from the trash.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a web link that has been moved to the trash. Useful for inspecting or restoring a trashed web link before permanent deletion."""
 
     # Construct request model with validation
@@ -6338,7 +6469,7 @@ async def get_trashed_web_link(web_link_id: str = Field(..., description="The un
 
 # Tags: Trashed web links
 @mcp.tool()
-async def permanently_delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to permanently delete from the trash.")) -> dict[str, Any]:
+async def permanently_delete_web_link(web_link_id: str = Field(..., description="The unique identifier of the web link to permanently delete from the trash.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a web link that is currently in the trash, removing it from Box entirely. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -6374,7 +6505,7 @@ async def permanently_delete_web_link(web_link_id: str = Field(..., description=
 
 # Tags: Shared links (Web Links)
 @mcp.tool()
-async def get_web_link_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string. Both the shared link and password fields must follow the prescribed header format.")) -> dict[str, Any]:
+async def get_web_link_from_shared_link(boxapi: str = Field(..., description="Authorization header containing the shared link URL and an optional password, formatted as a key-value string. Both the shared link and password fields must follow the prescribed header format.")) -> dict[str, Any] | ToolResult:
     """Retrieves web link details using only a shared link URL, supporting links originating from within or outside the current enterprise. Useful when the web link ID is unknown and only the shared link is available."""
 
     # Construct request model with validation
@@ -6413,7 +6544,7 @@ async def get_web_link_from_shared_link(boxapi: str = Field(..., description="Au
 async def get_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link whose shared link information you want to retrieve."),
     fields: str = Field(..., description="Specifies which fields to include in the response; must be set to request shared link data to be returned for the web link."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the shared link details for a specific web link item. Use this to inspect sharing settings, permissions, and access information for a web link."""
 
     # Construct request model with validation
@@ -6462,7 +6593,7 @@ async def add_web_link_shared_link(
     can_download: bool | None = Field(None, description="Whether recipients of the shared link are permitted to download the web link. Can only be set when access is 'open' or 'company'."),
     can_preview: bool | None = Field(None, description="Whether recipients of the shared link are permitted to preview the web link. This value is always true and also applies to items within a shared folder."),
     can_edit: bool | None = Field(None, description="Whether recipients of the shared link are permitted to edit the item. Can only be true when the item type is a file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds or updates a shared link on a web link item, controlling access level, password protection, expiration, and permissions. Returns the web link with the shared link fields populated."""
 
     # Construct request model with validation
@@ -6515,7 +6646,7 @@ async def update_web_link_shared_link(
     can_download: bool | None = Field(None, description="Whether the shared link permits downloading of the web link. Can only be set when access is 'open' or 'company'."),
     can_preview: bool | None = Field(None, description="Whether the shared link permits previewing of the web link; this value is always true and also applies to items within a shared folder."),
     can_edit: bool | None = Field(None, description="Whether the shared link permits editing; can only be true when the item type is a file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the shared link settings on an existing web link, allowing you to control access level, password protection, expiration, and permissions."""
 
     # Construct request model with validation
@@ -6562,7 +6693,7 @@ async def remove_web_link_shared_link(
     web_link_id: str = Field(..., description="The unique identifier of the web link from which the shared link will be removed."),
     fields: str = Field(..., description="A comma-separated list of fields to include in the response; must include 'shared_link' to confirm the shared link has been removed."),
     shared_link: dict[str, Any] | None = Field(None, description="Set this field to null to remove the shared link from the web link; omitting or providing any other value will not revoke the link."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the shared link from a specified web link, revoking any previously granted public or shared access. The updated web link object is returned with the shared link field reflected."""
 
     # Construct request model with validation
@@ -6604,7 +6735,7 @@ async def remove_web_link_shared_link(
 
 # Tags: Shared links (App Items)
 @mcp.tool()
-async def get_app_item_from_shared_link(boxapi: str = Field(..., description="A header value containing the shared link URL and an optional password, formatted as a key-value pair string using the pattern `shared_link=[link]&shared_link_password=[password]`.")) -> dict[str, Any]:
+async def get_app_item_from_shared_link(boxapi: str = Field(..., description="A header value containing the shared link URL and an optional password, formatted as a key-value pair string using the pattern `shared_link=[link]&shared_link_password=[password]`.")) -> dict[str, Any] | ToolResult:
     """Retrieves the app item associated with a given shared link, which may originate from the current enterprise or an external one. Requires the shared link URL and an optional password passed as a formatted header value."""
 
     # Construct request model with validation
@@ -6646,7 +6777,7 @@ async def list_users(
     external_app_user_id: str | None = Field(None, description="Restricts results to app users that were created with the specified external_app_user_id value, allowing lookup of app users by your own identifier assigned at creation time."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through large result sets. Must not exceed 10000."),
     limit: str | None = Field(None, description="Maximum number of users to return in a single response page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all enterprise users, including their user ID, public name, and login. Requires the authenticated user and application to have enterprise-wide user lookup permissions."""
 
     _offset = _parse_int(offset)
@@ -6705,7 +6836,7 @@ async def create_user(
     status: Literal["active", "inactive", "cannot_delete_edit", "cannot_delete_edit_upload"] | None = Field(None, description="The initial account status for the user, controlling their ability to log in and interact with content."),
     external_app_user_id: str | None = Field(None, description="A custom identifier from an external identity provider that can be used to look up and map this Box user to an external system's user record."),
     name_and_login: str | None = Field(None, description="The user's display name and login email in RFC 5322 format: \"Display Name <user@example.com>\". The login email is required unless is_platform_access_only is true, in which case you may omit the angle-bracket portion and supply only the display name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new managed or app user within a Box enterprise account. Requires admin-level permissions on the calling user or application."""
 
     # Call helper functions
@@ -6748,7 +6879,7 @@ async def create_user(
 
 # Tags: Users
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for the currently authenticated user, whether that is an OAuth 2.0 authorizing user, a JWT service account, or an impersonated user specified via the As-User header."""
 
     # Extract parameters for API call
@@ -6778,7 +6909,7 @@ async def get_current_user() -> dict[str, Any]:
 async def terminate_user_sessions(
     user_ids: list[str] | None = Field(None, description="A list of unique user IDs identifying the accounts whose sessions should be terminated. Order is not significant; each entry should be a valid numeric user ID string."),
     user_logins: list[str] | None = Field(None, description="A list of user login email addresses identifying the accounts whose sessions should be terminated. Order is not significant; each entry should be a valid email address associated with a user account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Terminates active sessions for one or more users by dispatching asynchronous jobs, after validating the caller's roles and permissions. Accepts user IDs, user logins, or both to identify the target accounts."""
 
     # Construct request model with validation
@@ -6816,7 +6947,7 @@ async def terminate_user_sessions(
 
 # Tags: Users
 @mcp.tool()
-async def get_user(user_id: str = Field(..., description="The unique identifier of the user whose information you want to retrieve.")) -> dict[str, Any]:
+async def get_user(user_id: str = Field(..., description="The unique identifier of the user whose information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for a specific user within the enterprise. Also returns a limited set of fields for external collaborators, with restricted fields returning null."""
 
     # Construct request model with validation
@@ -6875,7 +7006,7 @@ async def update_user(
     space_amount: str | None = Field(None, description="The user's total available storage quota in bytes. Set to -1 to grant unlimited storage."),
     email: str | None = Field(None, description="The email address to which enterprise notifications for this user will be sent."),
     external_app_user_id: str | None = Field(None, description="An external identifier linking this Box app user to a user in an external identity provider. Can only be updated using a token from the application that originally created the app user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates profile, permissions, and account settings for a managed or app user within an enterprise. Requires admin-level permissions to execute."""
 
     _space_amount = _parse_int(space_amount)
@@ -6921,7 +7052,7 @@ async def delete_user(
     user_id: str = Field(..., description="The unique identifier of the user to delete."),
     notify: bool | None = Field(None, description="Whether to send the user an email notification informing them of their account deletion."),
     force: bool | None = Field(None, description="When set to true, bypasses deletion safeguards and removes the user even if they still own files, were recently active, or recently joined the enterprise from a free account; their owned files will also be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a user account from the enterprise. By default, deletion is blocked if the user owns content, was recently active, or recently joined from a free account; use the force parameter to override these safeguards or move owned content beforehand."""
 
     # Construct request model with validation
@@ -6960,7 +7091,7 @@ async def delete_user(
 
 # Tags: User avatars
 @mcp.tool()
-async def get_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar image should be retrieved.")) -> dict[str, Any]:
+async def get_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar image should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the avatar image for a specified user. Returns the user's profile picture as an image resource."""
 
     # Construct request model with validation
@@ -6999,7 +7130,7 @@ async def get_user_avatar(user_id: str = Field(..., description="The unique iden
 async def upload_user_avatar(
     user_id: str = Field(..., description="The unique identifier of the user whose avatar is being added or updated."),
     pic: str | None = Field(None, description="The image file to upload as the user's avatar. Must be a JPG or PNG file and cannot exceed 1MB in size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds or replaces the avatar image for a specified user. Accepts JPG or PNG files up to 1MB in size."""
 
     # Construct request model with validation
@@ -7032,6 +7163,7 @@ async def upload_user_avatar(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["pic"],
         headers=_http_headers,
     )
 
@@ -7039,7 +7171,7 @@ async def upload_user_avatar(
 
 # Tags: User avatars
 @mcp.tool()
-async def delete_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar will be permanently deleted.")) -> dict[str, Any]:
+async def delete_user_avatar(user_id: str = Field(..., description="The unique identifier of the user whose avatar will be permanently deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently removes the avatar image for the specified user. This action is irreversible and cannot be undone."""
 
     # Construct request model with validation
@@ -7079,7 +7211,7 @@ async def transfer_user_folders(
     user_id: str = Field(..., description="The unique identifier of the user whose root folder and all owned content will be transferred."),
     notify: bool | None = Field(None, description="Whether to send email notifications to relevant users about the transfer action being performed."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the destination user who will receive ownership of the transferred folders and files."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transfers all files, folders, and workflows owned by a specified user into another user's account by moving the root folder. Requires administrative permissions; large transfers run asynchronously, and admins receive an email upon completion."""
 
     # Construct request model with validation
@@ -7121,7 +7253,7 @@ async def transfer_user_folders(
 
 # Tags: Email aliases
 @mcp.tool()
-async def list_user_email_aliases(user_id: str = Field(..., description="The unique identifier of the user whose email aliases should be retrieved.")) -> dict[str, Any]:
+async def list_user_email_aliases(user_id: str = Field(..., description="The unique identifier of the user whose email aliases should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all secondary email aliases associated with a specific user account. Note that the user's primary login email is not included in the returned collection."""
 
     # Construct request model with validation
@@ -7160,7 +7292,7 @@ async def list_user_email_aliases(user_id: str = Field(..., description="The uni
 async def create_email_alias(
     user_id: str = Field(..., description="The unique identifier of the user account to which the email alias will be added."),
     email: str | None = Field(None, description="The email address to register as an alias on the user account. The domain portion must be verified and registered to your enterprise before use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new email alias to an existing user account, allowing the user to send and receive email under an additional address. The alias domain must be registered and verified under your enterprise."""
 
     # Construct request model with validation
@@ -7202,7 +7334,7 @@ async def create_email_alias(
 async def remove_user_email_alias(
     user_id: str = Field(..., description="The unique identifier of the user whose email alias will be removed."),
     email_alias_id: str = Field(..., description="The unique identifier of the email alias to remove from the user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific email alias from a user's account. Once removed, the alias can no longer be used to identify or contact the user."""
 
     # Construct request model with validation
@@ -7241,7 +7373,7 @@ async def remove_user_email_alias(
 async def list_user_memberships(
     user_id: str = Field(..., description="The unique identifier of the user whose group memberships are being retrieved."),
     limit: str | None = Field(None, description="The maximum number of group memberships to return per page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all group memberships for a specified user. Accessible only to members of the same group or users with admin-level permissions."""
 
     _limit = _parse_int(limit)
@@ -7285,7 +7417,7 @@ async def list_user_memberships(
 async def invite_enterprise_user(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the enterprise to which the user is being invited."),
     login: str | None = Field(None, description="The email address (login) of the existing Box user to invite to the enterprise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invites an existing Box user to join an enterprise by sending them an email prompt to accept within the Box web application. The user must already have a Box account and must not currently belong to another enterprise."""
 
     # Construct request model with validation
@@ -7324,7 +7456,7 @@ async def invite_enterprise_user(
 
 # Tags: Invites
 @mcp.tool()
-async def get_invite(invite_id: str = Field(..., description="The unique identifier of the invite whose status you want to retrieve.")) -> dict[str, Any]:
+async def get_invite(invite_id: str = Field(..., description="The unique identifier of the invite whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of a specific user invite. Useful for checking whether an invite has been accepted, is pending, or has expired."""
 
     # Construct request model with validation
@@ -7364,7 +7496,7 @@ async def list_groups(
     filter_term: str | None = Field(None, description="Narrows results to only groups whose name begins with the specified search term. Omitting this parameter returns all groups."),
     limit: str | None = Field(None, description="Maximum number of groups to return in a single page of results. Accepts values between 1 and 1000."),
     offset: str | None = Field(None, description="Zero-based index of the first item to include in the response, used for paginating through results. Offsets greater than 10000 are not permitted and will return a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all groups belonging to the enterprise, with optional filtering by name. Requires admin permissions to access enterprise group data."""
 
     _limit = _parse_int(limit)
@@ -7412,7 +7544,7 @@ async def create_group(
     description: str | None = Field(None, description="A human-readable description providing additional context about the group's purpose or origin. Maximum 255 characters.", max_length=255),
     invitability_level: Literal["admins_only", "admins_and_members", "all_managed_users"] | None = Field(None, description="Controls who can invite this group to collaborate on folders. Use `admins_only` to restrict invitations to enterprise admins, co-admins, and the group's admin; `admins_and_members` to also allow group members; or `all_managed_users` to allow any managed user in the enterprise."),
     member_viewability_level: Literal["admins_only", "admins_and_members", "all_managed_users"] | None = Field(None, description="Controls who can view the membership list of this group. Use `admins_only` to restrict visibility to enterprise admins, co-admins, and the group's admin; `admins_and_members` to also allow group members; or `all_managed_users` to allow any managed user in the enterprise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new user group within an enterprise account. Requires admin permissions; supports linking to external directory systems like Active Directory or Okta for one-way sync."""
 
     # Construct request model with validation
@@ -7450,7 +7582,7 @@ async def create_group(
 
 # Tags: Session termination
 @mcp.tool()
-async def terminate_group_sessions(group_ids: list[str] | None = Field(None, description="A list of group IDs whose sessions should be terminated. Order is not significant; each item should be a valid group ID string.")) -> dict[str, Any]:
+async def terminate_group_sessions(group_ids: list[str] | None = Field(None, description="A list of group IDs whose sessions should be terminated. Order is not significant; each item should be a valid group ID string.")) -> dict[str, Any] | ToolResult:
     """Terminates all active sessions for one or more user groups by creating asynchronous jobs after validating group roles and permissions. Returns the status of the termination request."""
 
     # Construct request model with validation
@@ -7488,7 +7620,7 @@ async def terminate_group_sessions(group_ids: list[str] | None = Field(None, des
 
 # Tags: Groups
 @mcp.tool()
-async def get_group(group_id: str = Field(..., description="The unique identifier of the group to retrieve.")) -> dict[str, Any]:
+async def get_group(group_id: str = Field(..., description="The unique identifier of the group to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific group by its ID. Only group members or users with admin-level permissions can access this endpoint."""
 
     # Construct request model with validation
@@ -7532,7 +7664,7 @@ async def update_group(
     description: str | None = Field(None, description="A human-readable description providing additional context about the group's purpose or origin. Maximum 255 characters.", max_length=255),
     invitability_level: Literal["admins_only", "admins_and_members", "all_managed_users"] | None = Field(None, description="Controls who can invite this group to collaborate on folders. Use `admins_only` to restrict invitations to enterprise and group admins, `admins_and_members` to also allow group members, or `all_managed_users` to allow any managed user in the enterprise."),
     member_viewability_level: Literal["admins_only", "admins_and_members", "all_managed_users"] | None = Field(None, description="Controls who can view the membership list of this group. Use `admins_only` to restrict visibility to enterprise and group admins, `admins_and_members` to also allow group members, or `all_managed_users` to allow any managed user in the enterprise."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the properties of an existing group, such as its name, description, sync identifiers, and visibility settings. Only group admins or enterprise admins have permission to perform this operation."""
 
     # Construct request model with validation
@@ -7571,7 +7703,7 @@ async def update_group(
 
 # Tags: Groups
 @mcp.tool()
-async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to be permanently deleted.")) -> dict[str, Any]:
+async def delete_group(group_id: str = Field(..., description="The unique identifier of the group to be permanently deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group and all associated data. Requires admin-level permissions to perform this action."""
 
     # Construct request model with validation
@@ -7610,7 +7742,7 @@ async def delete_group(group_id: str = Field(..., description="The unique identi
 async def list_group_members(
     group_id: str = Field(..., description="The unique identifier of the group whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of membership records to return per page. Accepts values up to 1000; omit to use the API default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all membership records for a specified group, including details about each member. Accessible only to members of the group or users with admin-level permissions."""
 
     _limit = _parse_int(limit)
@@ -7655,7 +7787,7 @@ async def list_group_collaborations(
     group_id: str = Field(..., description="The unique identifier of the group whose collaborations you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of collaboration records to return per page. Accepts values up to 1000."),
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, used for paginating through results. Offset values exceeding 10000 will result in a 400 error."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all collaborations for a specified group, showing which files or folders the group can access and with what role. Requires admin permissions to inspect enterprise groups."""
 
     _limit = _parse_int(limit)
@@ -7702,7 +7834,7 @@ async def add_user_to_group(
     group_id: str | None = Field(None, alias="groupId", description="The unique identifier of the group the user will be added to."),
     role: Literal["member", "admin"] | None = Field(None, description="The role assigned to the user within the group. Use 'member' for standard access or 'admin' for elevated group management privileges."),
     configurable_permissions: dict[str, bool] | None = Field(None, description="Custom permission overrides for group admins only; has no effect on members with the 'member' role. Pass null to disable all configurable permissions, or specify individual permissions — any omitted permissions will default to enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user to a group with a specified role and optional custom admin permissions. Requires admin-level permissions to perform this action."""
 
     # Construct request model with validation
@@ -7742,7 +7874,7 @@ async def add_user_to_group(
 
 # Tags: Group memberships
 @mcp.tool()
-async def get_group_membership(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to retrieve.")) -> dict[str, Any]:
+async def get_group_membership(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific group membership by its unique ID. Only group admins or users with admin-level permissions can access this endpoint."""
 
     # Construct request model with validation
@@ -7782,7 +7914,7 @@ async def update_group_membership(
     group_membership_id: str = Field(..., description="The unique identifier of the group membership record to update."),
     role: Literal["member", "admin"] | None = Field(None, description="The role to assign to the user within the group. Accepted values are 'member' for standard access or 'admin' for elevated group management privileges."),
     configurable_permissions: dict[str, bool] | None = Field(None, description="A map of specific permission overrides for a group admin, replacing their default access levels. Only applies to users with the 'admin' role; has no effect on members. Pass null to disable all configurable permissions; omitted permissions default to enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a user's role or permissions within a specific group membership. Only group admins or users with admin-level permissions can perform this action."""
 
     # Construct request model with validation
@@ -7821,7 +7953,7 @@ async def update_group_membership(
 
 # Tags: Group memberships
 @mcp.tool()
-async def remove_group_member(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to delete, representing the association between a specific user and group.")) -> dict[str, Any]:
+async def remove_group_member(group_membership_id: str = Field(..., description="The unique identifier of the group membership record to delete, representing the association between a specific user and group.")) -> dict[str, Any] | ToolResult:
     """Removes a user from a group by deleting the specified group membership. Only group admins or users with admin-level permissions can perform this action."""
 
     # Construct request model with validation
@@ -7857,7 +7989,7 @@ async def remove_group_member(group_membership_id: str = Field(..., description=
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks(limit: str | None = Field(None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any]:
+async def list_webhooks(limit: str | None = Field(None, description="The maximum number of webhooks to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks defined for the authenticated application, scoped to files and folders owned by the requesting user. Note that admins cannot view webhooks created by service accounts unless they have explicit access to those folders, and vice versa."""
 
     _limit = _parse_int(limit)
@@ -7897,7 +8029,7 @@ async def list_webhooks(limit: str | None = Field(None, description="The maximum
 
 # Tags: Webhooks
 @mcp.tool()
-async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration and details of a specific webhook by its unique identifier. Useful for inspecting webhook settings, target URLs, and event subscriptions."""
 
     # Construct request model with validation
@@ -7933,7 +8065,7 @@ async def get_webhook(webhook_id: str = Field(..., description="The unique ident
 
 # Tags: Webhooks
 @mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any]:
+async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook by its unique identifier, stopping all future event notifications associated with it."""
 
     # Construct request model with validation
@@ -7977,7 +8109,7 @@ async def update_skill_cards_on_file(
     file_version_id: str | None = Field(None, alias="file_versionId", description="The unique identifier of the specific file version to associate the Skill cards with. Use this to target a particular version rather than the current version of the file."),
     unit: str | None = Field(None, description="The type of resource unit being referenced. This value is always 'file' for file-level Skill card operations."),
     value: float | None = Field(None, description="The number of resources affected by this skill invocation. Typically reflects how many files or items the skill operation applies to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Overwrites and updates all Box Skill metadata cards on a file for a given skill. Use this method to replace existing Skill cards with new ones in a single operation."""
 
     # Construct request model with validation
@@ -8027,7 +8159,7 @@ async def list_events(
     event_type: list[Literal["ACCESS_GRANTED", "ACCESS_REVOKED", "ADD_DEVICE_ASSOCIATION", "ADD_LOGIN_ACTIVITY_DEVICE", "ADMIN_LOGIN", "APPLICATION_CREATED", "APPLICATION_PUBLIC_KEY_ADDED", "APPLICATION_PUBLIC_KEY_DELETED", "CHANGE_ADMIN_ROLE", "CHANGE_FOLDER_PERMISSION", "COLLABORATION_ACCEPT", "COLLABORATION_EXPIRATION", "COLLABORATION_INVITE", "COLLABORATION_REMOVE", "COLLABORATION_ROLE_CHANGE", "COMMENT_CREATE", "COMMENT_DELETE", "CONTENT_WORKFLOW_ABNORMAL_DOWNLOAD_ACTIVITY", "CONTENT_WORKFLOW_AUTOMATION_ADD", "CONTENT_WORKFLOW_AUTOMATION_DELETE", "CONTENT_WORKFLOW_POLICY_ADD", "CONTENT_WORKFLOW_SHARING_POLICY_VIOLATION", "CONTENT_WORKFLOW_UPLOAD_POLICY_VIOLATION", "COPY", "DATA_RETENTION_CREATE_RETENTION", "DATA_RETENTION_REMOVE_RETENTION", "DELETE", "DELETE_USER", "DEVICE_TRUST_CHECK_FAILED", "DOWNLOAD", "EDIT", "EDIT_USER", "EMAIL_ALIAS_CONFIRM", "EMAIL_ALIAS_REMOVE", "ENTERPRISE_APP_AUTHORIZATION_UPDATE", "EXTERNAL_COLLAB_SECURITY_SETTINGS", "FAILED_LOGIN", "FILE_MARKED_MALICIOUS", "FILE_WATERMARKED_DOWNLOAD", "GROUP_ADD_ITEM", "GROUP_ADD_USER", "GROUP_CREATION", "GROUP_DELETION", "GROUP_EDITED", "GROUP_REMOVE_ITEM", "GROUP_REMOVE_USER", "ITEM_EMAIL_SEND", "ITEM_MODIFY", "ITEM_OPEN", "ITEM_SHARED_UPDATE", "ITEM_SYNC", "ITEM_UNSYNC", "LEGAL_HOLD_ASSIGNMENT_CREATE", "LEGAL_HOLD_ASSIGNMENT_DELETE", "LEGAL_HOLD_POLICY_CREATE", "LEGAL_HOLD_POLICY_DELETE", "LEGAL_HOLD_POLICY_UPDATE", "LOCK", "LOGIN", "METADATA_INSTANCE_CREATE", "METADATA_INSTANCE_DELETE", "METADATA_INSTANCE_UPDATE", "METADATA_TEMPLATE_CREATE", "METADATA_TEMPLATE_DELETE", "METADATA_TEMPLATE_UPDATE", "MOVE", "NEW_USER", "OAUTH2_ACCESS_TOKEN_REVOKE", "PREVIEW", "REMOVE_DEVICE_ASSOCIATION", "REMOVE_LOGIN_ACTIVITY_DEVICE", "RENAME", "RETENTION_POLICY_ASSIGNMENT_ADD", "SHARE", "SHARED_LINK_SEND", "SHARE_EXPIRATION", "SHIELD_ALERT", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED", "SHIELD_EXTERNAL_COLLAB_ACCESS_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED", "SHIELD_EXTERNAL_COLLAB_INVITE_BLOCKED_MISSING_JUSTIFICATION", "SHIELD_JUSTIFICATION_APPROVAL", "SHIELD_SHARED_LINK_ACCESS_BLOCKED", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_CREATE", "SHIELD_SHARED_LINK_STATUS_RESTRICTED_ON_UPDATE", "SIGN_DOCUMENT_ASSIGNED", "SIGN_DOCUMENT_CANCELLED", "SIGN_DOCUMENT_COMPLETED", "SIGN_DOCUMENT_CONVERTED", "SIGN_DOCUMENT_CREATED", "SIGN_DOCUMENT_DECLINED", "SIGN_DOCUMENT_EXPIRED", "SIGN_DOCUMENT_SIGNED", "SIGN_DOCUMENT_VIEWED_BY_SIGNED", "SIGNER_DOWNLOADED", "SIGNER_FORWARDED", "STORAGE_EXPIRATION", "TASK_ASSIGNMENT_CREATE", "TASK_ASSIGNMENT_DELETE", "TASK_ASSIGNMENT_UPDATE", "TASK_CREATE", "TASK_UPDATE", "TERMS_OF_SERVICE_ACCEPT", "TERMS_OF_SERVICE_REJECT", "UNDELETE", "UNLOCK", "UNSHARE", "UPDATE_COLLABORATION_EXPIRATION", "UPDATE_SHARE_EXPIRATION", "UPLOAD", "USER_AUTHENTICATE_OAUTH2_ACCESS_TOKEN_CREATE", "WATERMARK_LABEL_CREATE", "WATERMARK_LABEL_DELETE"]] | None = Field(None, description="A list of specific event type strings to filter results by. Only applicable when 'stream_type' is 'admin_logs' or 'admin_logs_streaming'; ignored for all other stream types. Each item should be a valid Box event type identifier."),
     created_after: str | None = Field(None, description="The earliest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types."),
     created_before: str | None = Field(None, description="The latest date and time (inclusive) for which to return events, specified in ISO 8601 format. Only applicable when 'stream_type' is 'admin_logs'; ignored for all other stream types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves up to one year of past events for the authenticated user or, with admin privileges, for the entire enterprise. Supports both real-time polling and historical querying via configurable stream types."""
 
     _limit = _parse_int(limit)
@@ -8073,7 +8205,7 @@ async def list_events(
 async def list_collections(
     offset: str | None = Field(None, description="The zero-based index of the first item to include in the response, enabling pagination through large result sets. Offset values exceeding 10,000 will result in a 400 error."),
     limit: str | None = Field(None, description="The maximum number of collections to return in a single response page. Accepts values up to 1,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all collections belonging to the authenticated user. Currently, only the favorites collection is supported."""
 
     _offset = _parse_int(offset)
@@ -8118,7 +8250,7 @@ async def list_collection_items(
     collection_id: str = Field(..., description="The unique identifier of the collection whose items you want to retrieve."),
     offset: str | None = Field(None, description="The zero-based index of the first item to return, enabling pagination through results. Must not exceed 10000; requests beyond this limit will be rejected with a 400 error."),
     limit: str | None = Field(None, description="The maximum number of items to return in a single response page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the files and folders contained within a specified collection. Supports pagination to navigate large result sets."""
 
     _offset = _parse_int(offset)
@@ -8160,7 +8292,7 @@ async def list_collection_items(
 
 # Tags: Collections
 @mcp.tool()
-async def get_collection(collection_id: str = Field(..., description="The unique identifier of the collection to retrieve.")) -> dict[str, Any]:
+async def get_collection(collection_id: str = Field(..., description="The unique identifier of the collection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific collection by its unique identifier. Use this to fetch metadata and contents associated with a single collection."""
 
     # Construct request model with validation
@@ -8196,7 +8328,7 @@ async def get_collection(collection_id: str = Field(..., description="The unique
 
 # Tags: Recent items
 @mcp.tool()
-async def list_recent_items(limit: str | None = Field(None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.")) -> dict[str, Any]:
+async def list_recent_items(limit: str | None = Field(None, description="The maximum number of recently accessed items to return. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of items recently accessed by the current user, covering activity from the last 90 days or up to the last 1000 items accessed, whichever limit is reached first."""
 
     _limit = _parse_int(limit)
@@ -8241,7 +8373,7 @@ async def list_retention_policies(
     policy_type: Literal["finite", "indefinite"] | None = Field(None, description="Filters results by the retention policy type. Use 'finite' for policies with a defined expiration period, or 'indefinite' for policies that retain content without a set end date."),
     created_by_user_id: str | None = Field(None, description="Filters results to only policies created by the user with the specified user ID. Useful for auditing or managing policies owned by a particular administrator."),
     limit: str | None = Field(None, description="Limits the number of retention policies returned per page. Accepts values up to 1000; omitting this parameter returns the default page size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all retention policies configured for the enterprise, with optional filtering by name, type, or creator. Useful for auditing data governance rules or locating specific policies before applying or modifying them."""
 
     _limit = _parse_int(limit)
@@ -8281,7 +8413,7 @@ async def list_retention_policies(
 
 # Tags: Retention policies
 @mcp.tool()
-async def get_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to retrieve.")) -> dict[str, Any]:
+async def get_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific retention policy by its unique identifier. Use this to inspect policy settings such as retention duration, disposition action, and assignment scope."""
 
     # Construct request model with validation
@@ -8328,7 +8460,7 @@ async def update_retention_policy(
     can_owner_extend_retention: bool | None = Field(None, description="Whether the owner of items under this policy is permitted to extend the retention period as it approaches expiration."),
     are_owners_notified: bool | None = Field(None, description="Whether owners and co-owners of items under this policy receive notifications as the retention period approaches its end."),
     custom_notification_recipients: list[_models.UserBase] | None = Field(None, description="An explicit list of additional users to notify when the retention duration is nearing expiration. Each item should represent a user recipient; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing retention policy's settings, including its name, duration, disposition action, and notification preferences. You can also use this operation to retire a policy or convert it from modifiable to non-modifiable."""
 
     # Construct request model with validation
@@ -8367,7 +8499,7 @@ async def update_retention_policy(
 
 # Tags: Retention policies
 @mcp.tool()
-async def delete_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to permanently delete.")) -> dict[str, Any]:
+async def delete_retention_policy(retention_policy_id: str = Field(..., description="The unique identifier of the retention policy to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a retention policy by its unique identifier. This action is irreversible and removes the policy and its associated settings."""
 
     # Construct request model with validation
@@ -8407,7 +8539,7 @@ async def list_retention_policy_assignments(
     retention_policy_id: str = Field(..., description="The unique identifier of the retention policy whose assignments you want to retrieve."),
     type_: Literal["folder", "enterprise", "metadata_template"] | None = Field(None, alias="type", description="Filters the results to only return assignments of a specific type. Accepted values are 'folder', 'enterprise', or 'metadata_template'."),
     limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all assignments for a specified retention policy, showing which folders, enterprise, or metadata templates the policy is applied to. Optionally filter results by assignment type and control page size."""
 
     _limit = _parse_int(limit)
@@ -8454,7 +8586,7 @@ async def assign_retention_policy(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the specific folder or metadata template to assign the policy to. Omit or set to null when assigning to the entire enterprise."),
     filter_fields: list[_models.PostRetentionPolicyAssignmentsBodyFilterFieldsItem] | None = Field(None, description="An array of field-value filter objects used to narrow the assignment when the target type is 'metadata_template'. Each object must contain a 'field' key and a 'value' key; currently only one filter object is supported."),
     start_date_field: str | None = Field(None, description="The date from which the retention policy assignment takes effect. When the target type is 'metadata_template', this can reference a date-type metadata attribute key ID to dynamically determine the start date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns a retention policy to a specific target, such as a folder, enterprise, or metadata template. Use this to enforce data retention rules on content within Box."""
 
     # Construct request model with validation
@@ -8493,7 +8625,7 @@ async def assign_retention_policy(
 
 # Tags: Retention policy assignments
 @mcp.tool()
-async def get_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to retrieve.")) -> dict[str, Any]:
+async def get_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific retention policy assignment by its unique ID. Use this to inspect how a retention policy has been applied to a particular content target."""
 
     # Construct request model with validation
@@ -8529,7 +8661,7 @@ async def get_retention_policy_assignment(retention_policy_assignment_id: str = 
 
 # Tags: Retention policy assignments
 @mcp.tool()
-async def delete_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to remove.")) -> dict[str, Any]:
+async def delete_retention_policy_assignment(retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment to remove.")) -> dict[str, Any] | ToolResult:
     """Removes a retention policy assignment, detaching the retention policy from the previously assigned content. This action stops the policy from being enforced on that content going forward."""
 
     # Construct request model with validation
@@ -8568,7 +8700,7 @@ async def delete_retention_policy_assignment(retention_policy_assignment_id: str
 async def list_files_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained files you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of files to return per page. Accepts values up to 1000; omit to use the API default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of files currently under retention for a specific retention policy assignment. Useful for auditing which files are actively governed by a given retention rule."""
 
     _limit = _parse_int(limit)
@@ -8612,7 +8744,7 @@ async def list_files_under_retention(
 async def list_file_versions_under_retention(
     retention_policy_assignment_id: str = Field(..., description="The unique identifier of the retention policy assignment whose retained file versions you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of file versions currently under retention for a specific retention policy assignment. Useful for auditing which file versions are being preserved by a given policy."""
 
     _limit = _parse_int(limit)
@@ -8656,7 +8788,7 @@ async def list_file_versions_under_retention(
 async def list_legal_hold_policies(
     policy_name: str | None = Field(None, description="Filters results to only include policies whose names begin with this search term. The match is case-insensitive."),
     limit: str | None = Field(None, description="The maximum number of legal hold policies to return in a single page of results. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all legal hold policies belonging to the enterprise. Supports filtering by policy name prefix to narrow results."""
 
     _limit = _parse_int(limit)
@@ -8696,7 +8828,7 @@ async def list_legal_hold_policies(
 
 # Tags: Legal hold policies
 @mcp.tool()
-async def get_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to retrieve.")) -> dict[str, Any]:
+async def get_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific legal hold policy by its unique identifier. Use this to inspect policy configuration, status, and associated metadata."""
 
     # Construct request model with validation
@@ -8737,7 +8869,7 @@ async def update_legal_hold_policy(
     policy_name: str | None = Field(None, description="The updated display name for the legal hold policy. Must not exceed 254 characters.", max_length=254),
     description: str | None = Field(None, description="An updated human-readable description of the legal hold policy's purpose or scope. Must not exceed 500 characters.", max_length=500),
     release_notes: str | None = Field(None, description="Notes explaining the reason or context for releasing this legal hold policy. Must not exceed 500 characters.", max_length=500),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the name, description, or release notes of an existing legal hold policy. Use this to modify policy details after creation without affecting associated holds."""
 
     # Construct request model with validation
@@ -8776,7 +8908,7 @@ async def update_legal_hold_policy(
 
 # Tags: Legal hold policies
 @mcp.tool()
-async def delete_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to delete.")) -> dict[str, Any]:
+async def delete_legal_hold_policy(legal_hold_policy_id: str = Field(..., description="The unique identifier of the legal hold policy to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes an existing legal hold policy by its ID. This is an asynchronous operation, so the policy may not be fully removed immediately when the response is returned."""
 
     # Construct request model with validation
@@ -8817,7 +8949,7 @@ async def list_legal_hold_policy_assignments(
     assign_to_type: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(None, description="Narrows results to only assignments targeting a specific item type. Accepted values are 'file', 'file_version', 'folder', 'user', 'ownership', or 'interactions'."),
     assign_to_id: str | None = Field(None, description="Narrows results to only assignments targeting a specific item by its unique ID. Best used in combination with assign_to_type for precise filtering."),
     limit: str | None = Field(None, description="The maximum number of assignments to return in a single page of results. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of all items (files, folders, users, etc.) that a specific legal hold policy has been assigned to. Supports filtering by item type and item ID for targeted lookups."""
 
     _limit = _parse_int(limit)
@@ -8861,7 +8993,7 @@ async def assign_legal_hold_policy(
     policy_id: str | None = Field(None, description="The unique identifier of the legal hold policy to assign to the target item."),
     type_: Literal["file", "file_version", "folder", "user", "ownership", "interactions"] | None = Field(None, alias="type", description="The category of item to which the legal hold policy will be applied. Must be one of: file, file_version, folder, user, ownership, or interactions."),
     id_: str | None = Field(None, alias="id", description="The unique identifier of the specific item (file, folder, user, etc.) to which the legal hold policy will be assigned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns a legal hold policy to a specific item, such as a file, file version, folder, user, ownership, or interactions. Use this to enforce legal holds across different content types within Box."""
 
     # Construct request model with validation
@@ -8900,7 +9032,7 @@ async def assign_legal_hold_policy(
 
 # Tags: Legal hold policy assignments
 @mcp.tool()
-async def get_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to retrieve.")) -> dict[str, Any]:
+async def get_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific legal hold policy assignment by its unique ID. Use this to inspect which users, folders, or files are bound to a particular legal hold policy."""
 
     # Construct request model with validation
@@ -8936,7 +9068,7 @@ async def get_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str 
 
 # Tags: Legal hold policy assignments
 @mcp.tool()
-async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to remove.")) -> dict[str, Any]:
+async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment to remove.")) -> dict[str, Any] | ToolResult:
     """Removes a legal hold policy assignment from an item, unlinking the policy from the associated content. This is an asynchronous operation; the hold may not be fully released by the time the response is returned."""
 
     # Construct request model with validation
@@ -8975,7 +9107,7 @@ async def remove_legal_hold_policy_assignment(legal_hold_policy_assignment_id: s
 async def list_legal_hold_assignment_files(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose held files you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of files to return per page, up to a maximum of 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of files with their current file versions held under a specific legal hold policy assignment. For previous file versions on hold, use the file versions on hold endpoint instead."""
 
     _limit = _parse_int(limit)
@@ -9019,7 +9151,7 @@ async def list_legal_hold_assignment_files(
 async def list_legal_hold_assignment_file_versions(
     legal_hold_policy_assignment_id: str = Field(..., description="The unique identifier of the legal hold policy assignment whose past file versions on hold should be retrieved."),
     limit: str | None = Field(None, description="The maximum number of file version records to return per page. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of previous (past) file versions placed on hold for a specific legal hold policy assignment. Use this endpoint for historical file versions; for current file versions on hold, use the files_on_hold endpoint instead."""
 
     _limit = _parse_int(limit)
@@ -9060,7 +9192,7 @@ async def list_legal_hold_assignment_file_versions(
 
 # Tags: File version legal holds
 @mcp.tool()
-async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..., description="The unique identifier of the file version legal hold record to retrieve.")) -> dict[str, Any]:
+async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..., description="The unique identifier of the file version legal hold record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details about the legal hold policies assigned to a specific file version. Use this to inspect which legal holds are actively applied to a given file version."""
 
     # Construct request model with validation
@@ -9099,7 +9231,7 @@ async def get_file_version_legal_hold(file_version_legal_hold_id: str = Field(..
 async def list_file_version_legal_holds(
     policy_id: str = Field(..., description="The unique identifier of the legal hold policy whose file version holds you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of file version legal hold records to return in a single page of results; must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves file versions currently held under a specific legal hold policy, covering legacy-architecture holds only. For holds in the new architecture, use the legal hold policy assignment endpoints instead."""
 
     _limit = _parse_int(limit)
@@ -9139,7 +9271,7 @@ async def list_file_version_legal_holds(
 
 # Tags: Shield information barriers
 @mcp.tool()
-async def get_information_barrier(shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier to retrieve.")) -> dict[str, Any]:
+async def get_information_barrier(shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific shield information barrier by its unique ID. Useful for inspecting the configuration and status of an existing barrier between user groups."""
 
     # Construct request model with validation
@@ -9178,7 +9310,7 @@ async def get_information_barrier(shield_information_barrier_id: str = Field(...
 async def update_shield_barrier_status(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the shield information barrier whose status you want to change."),
     status: Literal["pending", "disabled"] | None = Field(None, description="The target status to apply to the shield information barrier. Accepted values are 'pending' (barrier is queued for activation) or 'disabled' (barrier is turned off)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Changes the status of a shield information barrier to control its enforcement state. Use this to activate, suspend, or disable an existing barrier by its unique ID."""
 
     # Construct request model with validation
@@ -9216,7 +9348,7 @@ async def update_shield_barrier_status(
 
 # Tags: Shield information barriers
 @mcp.tool()
-async def list_shield_information_barriers(limit: str | None = Field(None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any]:
+async def list_shield_information_barriers(limit: str | None = Field(None, description="The maximum number of shield information barrier records to return in a single page of results. Must be between 1 and 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all shield information barriers configured for the enterprise associated with the JWT token. Shield information barriers restrict communication and data access between internal groups."""
 
     _limit = _parse_int(limit)
@@ -9256,7 +9388,7 @@ async def list_shield_information_barriers(limit: str | None = Field(None, descr
 
 # Tags: Shield information barriers
 @mcp.tool()
-async def create_shield_information_barrier(enterprise: _models.PostShieldInformationBarriersBodyEnterprise | None = Field(None, description="The type and ID of the enterprise under which this shield information barrier will be created.")) -> dict[str, Any]:
+async def create_shield_information_barrier(enterprise: _models.PostShieldInformationBarriersBodyEnterprise | None = Field(None, description="The type and ID of the enterprise under which this shield information barrier will be created.")) -> dict[str, Any] | ToolResult:
     """Creates a shield information barrier within an enterprise to separate individuals or groups and prevent confidential information from passing between them. Use this to enforce ethical walls or compliance boundaries within the same firm."""
 
     # Construct request model with validation
@@ -9297,7 +9429,7 @@ async def create_shield_information_barrier(enterprise: _models.PostShieldInform
 async def list_barrier_reports(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose reports should be listed."),
     limit: str | None = Field(None, description="The maximum number of reports to return per page. Accepts values up to 1000; omit to use the server default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of shield information barrier reports associated with a specific barrier. Use this to audit or review compliance reports generated for a given information barrier."""
 
     _limit = _parse_int(limit)
@@ -9340,7 +9472,7 @@ async def list_barrier_reports(
 async def create_barrier_report(
     id_: str | None = Field(None, alias="id", description="The unique identifier of the shield information barrier for which the report will be generated."),
     type_: Literal["shield_information_barrier"] | None = Field(None, alias="type", description="The resource type of the shield information barrier being referenced. Must be set to the designated barrier type value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generates a compliance report for a specified shield information barrier, providing a snapshot of the barrier's configuration and activity. Useful for auditing and regulatory review of information separation policies."""
 
     # Construct request model with validation
@@ -9378,7 +9510,7 @@ async def create_barrier_report(
 
 # Tags: Shield information barrier reports
 @mcp.tool()
-async def get_barrier_report(shield_information_barrier_report_id: str = Field(..., description="The unique identifier of the shield information barrier report to retrieve.")) -> dict[str, Any]:
+async def get_barrier_report(shield_information_barrier_report_id: str = Field(..., description="The unique identifier of the shield information barrier report to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier report by its unique ID. Use this to fetch the status and details of a previously created compliance barrier report."""
 
     # Construct request model with validation
@@ -9414,7 +9546,7 @@ async def get_barrier_report(shield_information_barrier_report_id: str = Field(.
 
 # Tags: Shield information barrier segments
 @mcp.tool()
-async def get_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to retrieve.")) -> dict[str, Any]:
+async def get_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific shield information barrier segment by its unique ID. Shield information barrier segments define the boundaries that restrict information flow between groups within an organization."""
 
     # Construct request model with validation
@@ -9454,7 +9586,7 @@ async def update_barrier_segment(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to update."),
     name: str | None = Field(None, description="The new name to assign to the barrier segment. Must contain at least one non-whitespace character.", pattern="\\S+"),
     description: str | None = Field(None, description="The new description to assign to the barrier segment, providing context about its purpose or the division it represents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the name and/or description of a specific shield information barrier segment by its ID. Use this to modify segment metadata without affecting its underlying barrier configuration."""
 
     # Construct request model with validation
@@ -9493,7 +9625,7 @@ async def update_barrier_segment(
 
 # Tags: Shield information barrier segments
 @mcp.tool()
-async def delete_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to delete.")) -> dict[str, Any]:
+async def delete_barrier_segment(shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a shield information barrier segment by its unique ID. This action removes the segment and its associated configurations from the information barrier."""
 
     # Construct request model with validation
@@ -9532,7 +9664,7 @@ async def delete_barrier_segment(shield_information_barrier_segment_id: str = Fi
 async def list_barrier_segments(
     shield_information_barrier_id: str = Field(..., description="The unique identifier of the shield information barrier whose segments you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of barrier segment objects to return in a single page of results. Accepts values up to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all shield information barrier segments associated with a specified information barrier. Segments define the groups or users separated by the barrier."""
 
     _limit = _parse_int(limit)
@@ -9577,7 +9709,7 @@ async def create_barrier_segment(
     type_: Literal["shield_information_barrier"] | None = Field(None, alias="type", description="The resource type of the associated shield information barrier; must be set to the designated barrier type value."),
     name: str | None = Field(None, description="A human-readable name for the barrier segment that identifies the division or group being isolated."),
     description: str | None = Field(None, description="An optional narrative description providing additional context about the barrier segment's purpose or the division it represents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a named segment within an existing shield information barrier, allowing organizations to define distinct groups or divisions for information separation and compliance purposes."""
 
     # Construct request model with validation
@@ -9616,7 +9748,7 @@ async def create_barrier_segment(
 
 # Tags: Shield information barrier segment members
 @mcp.tool()
-async def get_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to retrieve.")) -> dict[str, Any]:
+async def get_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier segment member by its unique ID. Useful for inspecting the details of an individual member assigned to a barrier segment."""
 
     # Construct request model with validation
@@ -9652,7 +9784,7 @@ async def get_barrier_segment_member(shield_information_barrier_segment_member_i
 
 # Tags: Shield information barrier segment members
 @mcp.tool()
-async def delete_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to delete.")) -> dict[str, Any]:
+async def delete_barrier_segment_member(shield_information_barrier_segment_member_id: str = Field(..., description="The unique identifier of the shield information barrier segment member to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific member from a shield information barrier segment. Use this to revoke a user's association with a segment when access restrictions need to be updated."""
 
     # Construct request model with validation
@@ -9691,7 +9823,7 @@ async def delete_barrier_segment_member(shield_information_barrier_segment_membe
 async def list_barrier_segment_members(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose members you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of segment members to return in a single page of results. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of members belonging to a specific shield information barrier segment. Use this to audit or review which users are assigned to a given segment."""
 
     _limit = _parse_int(limit)
@@ -9735,7 +9867,7 @@ async def add_barrier_segment_member(
     shield_information_barrier_id: str | None = Field(None, alias="shield_information_barrierId", description="The unique identifier of the shield information barrier that the target segment belongs to."),
     shield_information_barrier_segment_id: str | None = Field(None, alias="shield_information_barrier_segmentId", description="The unique identifier of the shield information barrier segment to which the user will be added as a member."),
     user: _models.PostShieldInformationBarrierSegmentMembersBodyUser | None = Field(None, description="The user object representing the individual to whom the segment's information barrier restrictions will be applied."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user as a member of a shield information barrier segment, applying the segment's information restrictions to that user."""
 
     # Construct request model with validation
@@ -9775,7 +9907,7 @@ async def add_barrier_segment_member(
 
 # Tags: Shield information barrier segment restrictions
 @mcp.tool()
-async def get_barrier_segment_restriction(shield_information_barrier_segment_restriction_id: str = Field(..., description="The unique identifier of the shield information barrier segment restriction to retrieve.")) -> dict[str, Any]:
+async def get_barrier_segment_restriction(shield_information_barrier_segment_restriction_id: str = Field(..., description="The unique identifier of the shield information barrier segment restriction to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific shield information barrier segment restriction by its unique ID. Use this to inspect the details of an existing restriction between two information barrier segments."""
 
     # Construct request model with validation
@@ -9814,7 +9946,7 @@ async def get_barrier_segment_restriction(shield_information_barrier_segment_res
 async def list_barrier_segment_restrictions(
     shield_information_barrier_segment_id: str = Field(..., description="The unique identifier of the shield information barrier segment whose restrictions you want to list."),
     limit: str | None = Field(None, description="The maximum number of restriction records to return in a single page of results. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all shield information barrier segment restrictions associated with a specific segment. Use this to audit or review access restrictions applied to a given barrier segment."""
 
     _limit = _parse_int(limit)
@@ -9854,7 +9986,7 @@ async def list_barrier_segment_restrictions(
 
 # Tags: Device pinners
 @mcp.tool()
-async def get_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to retrieve.")) -> dict[str, Any]:
+async def get_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific device pin by its unique identifier. Useful for inspecting the status and metadata of an individual device pinning record."""
 
     # Construct request model with validation
@@ -9890,7 +10022,7 @@ async def get_device_pin(device_pinner_id: str = Field(..., description="The uni
 
 # Tags: Device pinners
 @mcp.tool()
-async def delete_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to delete.")) -> dict[str, Any]:
+async def delete_device_pin(device_pinner_id: str = Field(..., description="The unique identifier of the device pin to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific device pin, revoking the trusted device association for the corresponding user. This action cannot be undone."""
 
     # Construct request model with validation
@@ -9930,7 +10062,7 @@ async def list_enterprise_device_pins(
     enterprise_id: str = Field(..., description="The unique identifier of the enterprise whose device pins you want to retrieve."),
     limit: str | None = Field(None, description="The maximum number of device pins to return per page, up to a maximum of 1000."),
     direction: Literal["ASC", "DESC"] | None = Field(None, description="The sort order for the returned results, either ascending (ASC) or descending (DESC) alphabetical order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all device pins registered within a specified enterprise. Requires admin privileges and the 'manage enterprise' application scope."""
 
     _limit = _parse_int(limit)
@@ -9974,7 +10106,7 @@ async def list_enterprise_device_pins(
 async def list_terms_of_service_user_statuses(
     tos_id: str = Field(..., description="The unique identifier of the terms of service whose user acceptance statuses should be retrieved."),
     user_id: str | None = Field(None, description="When provided, restricts the results to the acceptance status of a single user matching this ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the acceptance status of users for a specific terms of service, including whether each user has accepted the terms and the timestamp of their response. Optionally filter results to a single user."""
 
     # Construct request model with validation
@@ -10016,7 +10148,7 @@ async def create_terms_of_service_user_status(
     tos_id: str | None = Field(None, alias="tosId", description="The unique identifier of the terms of service document to associate with the user status."),
     user_id: str | None = Field(None, alias="userId", description="The unique identifier of the user whose terms of service acceptance status is being recorded."),
     is_accepted: bool | None = Field(None, description="Indicates whether the user has accepted the terms of service; set to true if accepted, false if declined."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or sets the acceptance status of a terms of service agreement for a specific user. Use this to record whether a new user has accepted or declined a given terms of service."""
 
     # Construct request model with validation
@@ -10059,7 +10191,7 @@ async def create_terms_of_service_user_status(
 async def update_terms_of_service_user_status(
     terms_of_service_user_status_id: str = Field(..., description="The unique identifier of the terms of service user status record to update."),
     is_accepted: bool | None = Field(None, description="Indicates whether the user has accepted the terms of service; set to true to mark acceptance or false to mark rejection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the acceptance status of a terms of service agreement for a specific user. Use this to record whether a user has accepted or declined a terms of service."""
 
     # Construct request model with validation
@@ -10098,7 +10230,7 @@ async def update_terms_of_service_user_status(
 
 # Tags: Domain restrictions for collaborations
 @mcp.tool()
-async def get_collaboration_whitelist_entry(collaboration_whitelist_entry_id: str = Field(..., description="The unique identifier of the collaboration whitelist entry to retrieve.")) -> dict[str, Any]:
+async def get_collaboration_whitelist_entry(collaboration_whitelist_entry_id: str = Field(..., description="The unique identifier of the collaboration whitelist entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific domain that has been approved for external collaborations within the current enterprise. Use this to inspect the details of a single whitelisted domain entry by its unique ID."""
 
     # Construct request model with validation
@@ -10137,7 +10269,7 @@ async def get_collaboration_whitelist_entry(collaboration_whitelist_entry_id: st
 async def list_storage_policy_assignments(
     resolved_for_type: Literal["user", "enterprise"] = Field(..., description="The type of entity to retrieve storage policy assignments for, either a specific user or an entire enterprise."),
     resolved_for_id: str = Field(..., description="The unique identifier of the user or enterprise whose storage policy assignments should be retrieved. Must correspond to the entity type specified in resolved_for_type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all storage policy assignments for a specified enterprise or user. Returns the storage policies currently assigned to the given target."""
 
     # Construct request model with validation
@@ -10180,7 +10312,7 @@ async def assign_storage_policy(
     assigned_to_type: Literal["user", "enterprise"] | None = Field(None, alias="assigned_toType", description="The type of entity receiving the storage policy assignment, either an individual user or an entire enterprise."),
     storage_policy_id: str | None = Field(None, alias="storage_policyId", description="The unique identifier of the storage policy to assign to the target entity."),
     assigned_to_id: str | None = Field(None, alias="assigned_toId", description="The unique identifier of the user or enterprise to which the storage policy will be assigned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns a storage policy to a specific user or enterprise, controlling where their content is stored. Use this to enforce data residency or storage tier requirements."""
 
     # Construct request model with validation
@@ -10219,7 +10351,7 @@ async def assign_storage_policy(
 
 # Tags: Standard and Zones Storage Policy Assignments
 @mcp.tool()
-async def get_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to retrieve.")) -> dict[str, Any]:
+async def get_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific storage policy assignment by its unique identifier. Useful for inspecting which storage policy is applied to a particular user or enterprise."""
 
     # Construct request model with validation
@@ -10255,7 +10387,7 @@ async def get_storage_policy_assignment(storage_policy_assignment_id: str = Fiel
 
 # Tags: Standard and Zones Storage Policy Assignments
 @mcp.tool()
-async def delete_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to delete.")) -> dict[str, Any]:
+async def delete_storage_policy_assignment(storage_policy_assignment_id: str = Field(..., description="The unique identifier of the storage policy assignment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a storage policy assignment, causing the affected user to inherit the enterprise's default storage policy. Note: this endpoint is rate-limited to two calls per user within any 24-hour period."""
 
     # Construct request model with validation
@@ -10294,7 +10426,7 @@ async def delete_storage_policy_assignment(storage_policy_assignment_id: str = F
 async def create_zip_download(
     items: list[_models.PostZipDownloadsBodyItemsItem] | None = Field(None, description="A list of files and folders to include in the zip archive. Order is not significant; each item should specify its type and identifier."),
     download_file_name: str | None = Field(None, description="The base name for the generated zip archive file, without the file extension. The `.zip` extension will be appended automatically."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a zip archive download request for multiple files and folders, validating access permissions and returning a download URL and status URL. The archive is limited to 10,000 files or the account's upload limit, with a recommended maximum total size of 25GB."""
 
     # Construct request model with validation
@@ -10332,7 +10464,7 @@ async def create_zip_download(
 
 # Tags: Zip Downloads
 @mcp.tool()
-async def download_zip_archive(zip_download_id: str = Field(..., description="The unique identifier for the zip archive, obtained from the `download_url` field returned by the Create Zip Download API.")) -> dict[str, Any]:
+async def download_zip_archive(zip_download_id: str = Field(..., description="The unique identifier for the zip archive, obtained from the `download_url` field returned by the Create Zip Download API.")) -> dict[str, Any] | ToolResult:
     """Downloads the binary contents of a previously created zip archive using the download URL provided when the archive was requested. This endpoint requires no authentication and is intended for direct browser-based downloads; the URL is time-limited and a new zip download request must be created if the session expires."""
 
     # Construct request model with validation
@@ -10368,7 +10500,7 @@ async def download_zip_archive(zip_download_id: str = Field(..., description="Th
 
 # Tags: Zip Downloads
 @mcp.tool()
-async def get_zip_download_status(zip_download_id: str = Field(..., description="The unique identifier for the zip archive whose status is being checked, obtained from the response of the Create zip download API.")) -> dict[str, Any]:
+async def get_zip_download_status(zip_download_id: str = Field(..., description="The unique identifier for the zip archive whose status is being checked, obtained from the response of the Create zip download API.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current download progress and status of a zip archive, including any items that were skipped. This endpoint is accessible only after the download has started and remains valid for 12 hours from initiation."""
 
     # Construct request model with validation
@@ -10407,7 +10539,7 @@ async def get_zip_download_status(zip_download_id: str = Field(..., description=
 async def cancel_sign_request(
     sign_request_id: str = Field(..., description="The unique identifier of the sign request to cancel."),
     reason: str | None = Field(None, description="An optional explanation for why the sign request is being cancelled, useful for audit trails and notifying stakeholders."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancels an active Box Sign request, preventing further signing actions by any recipients. An optional reason can be provided to document why the request was cancelled."""
 
     # Construct request model with validation
@@ -10446,7 +10578,7 @@ async def cancel_sign_request(
 
 # Tags: Box Sign requests
 @mcp.tool()
-async def resend_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the signature request to resend notifications for.")) -> dict[str, Any]:
+async def resend_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the signature request to resend notifications for.")) -> dict[str, Any] | ToolResult:
     """Resends the signature request email to all outstanding signers who have not yet completed signing. Useful for following up on pending signatures without creating a new request."""
 
     # Construct request model with validation
@@ -10482,7 +10614,7 @@ async def resend_sign_request(sign_request_id: str = Field(..., description="The
 
 # Tags: Box Sign requests
 @mcp.tool()
-async def get_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the Box Sign request to retrieve.")) -> dict[str, Any]:
+async def get_sign_request(sign_request_id: str = Field(..., description="The unique identifier of the Box Sign request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific Box Sign request by its unique ID. Use this to check the status, signers, and configuration of an existing signature request."""
 
     # Construct request model with validation
@@ -10522,7 +10654,7 @@ async def list_sign_requests(
     limit: str | None = Field(None, description="Maximum number of signature requests to return per page. Accepts values up to 1000."),
     senders: list[str] | None = Field(None, description="Filters results to only include signature requests sent by the specified email addresses. Requires `shared_requests` to be set to `true` when used. Order is not significant; each item should be a valid email address."),
     shared_requests: bool | None = Field(None, description="When `true`, returns only signature requests where the authenticated user is a collaborator (not the owner); collaborator access is determined by the user's access level on the associated sign files. Must be `true` if `senders` is provided; defaults to `false`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Box Sign signature requests created by the authenticated user. Requests associated with deleted sign files or parent folders are excluded from results."""
 
     _limit = _parse_int(limit)
@@ -10562,7 +10694,7 @@ async def list_sign_requests(
 
 # Tags: Box Sign requests
 @mcp.tool()
-async def create_sign_request(body: _models.SignRequestCreateRequest | None = Field(None, description="The request body containing all details needed to create the signature request, including the document to be signed, signer information, and any signing configuration options.")) -> dict[str, Any]:
+async def create_sign_request(body: _models.SignRequestCreateRequest | None = Field(None, description="The request body containing all details needed to create the signature request, including the document to be signed, signer information, and any signing configuration options.")) -> dict[str, Any] | ToolResult:
     """Creates a Box Sign signature request by preparing a document for signing and dispatching it to one or more signers. Use this to initiate a new e-signature workflow on a document stored in Box."""
 
     # Construct request model with validation
@@ -10605,7 +10737,7 @@ async def list_workflows(
     folder_id: str = Field(..., description="The unique identifier of the folder whose associated workflows you want to retrieve. The root folder of a Box account is always ID 0; other folder IDs can be found in the URL when viewing the folder in the Box web app."),
     trigger_type: str | None = Field(None, description="Filters workflows by their trigger type, returning only workflows that match the specified trigger. Use to narrow results to a specific trigger category."),
     limit: str | None = Field(None, description="The maximum number of workflows to return in a single response, up to a limit of 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all workflows associated with a specific folder that have a manually triggerable flow. Requires the Manage Box Relay application scope to be enabled in the developer console."""
 
     _limit = _parse_int(limit)
@@ -10654,7 +10786,7 @@ async def start_workflow(
     folder_id: str | None = Field(None, alias="folderId", description="The unique identifier of the folder configured for this workflow; all provided files must reside within this folder."),
     files: list[_models.PostWorkflowsIdStartBodyFilesItem] | None = Field(None, description="An array of file objects for which the workflow should be started; each file must already exist within the workflow's configured folder. Order is not significant."),
     outcomes: list[_models.Outcome] | None = Field(None, description="An array of configurable outcome objects that the workflow should complete as part of its execution. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Manually triggers a Box Relay workflow with a WORKFLOW_MANUAL_START trigger type for a specified folder and optional files. Requires the Manage Box Relay application scope to be authorized in the developer console."""
 
     # Construct request model with validation
@@ -10695,7 +10827,7 @@ async def start_workflow(
 
 # Tags: Box Sign templates
 @mcp.tool()
-async def list_sign_templates(limit: str | None = Field(None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.")) -> dict[str, Any]:
+async def list_sign_templates(limit: str | None = Field(None, description="The maximum number of sign templates to return per page. Accepts values up to 1000.")) -> dict[str, Any] | ToolResult:
     """Retrieves all Box Sign templates created by the authenticated user. Returns a paginated list of templates available for use in signing workflows."""
 
     _limit = _parse_int(limit)
@@ -10735,7 +10867,7 @@ async def list_sign_templates(limit: str | None = Field(None, description="The m
 
 # Tags: Box Sign templates
 @mcp.tool()
-async def get_sign_template(template_id: str = Field(..., description="The unique identifier of the Box Sign template to retrieve.")) -> dict[str, Any]:
+async def get_sign_template(template_id: str = Field(..., description="The unique identifier of the Box Sign template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific Box Sign template by its unique ID. Use this to inspect template configuration, fields, and signers before initiating a signing request."""
 
     # Construct request model with validation
@@ -10778,7 +10910,7 @@ async def list_slack_integration_mappings(
     box_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Box item ID."),
     box_item_type: Literal["folder"] | None = Field(None, description="Filters results to only return mappings for the specified Box item type. Currently only 'folder' is supported."),
     is_manually_created: bool | None = Field(None, description="Filters results to only return mappings that were manually created (true) or automatically created (false)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Slack integration mappings for the enterprise, showing how Box folders are linked to Slack channels. Requires Admin or Co-Admin role."""
 
     _limit = _parse_int(limit)
@@ -10823,7 +10955,7 @@ async def list_teams_integration_mappings(
     partner_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Microsoft Teams item ID."),
     box_item_id: str | None = Field(None, description="Filters results to only return mappings associated with the specified Box item ID."),
     box_item_type: Literal["folder"] | None = Field(None, description="Filters results to only return mappings for the specified Box item type. Currently only folder mappings are supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of Box for Teams integration mappings within an enterprise, showing how Box items are linked to Microsoft Teams channels or teams. Requires Admin or Co-Admin role."""
 
     # Construct request model with validation
@@ -10864,7 +10996,7 @@ async def list_teams_integration_mappings(
 async def create_teams_integration_mapping(
     partner_item: _models.PostIntegrationMappingsTeamsBodyPartnerItem | None = Field(None, description="The Microsoft Teams channel to map, identifying the partner-side resource in the integration."),
     box_item: _models.PostIntegrationMappingsTeamsBodyBoxItem | None = Field(None, description="The Box item (such as a folder) to map to the Teams channel, identifying the Box-side resource in the integration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a Teams integration mapping by linking a Microsoft Teams channel to a Box item. Requires Admin or Co-Admin role."""
 
     # Construct request model with validation
@@ -10906,7 +11038,7 @@ async def extract_metadata_freeform(
     prompt: str | None = Field(None, description="The freeform prompt instructing the LLM on what metadata to extract and how. Supports XML or JSON schema format and can be up to 10,000 characters long."),
     items: Annotated[list[_models.AiItemBase], AfterValidator(_check_unique_items)] | None = Field(None, description="The list of files the LLM will process for metadata extraction. Order is not significant; each item must reference a valid file. Between 1 and 25 files may be included.", min_length=1, max_length=25),
     ai_agent: _models.AiAgentReference | _models.AiAgentExtract | None = Field(None, description="Optional AI agent configuration to override the default LLM settings used for this extraction request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends a freeform prompt to an LLM to extract key-value metadata from one or more files, without requiring a predefined metadata template. Both the prompt structure and the output format are flexible, supporting XML or JSON schema prompts."""
 
     # Construct request model with validation
@@ -10953,7 +11085,7 @@ async def extract_structured_metadata(
     include_confidence_score: bool | None = Field(None, description="When set to true, the response will include a confidence score for each extracted field, indicating the LLM's certainty about the extracted value."),
     include_reference: bool | None = Field(None, description="When set to true, the response will include source references for each extracted field, indicating where in the file the value was found."),
     ai_agent: _models.AiAgentReference | _models.AiAgentExtractStructured | None = Field(None, description="Optional AI agent configuration to override the default extraction agent settings, such as model selection or prompt behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends files to a Box AI-supported LLM and returns extracted metadata as structured key-value pairs. Define the extraction structure using either a metadata template or a custom list of fields."""
 
     # Construct request model with validation
@@ -10997,7 +11129,7 @@ async def list_ai_agents(
     agent_state: list[str] | None = Field(None, description="Filters results to only return agents in the specified states. Accepts one or more of the following values: `enabled`, `disabled`, or `enabled_for_selected_users`. Order is not significant."),
     include_box_default: bool | None = Field(None, description="When set to true, includes Box-provided default agents in the response alongside any custom agents."),
     limit: str | None = Field(None, description="The maximum number of agents to return in a single response. Accepts a value between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of AI agents configured in the account, with optional filtering by mode, state, and whether to include Box default agents."""
 
     _limit = _parse_int(limit)
@@ -11072,7 +11204,7 @@ async def create_ai_agent(
     basic_text_multi: _models.PostAiAgentsBodyAskBasicTextMulti | None = Field(None, description="Configuration for the processor that handles standard-length text across multiple documents or segments, used for multi-document ask scenarios."),
     basic_image_multi: _models.PostAiAgentsBodyAskBasicImageMulti | None = Field(None, description="Configuration for the processor that handles images across multiple documents or segments, used for multi-document ask scenarios."),
     basic_gen: _models.PostAiAgentsBodyTextGenBasicGen | None = Field(None, description="Configuration for the basic text generation tool used by the text_gen capability, controlling model behavior and prompt structure for content generation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new AI agent with one or more capabilities (ask, text_gen, or extract). At least one capability must be configured when creating the agent."""
 
     # Construct request model with validation
@@ -11113,7 +11245,7 @@ async def create_ai_agent(
 
 # Tags: AI Studio
 @mcp.tool()
-async def get_ai_agent(agent_id: str = Field(..., description="The unique identifier of the AI agent to retrieve.")) -> dict[str, Any]:
+async def get_ai_agent(agent_id: str = Field(..., description="The unique identifier of the AI agent to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific AI agent by its unique identifier. Returns the full agent configuration and metadata for the specified agent."""
 
     # Construct request model with validation
@@ -11152,7 +11284,7 @@ async def get_ai_agent(agent_id: str = Field(..., description="The unique identi
 async def list_metadata_taxonomies(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomies to retrieve, typically representing an enterprise or organizational boundary."),
     limit: str | None = Field(None, description="The maximum number of taxonomy items to return in a single page of results, up to a maximum of 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all metadata taxonomies within a specified namespace, enabling discovery of available taxonomy structures for organizing and classifying content metadata."""
 
     _limit = _parse_int(limit)
@@ -11196,7 +11328,7 @@ async def list_metadata_taxonomies(
 async def get_metadata_taxonomy(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an enterprise or organizational unit."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy to retrieve within the specified namespace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific metadata taxonomy by its unique key within a given namespace. Use this to inspect the structure and configuration of a taxonomy for organizing and classifying metadata."""
 
     # Construct request model with validation
@@ -11241,7 +11373,7 @@ async def list_taxonomy_nodes(
     query: str | None = Field(None, description="Free-text search string to find matching taxonomy nodes by name or content. When provided, results are ranked by relevance rather than lexicographic order."),
     include_total_result_count: bool | None = Field(None, alias="include-total-result-count", description="When set to true, includes the total count of matching nodes in the response. Counts are computed for up to 10,000 matching elements; defaults to false."),
     limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves nodes within a specific metadata taxonomy, supporting filtering by level, parent, or ancestor relationships. Results are sorted lexicographically by default, or by relevance when a search query is provided."""
 
     _limit = _parse_int(limit)
@@ -11286,7 +11418,7 @@ async def get_taxonomy_node(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an enterprise or organizational unit."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy within the namespace, representing a classification domain such as geography or department."),
     node_id: str = Field(..., description="The unique identifier of the taxonomy node to retrieve, formatted as a UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single metadata taxonomy node by its unique identifier within a specified namespace and taxonomy. Useful for inspecting the details of a specific classification node in a hierarchical metadata structure."""
 
     # Construct request model with validation
@@ -11326,7 +11458,7 @@ async def delete_taxonomy_node(
     namespace: str = Field(..., description="The namespace that scopes the metadata taxonomy, typically representing an organization or enterprise account."),
     taxonomy_key: str = Field(..., description="The unique key identifying the metadata taxonomy within the namespace."),
     node_id: str = Field(..., description="The unique identifier of the taxonomy node to delete. The node must have no children before it can be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific node from a metadata taxonomy. Only leaf nodes (those without children) can be deleted, and this action cannot be undone."""
 
     # Construct request model with validation
@@ -11373,7 +11505,7 @@ async def list_taxonomy_field_options(
     include_total_result_count: bool | None = Field(None, alias="include-total-result-count", description="When set to true, the response includes the total count of nodes matching the query, computed for up to 10,000 results. Defaults to false."),
     only_selectable_options: bool | None = Field(None, alias="only-selectable-options", description="When set to true, restricts results to only those taxonomy nodes that are valid selectable options for this field. When false, all taxonomy nodes are returned regardless of selectability. Defaults to true."),
     limit: str | None = Field(None, description="The maximum number of taxonomy nodes to return in a single page of results. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves available taxonomy nodes for a specific taxonomy field within a metadata template, filtered by level, parent, ancestor, or search query. Results are sorted lexicographically by default, or by relevance when a query is provided."""
 
     _limit = _parse_int(limit)

@@ -1,7 +1,7 @@
 """
 Authentication module for Box MCP server.
 
-Generated: 2026-04-14 18:16:26 UTC
+Generated: 2026-04-23 21:03:51 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -682,7 +682,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "get_storage_policy_assignment": [["OAuth2Security"]],
     "delete_storage_policy_assignment": [["OAuth2Security"]],
     "create_zip_download": [["OAuth2Security"]],
-    "download_zip_archive": [],
+    "download_zip_archive": [["OAuth2Security"]],
     "get_zip_download_status": [["OAuth2Security"]],
     "cancel_sign_request": [["OAuth2Security"]],
     "resend_sign_request": [["OAuth2Security"]],
