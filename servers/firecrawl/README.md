@@ -1,4 +1,5 @@
 # Firecrawl MCP Server
+<!-- mcp-name: com.mcparmory/firecrawl -->
 
 Base URL: https://api.firecrawl.dev/v1
 | | |
@@ -87,6 +88,16 @@ Example (if server is at `/home/user/mcp-servers/firecrawl`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/firecrawl:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -94,7 +105,9 @@ docker build -t firecrawl .
 docker run -p 8000:8000 --env-file .env firecrawl
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

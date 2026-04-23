@@ -5,7 +5,7 @@ Firecrawl MCP Server
 API Info:
 - Contact: Firecrawl Support <support@firecrawl.dev> (https://firecrawl.dev/support)
 
-Generated: 2026-04-14 18:21:26 UTC
+Generated: 2026-04-23 21:16:32 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.firecrawl.dev/v1")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +717,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +773,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +839,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +873,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -826,16 +939,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -849,6 +963,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -891,6 +1006,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -902,7 +1032,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1043,7 +1172,7 @@ mcp = FastMCP("Firecrawl", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Scraping
 @mcp.tool()
-async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody = Field(..., description="Request payload containing the URL to scrape and extraction parameters, including the target URL and optional LLM extraction instructions or schema.")) -> dict[str, Any]:
+async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody = Field(..., description="Request payload containing the URL to scrape and extraction parameters, including the target URL and optional LLM extraction instructions or schema.")) -> dict[str, Any] | ToolResult:
     """Scrapes content from a specified URL and uses LLM-powered extraction to identify and structure relevant information from the page."""
 
     # Construct request model with validation
@@ -1082,7 +1211,7 @@ async def scrape_and_extract_webpage(body: _models.ScrapeAndExtractFromUrlBody =
 
 # Tags: Scraping
 @mcp.tool()
-async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = Field(..., description="Request payload containing the list of URLs to scrape and extraction configuration. Specify target URLs, extraction rules, and LLM processing options for batch operations.")) -> dict[str, Any]:
+async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = Field(..., description="Request payload containing the list of URLs to scrape and extraction configuration. Specify target URLs, extraction rules, and LLM processing options for batch operations.")) -> dict[str, Any] | ToolResult:
     """Scrape content from multiple URLs and extract structured information using LLM-powered analysis. Supports batch processing with optional intelligent data extraction."""
 
     # Construct request model with validation
@@ -1121,7 +1250,7 @@ async def scrape_and_extract_urls(body: _models.ScrapeAndExtractFromUrlsBody = F
 
 # Tags: Scraping
 @mcp.tool()
-async def get_batch_scrape_status(id_: str = Field(..., alias="id", description="The unique identifier of the batch scrape job to check status for.")) -> dict[str, Any]:
+async def get_batch_scrape_status(id_: str = Field(..., alias="id", description="The unique identifier of the batch scrape job to check status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and progress of a batch scraping job. Use this to monitor ongoing or completed scrape operations."""
 
     # Construct request model with validation
@@ -1157,7 +1286,7 @@ async def get_batch_scrape_status(id_: str = Field(..., alias="id", description=
 
 # Tags: Scraping
 @mcp.tool()
-async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job to cancel.")) -> dict[str, Any]:
+async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancels an active batch scraping job by its ID. The job will stop processing immediately and any pending tasks will be abandoned."""
 
     # Construct request model with validation
@@ -1193,7 +1322,7 @@ async def cancel_batch_scrape(id_: str = Field(..., alias="id", description="The
 
 # Tags: Scraping
 @mcp.tool()
-async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job for which to retrieve errors.")) -> dict[str, Any]:
+async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description="The unique identifier of the batch scraping job for which to retrieve errors.")) -> dict[str, Any] | ToolResult:
     """Retrieve all errors that occurred during a batch scraping job. Use this to diagnose failures and understand which URLs or data extraction steps encountered issues."""
 
     # Construct request model with validation
@@ -1229,7 +1358,7 @@ async def list_batch_scrape_errors(id_: str = Field(..., alias="id", description
 
 # Tags: Crawling
 @mcp.tool()
-async def get_crawl_status(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to retrieve status for. Must be a valid UUID.")) -> dict[str, Any]:
+async def get_crawl_status(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to retrieve status for. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and progress of a crawl job by its unique identifier. Use this to monitor ongoing or completed web crawling operations."""
 
     # Construct request model with validation
@@ -1265,7 +1394,7 @@ async def get_crawl_status(id_: str = Field(..., alias="id", description="The un
 
 # Tags: Crawling
 @mcp.tool()
-async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to cancel. Must be a valid UUID.")) -> dict[str, Any]:
+async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job to cancel. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Cancel an active or pending crawl job by its ID. Once cancelled, the crawl will stop processing and cannot be resumed."""
 
     # Construct request model with validation
@@ -1301,7 +1430,7 @@ async def cancel_crawl(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Crawling
 @mcp.tool()
-async def list_crawl_errors(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job for which to retrieve errors.")) -> dict[str, Any]:
+async def list_crawl_errors(id_: str = Field(..., alias="id", description="The unique identifier of the crawl job for which to retrieve errors.")) -> dict[str, Any] | ToolResult:
     """Retrieve all errors encountered during a specific crawl job. Returns detailed error information to help diagnose and troubleshoot crawling issues."""
 
     # Construct request model with validation
@@ -1356,7 +1485,7 @@ async def crawl_urls(
     metadata: dict[str, Any] | None = Field(None, description="Custom metadata object included in all webhook payloads for this crawl. Useful for tracking, correlation, or passing context through the crawl lifecycle."),
     events: list[Literal["completed", "page", "failed", "started"]] | None = Field(None, description="Array of event types to send to the webhook URL. If not specified, all event types are sent. Valid events include crawl.started, crawl.page, crawl.completed, and crawl.failed."),
     scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional scraping options to apply to all pages discovered during crawling. Inherits configuration from the /scrape endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Crawl multiple URLs from a base domain with configurable filtering, depth limits, and webhook notifications. Supports path-based inclusion/exclusion patterns, subdomain traversal, and concurrent scraping with rate limiting."""
 
     # Construct request model with validation
@@ -1401,7 +1530,7 @@ async def crawl_urls_map(
     sitemap_only: bool | None = Field(None, alias="sitemapOnly", description="If enabled, return only links that are included in the website's sitemap."),
     include_subdomains: bool | None = Field(None, alias="includeSubdomains", description="If enabled, include URLs from the site's subdomains in the results."),
     limit: int | None = Field(None, description="Maximum number of links to return. The API can discover up to 30,000 links, but results are capped at this limit.", le=30000),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Crawl and map multiple URLs from a website based on specified options. Discovers all accessible links starting from a base URL, with optional filtering by search query, sitemap, subdomains, and result limits."""
 
     # Construct request model with validation
@@ -1445,7 +1574,7 @@ async def extract_structured_data(
     include_subdomains: bool | None = Field(None, alias="includeSubdomains", description="Include subdomains of the specified URLs in the extraction scope."),
     show_sources: bool | None = Field(None, alias="showSources", description="Include source attribution in the response, showing which sources were used to extract each data point."),
     scrape_options: _models.ScrapeOptions | None = Field(None, alias="scrapeOptions", description="Additional configuration options for the scraping behavior, such as timeout settings, headers, or parsing preferences."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extract structured data from web pages using LLM analysis. Optionally augment extraction with web search, subdomain scanning, and source attribution."""
 
     # Construct request model with validation
@@ -1483,7 +1612,7 @@ async def extract_structured_data(
 
 # Tags: Extraction
 @mcp.tool()
-async def get_extraction_status(id_: str = Field(..., alias="id", description="The unique identifier of the extraction job to check status for.")) -> dict[str, Any]:
+async def get_extraction_status(id_: str = Field(..., alias="id", description="The unique identifier of the extraction job to check status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a data extraction job using its unique identifier. Returns the job's progress, completion state, and any relevant metadata."""
 
     # Construct request model with validation
@@ -1519,7 +1648,7 @@ async def get_extraction_status(id_: str = Field(..., alias="id", description="T
 
 # Tags: Crawling
 @mcp.tool()
-async def list_active_crawls() -> dict[str, Any]:
+async def list_active_crawls() -> dict[str, Any] | ToolResult:
     """Retrieve all currently running web crawls for the authenticated team. Returns a list of active crawl operations with their current status and progress."""
 
     # Extract parameters for API call
@@ -1553,7 +1682,7 @@ async def initiate_deep_research(
     analysis_prompt: str | None = Field(None, alias="analysisPrompt", description="Custom prompt template for formatting the final analysis results in Markdown. Used to structure the output according to specific requirements"),
     system_prompt: str | None = Field(None, alias="systemPrompt", description="System prompt for controlling JSON output generation behavior and formatting"),
     formats: list[Literal["markdown", "json"]] | None = Field(None, description="Output formats for the research results. Specifies which format types to include in the response"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates a comprehensive research process that iteratively analyzes multiple sources to deeply investigate a query. Returns structured findings formatted according to specified analysis requirements."""
 
     # Construct request model with validation
@@ -1592,7 +1721,7 @@ async def initiate_deep_research(
 
 # Tags: Research
 @mcp.tool()
-async def get_deep_research_status(id_: str = Field(..., alias="id", description="The unique identifier of the research job to retrieve status for.")) -> dict[str, Any]:
+async def get_deep_research_status(id_: str = Field(..., alias="id", description="The unique identifier of the research job to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of a deep research job. Use this to check progress and access findings from an ongoing or completed research task."""
 
     # Construct request model with validation
@@ -1628,7 +1757,7 @@ async def get_deep_research_status(id_: str = Field(..., alias="id", description
 
 # Tags: Billing
 @mcp.tool()
-async def get_team_credit_usage() -> dict[str, Any]:
+async def get_team_credit_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the remaining credit balance for the authenticated team. This shows how many credits are available for use."""
 
     # Extract parameters for API call
@@ -1655,7 +1784,7 @@ async def get_team_credit_usage() -> dict[str, Any]:
 
 # Tags: Billing
 @mcp.tool()
-async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns credit usage history grouped by API key instead of aggregated team-level data.")) -> dict[str, Any]:
+async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns credit usage history grouped by API key instead of aggregated team-level data.")) -> dict[str, Any] | ToolResult:
     """Retrieve the credit usage history for the authenticated team. Optionally filter results to show credit consumption broken down by individual API keys."""
 
     # Construct request model with validation
@@ -1693,7 +1822,7 @@ async def list_credit_usage_history(by_api_key: bool | None = Field(None, alias=
 
 # Tags: Billing
 @mcp.tool()
-async def get_token_usage() -> dict[str, Any]:
+async def get_token_usage() -> dict[str, Any] | ToolResult:
     """Retrieve the remaining token balance for the authenticated team's Extract operations. Returns current token usage information for the team."""
 
     # Extract parameters for API call
@@ -1720,7 +1849,7 @@ async def get_token_usage() -> dict[str, Any]:
 
 # Tags: Billing
 @mcp.tool()
-async def list_token_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns token usage broken down by each API key instead of aggregated team totals.")) -> dict[str, Any]:
+async def list_token_usage_history(by_api_key: bool | None = Field(None, alias="byApiKey", description="When enabled, returns token usage broken down by each API key instead of aggregated team totals.")) -> dict[str, Any] | ToolResult:
     """Retrieve historical token usage data for the authenticated team. Optionally break down usage by individual API keys."""
 
     # Construct request model with validation
@@ -1764,7 +1893,7 @@ async def search_and_scrape_results(
     tbs: str | None = Field(None, description="Time-based search filter. Supports predefined ranges (last hour, day, week, month, year) or custom date ranges with minimum and maximum dates."),
     location: str | None = Field(None, description="Geographic location to filter search results by region or locality."),
     scrape_options: _models.SearchAndScrapeBodyScrapeOptions | None = Field(None, alias="scrapeOptions", description="Configuration options for scraping content from search results, such as depth, timeout, or content extraction preferences."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a web search and optionally scrape detailed content from the results. Supports time-based filtering, location-specific searches, and customizable scraping behavior."""
 
     # Construct request model with validation
@@ -1806,7 +1935,7 @@ async def generate_llms_txt(
     url: str = Field(..., description="The website URL to analyze and generate the LLMs.txt file from. Must be a valid URI."),
     max_urls: int | None = Field(None, alias="maxUrls", description="Maximum number of URLs to crawl and analyze from the starting URL. Controls the scope of content extraction."),
     show_full_text: bool | None = Field(None, alias="showFullText", description="Include the complete extracted text content in the response. When disabled, returns only metadata and summary information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate an LLMs.txt file for a website to improve AI model discoverability and interaction. This operation crawls the specified URL and extracts relevant content to create a standardized LLMs.txt file."""
 
     # Construct request model with validation
@@ -1844,7 +1973,7 @@ async def generate_llms_txt(
 
 # Tags: LLMs.txt
 @mcp.tool()
-async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", description="The unique identifier of the LLMs.txt generation job to retrieve status for.")) -> dict[str, Any]:
+async def get_llms_txt_generation_status(id_: str = Field(..., alias="id", description="The unique identifier of the LLMs.txt generation job to retrieve status for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and results of an LLMs.txt generation job. Use this to check if a generation job has completed and access the generated content."""
 
     # Construct request model with validation
