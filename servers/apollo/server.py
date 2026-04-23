@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Apollo MCP Server
-Generated: 2026-04-14 18:14:17 UTC
+Generated: 2026-04-23 20:58:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.apollo.io")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +713,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +769,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +835,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +869,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -837,16 +950,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -860,6 +974,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -902,6 +1017,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -913,7 +1043,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1074,7 +1203,7 @@ async def enrich_person(
     reveal_personal_emails: bool | None = Field(None, description="Reveal the person's personal email addresses in the response. This may consume credits and will not return emails for individuals in GDPR-compliant regions. Set to true to include personal emails in enrichment results."),
     reveal_phone_number: bool | None = Field(None, description="Reveal all available phone numbers including mobile numbers in the response. This may consume credits and requires a webhook_url to be specified for asynchronous phone number verification results. Set to true to request phone number enrichment."),
     webhook_url: str | None = Field(None, description="The webhook URL where Apollo will send phone number verification results asynchronously. Required only when reveal_phone_number is set to true. Provide a valid HTTPS endpoint to receive the phone enrichment response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enrich data for a single person by matching against the Apollo database. Provide identifying information such as name, email, domain, or LinkedIn profile to locate and return enriched contact details. Optionally reveal personal emails and phone numbers, or enable waterfall enrichment for additional data discovery."""
 
     # Construct request model with validation
@@ -1119,7 +1248,7 @@ async def enrich_people_bulk(
     reveal_personal_emails: bool | None = Field(None, description="Include personal email addresses in enriched results for all matched people. This may consume credits based on your plan. Personal emails will not be revealed for people in GDPR-compliant regions."),
     reveal_phone_number: bool | None = Field(None, description="Include all available phone numbers (including mobile) in enriched results for matched people. Requires a valid webhook_url to receive asynchronous phone verification results."),
     webhook_url: str | None = Field(None, description="Webhook endpoint URL where Apollo will send phone number verification results asynchronously. Required when reveal_phone_number is enabled. Must be a valid HTTPS or HTTP URI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enrich contact and professional data for up to 10 people in a single request. Apollo uses the provided person details to identify and match records, then returns enriched information with optional email, phone, and waterfall verification."""
 
     # Construct request model with validation
@@ -1160,7 +1289,7 @@ async def enrich_people_bulk(
 
 # Tags: Enrichment
 @mcp.tool()
-async def enrich_organization(domain: str = Field(..., description="The company domain to enrich (e.g., apollo.io). Provide the domain without www prefix, @ symbol, or other special characters.")) -> dict[str, Any]:
+async def enrich_organization(domain: str = Field(..., description="The company domain to enrich (e.g., apollo.io). Provide the domain without www prefix, @ symbol, or other special characters.")) -> dict[str, Any] | ToolResult:
     """Enrich company data by domain to retrieve detailed organizational information including industry, revenue, employee counts, funding details, and contact information. Each call consumes credits from your Apollo pricing plan."""
 
     # Construct request model with validation
@@ -1198,7 +1327,7 @@ async def enrich_organization(domain: str = Field(..., description="The company 
 
 # Tags: Enrichment
 @mcp.tool()
-async def enrich_organizations(domains: list[str] = Field(..., description="Array of company domains to enrich, up to 10 domains per request. Provide domains without www prefix, @ symbol, or other modifiers (e.g., apollo.io, microsoft.com).")) -> dict[str, Any]:
+async def enrich_organizations(domains: list[str] = Field(..., description="Array of company domains to enrich, up to 10 domains per request. Provide domains without www prefix, @ symbol, or other modifiers (e.g., apollo.io, microsoft.com).")) -> dict[str, Any] | ToolResult:
     """Enrich company data for up to 10 organizations in a single request. Returns enriched information including industry, revenue, employee count, funding details, phone numbers, and locations."""
 
     # Construct request model with validation
@@ -1251,7 +1380,7 @@ async def search_people(
     currently_not_using_any_of_technology_uids: list[str] | None = Field(None, description="Exclude people whose employers use any of the specified technologies. Supports 1,500+ technology identifiers."),
     q_organization_job_titles: list[str] | None = Field(None, description="Filter by job titles listed in active job postings at people's current employers."),
     organization_job_locations: list[str] | None = Field(None, description="Filter by locations where people's current employers are actively recruiting for open positions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search the Apollo database for people matching specified criteria such as job title, location, seniority, and employer technology stack. This API-optimized endpoint does not consume credits and returns up to 50,000 records without email addresses or phone numbers."""
 
     # Construct request model with validation
@@ -1300,7 +1429,7 @@ async def search_companies(
     organization_ids: list[str] | None = Field(None, description="Filter by Apollo's unique company identifiers. Provide one or more company IDs to retrieve specific organizations from the database."),
     q_organization_job_titles: list[str] | None = Field(None, description="Filter by job titles listed in active company job postings. Find companies actively recruiting for specific roles (e.g., sales manager, research analyst)."),
     organization_job_locations: list[str] | None = Field(None, description="Filter by geographic locations where companies are actively recruiting. Specify cities or countries to find organizations hiring in particular regions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search the Apollo database for companies using multiple filter criteria including domain, location, technology stack, and hiring activity. Results are paginated at 100 records per page (up to 500 pages, 50,000 record limit) and consume credits based on your Apollo plan."""
 
     # Construct request model with validation
@@ -1338,7 +1467,7 @@ async def search_companies(
 
 # Tags: Search
 @mcp.tool()
-async def list_organization_job_postings(organization_id: str = Field(..., description="The unique identifier for the organization whose job postings you want to retrieve. You can find organization IDs by calling the Organization Search endpoint.")) -> dict[str, Any]:
+async def list_organization_job_postings(organization_id: str = Field(..., description="The unique identifier for the organization whose job postings you want to retrieve. You can find organization IDs by calling the Organization Search endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve current job postings for a specific organization to identify companies expanding headcount in strategically important areas. This endpoint is useful for competitive intelligence and hiring trend analysis."""
 
     # Construct request model with validation
@@ -1374,7 +1503,7 @@ async def list_organization_job_postings(organization_id: str = Field(..., descr
 
 # Tags: Search
 @mcp.tool()
-async def get_organization(id_: str = Field(..., alias="id", description="The Apollo organization ID to retrieve details for. You can find organization IDs by calling the Organization Search endpoint and extracting the organization_id value from the results.")) -> dict[str, Any]:
+async def get_organization(id_: str = Field(..., alias="id", description="The Apollo organization ID to retrieve details for. You can find organization IDs by calling the Organization Search endpoint and extracting the organization_id value from the results.")) -> dict[str, Any] | ToolResult:
     """Retrieve complete details about a specific organization from the Apollo database, including company information, contact data, and other organizational metadata. Requires a master API key for authentication."""
 
     # Construct request model with validation
@@ -1413,7 +1542,7 @@ async def get_organization(id_: str = Field(..., alias="id", description="The Ap
 async def search_company_news(
     organization_ids: list[str] = Field(..., description="One or more Apollo company IDs to search for news coverage. Retrieve company IDs from the Organization Search endpoint. Results will include news for all specified companies."),
     categories: list[str] | None = Field(None, description="Optional news categories or sub-categories to filter results (e.g., hires, investment, contract). When specified, only articles matching these categories are returned. Omit to include all available categories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for news articles related to companies in the Apollo database. Filter results by company IDs and optionally by news categories to find relevant coverage. Note: This operation consumes credits from your Apollo plan."""
 
     # Construct request model with validation
@@ -1459,7 +1588,7 @@ async def create_account(
     phone: str | None = Field(None, description="The primary phone number for the account. Apollo automatically formats phone numbers regardless of input format."),
     raw_address: str | None = Field(None, description="The corporate headquarters location for the account, which may include city, state, and country."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field values specific to your team's Apollo account, provided as key-value pairs where keys are custom field IDs and values are the field data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new account (company) in your Apollo team database. Note that Apollo does not deduplicate accounts, so creating an account with the same name, domain, or details as an existing account will result in a duplicate entry rather than an update. Requires a master API key."""
 
     # Construct request model with validation
@@ -1506,7 +1635,7 @@ async def update_account(
     raw_address: str | None = Field(None, description="The corporate headquarters location or primary office address (e.g., 'Belfield, Dublin 4, Ireland' or 'Dallas, United States')."),
     phone: str | None = Field(None, description="The primary contact phone number for the account in any standard format (e.g., '555-303-1234' or '+44 7911 123456')."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field values specific to your Apollo workspace. Structure as key-value pairs where keys match your configured custom field names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing account in your Apollo workspace. Requires a master API key and the account ID. You can modify account details such as name, domain, owner, stage, location, phone, and custom fields."""
 
     # Construct request model with validation
@@ -1549,7 +1678,7 @@ async def bulk_create_accounts(
     accounts: list[_models.PostApiV1AccountsBulkCreateBodyAccountsItem] = Field(..., description="Array of account objects to create, up to 100 accounts per request. Each object should contain the account attributes you want to set."),
     append_label_names: list[str] | None = Field(None, description="Optional array of label names to apply to all accounts created in this request."),
     run_dedupe: bool | None = Field(None, description="Enable aggressive deduplication matching by domain, organization_id, and name in addition to CRM IDs. When disabled (default), only CRM ID matching is used. Existing accounts are returned without modification regardless of this setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create up to 100 accounts in a single request with intelligent deduplication. The endpoint returns newly created accounts and existing matches separately without modifying existing accounts."""
 
     # Construct request model with validation
@@ -1594,7 +1723,7 @@ async def bulk_update_accounts(
     owner_id: str | None = Field(None, description="Owner ID to assign to all accounts when using account_ids. Ignored when using account_attributes."),
     account_stage_id: str | None = Field(None, description="Account stage ID to assign to all accounts when using account_ids. Ignored when using account_attributes."),
     async_: bool | None = Field(None, alias="async", description="Enable asynchronous processing for the bulk update. Only available when using account_ids with uniform updates; will fail if used with account_attributes. Defaults to false for synchronous processing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update multiple accounts simultaneously with common or individual field changes. Supports updating up to 1000 accounts per request, with optional asynchronous processing when applying uniform updates."""
 
     # Construct request model with validation
@@ -1638,7 +1767,7 @@ async def search_accounts(
     account_label_ids: list[str] | None = Field(None, description="Apollo IDs of labels to include in results. Provide as an array of label IDs to filter accounts by their assigned labels."),
     sort_by_field: Literal["account_last_activity_date", "account_created_at", "account_updated_at"] | None = Field(None, description="Field to sort results by. Choose from account activity date, creation date, or last update date."),
     sort_ascending: bool | None = Field(None, description="Sort results in ascending order. Only applies when sort_by_field is specified. Defaults to descending order when not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for accounts that have been added to your team's Apollo database. Filter by name, stage, labels, and sort results by activity or creation date. Results are paginated with a maximum of 50,000 records (100 per page)."""
 
     # Construct request model with validation
@@ -1676,7 +1805,7 @@ async def search_accounts(
 
 # Tags: Accounts
 @mcp.tool()
-async def get_account(id_: str = Field(..., alias="id", description="The Apollo ID of the account to retrieve. You can find account IDs by calling the Search for Accounts endpoint.")) -> dict[str, Any]:
+async def get_account(id_: str = Field(..., alias="id", description="The Apollo ID of the account to retrieve. You can find account IDs by calling the Search for Accounts endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific account (company) in your Apollo database. Requires a master API key."""
 
     # Construct request model with validation
@@ -1715,7 +1844,7 @@ async def get_account(id_: str = Field(..., alias="id", description="The Apollo 
 async def assign_accounts_to_owner(
     account_ids: list[str] = Field(..., description="Array of Apollo account IDs to reassign to the new owner. Retrieve account IDs from the Search for Accounts endpoint. Each ID should be a valid Apollo account identifier."),
     owner_id: str = Field(..., description="The Apollo user ID of the team member who will become the owner of the specified accounts. Retrieve available user IDs from the Get a List of Users endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign multiple accounts to a different owner within your team's Apollo account. This operation requires a master API key and allows bulk reassignment of account ownership."""
 
     # Construct request model with validation
@@ -1753,7 +1882,7 @@ async def assign_accounts_to_owner(
 
 # Tags: Accounts
 @mcp.tool()
-async def list_account_stages() -> dict[str, Any]:
+async def list_account_stages() -> dict[str, Any] | ToolResult:
     """Retrieve all available account stages in your Apollo account. Use the returned stage IDs to update individual accounts or bulk update account stages across multiple accounts."""
 
     # Extract parameters for API call
@@ -1789,7 +1918,7 @@ async def create_contact(
     present_raw_address: str | None = Field(None, description="The contact's personal location or address (e.g., 'Atlanta, United States')."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="An object containing custom field data specific to your Apollo account. Field names and values should match your team's configured custom fields."),
     run_dedupe: bool | None = Field(None, description="Set to true to enable deduplication logic that prevents creating duplicate contacts. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new contact to your Apollo account. By default, deduplication is disabled; enable it by setting `run_dedupe` to true to prevent creating duplicate contacts."""
 
     # Construct request model with validation
@@ -1827,7 +1956,7 @@ async def create_contact(
 
 # Tags: Contacts
 @mcp.tool()
-async def get_contact(contact_id: str = Field(..., description="The unique Apollo identifier for the contact you want to retrieve. You can find contact IDs by using the search contacts endpoint.")) -> dict[str, Any]:
+async def get_contact(contact_id: str = Field(..., description="The unique Apollo identifier for the contact you want to retrieve. You can find contact IDs by using the search contacts endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific contact in your Apollo database. This endpoint returns enriched contact data including email addresses, phone numbers, and other profile information."""
 
     # Construct request model with validation
@@ -1872,7 +2001,7 @@ async def update_contact(
     contact_stage_id: str | None = Field(None, description="The contact stage ID to update the contact's pipeline stage."),
     present_raw_address: str | None = Field(None, description="The contact's location as a city/state/country string (e.g., 'Atlanta, United States')."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field data specific to your Apollo account. Provide as key-value pairs where keys match your team's custom field identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing contact in your Apollo account. Modify contact details such as job title, account association, location, stage, and custom fields. List assignments are replaced entirely when provided."""
 
     # Construct request model with validation
@@ -1915,7 +2044,7 @@ async def bulk_create_contacts(
     contacts: list[dict[str, Any]] = Field(..., description="Array of contact objects to create. Maximum of 100 contacts per request. Order is preserved in the response."),
     append_label_names: list[str] | None = Field(None, description="Optional array of label names to apply to all contacts created in this request."),
     run_dedupe: bool | None = Field(None, description="Enable intelligent deduplication across all data sources by matching on email, CRM IDs, or name plus organization. When disabled (default), duplicates are created for non-email import sources while email import placeholders are still merged. When enabled, existing contacts are returned without modification except for email import placeholder merging."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create up to 100 contacts in a single request with optional deduplication and bulk label assignment. The endpoint intelligently separates newly created contacts from existing ones in the response."""
 
     # Construct request model with validation
@@ -1962,7 +2091,7 @@ async def bulk_update_contacts(
     linkedin_url: str | None = Field(None, description="LinkedIn profile URL for all specified contacts. Must be a valid URI format."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field key-value pairs to apply to all specified contacts. Structure as an object with field names as keys."),
     async_: bool | None = Field(None, alias="async", description="Force asynchronous processing of the update request. Automatically enabled when updating more than 100 contacts. Defaults to false for smaller batches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update multiple contacts simultaneously with common field values. Supports updating up to 100 contacts per request, with automatic asynchronous processing for larger batches."""
 
     # Construct request model with validation
@@ -2005,7 +2134,7 @@ async def search_contacts(
     contact_stage_ids: list[str] | None = Field(None, description="Apollo IDs of contact stages to include in the search results. Provide as an array of stage IDs to filter by one or more stages."),
     contact_label_ids: list[str] | None = Field(None, description="Apollo IDs of labels to include in the search results. Provide as an array of label IDs to filter by one or more labels."),
     sort: str | None = Field(None, description="Sort specification in the format 'field:direction' where direction is 'asc' or 'desc'. Example: 'contact_created_at:asc'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for contacts in your team's Apollo account by keywords, stage, or labels. Results are paginated with a maximum of 100 records per page, up to 500 pages (50,000 total records)."""
 
     # Call helper functions
@@ -2049,7 +2178,7 @@ async def search_contacts(
 async def update_contact_stages(
     contact_ids: list[str] = Field(..., description="Array of Apollo contact IDs to update. Retrieve contact IDs from the Search for Contacts endpoint. All specified contacts will be assigned to the same target stage."),
     contact_stage_id: str = Field(..., description="The Apollo ID of the contact stage to assign to the specified contacts. Retrieve available stage IDs from the List Contact Stages endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the stage assignment for multiple contacts in your Apollo account. Specify the contacts to update and the target stage they should be assigned to."""
 
     # Construct request model with validation
@@ -2090,7 +2219,7 @@ async def update_contact_stages(
 async def assign_contacts_to_owner(
     contact_ids: list[str] = Field(..., description="Array of Apollo contact IDs to reassign. Retrieve contact IDs from the Search for Contacts endpoint by identifying the `id` field for each contact you want to update."),
     owner_id: str = Field(..., description="The Apollo user ID of the team member who will become the owner of the specified contacts. Retrieve available user IDs from the Get a List of Users endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reassign multiple contacts to a different owner within your Apollo account. This operation allows you to bulk update contact ownership across your team."""
 
     # Construct request model with validation
@@ -2128,7 +2257,7 @@ async def assign_contacts_to_owner(
 
 # Tags: Contacts
 @mcp.tool()
-async def list_contact_stages() -> dict[str, Any]:
+async def list_contact_stages() -> dict[str, Any] | ToolResult:
     """Retrieve all available contact stages in your Apollo account. Use the returned stage IDs to update individual contacts or bulk update contact stages across multiple contacts."""
 
     # Extract parameters for API call
@@ -2163,7 +2292,7 @@ async def create_deal(
     opportunity_stage_id: str | None = Field(None, description="The ID of the deal stage (pipeline stage) within your Apollo account that categorizes this deal's progress."),
     closed_date: str | None = Field(None, description="The estimated close date for the deal in YYYY-MM-DD format. Can be a future or past date."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field data specific to your Apollo account. Structure and available fields depend on your team's custom field configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new deal in your Apollo account to track account activity, including deal value, ownership, and pipeline stage. Requires a master API key."""
 
     # Construct request model with validation
@@ -2201,7 +2330,7 @@ async def create_deal(
 
 # Tags: Deals
 @mcp.tool()
-async def list_opportunities(sort_by_field: Literal["amount", "is_closed", "is_won"] | None = Field(None, description="Sort results by one of three criteria: amount (largest deal values first), is_closed (closed deals first), or is_won (won deals first). If not specified, results are returned in default order.")) -> dict[str, Any]:
+async def list_opportunities(sort_by_field: Literal["amount", "is_closed", "is_won"] | None = Field(None, description="Sort results by one of three criteria: amount (largest deal values first), is_closed (closed deals first), or is_won (won deals first). If not specified, results are returned in default order.")) -> dict[str, Any] | ToolResult:
     """Retrieve all deals created in your Apollo account. This endpoint requires a master API key and returns a complete list of opportunities for your team."""
 
     # Construct request model with validation
@@ -2239,7 +2368,7 @@ async def list_opportunities(sort_by_field: Literal["amount", "is_closed", "is_w
 
 # Tags: Deals
 @mcp.tool()
-async def get_deal(opportunity_id: str = Field(..., description="The unique identifier for the deal you want to retrieve. Use the List All Deals endpoint to find the ID of the desired deal.")) -> dict[str, Any]:
+async def get_deal(opportunity_id: str = Field(..., description="The unique identifier for the deal you want to retrieve. Use the List All Deals endpoint to find the ID of the desired deal.")) -> dict[str, Any] | ToolResult:
     """Retrieve complete details about a specific deal in your Apollo account, including deal owner, monetary value, stage, and associated account information. Requires a master API key."""
 
     # Construct request model with validation
@@ -2283,7 +2412,7 @@ async def update_opportunity(
     opportunity_stage_id: str | None = Field(None, description="The ID of the deal stage for this opportunity. Retrieve available stage IDs from the List Deal Stages endpoint."),
     closed_date: str | None = Field(None, description="The estimated close date for the deal in YYYY-MM-DD format."),
     typed_custom_fields: dict[str, Any] | None = Field(None, description="Custom field values specific to your team's Apollo account. Use the Get a List of All Custom Fields endpoint to identify field IDs and their required data types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing deal in your Apollo account. Modify deal details such as name, monetary value, owner, stage, and close date to keep your pipeline current."""
 
     # Construct request model with validation
@@ -2322,7 +2451,7 @@ async def update_opportunity(
 
 # Tags: Deals
 @mcp.tool()
-async def list_deal_stages() -> dict[str, Any]:
+async def list_deal_stages() -> dict[str, Any] | ToolResult:
     """Retrieve all available deal stages in your Apollo account. Use the stage IDs returned by this endpoint when creating or updating deals through the Apollo API."""
 
     # Extract parameters for API call
@@ -2349,7 +2478,7 @@ async def list_deal_stages() -> dict[str, Any]:
 
 # Tags: Sequences
 @mcp.tool()
-async def search_sequences(q_name: str | None = Field(None, description="Keywords to filter sequences by name. The search will match sequences whose names contain any of the provided keywords.")) -> dict[str, Any]:
+async def search_sequences(q_name: str | None = Field(None, description="Keywords to filter sequences by name. The search will match sequences whose names contain any of the provided keywords.")) -> dict[str, Any] | ToolResult:
     """Search for email sequences in your Apollo account by name. This endpoint requires a master API key and returns sequences matching your search criteria."""
 
     # Construct request model with validation
@@ -2406,7 +2535,7 @@ async def add_contacts_to_sequence(
     user_id: str | None = Field(None, description="The Apollo user ID of the team member performing this action. This user will be recorded in the activity log. Retrieve user IDs using the Get a List of Users endpoint."),
     status: Literal["active", "paused"] | None = Field(None, description="Initial enrollment status for added contacts. Use 'paused' with auto_unpause_at to schedule contact addition. Valid values are 'active' or 'paused'."),
     auto_unpause_at: str | None = Field(None, description="ISO 8601 datetime when paused contacts should automatically resume. Must be used together with status set to 'paused'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add contacts to an email sequence in your Apollo account. Contacts can be specified by individual IDs or by label names. Requires a master API key and a valid email account to send from."""
 
     # Construct request model with validation
@@ -2449,7 +2578,7 @@ async def update_sequence_contact_status(
     emailer_campaign_ids: list[str] = Field(..., description="One or more Apollo sequence IDs to update. When multiple sequences are specified, the contact status change applies across all selected sequences."),
     contact_ids: list[str] = Field(..., description="One or more Apollo contact IDs whose sequence status should be updated. These contacts must exist within the specified sequences."),
     mode: Literal["mark_as_finished", "remove", "stop"] = Field(..., description="The action to perform on the contacts: mark_as_finished to indicate sequence completion, remove to delete contacts from the sequence, or stop to pause their progress."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status of contacts within email sequences by marking them as finished, removing them entirely, or stopping their progress. Requires a master API key."""
 
     # Construct request model with validation
@@ -2487,7 +2616,7 @@ async def update_sequence_contact_status(
 
 # Tags: Sequences
 @mcp.tool()
-async def activate_email_sequence(sequence_id: str = Field(..., description="The Apollo ID of the email sequence to activate. Retrieve sequence IDs by calling the Search for Sequences endpoint.")) -> dict[str, Any]:
+async def activate_email_sequence(sequence_id: str = Field(..., description="The Apollo ID of the email sequence to activate. Retrieve sequence IDs by calling the Search for Sequences endpoint.")) -> dict[str, Any] | ToolResult:
     """Activate an inactive email sequence to begin sending emails to its contacts on the configured schedule. The sequence must have at least one step configured before activation."""
 
     # Construct request model with validation
@@ -2523,7 +2652,7 @@ async def activate_email_sequence(sequence_id: str = Field(..., description="The
 
 # Tags: Sequences
 @mcp.tool()
-async def abort_email_sequence(sequence_id: str = Field(..., description="The unique Apollo identifier for the email sequence you want to abort. This is a 24-character hexadecimal string that uniquely identifies the sequence in the system.")) -> dict[str, Any]:
+async def abort_email_sequence(sequence_id: str = Field(..., description="The unique Apollo identifier for the email sequence you want to abort. This is a 24-character hexadecimal string that uniquely identifies the sequence in the system.")) -> dict[str, Any] | ToolResult:
     """Stop an active email sequence and pause all contacts from receiving further emails. Once aborted, the sequence halts all outgoing communications."""
 
     # Construct request model with validation
@@ -2559,7 +2688,7 @@ async def abort_email_sequence(sequence_id: str = Field(..., description="The un
 
 # Tags: Sequences
 @mcp.tool()
-async def archive_sequence(sequence_id: str = Field(..., description="The Apollo ID of the sequence to archive. This is a unique identifier in the format of a 24-character hexadecimal string.")) -> dict[str, Any]:
+async def archive_sequence(sequence_id: str = Field(..., description="The Apollo ID of the sequence to archive. This is a unique identifier in the format of a 24-character hexadecimal string.")) -> dict[str, Any] | ToolResult:
     """Archive an email sequence to mark it as inactive and automatically finish all contacts currently enrolled in it. Only the sequence owner or users with full access sharing permissions can perform this action, and a master API key is required."""
 
     # Construct request model with validation
@@ -2604,7 +2733,7 @@ async def search_outreach_emails(
     emailer_message_date_range_mode: Literal["due_at", "completed_at"] | None = Field(None, description="Specify the date field to filter by: use 'due_at' for scheduled delivery dates or 'completed_at' for actual delivery dates. Use with the min/max date range parameters."),
     not_sent_reason_cds: list[Literal["contact_stage_safeguard", "same_account_reply", "account_stage_safeguard", "email_unverified", "snippets_missing", "personalized_opener_missing", "thread_reply_original_email_missing", "no_active_email_account", "email_format_invalid", "ownership_permission", "email_service_provider_delivery_failure", "sendgrid_dropped_email", "mailgun_dropped_email", "gdpr_compliance", "not_valid_hard_bounce_detected", "other_safeguard", "new_job_change_detected", "email_on_global_bounce_list"]] | None = Field(None, description="Filter emails by the reason they were not sent (e.g., invalid address, bounced). Accepts multiple reasons."),
     q_keywords: str | None = Field(None, description="Narrow results by keywords that match email content. Keywords must directly match at least part of an email's body or subject."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for outreach emails created and sent through Apollo sequences by your team. Returns up to 50,000 records with pagination support (100 records per page, maximum 500 pages). Requires a master API key."""
 
     # Construct request model with validation
@@ -2642,7 +2771,7 @@ async def search_outreach_emails(
 
 # Tags: Sequences
 @mcp.tool()
-async def get_email_activities(id_: str = Field(..., alias="id", description="The unique identifier of the email message. This ID is assigned to each outreach email in Apollo and can be obtained by calling the search emails endpoint.")) -> dict[str, Any]:
+async def get_email_activities(id_: str = Field(..., alias="id", description="The unique identifier of the email message. This ID is assigned to each outreach email in Apollo and can be obtained by calling the search emails endpoint.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed statistics and activity information for a specific email sent through an Apollo sequence, including email contents, engagement metrics (opens and clicks), and recipient contact details."""
 
     # Construct request model with validation
@@ -2687,7 +2816,7 @@ async def create_task(
     priority: Literal["high", "medium", "low"] | None = Field(None, description="The priority level for this task. Defaults to medium if not specified. Options are high, medium, or low."),
     title: str | None = Field(None, description="An optional title for the task. If not provided, Apollo will auto-generate a title based on the task type and contact name."),
     note: str | None = Field(None, description="An optional description providing context for the task owner about the action they need to take."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a task to track upcoming actions for you and your team, such as calls, emails, or LinkedIn outreach. The created task is assigned to a specific team member and linked to a contact."""
 
     # Construct request model with validation
@@ -2733,7 +2862,7 @@ async def bulk_create_tasks(
     due_at: str = Field(..., description="The due date and time for the task in ISO 8601 format (e.g., 2025-02-15T08:10:30Z). Apollo uses Greenwich Mean Time (GMT) by default."),
     priority: Literal["high", "medium", "low"] | None = Field(None, description="Priority level for the task. Defaults to medium if not specified."),
     note: str | None = Field(None, description="Optional description providing context for the task owner about the action they need to take."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create multiple tasks in a single request, with one task generated per contact. Returns a success status and array of created tasks. Requires a master API key."""
 
     # Construct request model with validation
@@ -2774,7 +2903,7 @@ async def bulk_create_tasks(
 async def search_tasks(
     sort_by_field: Literal["task_due_at", "task_priority"] | None = Field(None, description="Sort results by task due date (future dates first) or priority level (highest priority first)."),
     open_factor_names: list[str] | None = Field(None, description="Request task type counts in the response by including task_types. When specified, the response includes a task_types array with count values for each task type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for tasks created in Apollo across your team. Returns up to 50,000 records with pagination support (100 records per page, maximum 500 pages). Requires a master API key."""
 
     # Construct request model with validation
@@ -2823,7 +2952,7 @@ async def create_phone_call(
     phone_call_purpose_id: str | None = Field(None, description="ID of the call purpose category to assign to this record. Call purposes are custom to your Apollo account."),
     phone_call_outcome_id: str | None = Field(None, description="ID of the call outcome to assign to this record. Call outcomes are custom to your Apollo account."),
     note: str | None = Field(None, description="Additional notes or context about the call to include in the record."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Log phone calls made through external systems (such as Orum or Nooks) into Apollo. This endpoint records call metadata and outcomes but cannot initiate calls. Requires a master API key."""
 
     # Construct request model with validation
@@ -2872,7 +3001,7 @@ async def search_phone_calls(
     phone_call_purpose_ids: list[str] | None = Field(None, description="Filter calls by their purpose. Provide an array of call purpose IDs configured in your Apollo account."),
     phone_call_outcome_ids: list[str] | None = Field(None, description="Filter calls by their outcome or disposition. Provide an array of call outcome IDs configured in your Apollo account."),
     q_keywords: str | None = Field(None, description="Narrow search results by keywords found in call records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for phone calls made or received by your team using the Apollo dialer. Filter results by date range, duration, call direction, team members, contacts, call purposes, outcomes, and keywords."""
 
     # Construct request model with validation
@@ -2922,7 +3051,7 @@ async def update_call(
     phone_call_purpose_id: str | None = Field(None, description="The Apollo ID of the call purpose category to assign to this record."),
     phone_call_outcome_id: str | None = Field(None, description="The Apollo ID of the call outcome to assign to this record."),
     note: str | None = Field(None, description="A text note to add to the call record for additional context or details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing call record in Apollo with new details such as status, timing, duration, purpose, outcome, and notes. Requires a master API key."""
 
     # Construct request model with validation
@@ -2961,7 +3090,7 @@ async def update_call(
 
 # Tags: Miscellaneous
 @mcp.tool()
-async def list_users() -> dict[str, Any]:
+async def list_users() -> dict[str, Any] | ToolResult:
     """Retrieve all user IDs in your Apollo account. These IDs are essential for creating deals, accounts, tasks, and other resources that require user assignment."""
 
     # Extract parameters for API call
@@ -2988,7 +3117,7 @@ async def list_users() -> dict[str, Any]:
 
 # Tags: Miscellaneous
 @mcp.tool()
-async def list_email_accounts() -> dict[str, Any]:
+async def list_email_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all linked email accounts and inboxes used by your team in Apollo. Returns account IDs that can be used with sequence operations. Requires a master API key."""
 
     # Extract parameters for API call
@@ -3015,7 +3144,7 @@ async def list_email_accounts() -> dict[str, Any]:
 
 # Tags: Miscellaneous
 @mcp.tool()
-async def list_lists() -> dict[str, Any]:
+async def list_lists() -> dict[str, Any] | ToolResult:
     """Retrieve all lists created in your Apollo account. Use this endpoint to discover available lists before creating contacts or performing other list-based operations. Requires a master API key."""
 
     # Extract parameters for API call
@@ -3042,7 +3171,7 @@ async def list_lists() -> dict[str, Any]:
 
 # Tags: Miscellaneous
 @mcp.tool()
-async def list_custom_fields() -> dict[str, Any]:
+async def list_custom_fields() -> dict[str, Any] | ToolResult:
     """Retrieve all custom fields configured in your Apollo account. This endpoint provides a complete inventory of custom field definitions available for use across your organization."""
 
     # Extract parameters for API call
@@ -3069,7 +3198,7 @@ async def list_custom_fields() -> dict[str, Any]:
 
 # Tags: Miscellaneous
 @mcp.tool()
-async def list_fields(source: Literal["system", "custom", "crm_synced"] | None = Field(None, description="Filter the returned fields by their source type: system fields (built-in), custom fields (user-created), or crm_synced fields (synchronized from your CRM).")) -> dict[str, Any]:
+async def list_fields(source: Literal["system", "custom", "crm_synced"] | None = Field(None, description="Filter the returned fields by their source type: system fields (built-in), custom fields (user-created), or crm_synced fields (synchronized from your CRM).")) -> dict[str, Any] | ToolResult:
     """Retrieve all fields available in your Apollo account, with optional filtering by source type. Requires a master API key for authentication."""
 
     # Construct request model with validation
@@ -3112,7 +3241,7 @@ async def create_custom_field(
     modality: Literal["contact", "account", "opportunity"] = Field(..., description="The entity type this custom field applies to: contact, account, or opportunity. This determines where the field will be available in your Apollo workspace."),
     type_: Literal["string", "textarea", "number", "date", "datetime", "boolean"] = Field(..., alias="type", description="The data type for the custom field. Choose from: string (single-line text), textarea (multi-line text), number, date, datetime, or boolean (true/false)."),
     meta: dict[str, Any] | None = Field(None, description="Optional metadata object to store additional configuration or properties for the custom field."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a custom field in your Apollo account to capture unique details about contacts, accounts, or deals. Custom fields enable your team to store specialized information and personalize outreach sequences."""
 
     # Construct request model with validation
@@ -3161,7 +3290,7 @@ async def list_notes(
     sort_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for results. Defaults to descending (newest first). Use ascending for oldest first."),
     skip: int | None = Field(None, description="Number of notes to skip for pagination. Must be zero or greater. Defaults to 0.", ge=0),
     limit: int | None = Field(None, description="Maximum number of notes to return per request. Must be between 1 and 100. Defaults to 25.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve notes associated with a specific contact, account, opportunity, calendar event, or conversation. At least one relation parameter must be provided to filter results, with support for sorting and pagination."""
 
     # Construct request model with validation

@@ -1,7 +1,7 @@
 """
 Authentication module for Apollo MCP server.
 
-Generated: 2026-04-14 18:14:17 UTC
+Generated: 2026-04-23 20:58:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -69,9 +69,12 @@ class OAuth2Auth:
         Format: JSON with access_token, refresh_token, expires_at
 
     URLs:
+        Authorization URL: https://app.apollo.io/#/oauth/authorize
+        Token URL: https://app.apollo.io/api/v1/oauth/token
 
     Available Scopes (configure via OAUTH2_SCOPES):
-        (Check API documentation for available scopes)
+        - read_user_profile
+        - app_scopes
     """
 
     def __init__(self):
@@ -111,8 +114,8 @@ class OAuth2Auth:
         self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
-        self.token_url = ""
-        self.auth_url = ""
+        self.token_url = "https://app.apollo.io/api/v1/oauth/token"
+        self.auth_url = "https://app.apollo.io/#/oauth/authorize"
         self.refresh_url = None
 
         # Token storage (secure file-based, unique per scheme)
@@ -522,56 +525,56 @@ This dictionary defines which authentication schemes are required for each opera
 using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
-    "enrich_person": [["apiKey"]],
-    "enrich_people_bulk": [["apiKey"]],
-    "enrich_organization": [["apiKey"]],
-    "enrich_organizations": [["apiKey"]],
-    "search_people": [["apiKey"]],
-    "search_companies": [["apiKey"]],
-    "list_organization_job_postings": [["apiKey"]],
-    "get_organization": [["apiKey"]],
-    "search_company_news": [["apiKey"]],
-    "create_account": [["apiKey"]],
-    "update_account": [["apiKey"]],
-    "bulk_create_accounts": [["apiKey"]],
-    "bulk_update_accounts": [["apiKey"]],
-    "search_accounts": [["apiKey"]],
-    "get_account": [["apiKey"]],
-    "assign_accounts_to_owner": [["apiKey"]],
-    "list_account_stages": [["apiKey"]],
-    "create_contact": [["apiKey"]],
-    "get_contact": [["apiKey"]],
-    "update_contact": [["apiKey"]],
-    "bulk_create_contacts": [["apiKey"]],
-    "bulk_update_contacts": [["apiKey"]],
-    "search_contacts": [["apiKey"]],
-    "update_contact_stages": [["apiKey"]],
-    "assign_contacts_to_owner": [["apiKey"]],
-    "list_contact_stages": [["apiKey"]],
-    "create_deal": [["apiKey"]],
-    "list_opportunities": [["apiKey"]],
-    "get_deal": [["apiKey"]],
-    "update_opportunity": [["apiKey"]],
-    "list_deal_stages": [["apiKey"]],
-    "search_sequences": [["apiKey"]],
-    "add_contacts_to_sequence": [["apiKey"]],
-    "update_sequence_contact_status": [["apiKey"]],
-    "activate_email_sequence": [["apiKey"]],
-    "abort_email_sequence": [["apiKey"]],
-    "archive_sequence": [["apiKey"]],
-    "search_outreach_emails": [["apiKey"]],
-    "get_email_activities": [["apiKey"]],
-    "create_task": [["apiKey"]],
-    "bulk_create_tasks": [["apiKey"]],
-    "search_tasks": [["apiKey"]],
-    "create_phone_call": [["apiKey"]],
-    "search_phone_calls": [["apiKey"]],
-    "update_call": [["apiKey"]],
-    "list_users": [["apiKey"]],
-    "list_email_accounts": [["apiKey"]],
-    "list_lists": [["apiKey"]],
-    "list_custom_fields": [["apiKey"]],
-    "list_fields": [["apiKey"]],
-    "create_custom_field": [["apiKey"]],
-    "list_notes": [["apiKey"]]
+    "enrich_person": [["apiKey"], ["oauth2"]],
+    "enrich_people_bulk": [["apiKey"], ["oauth2"]],
+    "enrich_organization": [["apiKey"], ["oauth2"]],
+    "enrich_organizations": [["apiKey"], ["oauth2"]],
+    "search_people": [["apiKey"], ["oauth2"]],
+    "search_companies": [["apiKey"], ["oauth2"]],
+    "list_organization_job_postings": [["apiKey"], ["oauth2"]],
+    "get_organization": [["apiKey"], ["oauth2"]],
+    "search_company_news": [["apiKey"], ["oauth2"]],
+    "create_account": [["apiKey"], ["oauth2"]],
+    "update_account": [["apiKey"], ["oauth2"]],
+    "bulk_create_accounts": [["apiKey"], ["oauth2"]],
+    "bulk_update_accounts": [["apiKey"], ["oauth2"]],
+    "search_accounts": [["apiKey"], ["oauth2"]],
+    "get_account": [["apiKey"], ["oauth2"]],
+    "assign_accounts_to_owner": [["apiKey"], ["oauth2"]],
+    "list_account_stages": [["apiKey"], ["oauth2"]],
+    "create_contact": [["apiKey"], ["oauth2"]],
+    "get_contact": [["apiKey"], ["oauth2"]],
+    "update_contact": [["apiKey"], ["oauth2"]],
+    "bulk_create_contacts": [["apiKey"], ["oauth2"]],
+    "bulk_update_contacts": [["apiKey"], ["oauth2"]],
+    "search_contacts": [["apiKey"], ["oauth2"]],
+    "update_contact_stages": [["apiKey"], ["oauth2"]],
+    "assign_contacts_to_owner": [["apiKey"], ["oauth2"]],
+    "list_contact_stages": [["apiKey"], ["oauth2"]],
+    "create_deal": [["apiKey"], ["oauth2"]],
+    "list_opportunities": [["apiKey"], ["oauth2"]],
+    "get_deal": [["apiKey"], ["oauth2"]],
+    "update_opportunity": [["apiKey"], ["oauth2"]],
+    "list_deal_stages": [["apiKey"], ["oauth2"]],
+    "search_sequences": [["apiKey"], ["oauth2"]],
+    "add_contacts_to_sequence": [["apiKey"], ["oauth2"]],
+    "update_sequence_contact_status": [["apiKey"], ["oauth2"]],
+    "activate_email_sequence": [["apiKey"], ["oauth2"]],
+    "abort_email_sequence": [["apiKey"], ["oauth2"]],
+    "archive_sequence": [["apiKey"], ["oauth2"]],
+    "search_outreach_emails": [["apiKey"], ["oauth2"]],
+    "get_email_activities": [["apiKey"], ["oauth2"]],
+    "create_task": [["apiKey"], ["oauth2"]],
+    "bulk_create_tasks": [["apiKey"], ["oauth2"]],
+    "search_tasks": [["apiKey"], ["oauth2"]],
+    "create_phone_call": [["apiKey"], ["oauth2"]],
+    "search_phone_calls": [["apiKey"], ["oauth2"]],
+    "update_call": [["apiKey"], ["oauth2"]],
+    "list_users": [["apiKey"], ["oauth2"]],
+    "list_email_accounts": [["apiKey"], ["oauth2"]],
+    "list_lists": [["apiKey"], ["oauth2"]],
+    "list_custom_fields": [["apiKey"], ["oauth2"]],
+    "list_fields": [["apiKey"], ["oauth2"]],
+    "create_custom_field": [["apiKey"], ["oauth2"]],
+    "list_notes": [["apiKey"], ["oauth2"]]
 }
