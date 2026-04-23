@@ -5,7 +5,7 @@ CircleCI MCP Server
 API Info:
 - API License: MIT (https://opensource.org/license/MIT)
 
-Generated: 2026-04-14 18:17:40 UTC
+Generated: 2026-04-23 21:07:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://circleci.com/api/v2")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +717,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +773,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +839,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +873,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -850,16 +963,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -873,6 +987,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -915,6 +1030,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -926,44 +1056,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'basic_auth',
     'api_key_header',
-    'api_key_query',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["basic_auth"] = _auth.BasicAuth(env_var_username="BASIC_AUTH_USERNAME", env_var_password="BASIC_AUTH_PASSWORD")
-    logging.info("Authentication configured: basic_auth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for basic_auth not configured: {error_msg}")
-    _auth_handlers["basic_auth"] = None
-try:
-    _auth_handlers["api_key_header"] = _auth.APIKeyAuth(env_var="API_KEY_HEADER", location="header", param_name="Circle-Token")
+    _auth_handlers["api_key_header"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Circle-Token")
     logging.info("Authentication configured: api_key_header")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for api_key_header not configured: {error_msg}")
     _auth_handlers["api_key_header"] = None
-try:
-    _auth_handlers["api_key_query"] = _auth.APIKeyAuth(env_var="API_KEY_QUERY", location="query", param_name="circle-token")
-    logging.info("Authentication configured: api_key_query")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for api_key_query not configured: {error_msg}")
-    _auth_handlers["api_key_query"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1090,7 +1201,7 @@ async def get_project_workflow_summary(
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="The time window over which summary metrics are calculated. Trends are only supported for windows up to 30 days; defaults to last-90-days if omitted."),
     branches: dict[str, Any] | None = Field(None, description="One or more VCS branch names to filter branch-level workflow metrics. Multiple branches can be specified by repeating the query parameter."),
     workflow_names: dict[str, Any] | None = Field(None, alias="workflow-names", description="One or more workflow names to filter workflow-level metrics. Multiple workflow names can be specified by repeating the query parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated summary metrics and trends for a project across its workflows and branches, covering up to 90 days of workflow run history. Note: Insights data is not suitable for precise credit reporting; use the CircleCI Plan Overview page for billing accuracy."""
 
     # Construct request model with validation
@@ -1111,7 +1222,6 @@ async def get_project_workflow_summary(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_project_workflow_summary")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_project_workflow_summary", "GET", _http_path, _request_id)
@@ -1137,7 +1247,7 @@ async def list_job_timeseries(
     granularity: Literal["daily", "hourly"] | None = Field(None, description="The time resolution for the returned timeseries data, either per hour or per day. Hourly data is only available for the past 48 hours; daily data is available for up to 90 days."),
     start_date: str | None = Field(None, alias="start-date", description="The inclusive start of the time range filter, in ISO 8601 date-time format. Must be provided if an end-date is specified."),
     end_date: str | None = Field(None, alias="end-date", description="The exclusive end of the time range filter, in ISO 8601 date-time format. Must be no more than 90 days after the start-date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve timeseries performance data for all jobs within a specified workflow, supporting hourly or daily granularity. Hourly data is retained for 48 hours and daily data for 90 days."""
 
     # Construct request model with validation
@@ -1158,7 +1268,6 @@ async def list_job_timeseries(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_job_timeseries")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_job_timeseries", "GET", _http_path, _request_id)
@@ -1181,7 +1290,7 @@ async def get_org_summary(
     org_slug: str = Field(..., alias="org-slug", description="The organization slug identifying the target org, combining the VCS provider slug and organization name separated by a forward slash (which may be URL-encoded)."),
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="The time window over which summary metrics are calculated and trends are derived. Defaults to the last 90 days if not specified."),
     project_names: dict[str, Any] | None = Field(None, alias="project-names", description="An optional list of project names used to filter results to specific projects within the org. Provide the parameter multiple times to include multiple projects."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated performance metrics and trends for an entire organization and each of its projects. Supports filtering by a specific reporting window and an optional subset of projects."""
 
     # Construct request model with validation
@@ -1202,7 +1311,6 @@ async def get_org_summary(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_org_summary")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_org_summary", "GET", _http_path, _request_id)
@@ -1224,7 +1332,7 @@ async def get_org_summary(
 async def list_project_branches(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
     workflow_name: str | None = Field(None, alias="workflow-name", description="Filters the returned branches to only those associated with the specified workflow name. When omitted, branches are scoped to the entire project across all workflows."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all branches currently tracked within Insights for a specified project. Returns up to 5,000 branches, optionally scoped to a specific workflow."""
 
     # Construct request model with validation
@@ -1245,7 +1353,6 @@ async def list_project_branches(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_project_branches")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_project_branches", "GET", _http_path, _request_id)
@@ -1264,7 +1371,7 @@ async def list_project_branches(
 
 # Tags: Insights
 @mcp.tool()
-async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped.")) -> dict[str, Any]:
+async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped.")) -> dict[str, Any] | ToolResult:
     """Retrieves all flaky tests for a given project, where a flaky test is defined as one that both passed and failed within the same commit. Results are branch-agnostic."""
 
     # Construct request model with validation
@@ -1278,13 +1385,11 @@ async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", 
 
     # Extract parameters for API call
     _http_path = _build_path("/insights/{project-slug}/flaky-tests", _request.path.model_dump(by_alias=True)) if _request.path else "/insights/{project-slug}/flaky-tests"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_flaky_tests")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_flaky_tests", "GET", _http_path, _request_id)
@@ -1295,7 +1400,6 @@ async def list_flaky_tests(project_slug: str = Field(..., alias="project-slug", 
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1307,7 +1411,7 @@ async def list_workflow_metrics(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the Organization ID (from Organization Settings) as org-name, and the Project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded."),
     branch: str | None = Field(None, description="Filters metrics to a specific VCS branch by name. If omitted, metrics are scoped to the project's default branch."),
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="Defines the time window over which summary metrics are calculated. Accepts predefined window values; if omitted, defaults to the last 90 days."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated summary metrics for all workflows in a project, covering up to the last 90 days. Metrics are refreshed daily and are intended for performance insights, not precise credit or billing reporting."""
 
     # Construct request model with validation
@@ -1328,7 +1432,6 @@ async def list_workflow_metrics(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_workflow_metrics")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_workflow_metrics", "GET", _http_path, _request_id)
@@ -1354,7 +1457,7 @@ async def list_workflow_runs(
     branch: str | None = Field(None, description="Filters results to a specific VCS branch by name. Defaults to the repository's default branch if omitted; cannot be used together with all-branches."),
     start_date: str | None = Field(None, alias="start-date", description="Filters results to only include workflow runs that started at or after this ISO 8601 datetime. Required when an end-date is specified."),
     end_date: str | None = Field(None, alias="end-date", description="Filters results to only include workflow runs that started before this ISO 8601 datetime. Must be no more than 90 days after the start-date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves recent runs of a specific workflow within a project, covering executions up to 90 days in the past. Note that Insights data is not suitable for precise credit reporting; use the CircleCI UI Plan Overview page for accurate billing information."""
 
     # Construct request model with validation
@@ -1375,7 +1478,6 @@ async def list_workflow_runs(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_workflow_runs")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_workflow_runs", "GET", _http_path, _request_id)
@@ -1401,7 +1503,7 @@ async def list_workflow_job_metrics(
     branch: str | None = Field(None, description="Filters metrics to a specific VCS branch by name. Defaults to the repository's default branch if neither this nor all-branches is provided."),
     reporting_window: Literal["last-7-days", "last-90-days", "last-24-hours", "last-30-days", "last-60-days"] | None = Field(None, alias="reporting-window", description="Defines the time window over which summary metrics are calculated. Defaults to the last 90 days if not specified."),
     job_name: str | None = Field(None, alias="job-name", description="Filters results to jobs whose names match the provided string, either as a full job name or a substring. Returns metrics for all jobs in the workflow if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated summary metrics for all jobs within a specific project workflow, covering up to the last 90 days. Metrics are refreshed daily and are intended for performance analysis, not precise credit or billing reporting."""
 
     # Construct request model with validation
@@ -1422,7 +1524,6 @@ async def list_workflow_job_metrics(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_workflow_job_metrics")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_workflow_job_metrics", "GET", _http_path, _request_id)
@@ -1446,7 +1547,7 @@ async def get_workflow_summary(
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow for which to retrieve summary metrics."),
     all_branches: bool | None = Field(None, alias="all-branches", description="When set to true, aggregates metrics across all branches instead of a single branch. Use either this parameter or the branch parameter, not both."),
     branch: str | None = Field(None, description="The name of the VCS branch to scope metrics to. If omitted and all-branches is not set, results default to the repository's default branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated metrics and trends for a specific workflow within a project, such as duration, success rate, and run frequency. Results can be scoped to a single branch or aggregated across all branches."""
 
     # Construct request model with validation
@@ -1467,7 +1568,6 @@ async def get_workflow_summary(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_workflow_summary")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_workflow_summary", "GET", _http_path, _request_id)
@@ -1491,7 +1591,7 @@ async def get_workflow_test_metrics(
     workflow_name: str = Field(..., alias="workflow-name", description="The exact name of the workflow for which test metrics should be retrieved."),
     branch: str | None = Field(None, description="Scopes results to a specific VCS branch name. Defaults to the repository's default branch if omitted. Mutually exclusive with the all-branches parameter."),
     all_branches: bool | None = Field(None, alias="all-branches", description="When set to true, aggregates test metrics across all branches rather than a single branch. Mutually exclusive with the branch parameter; use one or the other, not both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves test metrics for a specific workflow within a project, calculated from the 10 most recent workflow runs. Results can be scoped to a specific branch or aggregated across all branches."""
 
     # Construct request model with validation
@@ -1512,7 +1612,6 @@ async def get_workflow_test_metrics(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_workflow_test_metrics")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_workflow_test_metrics", "GET", _http_path, _request_id)
@@ -1531,7 +1630,7 @@ async def get_workflow_test_metrics(
 
 # Tags: Job
 @mcp.tool()
-async def cancel_job(job_id: str = Field(..., alias="job-id", description="The unique identifier of the job to cancel, in UUID format.")) -> dict[str, Any]:
+async def cancel_job(job_id: str = Field(..., alias="job-id", description="The unique identifier of the job to cancel, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Cancels an active job identified by its unique job ID. Use this to stop a job that is pending or in progress before it completes."""
 
     # Construct request model with validation
@@ -1545,13 +1644,11 @@ async def cancel_job(job_id: str = Field(..., alias="job-id", description="The u
 
     # Extract parameters for API call
     _http_path = _build_path("/jobs/{job-id}/cancel", _request.path.model_dump(by_alias=True)) if _request.path else "/jobs/{job-id}/cancel"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_job")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("cancel_job", "POST", _http_path, _request_id)
@@ -1562,7 +1659,6 @@ async def cancel_job(job_id: str = Field(..., alias="job-id", description="The u
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1570,18 +1666,16 @@ async def cancel_job(job_id: str = Field(..., alias="job-id", description="The u
 
 # Tags: User
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for the currently authenticated user. Useful for identifying who is signed in and accessing their associated details."""
 
     # Extract parameters for API call
     _http_path = "/me"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_current_user")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_current_user", "GET", _http_path, _request_id)
@@ -1592,7 +1686,6 @@ async def get_current_user() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1600,18 +1693,16 @@ async def get_current_user() -> dict[str, Any]:
 
 # Tags: User
 @mcp.tool()
-async def list_collaborations() -> dict[str, Any]:
+async def list_collaborations() -> dict[str, Any] | ToolResult:
     """Retrieves all organizations where the current user is a member or collaborator, spanning multiple VCS providers (e.g., GitHub, BitBucket), parent organizations of accessible repositories, and the user's own account organization."""
 
     # Extract parameters for API call
     _http_path = "/me/collaborations"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_collaborations")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_collaborations", "GET", _http_path, _request_id)
@@ -1622,7 +1713,6 @@ async def list_collaborations() -> dict[str, Any]:
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1633,7 +1723,7 @@ async def list_collaborations() -> dict[str, Any]:
 async def create_organization(
     name: str | None = Field(None, description="The display name for the organization being created."),
     vcs_type: Literal["github", "bitbucket", "circleci"] | None = Field(None, description="The version control system associated with the organization, or 'circleci' for a standalone organization not tied to a VCS provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new organization, either by validating access and syncing data for a VCS provider (GitHub or Bitbucket), or by provisioning a standalone CircleCI organization."""
 
     # Construct request model with validation
@@ -1647,14 +1737,12 @@ async def create_organization(
 
     # Extract parameters for API call
     _http_path = "/organization"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_organization")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_organization", "POST", _http_path, _request_id)
@@ -1665,7 +1753,6 @@ async def create_organization(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1674,7 +1761,7 @@ async def create_organization(
 
 # Tags: Organization
 @mcp.tool()
-async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a VCS slug in the format `vcs-slug/org-name` (e.g., `gh/` for GitHub, `bb/` for Bitbucket). For GitLab or GitHub App integrations, use `circleci` as the VCS slug and provide the numeric organization ID (found in Organization Settings) in place of the org name.")) -> dict[str, Any]:
+async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a VCS slug in the format `vcs-slug/org-name` (e.g., `gh/` for GitHub, `bb/` for Bitbucket). For GitLab or GitHub App integrations, use `circleci` as the VCS slug and provide the numeric organization ID (found in Organization Settings) in place of the org name.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific organization by its slug or UUID. Supports organizations across GitHub, Bitbucket, and GitLab (via CircleCI VCS slug)."""
 
     # Construct request model with validation
@@ -1688,13 +1775,11 @@ async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-i
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_organization")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_organization", "GET", _http_path, _request_id)
@@ -1705,7 +1790,6 @@ async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-i
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1713,7 +1797,7 @@ async def get_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-i
 
 # Tags: Organization
 @mcp.tool()
-async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The unique identifier for the organization, either as a UUID or a VCS-prefixed slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and the organization ID (found in Organization Settings) as the org name.")) -> dict[str, Any]:
+async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The unique identifier for the organization, either as a UUID or a VCS-prefixed slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and the organization ID (found in Organization Settings) as the org name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an organization and all associated projects and build data. This action is irreversible and will remove all resources tied to the organization."""
 
     # Construct request model with validation
@@ -1727,13 +1811,11 @@ async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-o
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_organization")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_organization", "DELETE", _http_path, _request_id)
@@ -1744,7 +1826,6 @@ async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-o
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1755,7 +1836,7 @@ async def delete_organization(org_slug_or_id: str = Field(..., alias="org-slug-o
 async def create_project(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The unique identifier for the organization, either as a UUID or a VCS-based slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App integrations, use `circleci` as the VCS slug and provide the numeric organization ID (available in Organization Settings) in place of the org name."),
     name: str | None = Field(None, description="The display name for the new project. Should be unique within the organization and clearly identify the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project within the specified organization. Works across all organization types including GitHub, GitLab, and CircleCI-managed organizations."""
 
     # Construct request model with validation
@@ -1770,14 +1851,12 @@ async def create_project(
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}/project", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}/project"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_project")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_project", "POST", _http_path, _request_id)
@@ -1788,7 +1867,6 @@ async def create_project(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1797,7 +1875,7 @@ async def create_project(
 
 # Tags: Organization
 @mcp.tool()
-async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and provide the organization ID (available in Organization Settings) in place of the org name.")) -> dict[str, Any]:
+async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the format `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the VCS slug and provide the organization ID (available in Organization Settings) in place of the org name.")) -> dict[str, Any] | ToolResult:
     """Retrieves all entries in the URL Orb allow-list for the specified organization. Use this to review which URLs are permitted under the org's URL Orb configuration."""
 
     # Construct request model with validation
@@ -1811,13 +1889,11 @@ async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}/url-orb-allow-list", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}/url-orb-allow-list"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_url_orb_allow_list_entries")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_url_orb_allow_list_entries", "GET", _http_path, _request_id)
@@ -1828,7 +1904,6 @@ async def list_url_orb_allow_list_entries(org_slug_or_id: str = Field(..., alias
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1840,7 +1915,7 @@ async def create_url_orb_allow_list_entry(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the form `vcs-slug/org-name`. For organizations using GitLab or GitHub App, use `circleci` as the vcs-slug and the organization ID (found in Organization Settings) as the org-name."),
     name: str | None = Field(None, description="A human-readable label for this allow-list entry to help identify its purpose within the organization."),
     prefix: Any | None = Field(None, description="The URL prefix that defines which URL orb references are permitted; any orb reference URL beginning with this prefix will be allowed by this entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new URL prefix entry to an organization's URL Orb allow-list, permitting orb references that begin with the specified URL prefix to be used in pipelines."""
 
     # Construct request model with validation
@@ -1855,14 +1930,12 @@ async def create_url_orb_allow_list_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}/url-orb-allow-list", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}/url-orb-allow-list"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_url_orb_allow_list_entry")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_url_orb_allow_list_entry", "POST", _http_path, _request_id)
@@ -1873,7 +1946,6 @@ async def create_url_orb_allow_list_entry(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -1885,7 +1957,7 @@ async def create_url_orb_allow_list_entry(
 async def delete_url_orb_allow_list_entry(
     org_slug_or_id: str = Field(..., alias="org-slug-or-id", description="The organization identifier, either as a UUID or a slug in the format `vcs-slug/org-name`. For GitLab or GitHub App projects, use `circleci` as the `vcs-slug` and provide the organization ID (found in Organization Settings) as the `org-name`."),
     allow_list_entry_id: str = Field(..., alias="allow-list-entry-id", description="The UUID of the URL orb allow-list entry to remove. This uniquely identifies the specific allow-list entry to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific entry from the organization's URL orb allow-list by its unique ID. Use this to revoke previously permitted URLs from the allow-list."""
 
     # Construct request model with validation
@@ -1899,13 +1971,11 @@ async def delete_url_orb_allow_list_entry(
 
     # Extract parameters for API call
     _http_path = _build_path("/organization/{org-slug-or-id}/url-orb-allow-list/{allow-list-entry-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organization/{org-slug-or-id}/url-orb-allow-list/{allow-list-entry-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_url_orb_allow_list_entry")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_url_orb_allow_list_entry", "DELETE", _http_path, _request_id)
@@ -1916,7 +1986,6 @@ async def delete_url_orb_allow_list_entry(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -1927,7 +1996,7 @@ async def delete_url_orb_allow_list_entry(
 async def list_pipelines(
     org_slug: str | None = Field(None, alias="org-slug", description="The organization slug identifying the target organization, formatted as vcs-slug/org-name. For GitLab or GitHub App projects, use 'circleci' as the vcs-slug and supply the organization ID (found in Organization Settings) as the org-name."),
     mine: bool | None = Field(None, description="When set to true, restricts results to only pipelines triggered by the authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves up to 250 pipelines from the most recently built projects you follow within an organization. Optionally filter by organization or limit results to pipelines triggered by your user."""
 
     # Construct request model with validation
@@ -1947,7 +2016,6 @@ async def list_pipelines(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_pipelines")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_pipelines", "GET", _http_path, _request_id)
@@ -1970,7 +2038,7 @@ async def continue_pipeline(
     continuation_key: str | None = Field(None, alias="continuation-key", description="The unique continuation key that identifies the paused pipeline to resume, obtained from the pipeline setup phase."),
     configuration: str | None = Field(None, description="The full pipeline configuration string to apply when continuing the pipeline, used to supply dynamic configuration at runtime."),
     parameters: dict[str, int | str | bool] | None = Field(None, description="A key-value map of pipeline parameter names to their values, subject to limits of 100 max entries, 128-character maximum key length, and 512-character maximum value length."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resumes a pipeline from the setup phase using a continuation key, allowing dynamic configuration and parameter injection. Refer to the Pipeline values and parameters documentation for guidance on using pipeline parameters with dynamic configuration."""
 
     # Construct request model with validation
@@ -1984,14 +2052,12 @@ async def continue_pipeline(
 
     # Extract parameters for API call
     _http_path = "/pipeline/continue"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("continue_pipeline")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("continue_pipeline", "POST", _http_path, _request_id)
@@ -2002,7 +2068,6 @@ async def continue_pipeline(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -2011,7 +2076,7 @@ async def continue_pipeline(
 
 # Tags: Pipeline
 @mcp.tool()
-async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline to retrieve, provided as a UUID.")) -> dict[str, Any]:
+async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific pipeline using its unique identifier. Returns the full pipeline configuration and metadata."""
 
     # Construct request model with validation
@@ -2025,13 +2090,11 @@ async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", descri
 
     # Extract parameters for API call
     _http_path = _build_path("/pipeline/{pipeline-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/pipeline/{pipeline-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_pipeline")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_pipeline", "GET", _http_path, _request_id)
@@ -2042,7 +2105,6 @@ async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", descri
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2050,7 +2112,7 @@ async def get_pipeline(pipeline_id: str = Field(..., alias="pipeline-id", descri
 
 # Tags: Pipeline
 @mcp.tool()
-async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose configuration you want to retrieve. Must be a valid UUID corresponding to an existing pipeline.")) -> dict[str, Any]:
+async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose configuration you want to retrieve. Must be a valid UUID corresponding to an existing pipeline.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full configuration for a specific pipeline by its unique ID. Useful for inspecting pipeline settings, stages, and parameters without modifying them."""
 
     # Construct request model with validation
@@ -2064,13 +2126,11 @@ async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id",
 
     # Extract parameters for API call
     _http_path = _build_path("/pipeline/{pipeline-id}/config", _request.path.model_dump(by_alias=True)) if _request.path else "/pipeline/{pipeline-id}/config"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_pipeline_config")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_pipeline_config", "GET", _http_path, _request_id)
@@ -2081,7 +2141,6 @@ async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id",
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2089,7 +2148,7 @@ async def get_pipeline_config(pipeline_id: str = Field(..., alias="pipeline-id",
 
 # Tags: Pipeline
 @mcp.tool()
-async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose values you want to retrieve, in UUID format.")) -> dict[str, Any]:
+async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose values you want to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves a map of built-in pipeline values (such as pipeline number, trigger parameters, and VCS metadata) for a specific pipeline. Useful for inspecting runtime context associated with a pipeline execution."""
 
     # Construct request model with validation
@@ -2103,13 +2162,11 @@ async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id",
 
     # Extract parameters for API call
     _http_path = _build_path("/pipeline/{pipeline-id}/values", _request.path.model_dump(by_alias=True)) if _request.path else "/pipeline/{pipeline-id}/values"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_pipeline_values")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_pipeline_values", "GET", _http_path, _request_id)
@@ -2120,7 +2177,6 @@ async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id",
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2128,7 +2184,7 @@ async def get_pipeline_values(pipeline_id: str = Field(..., alias="pipeline-id",
 
 # Tags: Pipeline
 @mcp.tool()
-async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose workflows you want to retrieve. Must be a valid UUID.")) -> dict[str, Any]:
+async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-id", description="The unique identifier of the pipeline whose workflows you want to retrieve. Must be a valid UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of workflows associated with a specific pipeline. Use this to inspect all workflows belonging to a given pipeline by its unique identifier."""
 
     # Construct request model with validation
@@ -2142,13 +2198,11 @@ async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-
 
     # Extract parameters for API call
     _http_path = _build_path("/pipeline/{pipeline-id}/workflow", _request.path.model_dump(by_alias=True)) if _request.path else "/pipeline/{pipeline-id}/workflow"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_pipeline_workflows")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_pipeline_workflows", "GET", _http_path, _request_id)
@@ -2159,7 +2213,6 @@ async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2167,7 +2220,7 @@ async def list_pipeline_workflows(pipeline_id: str = Field(..., alias="pipeline-
 
 # Tags: Project
 @mcp.tool()
-async def get_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the VCS slug, the organization ID (from Organization Settings) as the org name, and the project ID (from Project Settings) as the repo name.")) -> dict[str, Any]:
+async def get_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the VCS slug, the organization ID (from Organization Settings) as the org name, and the project ID (from Project Settings) as the repo name.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific CircleCI project using its unique project slug. Supports projects hosted on GitHub, GitLab, and Bitbucket, including those using the GitHub App integration."""
 
     # Construct request model with validation
@@ -2181,13 +2234,11 @@ async def get_project(project_slug: str = Field(..., alias="project-slug", descr
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_project")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_project", "GET", _http_path, _request_id)
@@ -2198,7 +2249,6 @@ async def get_project(project_slug: str = Field(..., alias="project-slug", descr
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2206,7 +2256,7 @@ async def get_project(project_slug: str = Field(..., alias="project-slug", descr
 
 # Tags: Project
 @mcp.tool()
-async def delete_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any]:
+async def delete_project(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project from CircleCI using its unique project slug. This action is irreversible and removes all associated project data."""
 
     # Construct request model with validation
@@ -2220,13 +2270,11 @@ async def delete_project(project_slug: str = Field(..., alias="project-slug", de
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_project")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_project", "DELETE", _http_path, _request_id)
@@ -2237,7 +2285,6 @@ async def delete_project(project_slug: str = Field(..., alias="project-slug", de
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2248,7 +2295,7 @@ async def delete_project(project_slug: str = Field(..., alias="project-slug", de
 async def list_checkout_keys(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID in place of org-name, and the project ID in place of repo-name; forward slashes may be URL-encoded."),
     digest: Literal["sha256", "md5"] | None = Field(None, description="The hashing algorithm used to format the returned key fingerprints; accepted values are `md5` or `sha256`, defaulting to `md5` if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all checkout keys associated with a specified project, returning their fingerprints and metadata. Useful for auditing or managing SSH keys used during CI/CD checkout steps."""
 
     # Construct request model with validation
@@ -2269,7 +2316,6 @@ async def list_checkout_keys(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_checkout_keys")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_checkout_keys", "GET", _http_path, _request_id)
@@ -2291,7 +2337,7 @@ async def list_checkout_keys(
 async def create_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as vcs-slug/org-name/repo-name. For GitLab or GitHub App projects, use 'circleci' as the vcs-slug with the organization ID and project ID in place of org-name and repo-name respectively."),
     type_: Literal["user-key", "deploy-key"] | None = Field(None, alias="type", description="The type of checkout key to create: 'deploy-key' grants read-only repository access for deployments, while 'user-key' grants access tied to a specific GitHub user account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new checkout key (deploy key or user key) for a specified project. Only available for GitHub and Bitbucket projects using a user API token; requires GitHub account authorization before creating user keys."""
 
     # Construct request model with validation
@@ -2306,14 +2352,12 @@ async def create_checkout_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/checkout-key", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/checkout-key"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_checkout_key")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_checkout_key", "POST", _http_path, _request_id)
@@ -2324,7 +2368,6 @@ async def create_checkout_key(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -2336,7 +2379,7 @@ async def create_checkout_key(
 async def get_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     fingerprint: str = Field(..., description="The SSH key fingerprint used to uniquely identify the checkout key, accepted in either MD5 or SHA256 format. SHA256 fingerprints must be URL-encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific checkout key for a project using its MD5 or SHA256 fingerprint. SHA256 fingerprints must be URL-encoded before being passed as the fingerprint parameter."""
 
     # Construct request model with validation
@@ -2350,13 +2393,11 @@ async def get_checkout_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/checkout-key/{fingerprint}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/checkout-key/{fingerprint}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_checkout_key")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_checkout_key", "GET", _http_path, _request_id)
@@ -2367,7 +2408,6 @@ async def get_checkout_key(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2378,7 +2418,7 @@ async def get_checkout_key(
 async def delete_checkout_key(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     fingerprint: str = Field(..., description="The MD5 or SHA256 fingerprint of the SSH checkout key to delete. SHA256 fingerprints must be URL-encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific checkout key for a project using its MD5 or SHA256 fingerprint. SHA256 fingerprints must be URL-encoded before being passed as the fingerprint parameter."""
 
     # Construct request model with validation
@@ -2392,13 +2432,11 @@ async def delete_checkout_key(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/checkout-key/{fingerprint}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/checkout-key/{fingerprint}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_checkout_key")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_checkout_key", "DELETE", _http_path, _request_id)
@@ -2409,7 +2447,6 @@ async def delete_checkout_key(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2417,7 +2454,7 @@ async def delete_checkout_key(
 
 # Tags: Project
 @mcp.tool()
-async def list_env_vars(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any]:
+async def list_env_vars(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all environment variables for a specified CircleCI project. Values are masked, returning only the last four characters prefixed with four 'x' characters, matching the display behavior on the CircleCI website."""
 
     # Construct request model with validation
@@ -2431,13 +2468,11 @@ async def list_env_vars(project_slug: str = Field(..., alias="project-slug", des
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/envvar", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/envvar"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_env_vars")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_env_vars", "GET", _http_path, _request_id)
@@ -2448,7 +2483,6 @@ async def list_env_vars(project_slug: str = Field(..., alias="project-slug", des
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2460,7 +2494,7 @@ async def create_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-escaped."),
     name: str | None = Field(None, description="The name of the environment variable to create, which must be unique within the project and will be used to reference the variable in pipeline configurations."),
     value: str | None = Field(None, description="The value to assign to the environment variable; once stored, this value will be masked and not returned in plaintext by the API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new environment variable for a specified CircleCI project, making it available to pipelines and jobs running within that project."""
 
     # Construct request model with validation
@@ -2475,14 +2509,12 @@ async def create_env_var(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/envvar", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/envvar"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_env_var")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_env_var", "POST", _http_path, _request_id)
@@ -2493,7 +2525,6 @@ async def create_env_var(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -2505,7 +2536,7 @@ async def create_env_var(
 async def get_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formed as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
     name: str = Field(..., description="The exact name of the environment variable to retrieve, matching the name as defined in the project's environment variable settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the masked value of a specific environment variable for a given project. The returned value is masked for security purposes."""
 
     # Construct request model with validation
@@ -2519,13 +2550,11 @@ async def get_env_var(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/envvar/{name}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/envvar/{name}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_env_var")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_env_var", "GET", _http_path, _request_id)
@@ -2536,7 +2565,6 @@ async def get_env_var(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2547,7 +2575,7 @@ async def get_env_var(
 async def delete_env_var(
     project_slug: str = Field(..., alias="project-slug", description="The project slug uniquely identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name; forward slashes may be URL-encoded."),
     name: str = Field(..., description="The exact name of the environment variable to delete, matching the variable's name as it appears in the project's environment variable settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific environment variable from a CircleCI project. This action is irreversible and immediately removes the variable from the project's configuration."""
 
     # Construct request model with validation
@@ -2561,13 +2589,11 @@ async def delete_env_var(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/envvar/{name}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/envvar/{name}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_env_var")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_env_var", "DELETE", _http_path, _request_id)
@@ -2578,7 +2604,6 @@ async def delete_env_var(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2589,7 +2614,7 @@ async def delete_env_var(
 async def get_job_details(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job to retrieve details for."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project in the format `vcs-slug/org-name/repo-name`, where slashes may be URL-escaped. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific job within a project, including its status, timing, and configuration. Use this to inspect the outcome or metadata of a particular job run."""
 
     # Construct request model with validation
@@ -2603,13 +2628,11 @@ async def get_job_details(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/job/{job-number}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/job/{job-number}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_job_details")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_job_details", "GET", _http_path, _request_id)
@@ -2620,7 +2643,6 @@ async def get_job_details(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2631,7 +2653,7 @@ async def get_job_details(
 async def cancel_job_by_number(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job to cancel within the project."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project, formatted as vcs-slug/org-name/repo-name. For GitLab or GitHub App projects, use circleci as the vcs-slug, the organization ID as org-name, and the project ID as repo-name; forward slashes may be URL-escaped."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancels a running job in a specified project using its job number. Useful for stopping unwanted or erroneous builds mid-execution."""
 
     # Construct request model with validation
@@ -2645,13 +2667,11 @@ async def cancel_job_by_number(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/job/{job-number}/cancel", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/job/{job-number}/cancel"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_job_by_number")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("cancel_job_by_number", "POST", _http_path, _request_id)
@@ -2662,7 +2682,6 @@ async def cancel_job_by_number(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2673,7 +2692,7 @@ async def cancel_job_by_number(
 async def list_project_pipelines(
     project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded."),
     branch: str | None = Field(None, description="Filters returned pipelines to only those triggered on the specified branch name. When omitted, pipelines from all branches are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pipelines for a specified project, optionally filtered by branch. Useful for monitoring CI/CD activity and pipeline history across a project."""
 
     # Construct request model with validation
@@ -2694,7 +2713,6 @@ async def list_project_pipelines(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_project_pipelines")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_project_pipelines", "GET", _http_path, _request_id)
@@ -2718,7 +2736,7 @@ async def trigger_pipeline(
     branch: str | None = Field(None, description="The branch to run the pipeline against, using the HEAD commit of that branch. Mutually exclusive with `tag`; only one may be provided. To target a pull request, use `pull/<number>/head` for the PR ref or `pull/<number>/merge` for the merge ref (GitHub only)."),
     tag: str | None = Field(None, description="A Git tag whose pointed-to commit will be used for the pipeline run. Mutually exclusive with `branch`; only one may be provided."),
     parameters: dict[str, int | str | bool] | None = Field(None, description="A key-value map of pipeline parameter names to their values, used to customize the pipeline run. Limited to 100 entries, with keys up to 128 characters and values up to 512 characters each."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers a new pipeline run on a specified project using a branch, tag, or custom parameters. Note: this endpoint does not support GitLab or GitHub App projects — use the Trigger Pipeline Run API for those."""
 
     # Construct request model with validation
@@ -2733,14 +2751,12 @@ async def trigger_pipeline(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/pipeline", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/pipeline"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("trigger_pipeline")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("trigger_pipeline", "POST", _http_path, _request_id)
@@ -2751,7 +2767,6 @@ async def trigger_pipeline(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -2760,7 +2775,7 @@ async def trigger_pipeline(
 
 # Tags: Pipeline
 @mcp.tool()
-async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any]:
+async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipelines for a specified project that were triggered by the authenticated user. Returns results as a sequence ordered by trigger time."""
 
     # Construct request model with validation
@@ -2774,13 +2789,11 @@ async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug",
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/pipeline/mine", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/pipeline/mine"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_my_pipelines")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_my_pipelines", "GET", _http_path, _request_id)
@@ -2791,7 +2804,6 @@ async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug",
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2802,7 +2814,7 @@ async def list_my_pipelines(project_slug: str = Field(..., alias="project-slug",
 async def get_pipeline_by_number(
     project_slug: str = Field(..., alias="project-slug", description="The project slug identifying the target project, formatted as `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
     pipeline_number: Any = Field(..., alias="pipeline-number", description="The sequential number assigned to the pipeline within the project, uniquely identifying it among all pipelines for that project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific pipeline by its number within a given project. Returns full pipeline details including status, configuration, and metadata."""
 
     # Construct request model with validation
@@ -2816,13 +2828,11 @@ async def get_pipeline_by_number(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/pipeline/{pipeline-number}", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/pipeline/{pipeline-number}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_pipeline_by_number")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_pipeline_by_number", "GET", _http_path, _request_id)
@@ -2833,7 +2843,6 @@ async def get_pipeline_by_number(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2841,7 +2850,7 @@ async def get_pipeline_by_number(
 
 # Tags: Schedule
 @mcp.tool()
-async def list_project_schedules(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any]:
+async def list_project_schedules(project_slug: str = Field(..., alias="project-slug", description="Unique identifier for the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID (from Organization Settings) as org-name, and the project ID (from Project Settings) as repo-name. Forward slashes may be URL-encoded.")) -> dict[str, Any] | ToolResult:
     """Retrieves all schedule triggers associated with GitHub OAuth or Bitbucket Cloud pipeline definitions for a given project. Note: schedules for GitHub App pipelines are not included and must be fetched via the List Pipeline Definition Triggers endpoint."""
 
     # Construct request model with validation
@@ -2855,13 +2864,11 @@ async def list_project_schedules(project_slug: str = Field(..., alias="project-s
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/schedule", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/schedule"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_project_schedules")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_project_schedules", "GET", _http_path, _request_id)
@@ -2872,7 +2879,6 @@ async def list_project_schedules(project_slug: str = Field(..., alias="project-s
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2887,7 +2893,7 @@ async def create_schedule(
     attribution_actor: Literal["current", "system"] | None = Field(None, alias="attribution-actor", description="Determines which actor's permissions are used when the scheduled pipeline runs — `current` uses the token owner's permissions, while `system` uses neutral system-level permissions."),
     parameters: dict[str, int | str | bool] | None = Field(None, description="Key-value pairs of pipeline parameters passed to each triggered pipeline run; must include at least a `branch` or `tag` key to specify the target ref."),
     description: str | None = Field(None, description="An optional human-readable description providing additional context about the schedule's purpose or behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a recurring pipeline schedule for a project and returns the created schedule. Available only for Bitbucket and GitHub OAuth organizations; for GitHub App or CircleCI project types, use the Create Trigger endpoint instead."""
 
     # Construct request model with validation
@@ -2902,14 +2908,12 @@ async def create_schedule(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/schedule", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/schedule"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_schedule")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_schedule", "POST", _http_path, _request_id)
@@ -2920,7 +2924,6 @@ async def create_schedule(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -2932,7 +2935,7 @@ async def create_schedule(
 async def list_job_artifacts(
     job_number: Any = Field(..., alias="job-number", description="The unique number identifying the job within the project whose artifacts you want to retrieve."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug uniquely identifying the project in the format `vcs-slug/org-name/repo-name`. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name. Forward slashes may be URL-escaped."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all artifacts produced by a specific job in a CircleCI project. Useful for accessing build outputs such as test reports, binaries, or logs."""
 
     # Construct request model with validation
@@ -2946,13 +2949,11 @@ async def list_job_artifacts(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/{job-number}/artifacts", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/{job-number}/artifacts"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_job_artifacts")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_job_artifacts", "GET", _http_path, _request_id)
@@ -2963,7 +2964,6 @@ async def list_job_artifacts(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -2974,7 +2974,7 @@ async def list_job_artifacts(
 async def list_job_tests(
     job_number: Any = Field(..., alias="job-number", description="The unique numeric identifier of the job whose test metadata you want to retrieve."),
     project_slug: str = Field(..., alias="project-slug", description="Project slug identifying the target project in the format `vcs-slug/org-name/repo-name`, where URL-escaping of `/` is supported. For GitLab or GitHub App projects, use `circleci` as the vcs-slug, the organization ID as org-name, and the project ID as repo-name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves test metadata for a specific job within a project, including results and timing information. Returns no results if test data exceeds 250MB for the job."""
 
     # Construct request model with validation
@@ -2988,13 +2988,11 @@ async def list_job_tests(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{project-slug}/{job-number}/tests", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{project-slug}/{job-number}/tests"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_job_tests")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_job_tests", "GET", _http_path, _request_id)
@@ -3005,7 +3003,6 @@ async def list_job_tests(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3013,7 +3010,7 @@ async def list_job_tests(
 
 # Tags: Schedule
 @mcp.tool()
-async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to retrieve, in UUID format.")) -> dict[str, Any]:
+async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific pipeline schedule by its unique ID. Only available for schedules associated with GitHub OAuth or Bitbucket Cloud pipeline definitions."""
 
     # Construct request model with validation
@@ -3027,13 +3024,11 @@ async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", descri
 
     # Extract parameters for API call
     _http_path = _build_path("/schedule/{schedule-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/schedule/{schedule-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_schedule")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_schedule", "GET", _http_path, _request_id)
@@ -3044,7 +3039,6 @@ async def get_schedule(schedule_id: str = Field(..., alias="schedule-id", descri
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3063,7 +3057,7 @@ async def update_schedule(
     months: list[Literal["MAR", "NOV", "DEC", "JUN", "MAY", "OCT", "FEB", "APR", "SEP", "AUG", "JAN", "JUL"]] | None = Field(None, description="List of months in which the schedule triggers (e.g., JAN, FEB); order is not significant."),
     attribution_actor: Literal["current", "system"] | None = Field(None, alias="attribution-actor", description="Determines whose permissions are used when the scheduled pipeline runs: 'current' uses the token owner's permissions, 'system' uses a neutral system actor."),
     parameters: dict[str, int | str | bool] | None = Field(None, description="Key-value pairs of pipeline parameters to pass when the schedule triggers; must include either a branch or tag key to specify the target ref."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing pipeline schedule by ID and returns the updated schedule. Only available for schedules associated with GitHub OAuth or Bitbucket Cloud pipeline definitions; use the Update Trigger endpoint for GitHub App pipeline definitions."""
 
     _per_hour = _parse_int(per_hour)
@@ -3081,14 +3075,12 @@ async def update_schedule(
 
     # Extract parameters for API call
     _http_path = _build_path("/schedule/{schedule-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/schedule/{schedule-id}"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_schedule")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_schedule", "PATCH", _http_path, _request_id)
@@ -3099,7 +3091,6 @@ async def update_schedule(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3108,7 +3099,7 @@ async def update_schedule(
 
 # Tags: Schedule
 @mcp.tool()
-async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to delete, in UUID format.")) -> dict[str, Any]:
+async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", description="The unique identifier of the schedule to delete, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a pipeline schedule by its unique ID. Only available for schedules associated with GitHub OAuth or Bitbucket Cloud pipeline definitions."""
 
     # Construct request model with validation
@@ -3122,13 +3113,11 @@ async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", des
 
     # Extract parameters for API call
     _http_path = _build_path("/schedule/{schedule-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/schedule/{schedule-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_schedule")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_schedule", "DELETE", _http_path, _request_id)
@@ -3139,7 +3128,6 @@ async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", des
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3147,7 +3135,7 @@ async def delete_schedule(schedule_id: str = Field(..., alias="schedule-id", des
 
 # Tags: User
 @mcp.tool()
-async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user whose information should be retrieved, provided as a UUID.")) -> dict[str, Any]:
+async def get_user(id_: str = Field(..., alias="id", description="The unique identifier of the user whose information should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves profile and account information for a specific user. Use this to look up user details by their unique identifier."""
 
     # Construct request model with validation
@@ -3161,13 +3149,11 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
 
     # Extract parameters for API call
     _http_path = _build_path("/user/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/user/{id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_user")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_user", "GET", _http_path, _request_id)
@@ -3178,7 +3164,6 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3189,7 +3174,7 @@ async def get_user(id_: str = Field(..., alias="id", description="The unique ide
 async def list_webhooks(
     scope_id: str = Field(..., alias="scope-id", description="The unique identifier of the scope entity to filter webhooks by. Currently only project IDs are supported."),
     scope_type: Literal["project"] = Field(..., alias="scope-type", description="The type of scope used to filter webhooks. Determines how the scope-id is interpreted; currently only 'project' is supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all outbound webhooks associated with a given scope. Currently supports project-level scoping by providing a project ID."""
 
     # Construct request model with validation
@@ -3209,7 +3194,6 @@ async def list_webhooks(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_webhooks")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_webhooks", "GET", _http_path, _request_id)
@@ -3236,7 +3220,7 @@ async def create_webhook(
     signing_secret: str | None = Field(None, alias="signing-secret", description="A secret string used to generate an HMAC hash of the outgoing payload, which is passed as a header so the receiver can verify authenticity."),
     id_: str | None = Field(None, alias="id", description="The UUID of the scope (e.g., a project) this webhook is associated with; currently only project IDs are supported."),
     type_: Literal["project"] | None = Field(None, alias="type", description="The type of scope the provided ID refers to; currently only project-level scopes are supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an outbound webhook that listens for specified events and delivers payloads to a designated HTTPS URL. Supports TLS verification enforcement and HMAC payload signing for secure delivery."""
 
     # Construct request model with validation
@@ -3251,14 +3235,12 @@ async def create_webhook(
 
     # Extract parameters for API call
     _http_path = "/webhook"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_webhook")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_webhook", "POST", _http_path, _request_id)
@@ -3269,7 +3251,6 @@ async def create_webhook(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3278,7 +3259,7 @@ async def create_webhook(
 
 # Tags: Webhook
 @mcp.tool()
-async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to retrieve, provided as a UUID.")) -> dict[str, Any]:
+async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration and details of a specific outbound webhook by its unique identifier. Use this to inspect webhook settings such as target URL, events, and status."""
 
     # Construct request model with validation
@@ -3292,13 +3273,11 @@ async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", descripti
 
     # Extract parameters for API call
     _http_path = _build_path("/webhook/{webhook-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook/{webhook-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_webhook")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_webhook", "GET", _http_path, _request_id)
@@ -3309,7 +3288,6 @@ async def get_webhook(webhook_id: str = Field(..., alias="webhook-id", descripti
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3324,7 +3302,7 @@ async def update_webhook(
     url: str | None = Field(None, description="The destination URL where webhook payloads will be delivered; must use the HTTPS protocol (HTTP is not supported)."),
     signing_secret: str | None = Field(None, alias="signing-secret", description="A secret string used to generate an HMAC signature of the payload, which is passed as a request header so the receiver can verify the webhook's authenticity."),
     verify_tls: bool | None = Field(None, alias="verify-tls", description="When set to true, enforces strict TLS certificate validation on the destination URL; set to false only if delivering to an endpoint with a self-signed or otherwise unverifiable certificate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the configuration of an existing outbound webhook, allowing changes to its name, target URL, triggered events, signing secret, and TLS verification behavior. Only fields provided in the request will be updated."""
 
     # Construct request model with validation
@@ -3339,14 +3317,12 @@ async def update_webhook(
 
     # Extract parameters for API call
     _http_path = _build_path("/webhook/{webhook-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook/{webhook-id}"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_webhook")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_webhook", "PUT", _http_path, _request_id)
@@ -3357,7 +3333,6 @@ async def update_webhook(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3366,7 +3341,7 @@ async def update_webhook(
 
 # Tags: Webhook
 @mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to delete, provided as a UUID.")) -> dict[str, Any]:
+async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", description="The unique identifier of the outbound webhook to delete, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an outbound webhook, stopping all future event deliveries to its configured endpoint. This action cannot be undone."""
 
     # Construct request model with validation
@@ -3380,13 +3355,11 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", descri
 
     # Extract parameters for API call
     _http_path = _build_path("/webhook/{webhook-id}", _request.path.model_dump(by_alias=True)) if _request.path else "/webhook/{webhook-id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_webhook")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_webhook", "DELETE", _http_path, _request_id)
@@ -3397,7 +3370,6 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", descri
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3405,7 +3377,7 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhook-id", descri
 
 # Tags: Workflow
 @mcp.tool()
-async def get_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to retrieve, in UUID format.")) -> dict[str, Any]:
+async def get_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to retrieve, in UUID format.")) -> dict[str, Any] | ToolResult:
     """Retrieves summary fields for a specific workflow by its unique identifier. Useful for checking workflow metadata such as name, status, and configuration details."""
 
     # Construct request model with validation
@@ -3419,13 +3391,11 @@ async def get_workflow(id_: str = Field(..., alias="id", description="The unique
 
     # Extract parameters for API call
     _http_path = _build_path("/workflow/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflow/{id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_workflow")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_workflow", "GET", _http_path, _request_id)
@@ -3436,7 +3406,6 @@ async def get_workflow(id_: str = Field(..., alias="id", description="The unique
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3447,7 +3416,7 @@ async def get_workflow(id_: str = Field(..., alias="id", description="The unique
 async def approve_workflow_job(
     approval_request_id: str = Field(..., description="The unique identifier of the pending approval job to approve, in UUID format."),
     id_: str = Field(..., alias="id", description="The unique identifier of the workflow containing the pending approval job, in UUID format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Approves a pending approval job within a specified workflow, allowing the workflow to continue past the approval gate."""
 
     # Construct request model with validation
@@ -3461,13 +3430,11 @@ async def approve_workflow_job(
 
     # Extract parameters for API call
     _http_path = _build_path("/workflow/{id}/approve/{approval_request_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/workflow/{id}/approve/{approval_request_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("approve_workflow_job")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("approve_workflow_job", "POST", _http_path, _request_id)
@@ -3478,7 +3445,6 @@ async def approve_workflow_job(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3486,7 +3452,7 @@ async def approve_workflow_job(
 
 # Tags: Workflow
 @mcp.tool()
-async def cancel_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to cancel. Must correspond to an existing, currently running workflow.")) -> dict[str, Any]:
+async def cancel_workflow(id_: str = Field(..., alias="id", description="The unique identifier of the workflow to cancel. Must correspond to an existing, currently running workflow.")) -> dict[str, Any] | ToolResult:
     """Cancels a currently running workflow, halting any further execution. Use this to stop a workflow that is in progress before it completes naturally."""
 
     # Construct request model with validation
@@ -3500,13 +3466,11 @@ async def cancel_workflow(id_: str = Field(..., alias="id", description="The uni
 
     # Extract parameters for API call
     _http_path = _build_path("/workflow/{id}/cancel", _request.path.model_dump(by_alias=True)) if _request.path else "/workflow/{id}/cancel"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("cancel_workflow")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("cancel_workflow", "POST", _http_path, _request_id)
@@ -3517,7 +3481,6 @@ async def cancel_workflow(id_: str = Field(..., alias="id", description="The uni
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3525,7 +3488,7 @@ async def cancel_workflow(id_: str = Field(..., alias="id", description="The uni
 
 # Tags: Workflow
 @mcp.tool()
-async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The unique identifier of the workflow whose jobs you want to retrieve.")) -> dict[str, Any]:
+async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The unique identifier of the workflow whose jobs you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the ordered sequence of jobs associated with a specific workflow. Use this to inspect all jobs belonging to a workflow and their current states."""
 
     # Construct request model with validation
@@ -3539,13 +3502,11 @@ async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The 
 
     # Extract parameters for API call
     _http_path = _build_path("/workflow/{id}/job", _request.path.model_dump(by_alias=True)) if _request.path else "/workflow/{id}/job"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_workflow_jobs")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_workflow_jobs", "GET", _http_path, _request_id)
@@ -3556,7 +3517,6 @@ async def list_workflow_jobs(id_: str = Field(..., alias="id", description="The 
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3570,7 +3530,7 @@ async def rerun_workflow(
     from_failed: bool | None = Field(None, description="When true, reruns the workflow starting from the first failed job rather than the beginning. Mutually exclusive with the jobs and sparse_tree parameters."),
     jobs: list[str] | None = Field(None, description="A list of specific job IDs (UUIDs) to rerun within the workflow. Order is not significant. Mutually exclusive with from_failed."),
     sparse_tree: bool | None = Field(None, description="When true, applies sparse tree optimization logic during the rerun, improving performance for workflows containing disconnected subgraphs. Requires the jobs parameter and is mutually exclusive with from_failed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reruns an existing workflow by its ID, with options to rerun from the first failed job, target specific jobs, or apply sparse tree optimization for complex workflow graphs."""
 
     # Construct request model with validation
@@ -3585,14 +3545,12 @@ async def rerun_workflow(
 
     # Extract parameters for API call
     _http_path = _build_path("/workflow/{id}/rerun", _request.path.model_dump(by_alias=True)) if _request.path else "/workflow/{id}/rerun"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("rerun_workflow")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("rerun_workflow", "POST", _http_path, _request_id)
@@ -3603,7 +3561,6 @@ async def rerun_workflow(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3612,7 +3569,7 @@ async def rerun_workflow(
 
 # Tags: OIDC Token Management
 @mcp.tool()
-async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose OIDC custom claims should be retrieved.")) -> dict[str, Any]:
+async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose OIDC custom claims should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves the org-level custom claims configured for OIDC identity tokens. Use this to inspect which additional claims are included in tokens issued for the specified organization."""
 
     # Construct request model with validation
@@ -3626,13 +3583,11 @@ async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", de
 
     # Extract parameters for API call
     _http_path = _build_path("/org/{orgID}/oidc-custom-claims", _request.path.model_dump(by_alias=True)) if _request.path else "/org/{orgID}/oidc-custom-claims"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_org_oidc_custom_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_org_oidc_custom_claims", "GET", _http_path, _request_id)
@@ -3643,7 +3598,6 @@ async def list_org_oidc_custom_claims(org_id: str = Field(..., alias="orgID", de
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3655,7 +3609,7 @@ async def update_org_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose OIDC custom claims will be updated."),
     audience: list[str] | None = Field(None, description="List of intended recipients (audiences) for the OIDC token; order is not significant and each item should be a valid audience identifier string."),
     ttl: str | None = Field(None, description="Token time-to-live duration specifying how long the OIDC token remains valid; composed of one to seven time unit segments using milliseconds (ms), seconds (s), minutes (m), hours (h), days (d), or weeks (w).", pattern="^([0-9]+(ms|s|m|h|d|w)){1,7}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates org-level custom claims on OIDC identity tokens for the specified organization. Use this to configure audience restrictions and token time-to-live settings."""
 
     # Construct request model with validation
@@ -3670,14 +3624,12 @@ async def update_org_oidc_claims(
 
     # Extract parameters for API call
     _http_path = _build_path("/org/{orgID}/oidc-custom-claims", _request.path.model_dump(by_alias=True)) if _request.path else "/org/{orgID}/oidc-custom-claims"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_org_oidc_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_org_oidc_claims", "PATCH", _http_path, _request_id)
@@ -3688,7 +3640,6 @@ async def update_org_oidc_claims(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3700,7 +3651,7 @@ async def update_org_oidc_claims(
 async def delete_org_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization whose custom OIDC claims will be deleted."),
     claims: str = Field(..., description="Comma-separated list of custom OIDC claim names to delete. Valid values are 'audience' and 'ttl'; multiple values may be combined in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes one or more custom OIDC identity token claims configured at the organization level. Supports removing the 'audience' and/or 'ttl' claim overrides."""
 
     # Construct request model with validation
@@ -3721,7 +3672,6 @@ async def delete_org_oidc_claims(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_org_oidc_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_org_oidc_claims", "DELETE", _http_path, _request_id)
@@ -3743,7 +3693,7 @@ async def delete_org_oidc_claims(
 async def get_project_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="The unique identifier of the organization that owns the project."),
     project_id: str = Field(..., alias="projectID", description="The unique identifier of the project whose custom OIDC claims are being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the custom OIDC identity token claims configured at the project level. Use this to inspect which additional claims are included in tokens issued for a specific project."""
 
     # Construct request model with validation
@@ -3757,13 +3707,11 @@ async def get_project_oidc_claims(
 
     # Extract parameters for API call
     _http_path = _build_path("/org/{orgID}/project/{projectID}/oidc-custom-claims", _request.path.model_dump(by_alias=True)) if _request.path else "/org/{orgID}/project/{projectID}/oidc-custom-claims"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_project_oidc_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_project_oidc_claims", "GET", _http_path, _request_id)
@@ -3774,7 +3722,6 @@ async def get_project_oidc_claims(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3787,7 +3734,7 @@ async def update_project_oidc_claims(
     project_id: str = Field(..., alias="projectID", description="Unique identifier of the project whose OIDC custom claims are being created or updated."),
     audience: list[str] | None = Field(None, description="List of intended audiences for the OIDC token. Order is not significant; each item should be a valid audience string identifying a recipient that the token is intended for."),
     ttl: str | None = Field(None, description="Time-to-live duration for the OIDC token, specifying how long it remains valid. Accepts a compound duration string composed of up to seven unit segments in descending order, using units: weeks (w), days (d), hours (h), minutes (m), seconds (s), and milliseconds (ms).", pattern="^([0-9]+(ms|s|m|h|d|w)){1,7}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates project-level custom claims on OIDC identity tokens for the specified project. Use this to configure audience restrictions and token time-to-live at the project scope."""
 
     # Construct request model with validation
@@ -3802,14 +3749,12 @@ async def update_project_oidc_claims(
 
     # Extract parameters for API call
     _http_path = _build_path("/org/{orgID}/project/{projectID}/oidc-custom-claims", _request.path.model_dump(by_alias=True)) if _request.path else "/org/{orgID}/project/{projectID}/oidc-custom-claims"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_project_oidc_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_project_oidc_claims", "PATCH", _http_path, _request_id)
@@ -3820,7 +3765,6 @@ async def update_project_oidc_claims(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -3833,7 +3777,7 @@ async def delete_project_oidc_claims(
     org_id: str = Field(..., alias="orgID", description="Unique identifier of the organization that owns the project."),
     project_id: str = Field(..., alias="projectID", description="Unique identifier of the project whose OIDC custom claims will be deleted."),
     claims: str = Field(..., description="Comma-separated list of custom claim names to delete. Valid values are 'audience' and 'ttl'; multiple values may be combined in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes one or more custom claims from the OIDC identity token configuration at the project level. Only the 'audience' and 'ttl' claims are eligible for deletion."""
 
     # Construct request model with validation
@@ -3854,7 +3798,6 @@ async def delete_project_oidc_claims(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_project_oidc_claims")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_project_oidc_claims", "DELETE", _http_path, _request_id)
@@ -3883,7 +3826,7 @@ async def list_decision_logs(
     project_id: str | None = Field(None, description="Filters results to only include decisions associated with the specified project identifier."),
     build_number: str | None = Field(None, description="Filters results to only include decisions associated with the specified build number."),
     offset: int | None = Field(None, description="The number of records to skip before returning results, enabling pagination through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of policy decision audit logs for the specified owner and context. Results can be filtered by status, date range, branch, project, or build number."""
 
     # Construct request model with validation
@@ -3904,7 +3847,6 @@ async def list_decision_logs(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_decision_logs")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_decision_logs", "GET", _http_path, _request_id)
@@ -3927,7 +3869,7 @@ async def get_decision_log(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner whose decision audit log is being retrieved."),
     context: str = Field(..., description="The context scope under which the decision was recorded, used to namespace or categorize decisions for the given owner."),
     decision_id: str = Field(..., alias="decisionID", description="The unique identifier of the specific decision log entry to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific decision audit log entry for a given owner and context. Use this to inspect the details and outcome of a previously recorded decision by its unique ID."""
 
     # Construct request model with validation
@@ -3941,13 +3883,11 @@ async def get_decision_log(
 
     # Extract parameters for API call
     _http_path = _build_path("/owner/{ownerID}/context/{context}/decision/{decisionID}", _request.path.model_dump(by_alias=True)) if _request.path else "/owner/{ownerID}/context/{context}/decision/{decisionID}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_decision_log")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_decision_log", "GET", _http_path, _request_id)
@@ -3958,7 +3898,6 @@ async def get_decision_log(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -3970,7 +3909,7 @@ async def get_decision_policy_bundle(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner (organization or user) whose decision log is being queried."),
     context: str = Field(..., description="The policy context scope under which the decision was evaluated, used to namespace and organize policies."),
     decision_id: str = Field(..., alias="decisionID", description="The unique identifier of the decision log entry for which the associated policy bundle should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the policy bundle associated with a specific decision log entry. Useful for auditing which policies were evaluated at the time a given decision was made."""
 
     # Construct request model with validation
@@ -3984,13 +3923,11 @@ async def get_decision_policy_bundle(
 
     # Extract parameters for API call
     _http_path = _build_path("/owner/{ownerID}/context/{context}/decision/{decisionID}/policy-bundle", _request.path.model_dump(by_alias=True)) if _request.path else "/owner/{ownerID}/context/{context}/decision/{decisionID}/policy-bundle"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_decision_policy_bundle")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_decision_policy_bundle", "GET", _http_path, _request_id)
@@ -4001,7 +3938,6 @@ async def get_decision_policy_bundle(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4012,7 +3948,7 @@ async def get_decision_policy_bundle(
 async def get_policy_bundle(
     owner_id: str = Field(..., alias="ownerID", description="The unique identifier of the owner whose policy bundle is being retrieved."),
     context: str = Field(..., description="The context scope under which the policy bundle is organized, used to namespace or categorize policies for the specified owner."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the complete policy bundle associated with a specific context for a given owner. Returns all policies grouped within that bundle for review or enforcement purposes."""
 
     # Construct request model with validation
@@ -4026,13 +3962,11 @@ async def get_policy_bundle(
 
     # Extract parameters for API call
     _http_path = _build_path("/owner/{ownerID}/context/{context}/policy-bundle", _request.path.model_dump(by_alias=True)) if _request.path else "/owner/{ownerID}/context/{context}/policy-bundle"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_policy_bundle")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_policy_bundle", "GET", _http_path, _request_id)
@@ -4043,7 +3977,6 @@ async def get_policy_bundle(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4055,7 +3988,7 @@ async def list_contexts(
     owner_id: str | None = Field(None, alias="owner-id", description="The unique UUID of the organization that owns the contexts. Use this or owner-slug to identify the organization — find both in CircleCI web app under Organization Settings > Overview."),
     owner_slug: str | None = Field(None, alias="owner-slug", description="The slug identifier for the organization that owns the contexts. Use this or owner-id to identify the organization — find both in CircleCI web app under Organization Settings > Overview. Not supported on CircleCI server."),
     owner_type: Literal["account", "organization"] | None = Field(None, alias="owner-type", description="Specifies whether the owner is an organization or an individual account. Defaults to 'organization'; use 'account' when working with CircleCI server."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all contexts belonging to a specified organization or owner, enabling management of shared environment variables and secrets across projects."""
 
     # Construct request model with validation
@@ -4075,7 +4008,6 @@ async def list_contexts(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_contexts")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_contexts", "GET", _http_path, _request_id)
@@ -4097,7 +4029,7 @@ async def list_contexts(
 async def create_context(
     name: str | None = Field(None, description="The human-readable name to assign to the new context, used to identify it within the organization."),
     owner: _models.CreateContextBodyOwnerV0 | _models.CreateContextBodyOwnerV1 | None = Field(None, description="The owner of the context, typically representing the organization or account under which the context will be created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new named context within a specified organization, allowing you to group and manage related environment variables or secrets."""
 
     # Construct request model with validation
@@ -4111,14 +4043,12 @@ async def create_context(
 
     # Extract parameters for API call
     _http_path = "/context"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_context")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_context", "POST", _http_path, _request_id)
@@ -4129,7 +4059,6 @@ async def create_context(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4138,7 +4067,7 @@ async def create_context(
 
 # Tags: Context
 @mcp.tool()
-async def get_context(context_id: str = Field(..., description="The unique identifier of the context to retrieve, provided as a UUID.")) -> dict[str, Any]:
+async def get_context(context_id: str = Field(..., description="The unique identifier of the context to retrieve, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves basic information about a specific context by its unique identifier. Use this to look up context details when you have a known context ID."""
 
     # Construct request model with validation
@@ -4152,13 +4081,11 @@ async def get_context(context_id: str = Field(..., description="The unique ident
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_context")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_context", "GET", _http_path, _request_id)
@@ -4169,7 +4096,6 @@ async def get_context(context_id: str = Field(..., description="The unique ident
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4177,7 +4103,7 @@ async def get_context(context_id: str = Field(..., description="The unique ident
 
 # Tags: Context
 @mcp.tool()
-async def delete_context(context_id: str = Field(..., description="The unique identifier of the context to delete. Deleting a context will also remove all environment variables stored within it.")) -> dict[str, Any]:
+async def delete_context(context_id: str = Field(..., description="The unique identifier of the context to delete. Deleting a context will also remove all environment variables stored within it.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a context and all of its associated environment variables by context ID. This action is irreversible."""
 
     # Construct request model with validation
@@ -4191,13 +4117,11 @@ async def delete_context(context_id: str = Field(..., description="The unique id
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_context")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_context", "DELETE", _http_path, _request_id)
@@ -4208,7 +4132,6 @@ async def delete_context(context_id: str = Field(..., description="The unique id
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4216,7 +4139,7 @@ async def delete_context(context_id: str = Field(..., description="The unique id
 
 # Tags: Context
 @mcp.tool()
-async def list_context_environment_variables(context_id: str = Field(..., description="The unique identifier of the context whose environment variables should be listed.")) -> dict[str, Any]:
+async def list_context_environment_variables(context_id: str = Field(..., description="The unique identifier of the context whose environment variables should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of environment variables defined within a specified context, returning metadata such as names but excluding their values for security."""
 
     # Construct request model with validation
@@ -4230,13 +4153,11 @@ async def list_context_environment_variables(context_id: str = Field(..., descri
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/environment-variable", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/environment-variable"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_context_environment_variables")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_context_environment_variables", "GET", _http_path, _request_id)
@@ -4247,7 +4168,6 @@ async def list_context_environment_variables(context_id: str = Field(..., descri
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4259,7 +4179,7 @@ async def set_context_environment_variable(
     context_id: str = Field(..., description="The unique identifier of the context in which to create or update the environment variable."),
     env_var_name: str = Field(..., description="The name of the environment variable to create or update within the context."),
     value: str | None = Field(None, description="The value to assign to the environment variable; treated as a secret and not returned in responses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a named environment variable within a specified context. Returns metadata about the variable after the operation, excluding its value."""
 
     # Construct request model with validation
@@ -4274,14 +4194,12 @@ async def set_context_environment_variable(
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/environment-variable/{env_var_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/environment-variable/{env_var_name}"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("set_context_environment_variable")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("set_context_environment_variable", "PUT", _http_path, _request_id)
@@ -4292,7 +4210,6 @@ async def set_context_environment_variable(
         method="PUT",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4304,7 +4221,7 @@ async def set_context_environment_variable(
 async def delete_context_environment_variable(
     context_id: str = Field(..., description="The unique identifier of the context from which the environment variable will be deleted."),
     env_var_name: str = Field(..., description="The exact name of the environment variable to delete, matching the name as it was originally stored in the context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a named environment variable from the specified context. This action cannot be undone and will immediately make the variable unavailable to pipelines using that context."""
 
     # Construct request model with validation
@@ -4318,13 +4235,11 @@ async def delete_context_environment_variable(
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/environment-variable/{env_var_name}", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/environment-variable/{env_var_name}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_context_environment_variable")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_context_environment_variable", "DELETE", _http_path, _request_id)
@@ -4335,7 +4250,6 @@ async def delete_context_environment_variable(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4343,7 +4257,7 @@ async def delete_context_environment_variable(
 
 # Tags: Context
 @mcp.tool()
-async def list_context_restrictions(context_id: str = Field(..., description="The unique identifier of the context whose restrictions should be retrieved, provided as a UUID.")) -> dict[str, Any]:
+async def list_context_restrictions(context_id: str = Field(..., description="The unique identifier of the context whose restrictions should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all project and expression restrictions associated with a specific context. Returns the complete list of restrictions currently applied to the given context."""
 
     # Construct request model with validation
@@ -4357,13 +4271,11 @@ async def list_context_restrictions(context_id: str = Field(..., description="Th
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/restrictions", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/restrictions"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_context_restrictions")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_context_restrictions", "GET", _http_path, _request_id)
@@ -4374,7 +4286,6 @@ async def list_context_restrictions(context_id: str = Field(..., description="Th
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4386,7 +4297,7 @@ async def add_context_restriction(
     context_id: str = Field(..., description="The unique identifier of the context to which the restriction will be added."),
     restriction_type: Literal["project", "expression", "group"] | None = Field(None, description="The category of restriction to apply: 'project' limits access to a specific project, 'expression' applies a rule-based condition, and 'group' restricts access to a specific group."),
     restriction_value: str | None = Field(None, description="The value that defines the restriction rule, interpreted based on the restriction type: a project UUID for 'project' restrictions, or an expression rule string for 'expression' restrictions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an access restriction to a context, limiting its use to specific projects, groups, or expression-based rules. Use this to control which projects or conditions are permitted to access the context."""
 
     # Construct request model with validation
@@ -4401,14 +4312,12 @@ async def add_context_restriction(
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/restrictions", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/restrictions"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("add_context_restriction")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("add_context_restriction", "POST", _http_path, _request_id)
@@ -4419,7 +4328,6 @@ async def add_context_restriction(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4431,7 +4339,7 @@ async def add_context_restriction(
 async def delete_context_restriction(
     context_id: str = Field(..., description="The unique identifier of the context from which the restriction will be deleted."),
     restriction_id: str = Field(..., description="The unique identifier of the specific restriction to delete within the given context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific restriction (project, expression, or group) from a context. This action cannot be undone and immediately revokes the associated access control rule."""
 
     # Construct request model with validation
@@ -4445,13 +4353,11 @@ async def delete_context_restriction(
 
     # Extract parameters for API call
     _http_path = _build_path("/context/{context_id}/restrictions/{restriction_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/context/{context_id}/restrictions/{restriction_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_context_restriction")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_context_restriction", "DELETE", _http_path, _request_id)
@@ -4462,7 +4368,6 @@ async def delete_context_restriction(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4474,7 +4379,7 @@ async def get_project_settings(
     provider: Literal["github", "gh", "bitbucket", "bb", "circleci"] = Field(..., description="The version control or CI provider portion of the project slug, identifying which platform hosts the project."),
     organization: str = Field(..., description="The organization segment of the project slug, which may be an organization name or a unique organization ID depending on the account type."),
     project: str = Field(..., description="The project segment of the project slug, which may be a project name or a unique project ID depending on the account type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the advanced settings for a specified CircleCI project, returning each setting with a boolean indicating whether it is enabled or disabled."""
 
     # Construct request model with validation
@@ -4488,13 +4393,11 @@ async def get_project_settings(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{provider}/{organization}/{project}/settings", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{provider}/{organization}/{project}/settings"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_project_settings")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_project_settings", "GET", _http_path, _request_id)
@@ -4505,7 +4408,6 @@ async def get_project_settings(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4527,7 +4429,7 @@ async def update_project_settings(
     setup_workflows: bool | None = Field(None, description="When enabled, allows pipeline configurations to be conditionally triggered from directories outside the primary `.circleci` parent directory using setup workflows."),
     write_settings_requires_admin: bool | None = Field(None, description="When enabled, only organization administrators can update project settings; when disabled, any project member may update settings."),
     pr_only_branch_overrides: list[str] | None = Field(None, description="A list of branch names that will always trigger a build regardless of the `build_prs_only` setting. The provided list completely overwrites the existing value; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates one or more advanced settings for a CircleCI project, such as build behavior, fork policies, SSH access, and GitHub status reporting. Only the settings fields provided in the request body will be modified."""
 
     # Construct request model with validation
@@ -4542,14 +4444,12 @@ async def update_project_settings(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{provider}/{organization}/{project}/settings", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{provider}/{organization}/{project}/settings"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_project_settings")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_project_settings", "PATCH", _http_path, _request_id)
@@ -4560,7 +4460,6 @@ async def update_project_settings(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4572,7 +4471,7 @@ async def update_project_settings(
 async def list_organization_groups(
     org_id: str = Field(..., description="The unique identifier of the organization whose groups you want to retrieve."),
     limit: int | None = Field(None, description="The maximum number of group results to return per page. Use this to control pagination when an organization has many groups."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all groups belonging to a specified organization. Supports pagination to control the number of results returned per page."""
 
     # Construct request model with validation
@@ -4593,7 +4492,6 @@ async def list_organization_groups(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_organization_groups")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_organization_groups", "GET", _http_path, _request_id)
@@ -4616,7 +4514,7 @@ async def create_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization under which the group will be created."),
     name: str = Field(..., description="The display name for the new group, used to identify it within the organization."),
     description: str | None = Field(None, description="An optional human-readable description providing additional context or purpose for the group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new group within a standalone organization, allowing members and resources to be organized under a named group. Only supported for standalone organizations."""
 
     # Construct request model with validation
@@ -4631,14 +4529,12 @@ async def create_group(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{org_id}/groups", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org_id}/groups"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_group")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_group", "POST", _http_path, _request_id)
@@ -4649,7 +4545,6 @@ async def create_group(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4661,7 +4556,7 @@ async def create_group(
 async def get_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization that contains the group."),
     group_id: str = Field(..., description="The unique identifier of the group to retrieve, provided as a UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific group within an organization. Currently only supported for standalone organizations."""
 
     # Construct request model with validation
@@ -4675,13 +4570,11 @@ async def get_group(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{org_id}/groups/{group_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org_id}/groups/{group_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_group")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_group", "GET", _http_path, _request_id)
@@ -4692,7 +4585,6 @@ async def get_group(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4703,7 +4595,7 @@ async def get_group(
 async def delete_group(
     org_id: str = Field(..., description="The unique opaque identifier of the organization that contains the group to be deleted."),
     group_id: str = Field(..., description="The unique UUID identifier of the group to delete. All members and associated role grants will be removed upon deletion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group from a standalone organization, removing all its members and revoking any role grants associated with the group."""
 
     # Construct request model with validation
@@ -4717,13 +4609,11 @@ async def delete_group(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{org_id}/groups/{group_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org_id}/groups/{group_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_group")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_group", "DELETE", _http_path, _request_id)
@@ -4734,7 +4624,6 @@ async def delete_group(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4747,7 +4636,7 @@ async def create_usage_export(
     start: str = Field(..., description="The start date and time (inclusive) of the export range in ISO 8601 format. Must be no more than one year in the past."),
     end: str = Field(..., description="The end date and time (inclusive) of the export range in ISO 8601 format. Must be no more than 31 days after the start date."),
     shared_org_ids: list[str] | None = Field(None, description="A list of additional organization IDs whose usage data should be included in the export, useful for aggregating usage across shared or linked organizations. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submits a job to export usage data for an organization within a specified date range. The export covers up to 31 days of data and can optionally include usage from shared organizations."""
 
     # Construct request model with validation
@@ -4762,14 +4651,12 @@ async def create_usage_export(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{org_id}/usage_export_job", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org_id}/usage_export_job"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_usage_export")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_usage_export", "POST", _http_path, _request_id)
@@ -4780,7 +4667,6 @@ async def create_usage_export(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4792,7 +4678,7 @@ async def create_usage_export(
 async def get_usage_export_job(
     org_id: str = Field(..., description="The unique opaque identifier of the organization whose usage export job is being retrieved."),
     usage_export_job_id: str = Field(..., description="The unique UUID identifier of the usage export job to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the status and details of a specific usage export job for an organization, including download information once the export is complete."""
 
     # Construct request model with validation
@@ -4806,13 +4692,11 @@ async def get_usage_export_job(
 
     # Extract parameters for API call
     _http_path = _build_path("/organizations/{org_id}/usage_export_job/{usage_export_job_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/organizations/{org_id}/usage_export_job/{usage_export_job_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_usage_export_job")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_usage_export_job", "GET", _http_path, _request_id)
@@ -4823,7 +4707,6 @@ async def get_usage_export_job(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4841,7 +4724,7 @@ async def trigger_pipeline_run(
     config_tag: str | None = Field(None, alias="configTag", description="The tag used to fetch the pipeline config file; the pipeline runs against the commit the tag points to. Mutually exclusive with the config branch field."),
     checkout_tag: str | None = Field(None, alias="checkoutTag", description="The tag used to check out source code during a checkout step; the pipeline runs against the commit the tag points to. Mutually exclusive with the checkout branch field."),
     parameters: dict[str, Any] | None = Field(None, description="A key-value map of pipeline parameter names to their values. Limited to 100 entries, with keys up to 128 characters and values up to 512 characters. Values may be strings, booleans, or integers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a new pipeline run for a project using a specific pipeline definition. Supports GitHub, Bitbucket, and CircleCI integrations (GitLab not supported)."""
 
     # Construct request model with validation
@@ -4858,14 +4741,12 @@ async def trigger_pipeline_run(
 
     # Extract parameters for API call
     _http_path = _build_path("/project/{provider}/{organization}/{project}/pipeline/run", _request.path.model_dump(by_alias=True)) if _request.path else "/project/{provider}/{organization}/{project}/pipeline/run"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("trigger_pipeline_run")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("trigger_pipeline_run", "POST", _http_path, _request_id)
@@ -4876,7 +4757,6 @@ async def trigger_pipeline_run(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4885,7 +4765,7 @@ async def trigger_pipeline_run(
 
 # Tags: Pipeline Definition
 @mcp.tool()
-async def list_pipeline_definitions(project_id: str = Field(..., description="The unique identifier of the project whose pipeline definitions should be listed.")) -> dict[str, Any]:
+async def list_pipeline_definitions(project_id: str = Field(..., description="The unique identifier of the project whose pipeline definitions should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves all pipeline definitions associated with a specified project. Pipeline definitions describe the structure and configuration of pipelines available within the project."""
 
     # Construct request model with validation
@@ -4899,13 +4779,11 @@ async def list_pipeline_definitions(project_id: str = Field(..., description="Th
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_pipeline_definitions")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_pipeline_definitions", "GET", _http_path, _request_id)
@@ -4916,7 +4794,6 @@ async def list_pipeline_definitions(project_id: str = Field(..., description="Th
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -4931,7 +4808,7 @@ async def create_pipeline_definition(
     config_source: _models.CreatePipelineDefinitionBodyConfigSourceV0 | _models.CreatePipelineDefinitionBodyConfigSourceV1 | None = Field(None, description="The configuration source object that specifies where and how the pipeline configuration is sourced, including the provider and repository details."),
     provider: Literal["github_app"] | None = Field(None, description="The version control integration provider for the pipeline definition's configuration source. Currently only 'github_app' is supported."),
     external_id: str | None = Field(None, description="The external identifier for the repository as defined by the version control provider, used to link the pipeline definition to the correct repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new pipeline definition for a specified project, allowing you to define the configuration source and metadata. Currently only supported for projects using the GitHub App integration provider."""
 
     # Construct request model with validation
@@ -4948,14 +4825,12 @@ async def create_pipeline_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_pipeline_definition")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_pipeline_definition", "POST", _http_path, _request_id)
@@ -4966,7 +4841,6 @@ async def create_pipeline_definition(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -4978,7 +4852,7 @@ async def create_pipeline_definition(
 async def get_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project containing the pipeline definition."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed configuration metadata for a specific pipeline definition within a project. Supported for pipeline definitions using GitHub App, GitHub OAuth, Bitbucket DC, Bitbucket OAuth, or GitLab as the config source provider."""
 
     # Construct request model with validation
@@ -4992,13 +4866,11 @@ async def get_pipeline_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_pipeline_definition")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_pipeline_definition", "GET", _http_path, _request_id)
@@ -5009,7 +4881,6 @@ async def get_pipeline_definition(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5025,7 +4896,7 @@ async def update_pipeline_definition(
     file_path: str | None = Field(None, description="The relative path within the repository to the CircleCI YAML configuration file that this pipeline definition should use."),
     provider: str | None = Field(None, description="The version control integration provider for the pipeline definition's config source. Currently only 'github_app' is supported."),
     external_id: str | None = Field(None, description="The repository identifier as defined by the version control provider, used to associate the pipeline definition with a specific external repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing pipeline definition for a project, allowing changes to its name, description, config file path, or version control source settings. Currently supported only for pipeline definitions using GitHub App or Bitbucket Data Center as the config source provider."""
 
     # Construct request model with validation
@@ -5043,14 +4914,12 @@ async def update_pipeline_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_pipeline_definition")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_pipeline_definition", "PATCH", _http_path, _request_id)
@@ -5061,7 +4930,6 @@ async def update_pipeline_definition(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -5073,7 +4941,7 @@ async def update_pipeline_definition(
 async def delete_pipeline_definition(
     project_id: str = Field(..., description="The unique opaque identifier of the project containing the pipeline definition to delete."),
     pipeline_definition_id: str = Field(..., description="The unique opaque identifier of the pipeline definition to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a pipeline definition from a project. Currently only supported for pipeline definitions using GitHub App or Bitbucket Data Center as the config source provider."""
 
     # Construct request model with validation
@@ -5087,13 +4955,11 @@ async def delete_pipeline_definition(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_pipeline_definition")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_pipeline_definition", "DELETE", _http_path, _request_id)
@@ -5104,7 +4970,6 @@ async def delete_pipeline_definition(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5115,7 +4980,7 @@ async def delete_pipeline_definition(
 async def list_pipeline_definition_triggers(
     project_id: str = Field(..., description="The unique identifier of the project containing the pipeline definition."),
     pipeline_definition_id: str = Field(..., description="The unique identifier of the pipeline definition whose triggers you want to list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all triggers configured for a specific pipeline definition within a project. Supported only for pipeline definitions using GitHub OAuth, GitHub App, or Bitbucket Data Center as the config source provider."""
 
     # Construct request model with validation
@@ -5129,13 +4994,11 @@ async def list_pipeline_definition_triggers(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_pipeline_definition_triggers")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_pipeline_definition_triggers", "GET", _http_path, _request_id)
@@ -5146,7 +5009,6 @@ async def list_pipeline_definition_triggers(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5165,7 +5027,7 @@ async def create_pipeline_trigger(
     config_ref: str | None = Field(None, description="The Git ref used to fetch the pipeline configuration for runs created by this trigger. Required when the provider is `webhook`; for `github_app`, only provide this if the event source repository differs from the pipeline definition's config source repository."),
     event_name: str | None = Field(None, description="The name of the event that activates this trigger. Should only be set when the provider is `webhook`."),
     disabled: bool | None = Field(None, description="When set to `true`, the trigger is created in a disabled state and will not fire until explicitly enabled. Not supported for pipeline definitions using `github_oauth` as the config source provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a trigger for a specified pipeline definition, enabling automated pipeline runs in response to events. Currently supported only for pipeline definitions using GitHub OAuth or GitHub App as the config source provider."""
 
     # Construct request model with validation
@@ -5183,14 +5045,12 @@ async def create_pipeline_trigger(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_pipeline_trigger")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_pipeline_trigger", "POST", _http_path, _request_id)
@@ -5201,7 +5061,6 @@ async def create_pipeline_trigger(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -5213,7 +5072,7 @@ async def create_pipeline_trigger(
 async def get_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project that owns the trigger."),
     trigger_id: str = Field(..., description="The unique opaque identifier of the trigger to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed configuration and metadata for a specific project trigger. Currently supported for triggers with GitHub OAuth, GitHub App, Bitbucket Data Center, or webhook event sources."""
 
     # Construct request model with validation
@@ -5227,13 +5086,11 @@ async def get_trigger(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/triggers/{trigger_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/triggers/{trigger_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_trigger")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_trigger", "GET", _http_path, _request_id)
@@ -5244,7 +5101,6 @@ async def get_trigger(
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5261,7 +5117,7 @@ async def update_trigger(
     event_name: str | None = Field(None, description="The name of the event that activates this trigger. Only settable for triggers where the provider is `webhook`."),
     disabled: bool | None = Field(None, description="Whether the trigger is disabled and should not create pipeline runs when events occur. Only settable for triggers where the provider is `github_oauth`, `github_app`, or `webhook`."),
     sender: str | None = Field(None, description="The identity of the entity sending the webhook payload. Only settable for triggers where the provider is `webhook`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration for an existing pipeline trigger on a project. Currently supported for triggers with a provider of `github_oauth`, `github_app`, `bitbucket_dc`, or `webhook`."""
 
     # Construct request model with validation
@@ -5277,14 +5133,12 @@ async def update_trigger(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/triggers/{trigger_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/triggers/{trigger_id}"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("update_trigger")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("update_trigger", "PATCH", _http_path, _request_id)
@@ -5295,7 +5149,6 @@ async def update_trigger(
         method="PATCH",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -5307,7 +5160,7 @@ async def update_trigger(
 async def delete_trigger(
     project_id: str = Field(..., description="The unique opaque identifier of the project from which the trigger will be deleted."),
     trigger_id: str = Field(..., description="The unique opaque identifier of the trigger to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a trigger from the specified project. Supported only for triggers with an event source provider of GitHub OAuth, GitHub App, Bitbucket Data Center, or webhook."""
 
     # Construct request model with validation
@@ -5321,13 +5174,11 @@ async def delete_trigger(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/triggers/{trigger_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/triggers/{trigger_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_trigger")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_trigger", "DELETE", _http_path, _request_id)
@@ -5338,7 +5189,6 @@ async def delete_trigger(
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5355,7 +5205,7 @@ async def rollback_project(
     namespace: str | None = Field(None, description="The Kubernetes or deployment namespace where the component resides. Defaults to the project's default namespace if not specified."),
     parameters: dict[str, Any] | None = Field(None, description="A key-value map of additional parameters to pass to the rollback pipeline, allowing customization of pipeline behavior beyond standard inputs."),
     reason: str | None = Field(None, description="A human-readable explanation for why the rollback is being performed, useful for audit trails and incident tracking."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rolls back a specific component in a project to a target version by triggering a rollback pipeline. Use this to recover from a bad deployment by reverting a component from its current version to a previously stable version."""
 
     # Construct request model with validation
@@ -5370,14 +5220,12 @@ async def rollback_project(
 
     # Extract parameters for API call
     _http_path = _build_path("/projects/{project_id}/rollback", _request.path.model_dump(by_alias=True)) if _request.path else "/projects/{project_id}/rollback"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("rollback_project")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("rollback_project", "POST", _http_path, _request_id)
@@ -5388,7 +5236,6 @@ async def rollback_project(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -5400,7 +5247,7 @@ async def rollback_project(
 async def list_environments(
     org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose environments you want to list, provided as a UUID."),
     page_size: int = Field(..., alias="page-size", description="The maximum number of environments to return per page. Use this alongside pagination controls to iterate through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of deployment environments belonging to a specified organization. Use this to browse available environments for deployment targeting or configuration management."""
 
     # Construct request model with validation
@@ -5420,7 +5267,6 @@ async def list_environments(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_environments")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_environments", "GET", _http_path, _request_id)
@@ -5439,7 +5285,7 @@ async def list_environments(
 
 # Tags: Deploy
 @mcp.tool()
-async def get_environment(environment_id: str = Field(..., description="The unique UUID identifying the deployment environment to retrieve.")) -> dict[str, Any]:
+async def get_environment(environment_id: str = Field(..., description="The unique UUID identifying the deployment environment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific deployment environment by its unique identifier. Use this to inspect environment configuration, status, or metadata for a known environment."""
 
     # Construct request model with validation
@@ -5453,13 +5299,11 @@ async def get_environment(environment_id: str = Field(..., description="The uniq
 
     # Extract parameters for API call
     _http_path = _build_path("/deploy/environments/{environment_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/deploy/environments/{environment_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_environment")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_environment", "GET", _http_path, _request_id)
@@ -5470,7 +5314,6 @@ async def get_environment(environment_id: str = Field(..., description="The uniq
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5482,7 +5325,7 @@ async def list_components(
     org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose components will be listed."),
     page_size: int = Field(..., alias="page-size", description="The maximum number of components to return in a single page of results. Use in combination with pagination tokens to iterate through all components."),
     project_id: str | None = Field(None, alias="project-id", description="The unique identifier of a project used to filter components to only those belonging to that project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of deployed components belonging to a specified organization. Optionally filter results by project to narrow the scope of returned components."""
 
     # Construct request model with validation
@@ -5502,7 +5345,6 @@ async def list_components(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_components")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_components", "GET", _http_path, _request_id)
@@ -5521,7 +5363,7 @@ async def list_components(
 
 # Tags: Deploy
 @mcp.tool()
-async def get_component(component_id: str = Field(..., description="The unique opaque identifier of the component to retrieve, as returned when the component was created or listed.")) -> dict[str, Any]:
+async def get_component(component_id: str = Field(..., description="The unique opaque identifier of the component to retrieve, as returned when the component was created or listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a deployed component by its unique identifier. Use this to inspect configuration, status, or metadata for a specific component."""
 
     # Construct request model with validation
@@ -5535,13 +5377,11 @@ async def get_component(component_id: str = Field(..., description="The unique o
 
     # Extract parameters for API call
     _http_path = _build_path("/deploy/components/{component_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/deploy/components/{component_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_component")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_component", "GET", _http_path, _request_id)
@@ -5552,7 +5392,6 @@ async def get_component(component_id: str = Field(..., description="The unique o
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 
@@ -5563,7 +5402,7 @@ async def get_component(component_id: str = Field(..., description="The unique o
 async def list_component_versions(
     component_id: str = Field(..., description="The unique identifier of the component whose versions you want to retrieve."),
     environment_id: str | None = Field(None, alias="environment-id", description="The unique identifier of an environment to filter component versions by, returning only versions relevant to that environment. Must be a valid UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all available versions for a specified component. Optionally filter results by environment to see versions relevant to a particular deployment context."""
 
     # Construct request model with validation
@@ -5584,7 +5423,6 @@ async def list_component_versions(
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_component_versions")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_component_versions", "GET", _http_path, _request_id)
@@ -5603,7 +5441,7 @@ async def list_component_versions(
 
 # Tags: OTel
 @mcp.tool()
-async def list_otel_exporters(org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose OTLP exporter configurations should be retrieved, provided as a UUID.")) -> dict[str, Any]:
+async def list_otel_exporters(org_id: str = Field(..., alias="org-id", description="The unique identifier of the organization whose OTLP exporter configurations should be retrieved, provided as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all OpenTelemetry (OTLP) exporter configurations associated with the specified organization. This is an experimental feature and may be subject to change."""
 
     # Construct request model with validation
@@ -5623,7 +5461,6 @@ async def list_otel_exporters(org_id: str = Field(..., alias="org-id", descripti
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_otel_exporters")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_otel_exporters", "GET", _http_path, _request_id)
@@ -5648,7 +5485,7 @@ async def create_otlp_exporter(
     protocol: Literal["grpc", "http"] = Field(..., description="The transport protocol used when exporting telemetry data; choose grpc for gRPC transport or http for HTTP/protobuf transport."),
     insecure: bool | None = Field(None, description="When set to true, the exporter connects to the endpoint without TLS encryption; defaults to false for secure connections."),
     headers: dict[str, str] | None = Field(None, description="A key-value map of additional HTTP or gRPC headers to include with every export request, useful for authentication tokens or routing metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new OTLP exporter configuration for a specified organization, defining how telemetry spans are exported to an external observability backend. This is an experimental feature supporting both gRPC and HTTP transport protocols."""
 
     # Construct request model with validation
@@ -5662,14 +5499,12 @@ async def create_otlp_exporter(
 
     # Extract parameters for API call
     _http_path = "/otel/exporters"
-    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("create_otlp_exporter")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("create_otlp_exporter", "POST", _http_path, _request_id)
@@ -5680,7 +5515,6 @@ async def create_otlp_exporter(
         method="POST",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         body=_http_body,
         headers=_http_headers,
     )
@@ -5689,7 +5523,7 @@ async def create_otlp_exporter(
 
 # Tags: OTel
 @mcp.tool()
-async def delete_otlp_exporter(otel_exporter_id: str = Field(..., description="The unique identifier of the OTLP exporter configuration to delete.")) -> dict[str, Any]:
+async def delete_otlp_exporter(otel_exporter_id: str = Field(..., description="The unique identifier of the OTLP exporter configuration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an OTLP exporter configuration by its unique identifier. This is an experimental feature and the behavior may change in future releases."""
 
     # Construct request model with validation
@@ -5703,13 +5537,11 @@ async def delete_otlp_exporter(otel_exporter_id: str = Field(..., description="T
 
     # Extract parameters for API call
     _http_path = _build_path("/otel/exporters/{otel_exporter_id}", _request.path.model_dump(by_alias=True)) if _request.path else "/otel/exporters/{otel_exporter_id}"
-    _http_query = {}
     _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("delete_otlp_exporter")
     _http_headers.update(_auth.get("headers", {}))
-    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("delete_otlp_exporter", "DELETE", _http_path, _request_id)
@@ -5720,7 +5552,6 @@ async def delete_otlp_exporter(otel_exporter_id: str = Field(..., description="T
         method="DELETE",
         path=_http_path,
         request_id=_request_id,
-        params=_http_query,
         headers=_http_headers,
     )
 

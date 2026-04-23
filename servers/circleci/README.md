@@ -1,11 +1,12 @@
 # CircleCI MCP Server
+<!-- mcp-name: com.mcparmory/circleci -->
 
 Base URL: https://circleci.com/api/v2
 | | |
 |---|---|
 | **Category** | Developer Tools |
 | **Tools** | 108 |
-| **Auth** | API Key, HTTP Basic |
+| **Auth** | API Key |
 
 ## API Info
 - **API License:** MIT — [https://opensource.org/license/MIT](https://opensource.org/license/MIT)
@@ -17,10 +18,7 @@ Base URL: https://circleci.com/api/v2
 ### Quick Start (recommended)
 
 ```bash
-API_KEY_HEADER=YOUR_API_KEY_HEADER \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-API_KEY_QUERY=YOUR_API_KEY_QUERY \
+API_KEY=YOUR_API_KEY \
 uvx mcparmory-circleci
 ```
 
@@ -28,10 +26,7 @@ uvx mcparmory-circleci
 
 ```bash
 pip install mcparmory-circleci
-API_KEY_HEADER=YOUR_API_KEY_HEADER \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-API_KEY_QUERY=YOUR_API_KEY_QUERY \
+API_KEY=YOUR_API_KEY \
 mcparmory-circleci
 ```
 
@@ -46,10 +41,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-circleci"],
       "env": {
-        "API_KEY_HEADER": "YOUR_API_KEY_HEADER",
-        "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD",
-        "API_KEY_QUERY": "YOUR_API_KEY_QUERY"
+        "API_KEY": "YOUR_API_KEY"
       }
     }
   }
@@ -62,10 +54,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY_HEADER` — API Key Authentication (Circle-Token)
-- `BASIC_AUTH_USERNAME` — Username
-- `BASIC_AUTH_PASSWORD` — Password
-- `API_KEY_QUERY` — API Key Authentication (circle-token)
+- `API_KEY` — API Key Authentication (Circle-Token)
 Do not commit credentials to version control.
 
 ---
@@ -99,6 +88,16 @@ Example (if server is at `/home/user/mcp-servers/circleci`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/circleci:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -106,7 +105,9 @@ docker build -t circleci .
 docker run -p 8000:8000 --env-file .env circleci
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

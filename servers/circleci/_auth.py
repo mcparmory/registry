@@ -1,7 +1,7 @@
 """
 Authentication module for CircleCI MCP server.
 
-Generated: 2026-04-14 18:17:40 UTC
+Generated: 2026-04-23 21:07:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -11,7 +11,6 @@ This module contains:
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 
@@ -19,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "APIKeyAuth",
-    "BasicAuth",
     "OPERATION_AUTH_MAP",
 ]
 
@@ -97,58 +95,6 @@ class APIKeyAuth:
             return {}
         return {self.param_name: self.api_key}
 
-class BasicAuth:
-    """
-    HTTP Basic Authentication for CircleCI API.
-
-    Configuration:
-        Credentials are automatically Base64-encoded.
-        Provide raw username and password via environment variables.
-
-    Security Note:
-        Basic Auth transmits credentials in Base64 encoding (NOT encryption).
-        Always use HTTPS to protect credentials in transit.
-    """
-
-    def __init__(self, env_var_username: str = "BASIC_AUTH_USERNAME",
-                 env_var_password: str = "BASIC_AUTH_PASSWORD"):
-        """Initialize Basic Auth from environment variables.
-
-        Args:
-            env_var_username: Environment variable name for the username.
-            env_var_password: Environment variable name for the password.
-        """
-        self.username = os.getenv(env_var_username, "").strip()
-        self.password = os.getenv(env_var_password, "").strip()
-
-        # Check for empty username (password may be empty for API-key-as-username auth)
-        if not self.username:
-            raise ValueError(
-                f"{env_var_username} environment variable must be set. "
-                "Leave empty in .env to disable Basic Auth."
-            )
-
-        # Detect common placeholder patterns
-        placeholders = ["placeholder", "your-", "example", "change-me", "todo"]
-        username_lower = self.username.lower()
-        password_lower = self.password.lower()
-
-        if any(p in username_lower or p in password_lower for p in placeholders):
-            raise ValueError(
-                f"Basic Auth credentials appear to be placeholders (username: {self.username[:20]}...). "
-                "Please set real credentials or leave empty to disable Basic Auth."
-            )
-
-    def get_auth_headers(self) -> dict[str, str]:
-        """Get authentication headers with Basic Auth credentials."""
-        # Encode credentials
-        credentials = f"{self.username}:{self.password}"
-        encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
-
-        return {
-            'Authorization': f'Basic {encoded_credentials}',
-        }
-
 
 # ============================================================================
 # Operation Auth Requirements Map
@@ -161,112 +107,112 @@ This dictionary defines which authentication schemes are required for each opera
 using OR/AND relationships (outer list = OR, inner list = AND).
 """
 OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
-    "get_project_workflow_summary": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_job_timeseries": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_org_summary": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_project_branches": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_flaky_tests": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_workflow_metrics": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_workflow_runs": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_workflow_job_metrics": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_workflow_summary": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_workflow_test_metrics": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "cancel_job": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_current_user": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_collaborations": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_organization": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_organization": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_organization": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_project": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_url_orb_allow_list_entries": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_url_orb_allow_list_entry": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_url_orb_allow_list_entry": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_pipelines": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "continue_pipeline": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_pipeline": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_pipeline_config": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_pipeline_values": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_pipeline_workflows": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_project": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_project": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_checkout_keys": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_checkout_key": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_checkout_key": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_checkout_key": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_env_vars": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_env_var": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_env_var": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_env_var": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_job_details": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "cancel_job_by_number": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_project_pipelines": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "trigger_pipeline": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_my_pipelines": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_pipeline_by_number": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_project_schedules": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_schedule": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_job_artifacts": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_job_tests": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_schedule": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_schedule": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_schedule": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_user": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_webhooks": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_webhook": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_webhook": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_webhook": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_webhook": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_workflow": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "approve_workflow_job": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "cancel_workflow": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_workflow_jobs": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "rerun_workflow": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_org_oidc_custom_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_org_oidc_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_org_oidc_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_project_oidc_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_project_oidc_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_project_oidc_claims": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_decision_logs": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_decision_log": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_decision_policy_bundle": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_policy_bundle": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_contexts": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_context": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_context": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_context": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_context_environment_variables": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "set_context_environment_variable": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_context_environment_variable": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_context_restrictions": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "add_context_restriction": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_context_restriction": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_project_settings": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_project_settings": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_organization_groups": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_group": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_group": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_group": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_usage_export": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_usage_export_job": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "trigger_pipeline_run": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_pipeline_definitions": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_pipeline_definition": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_pipeline_definition": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_pipeline_definition": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_pipeline_definition": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_pipeline_definition_triggers": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_pipeline_trigger": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_trigger": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "update_trigger": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_trigger": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "rollback_project": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_environments": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_environment": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_components": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "get_component": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_component_versions": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "list_otel_exporters": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "create_otlp_exporter": [["basic_auth"], ["api_key_header"], ["api_key_query"]],
-    "delete_otlp_exporter": [["basic_auth"], ["api_key_header"], ["api_key_query"]]
+    "get_project_workflow_summary": [["api_key_header"]],
+    "list_job_timeseries": [["api_key_header"]],
+    "get_org_summary": [["api_key_header"]],
+    "list_project_branches": [["api_key_header"]],
+    "list_flaky_tests": [["api_key_header"]],
+    "list_workflow_metrics": [["api_key_header"]],
+    "list_workflow_runs": [["api_key_header"]],
+    "list_workflow_job_metrics": [["api_key_header"]],
+    "get_workflow_summary": [["api_key_header"]],
+    "get_workflow_test_metrics": [["api_key_header"]],
+    "cancel_job": [["api_key_header"]],
+    "get_current_user": [["api_key_header"]],
+    "list_collaborations": [["api_key_header"]],
+    "create_organization": [["api_key_header"]],
+    "get_organization": [["api_key_header"]],
+    "delete_organization": [["api_key_header"]],
+    "create_project": [["api_key_header"]],
+    "list_url_orb_allow_list_entries": [["api_key_header"]],
+    "create_url_orb_allow_list_entry": [["api_key_header"]],
+    "delete_url_orb_allow_list_entry": [["api_key_header"]],
+    "list_pipelines": [["api_key_header"]],
+    "continue_pipeline": [["api_key_header"]],
+    "get_pipeline": [["api_key_header"]],
+    "get_pipeline_config": [["api_key_header"]],
+    "get_pipeline_values": [["api_key_header"]],
+    "list_pipeline_workflows": [["api_key_header"]],
+    "get_project": [["api_key_header"]],
+    "delete_project": [["api_key_header"]],
+    "list_checkout_keys": [["api_key_header"]],
+    "create_checkout_key": [["api_key_header"]],
+    "get_checkout_key": [["api_key_header"]],
+    "delete_checkout_key": [["api_key_header"]],
+    "list_env_vars": [["api_key_header"]],
+    "create_env_var": [["api_key_header"]],
+    "get_env_var": [["api_key_header"]],
+    "delete_env_var": [["api_key_header"]],
+    "get_job_details": [["api_key_header"]],
+    "cancel_job_by_number": [["api_key_header"]],
+    "list_project_pipelines": [["api_key_header"]],
+    "trigger_pipeline": [["api_key_header"]],
+    "list_my_pipelines": [["api_key_header"]],
+    "get_pipeline_by_number": [["api_key_header"]],
+    "list_project_schedules": [["api_key_header"]],
+    "create_schedule": [["api_key_header"]],
+    "list_job_artifacts": [["api_key_header"]],
+    "list_job_tests": [["api_key_header"]],
+    "get_schedule": [["api_key_header"]],
+    "update_schedule": [["api_key_header"]],
+    "delete_schedule": [["api_key_header"]],
+    "get_user": [["api_key_header"]],
+    "list_webhooks": [["api_key_header"]],
+    "create_webhook": [["api_key_header"]],
+    "get_webhook": [["api_key_header"]],
+    "update_webhook": [["api_key_header"]],
+    "delete_webhook": [["api_key_header"]],
+    "get_workflow": [["api_key_header"]],
+    "approve_workflow_job": [["api_key_header"]],
+    "cancel_workflow": [["api_key_header"]],
+    "list_workflow_jobs": [["api_key_header"]],
+    "rerun_workflow": [["api_key_header"]],
+    "list_org_oidc_custom_claims": [["api_key_header"]],
+    "update_org_oidc_claims": [["api_key_header"]],
+    "delete_org_oidc_claims": [["api_key_header"]],
+    "get_project_oidc_claims": [["api_key_header"]],
+    "update_project_oidc_claims": [["api_key_header"]],
+    "delete_project_oidc_claims": [["api_key_header"]],
+    "list_decision_logs": [["api_key_header"]],
+    "get_decision_log": [["api_key_header"]],
+    "get_decision_policy_bundle": [["api_key_header"]],
+    "get_policy_bundle": [["api_key_header"]],
+    "list_contexts": [["api_key_header"]],
+    "create_context": [["api_key_header"]],
+    "get_context": [["api_key_header"]],
+    "delete_context": [["api_key_header"]],
+    "list_context_environment_variables": [["api_key_header"]],
+    "set_context_environment_variable": [["api_key_header"]],
+    "delete_context_environment_variable": [["api_key_header"]],
+    "list_context_restrictions": [["api_key_header"]],
+    "add_context_restriction": [["api_key_header"]],
+    "delete_context_restriction": [["api_key_header"]],
+    "get_project_settings": [["api_key_header"]],
+    "update_project_settings": [["api_key_header"]],
+    "list_organization_groups": [["api_key_header"]],
+    "create_group": [["api_key_header"]],
+    "get_group": [["api_key_header"]],
+    "delete_group": [["api_key_header"]],
+    "create_usage_export": [["api_key_header"]],
+    "get_usage_export_job": [["api_key_header"]],
+    "trigger_pipeline_run": [["api_key_header"]],
+    "list_pipeline_definitions": [["api_key_header"]],
+    "create_pipeline_definition": [["api_key_header"]],
+    "get_pipeline_definition": [["api_key_header"]],
+    "update_pipeline_definition": [["api_key_header"]],
+    "delete_pipeline_definition": [["api_key_header"]],
+    "list_pipeline_definition_triggers": [["api_key_header"]],
+    "create_pipeline_trigger": [["api_key_header"]],
+    "get_trigger": [["api_key_header"]],
+    "update_trigger": [["api_key_header"]],
+    "delete_trigger": [["api_key_header"]],
+    "rollback_project": [["api_key_header"]],
+    "list_environments": [["api_key_header"]],
+    "get_environment": [["api_key_header"]],
+    "list_components": [["api_key_header"]],
+    "get_component": [["api_key_header"]],
+    "list_component_versions": [["api_key_header"]],
+    "list_otel_exporters": [["api_key_header"]],
+    "create_otlp_exporter": [["api_key_header"]],
+    "delete_otlp_exporter": [["api_key_header"]]
 }
