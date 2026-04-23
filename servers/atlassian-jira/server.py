@@ -6,7 +6,7 @@ API Info:
 - API License: Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0.html)
 - Terms of Service: https://developer.atlassian.com/platform/marketplace/atlassian-developer-terms/
 
-Generated: 2026-04-14 18:15:24 UTC
+Generated: 2026-04-23 21:00:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,9 +42,14 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import AfterValidator, Field
 
-BASE_URL = os.getenv("BASE_URL", "https://your-domain.atlassian.net")
+# Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
+_SERVER_VARS = {
+    "your_domain": os.getenv("SERVER_YOUR_DOMAIN", ""),
+}
+BASE_URL = os.getenv("BASE_URL", "https://{your_domain}.atlassian.net".format_map(collections.defaultdict(str, _SERVER_VARS)))
 SERVER_NAME = "Atlassian Jira"
 SERVER_VERSION = "1.0.0"
 
@@ -471,12 +478,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +530,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +576,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +723,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +779,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +845,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +879,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -859,16 +977,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -882,6 +1001,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -924,6 +1044,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -935,7 +1070,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1088,7 +1222,7 @@ mcp = FastMCP("Atlassian Jira", middleware=[_JsonCoercionMiddleware()])
 async def update_custom_field_values(
     generate_changelog: bool | None = Field(None, alias="generateChangelog", description="Whether to generate a changelog entry for this update. Defaults to true if not specified."),
     updates: list[_models.MultipleCustomFieldValuesUpdate] | None = Field(None, description="Array of custom field value updates to apply. Each entry specifies a custom field and the issue(s) to update with their new values. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the values of one or more custom fields across one or more issues. Each custom field and issue combination must be unique within the request. Only the app that owns the custom field can perform this operation."""
 
     # Construct request model with validation
@@ -1133,7 +1267,7 @@ async def update_custom_field_value(
     field_id_or_key: str = Field(..., alias="fieldIdOrKey", description="The ID or key of the custom field to update (e.g., customfield_10010)."),
     generate_changelog: bool | None = Field(None, alias="generateChangelog", description="Whether to generate a changelog entry for this update. Defaults to true if not specified."),
     updates: list[_models.CustomFieldValueUpdate] | None = Field(None, description="An array of custom field update details specifying which issues to update and their new values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the value of a custom field across one or more issues. Only the app that owns the custom field can perform this operation."""
 
     # Construct request model with validation
@@ -1178,7 +1312,7 @@ async def update_custom_field_value(
 async def download_attachment(
     id_: str = Field(..., alias="id", description="The unique identifier of the attachment to download."),
     redirect: bool | None = Field(None, description="Whether to follow HTTP redirects for the attachment download. Set to false if your client doesn't automatically follow redirects to avoid multiple requests. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Download the full content of an attachment file. Supports partial downloads using HTTP Range headers to retrieve specific byte ranges. This operation can be accessed anonymously if you have the required project and issue permissions."""
 
     # Construct request model with validation
@@ -1223,7 +1357,7 @@ async def get_attachment_thumbnail(
     fallback_to_default: bool | None = Field(None, alias="fallbackToDefault", description="Whether to return a default placeholder thumbnail when the requested attachment thumbnail cannot be generated or found."),
     width: str | None = Field(None, description="The maximum width in pixels to scale the thumbnail to. The thumbnail will be scaled proportionally to fit within this width."),
     height: str | None = Field(None, description="The maximum height in pixels to scale the thumbnail to. The thumbnail will be scaled proportionally to fit within this height."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a thumbnail image for an attachment. Supports optional scaling and fallback behavior when thumbnails are unavailable."""
 
     _width = _parse_int(width)
@@ -1265,7 +1399,7 @@ async def get_attachment_thumbnail(
 
 # Tags: Issue attachments
 @mcp.tool()
-async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment whose metadata you want to retrieve.")) -> dict[str, Any]:
+async def get_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment whose metadata you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for an attachment, including details like filename, size, and creation date. The attachment content itself is not returned by this operation."""
 
     # Construct request model with validation
@@ -1301,7 +1435,7 @@ async def get_attachment(id_: str = Field(..., alias="id", description="The uniq
 
 # Tags: Issue attachments
 @mcp.tool()
-async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to delete.")) -> dict[str, Any]:
+async def delete_attachment(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Removes an attachment from an issue. Requires either permission to delete your own attachments or permission to delete any attachment in the project."""
 
     # Construct request model with validation
@@ -1337,7 +1471,7 @@ async def delete_attachment(id_: str = Field(..., alias="id", description="The u
 
 # Tags: Issue attachments
 @mcp.tool()
-async def get_attachment_metadata_with_contents(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve metadata for.")) -> dict[str, Any]:
+async def get_attachment_metadata_with_contents(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve complete metadata for an attachment and its contents if it's an archive. Returns information about the attachment itself (ID, name) plus details about any files within supported archive formats like ZIP."""
 
     # Construct request model with validation
@@ -1373,7 +1507,7 @@ async def get_attachment_metadata_with_contents(id_: str = Field(..., alias="id"
 
 # Tags: Issue attachments
 @mcp.tool()
-async def get_archive_contents_metadata(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to expand and retrieve contents metadata for.")) -> dict[str, Any]:
+async def get_archive_contents_metadata(id_: str = Field(..., alias="id", description="The unique identifier of the attachment to expand and retrieve contents metadata for.")) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for the contents of an archive attachment, such as files within a ZIP archive. Use this operation when processing attachment data programmatically without user presentation."""
 
     # Construct request model with validation
@@ -1409,7 +1543,7 @@ async def get_archive_contents_metadata(id_: str = Field(..., alias="id", descri
 
 # Tags: Avatars
 @mcp.tool()
-async def list_system_avatars(type_: Literal["issuetype", "project", "user", "priority"] = Field(..., alias="type", description="The category of avatars to retrieve. Must be one of: issuetype, project, user, or priority.")) -> dict[str, Any]:
+async def list_system_avatars(type_: Literal["issuetype", "project", "user", "priority"] = Field(..., alias="type", description="The category of avatars to retrieve. Must be one of: issuetype, project, user, or priority.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of system avatars filtered by type (issue type, project, user, or priority). This operation is publicly accessible and requires no authentication."""
 
     # Construct request model with validation
@@ -1448,7 +1582,7 @@ async def list_system_avatars(type_: Literal["issuetype", "project", "user", "pr
 async def delete_issues_bulk(
     selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to delete. Can include issues from different projects and types. Order is not significant."),
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send a bulk change notification email to users about the deletions. Enabled by default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a bulk delete request to remove multiple issues across projects in a single operation. You can delete up to 1,000 issues at once, with optional notification to affected users."""
 
     # Construct request model with validation
@@ -1489,7 +1623,7 @@ async def delete_issues_bulk(
 async def list_bulk_editable_fields(
     issue_ids_or_keys: str = Field(..., alias="issueIdsOrKeys", description="One or more issue IDs or keys to determine which fields are eligible for bulk editing. Provide as a comma-separated list or array of values."),
     search_text: str | None = Field(None, alias="searchText", description="Optional text to filter the returned editable fields by name or description."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of fields that are editable in bulk operations for the specified issues. Returns up to 50 fields per page, optionally filtered by search text."""
 
     # Construct request model with validation
@@ -1532,7 +1666,7 @@ async def bulk_edit_issues(
     selected_actions: list[str] = Field(..., alias="selectedActions", description="List of field IDs to be modified in the bulk edit operation. Each ID must match a field in editedFieldsInput and corresponds to a specific issue attribute being updated. Obtain available field IDs from the Bulk Edit Get Fields API."),
     selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to be edited, which may span multiple projects and issue types. Supports up to 1000 issues including subtasks per request."),
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send bulk change notification emails to affected users about the updates. Defaults to true if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Simultaneously edit multiple issues across projects by specifying field values and target issues. Supports up to 1000 issues and 200 fields per request, with optional bulk notification to affected users."""
 
     # Construct request model with validation
@@ -1573,7 +1707,7 @@ async def bulk_edit_issues(
 async def move_issues_bulk(
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send a bulk notification email to users when issues are moved. Defaults to true if not specified."),
     target_to_sources_mapping: dict[str, _models.TargetToSourcesMapping] | None = Field(None, alias="targetToSourcesMapping", description="Mapping of destination configurations to source issues. Each mapping key combines destination project (ID or key), issue type ID, and optional parent (ID or key) in comma-separated format. The mapping defines field transformations and status mappings required for the move. Duplicate keys will be silently ignored without failing the operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move multiple issues across projects in a single operation. Supports moving up to 1,000 issues (including subtasks) to a single destination project, issue type, and parent, with automatic field mapping and optional bulk notifications."""
 
     # Construct request model with validation
@@ -1611,7 +1745,7 @@ async def move_issues_bulk(
 
 # Tags: Issue bulk operations
 @mcp.tool()
-async def list_issue_transitions(issue_ids_or_keys: str = Field(..., alias="issueIdsOrKeys", description="Comma-separated list of issue IDs or keys to retrieve available transitions for. Supports up to 1,000 issues per request.")) -> dict[str, Any]:
+async def list_issue_transitions(issue_ids_or_keys: str = Field(..., alias="issueIdsOrKeys", description="Comma-separated list of issue IDs or keys to retrieve available transitions for. Supports up to 1,000 issues per request.")) -> dict[str, Any] | ToolResult:
     """Retrieve available transitions for specified issues that can be used in bulk transition operations. Returns transitions organized by workflow, including only those common across all specified issues that don't require additional field updates."""
 
     # Construct request model with validation
@@ -1652,7 +1786,7 @@ async def list_issue_transitions(issue_ids_or_keys: str = Field(..., alias="issu
 async def transition_issues_bulk(
     bulk_transition_inputs: list[_models.BulkTransitionSubmitInput] = Field(..., alias="bulkTransitionInputs", description="Array of issue transition objects, each containing an issue identifier and its corresponding transition ID. Issues must share compatible workflows for their specified transitions. Maximum of 1,000 issues per request."),
     send_bulk_notification: bool | None = Field(None, alias="sendBulkNotification", description="Whether to send bulk notification emails to affected users when issues are transitioned. Enabled by default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transition the status of multiple issues in a single operation. Submit up to 1,000 issues with their corresponding transition IDs to move them through your workflow states."""
 
     # Construct request model with validation
@@ -1690,7 +1824,7 @@ async def transition_issues_bulk(
 
 # Tags: Issue bulk operations
 @mcp.tool()
-async def unwatch_issues_bulk(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to unwatch. You can include up to 1,000 issues from any projects or issue types in a single request.")) -> dict[str, Any]:
+async def unwatch_issues_bulk(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to unwatch. You can include up to 1,000 issues from any projects or issue types in a single request.")) -> dict[str, Any] | ToolResult:
     """Remove your watch from multiple issues in a single operation. You can unwatch up to 1,000 issues across different projects and issue types."""
 
     # Construct request model with validation
@@ -1728,7 +1862,7 @@ async def unwatch_issues_bulk(selected_issue_ids_or_keys: list[str] = Field(...,
 
 # Tags: Issue bulk operations
 @mcp.tool()
-async def watch_issues(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to watch, supporting up to 1,000 items per request. Issues can be from different projects and types. Provide either numeric IDs or string keys (e.g., PROJ-123).")) -> dict[str, Any]:
+async def watch_issues(selected_issue_ids_or_keys: list[str] = Field(..., alias="selectedIssueIdsOrKeys", description="List of issue IDs or keys to watch, supporting up to 1,000 items per request. Issues can be from different projects and types. Provide either numeric IDs or string keys (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Add up to 1,000 issues to your watch list in a single bulk operation. Watched issues will appear in your notifications and dashboards."""
 
     # Construct request model with validation
@@ -1766,7 +1900,7 @@ async def watch_issues(selected_issue_ids_or_keys: list[str] = Field(..., alias=
 
 # Tags: Issue bulk operations
 @mcp.tool()
-async def get_bulk_operation_progress(task_id: str = Field(..., alias="taskId", description="The unique identifier of the bulk operation task whose progress you want to check.")) -> dict[str, Any]:
+async def get_bulk_operation_progress(task_id: str = Field(..., alias="taskId", description="The unique identifier of the bulk operation task whose progress you want to check.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current progress and status of a bulk issue operation. Returns real-time progress metrics while running, or final results upon completion. Task progress data is available for up to 14 days after creation."""
 
     # Construct request model with validation
@@ -1806,7 +1940,7 @@ async def fetch_issue_changelogs(
     issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="List of issue identifiers (IDs or keys) to fetch changelogs for. You can request changelogs for up to 1000 issues. At least one issue identifier is required.", min_length=1, max_length=1000),
     field_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="fieldIds", description="Optional list of field IDs to narrow changelog results to specific fields. You can filter by up to 10 fields.", min_length=0, max_length=10),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of changelog items to return per page. Defaults to 1000 if not specified. Must be between 1 and 10000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve change history for multiple issues in a paginated list, optionally filtered by specific fields. Results are sorted chronologically by changelog date and issue ID, starting from the oldest entries."""
 
     _max_results = _parse_int(max_results)
@@ -1849,7 +1983,7 @@ async def fetch_issue_changelogs(
 async def list_classification_levels(
     status: Annotated[list[Literal["PUBLISHED", "ARCHIVED", "DRAFT"]], AfterValidator(_check_unique_items)] | None = Field(None, description="Optional filter to return only classification levels matching the specified statuses. Provide as an array of status values."),
     order_by: Literal["rank", "-rank", "+rank"] | None = Field(None, alias="orderBy", description="Optional field to sort results by rank. Use 'rank' for ascending order, '+rank' for ascending, or '-rank' for descending order. If not specified, results are returned unsorted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all available classification levels, optionally filtered by status and sorted by rank. No permissions are required to access this endpoint."""
 
     # Construct request model with validation
@@ -1887,7 +2021,7 @@ async def list_classification_levels(
 
 # Tags: Issue comments
 @mcp.tool()
-async def list_comments(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of comment IDs to retrieve. Specify up to 1000 IDs per request. Order is preserved in the response.")) -> dict[str, Any]:
+async def list_comments(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of comment IDs to retrieve. Specify up to 1000 IDs per request. Order is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of comments by their IDs. Returns comments where you have appropriate project browse permissions and any required issue-level security or visibility group/role permissions."""
 
     # Construct request model with validation
@@ -1925,7 +2059,7 @@ async def list_comments(ids: Annotated[list[int], AfterValidator(_check_unique_i
 
 # Tags: Issue comment properties
 @mcp.tool()
-async def list_comment_property_keys(comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment whose property keys you want to retrieve.")) -> dict[str, Any]:
+async def list_comment_property_keys(comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment whose property keys you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a specific comment. Useful for discovering what custom properties have been set on a comment."""
 
     # Construct request model with validation
@@ -1964,7 +2098,7 @@ async def list_comment_property_keys(comment_id: str = Field(..., alias="comment
 async def get_comment_property(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment from which to retrieve the property."),
     property_key: str = Field(..., alias="propertyKey", description="The identifier of the property whose value should be retrieved from the comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the value of a specific property attached to a comment. Requires appropriate project and issue permissions, and respects any visibility restrictions on the comment."""
 
     # Construct request model with validation
@@ -2003,7 +2137,7 @@ async def get_comment_property(
 async def delete_comment_property(
     comment_id: str = Field(..., alias="commentId", description="The unique identifier of the comment containing the property to delete."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the custom property to remove from the comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a comment. Requires either Edit All Comments permission or Edit Own Comments permission if you created the comment."""
 
     # Construct request model with validation
@@ -2044,7 +2178,7 @@ async def list_components(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets. Defaults to 0 (first item)."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of components to return in a single page. Defaults to 50 items per page."),
     order_by: Literal["description", "-description", "+description", "name", "-name", "+name"] | None = Field(None, alias="orderBy", description="Sort results by component name or description. Use `name` or `description` for ascending order, prefix with `-` for descending order, or `+` for explicit ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all components in specified projects, including global Compass components when applicable. Requires Browse Projects permission for the target project(s)."""
 
     _start_at = _parse_int(start_at)
@@ -2090,7 +2224,7 @@ async def create_component(
     description: str | None = Field(None, description="A brief text description of the component's purpose and scope. Optional and can be added or updated at any time."),
     name: str | None = Field(None, description="The unique name for the component in the project. Required when creating a component. Optional when updating a component. The maximum length is 255 characters."),
     project_id: str | None = Field(None, alias="projectId", description="The ID of the project the component is assigned to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new component in a project to serve as a container for organizing and grouping related issues. Requires project administration permissions."""
 
     _project_id = _parse_int(project_id)
@@ -2130,7 +2264,7 @@ async def create_component(
 
 # Tags: Project components
 @mcp.tool()
-async def get_component(id_: str = Field(..., alias="id", description="The unique identifier of the component to retrieve.")) -> dict[str, Any]:
+async def get_component(id_: str = Field(..., alias="id", description="The unique identifier of the component to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific component by its ID. Requires Browse projects permission for the project containing the component."""
 
     # Construct request model with validation
@@ -2170,7 +2304,7 @@ async def update_component(
     id_: str = Field(..., alias="id", description="The unique identifier of the component to update."),
     assignee_type: Literal["PROJECT_DEFAULT", "COMPONENT_LEAD", "PROJECT_LEAD", "UNASSIGNED"] | None = Field(None, alias="assigneeType", description="Determines who is assigned to issues created with this component. Choose from: PROJECT_DEFAULT (project's default assignee), COMPONENT_LEAD (component lead), PROJECT_LEAD (project lead), or UNASSIGNED (no assignee). Defaults to PROJECT_DEFAULT if not specified."),
     description: str | None = Field(None, description="A text description of the component's purpose and scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing component in a project, overwriting any provided fields. Use an empty string for leadAccountId to remove the component lead."""
 
     # Construct request model with validation
@@ -2212,7 +2346,7 @@ async def update_component(
 async def delete_component(
     id_: str = Field(..., alias="id", description="The unique identifier of the component to delete."),
     move_issues_to: str | None = Field(None, alias="moveIssuesTo", description="The unique identifier of a component to replace the deleted one. If not provided, issues associated with the deleted component will not be reassigned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a component from a project. Optionally specify a replacement component to reassign any issues currently associated with the deleted component."""
 
     # Construct request model with validation
@@ -2251,7 +2385,7 @@ async def delete_component(
 
 # Tags: Project components
 @mcp.tool()
-async def get_component_issue_counts(id_: str = Field(..., alias="id", description="The unique identifier of the component for which to retrieve issue counts.")) -> dict[str, Any]:
+async def get_component_issue_counts(id_: str = Field(..., alias="id", description="The unique identifier of the component for which to retrieve issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves the count of issues assigned to a specific component. This provides a summary of issue distribution for component management and reporting purposes."""
 
     # Construct request model with validation
@@ -2287,7 +2421,7 @@ async def get_component_issue_counts(id_: str = Field(..., alias="id", descripti
 
 # Tags: Issue custom field options
 @mcp.tool()
-async def get_custom_field_option(id_: str = Field(..., alias="id", description="The unique identifier of the custom field option to retrieve.")) -> dict[str, Any]:
+async def get_custom_field_option(id_: str = Field(..., alias="id", description="The unique identifier of the custom field option to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a custom field option by ID, such as an option from a select list. This operation works only with options created in Jira or via the Issue custom field options API, and can be accessed anonymously with appropriate permissions."""
 
     # Construct request model with validation
@@ -2327,7 +2461,7 @@ async def list_dashboards(
     filter_: Literal["my", "favourite"] | None = Field(None, alias="filter", description="Filter the dashboard list by ownership or favorite status. Use 'my' to show only dashboards you own, or 'favourite' to show only dashboards you've marked as favorites."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of dashboards to return per page. Defaults to 20 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of dashboards owned by or shared with the user. Results can be filtered to show only favorite or owned dashboards, with support for pagination."""
 
     _start_at = _parse_int(start_at)
@@ -2373,7 +2507,7 @@ async def create_dashboard(
     name: str = Field(..., description="Required name for the dashboard. Used as the primary identifier and display label."),
     share_permissions: list[_models.SharePermission] = Field(..., alias="sharePermissions", description="Required array specifying which users or groups can view and access the dashboard and their permission levels."),
     description: str | None = Field(None, description="Optional text describing the dashboard's purpose and content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new dashboard with specified name, description, and access permissions. The dashboard will be configured with edit and share permissions to control who can modify and access it."""
 
     # Construct request model with validation
@@ -2416,7 +2550,7 @@ async def update_dashboards_bulk(
     entity_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="entityIds", description="A list of dashboard IDs to be modified by the bulk operation. Maximum of 100 dashboard IDs per request."),
     change_owner_details: _models.BulkEditDashboardsBodyChangeOwnerDetails | None = Field(None, alias="changeOwnerDetails", description="Required when action is 'changeOwner'. Contains the details needed to transfer ownership of the dashboards to a new owner."),
     permission_details: _models.BulkEditDashboardsBodyPermissionDetails | None = Field(None, alias="permissionDetails", description="Required when action is 'changePermission', 'addPermission', or 'removePermission'. Specifies the permission settings to apply to the selected dashboards."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Perform bulk operations on multiple dashboards such as changing ownership or modifying permissions. You can update up to 100 dashboards in a single request. You must own the dashboards or have administrator privileges to make changes."""
 
     # Construct request model with validation
@@ -2454,7 +2588,7 @@ async def update_dashboards_bulk(
 
 # Tags: Dashboards
 @mcp.tool()
-async def list_dashboard_gadgets() -> dict[str, Any]:
+async def list_dashboard_gadgets() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all available gadgets that can be added to dashboards. No authentication required."""
 
     # Extract parameters for API call
@@ -2488,7 +2622,7 @@ async def search_dashboards(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of dashboards to return per page. Defaults to 50."),
     status: Literal["active", "archived", "deleted"] | None = Field(None, description="Filter dashboards by their status: active, archived, or deleted. Defaults to active."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for dashboards with optional filtering by name, project, and status. Returns a paginated list of dashboards accessible to the user based on ownership, group membership, project sharing, or public availability."""
 
     _project_id = _parse_int(project_id)
@@ -2535,7 +2669,7 @@ async def update_dashboard_gadget(
     gadget_id: str = Field(..., alias="gadgetId", description="The unique identifier of the gadget to update. Must be a positive integer."),
     color: str | None = Field(None, description="The visual color of the gadget. Choose from: blue, red, yellow, green, cyan, purple, gray, or white."),
     title: str | None = Field(None, description="The display title for the gadget shown on the dashboard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify a gadget's appearance and position on a dashboard by updating its title, color, and layout properties."""
 
     _dashboard_id = _parse_int(dashboard_id)
@@ -2580,7 +2714,7 @@ async def update_dashboard_gadget(
 async def remove_gadget(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the gadget to remove. Must be a positive integer."),
     gadget_id: str = Field(..., alias="gadgetId", description="The unique identifier of the gadget to remove from the dashboard. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a gadget from a dashboard. When removed, other gadgets in the same column automatically shift up to fill the vacant position."""
 
     _dashboard_id = _parse_int(dashboard_id)
@@ -2622,7 +2756,7 @@ async def remove_gadget(
 async def list_dashboard_item_property_keys(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item whose property keys you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a specific dashboard item. This operation allows you to discover what custom properties are available for a dashboard item without retrieving their values."""
 
     # Construct request model with validation
@@ -2662,7 +2796,7 @@ async def get_dashboard_item_property(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item (gadget) whose property you want to retrieve."),
     property_key: str = Field(..., alias="propertyKey", description="The key name of the property to retrieve from the dashboard item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific property value stored for a dashboard item. Dashboard items are gadgets that apps use to display user-specific information on dashboards, and properties store the item's content or configuration details."""
 
     # Construct request model with validation
@@ -2702,7 +2836,7 @@ async def remove_dashboard_item_property(
     dashboard_id: str = Field(..., alias="dashboardId", description="The unique identifier of the dashboard containing the item."),
     item_id: str = Field(..., alias="itemId", description="The unique identifier of the dashboard item whose property will be deleted."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the specific property to delete from the dashboard item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a dashboard item. Requires edit permission on the dashboard."""
 
     # Construct request model with validation
@@ -2738,7 +2872,7 @@ async def remove_dashboard_item_property(
 
 # Tags: Dashboards
 @mcp.tool()
-async def get_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to retrieve.")) -> dict[str, Any]:
+async def get_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a dashboard by its ID. The dashboard must be shared with the user, owned by the user, or the user must have Jira administration permissions to access it."""
 
     # Construct request model with validation
@@ -2780,7 +2914,7 @@ async def update_dashboard(
     name: str = Field(..., description="The display name of the dashboard."),
     share_permissions: list[_models.SharePermission] = Field(..., alias="sharePermissions", description="An array of permission objects that define who can view and access the dashboard."),
     description: str | None = Field(None, description="A brief text description of the dashboard's purpose or content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing dashboard by replacing all its details with the provided information. You must own the dashboard to update it."""
 
     # Construct request model with validation
@@ -2819,7 +2953,7 @@ async def update_dashboard(
 
 # Tags: Dashboards
 @mcp.tool()
-async def delete_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to delete.")) -> dict[str, Any]:
+async def delete_dashboard(id_: str = Field(..., alias="id", description="The unique identifier of the dashboard to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a dashboard. You must be the owner of the dashboard to delete it."""
 
     # Construct request model with validation
@@ -2861,7 +2995,7 @@ async def duplicate_dashboard(
     name: str = Field(..., description="The display name for the copied dashboard. This identifies the dashboard in lists and navigation."),
     share_permissions: list[_models.SharePermission] = Field(..., alias="sharePermissions", description="An array of user or group permissions that grants view and share access to the dashboard. Specifies who can view and redistribute access to the dashboard."),
     description: str | None = Field(None, description="Optional text describing the purpose or content of the copied dashboard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing dashboard with customizable name, description, and permissions. The source dashboard must be owned by or shared with the requesting user."""
 
     # Construct request model with validation
@@ -2900,7 +3034,7 @@ async def duplicate_dashboard(
 
 # Tags: Issues
 @mcp.tool()
-async def list_events() -> dict[str, Any]:
+async def list_events() -> dict[str, Any] | ToolResult:
     """Retrieve all issue events from your Jira instance. Requires Administer Jira global permission to access."""
 
     # Extract parameters for API call
@@ -2930,7 +3064,7 @@ async def list_events() -> dict[str, Any]:
 async def evaluate_jira_expression(
     expression: str = Field(..., description="The Jira expression to evaluate as a string. Can reference context variables and perform operations like field extraction, filtering, and mapping (e.g., extracting issue keys, types, and linked issue IDs)."),
     context: _models.EvaluateJsisJiraExpressionBodyContext | None = Field(None, description="Optional context object that defines variables available to the expression, including built-in contexts (user, issue, issues, project, sprint, board, serviceDesk, customerRequest) and custom variables (user IDs, issue keys, JSON objects, or lists). Omit if using only automatic contexts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Evaluates a Jira expression and returns its computed value using the enhanced search API for better performance and scalability. Supports flexible data retrieval with access to issues, projects, sprints, boards, and custom context variables."""
 
     # Construct request model with validation
@@ -2968,7 +3102,7 @@ async def evaluate_jira_expression(
 
 # Tags: Issue fields
 @mcp.tool()
-async def list_fields() -> dict[str, Any]:
+async def list_fields() -> dict[str, Any] | ToolResult:
     """Retrieve all available issue fields in Jira, including system and custom fields. Returns fields based on global settings, screen configuration, and your project access permissions."""
 
     # Extract parameters for API call
@@ -3000,7 +3134,7 @@ async def list_fields_search(
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Defaults to 50 if not specified."),
     order_by: Literal["contextsCount", "-contextsCount", "+contextsCount", "lastUsed", "-lastUsed", "+lastUsed", "name", "-name", "+name", "screensCount", "-screensCount", "+screensCount", "projectsCount", "-projectsCount", "+projectsCount"] | None = Field(None, alias="orderBy", description="Sort the results by field attribute: contextsCount (number of related contexts), lastUsed (date of last value change), name (field name), screensCount (number of related screens), or projectsCount (number of related projects). Prefix with '-' for descending order or '+' for ascending order."),
     project_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, alias="projectIds", description="Filter results to fields belonging only to the specified project IDs. Fields from projects you lack access to will be excluded. Provide as a comma-separated list of project identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of Jira fields, optionally filtered by field IDs, search query, or project IDs. Supports sorting by various field attributes and can be restricted to custom fields only."""
 
     _start_at = _parse_int(start_at)
@@ -3045,7 +3179,7 @@ async def list_trashed_fields(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results. Defaults to 0."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Defaults to 50 items per page."),
     order_by: str | None = Field(None, alias="orderBy", description="Sort the results by field name, the date the field was moved to trash, or the planned deletion date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of custom fields that have been moved to trash. Results can be filtered by field name or description, and sorted by name, trash date, or planned deletion date. Requires Administer Jira global permission."""
 
     _start_at = _parse_int(start_at)
@@ -3091,7 +3225,7 @@ async def list_custom_field_context_issue_type_mappings(
     context_id: list[int] | None = Field(None, alias="contextId", description="Filter results to specific contexts by providing one or more context IDs. Omit to retrieve mappings for all contexts."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of mappings to return per page. Defaults to 50 items if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of issue type mappings for a custom field across specified contexts. Results are ordered by context ID first, then by issue type ID."""
 
     _start_at = _parse_int(start_at)
@@ -3140,7 +3274,7 @@ async def list_custom_field_options(
     only_options: bool | None = Field(None, alias="onlyOptions", description="When enabled, returns only the direct options without cascading options."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from for pagination."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of options to return per page, up to 100 items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of custom field options for a specific context, including both regular and cascading options in display order. Requires Jira administration or workflow edit permissions."""
 
     _context_id = _parse_int(context_id)
@@ -3188,7 +3322,7 @@ async def create_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field to which options will be added."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the field context where options will be created. Must be a positive integer."),
     options: list[_models.CustomFieldOptionCreate] | None = Field(None, description="An array of option objects to create. Each option defines a select list choice, and for cascading select fields, can include nested cascading options. Order is preserved as provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create options for a custom select field within a specific context. Supports cascading options for cascading select fields, with a maximum of 1000 options per request and 10000 total options per field."""
 
     _context_id = _parse_int(context_id)
@@ -3233,7 +3367,7 @@ async def update_custom_field_options(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field to update options for."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context where the custom field options apply. Must be a valid 64-bit integer."),
     options: list[_models.CustomFieldOptionUpdate] | None = Field(None, description="An array of custom field option objects to update. Each object should contain the option details to be modified. If any option is not found, the entire operation fails and no options are updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the available options for a custom field within a specific context. Only options with changed values are updated; unchanged options are ignored in the response. This operation works exclusively with select list options created in Jira or via the Issue custom field options API, not with options created by Connect apps."""
 
     _context_id = _parse_int(context_id)
@@ -3280,7 +3414,7 @@ async def reorder_custom_field_options(
     custom_field_option_ids: list[str] = Field(..., alias="customFieldOptionIds", description="An ordered list of custom field option IDs that defines their new sequence. All IDs must be either custom field options or cascading options, but not a mix of both types."),
     after: str | None = Field(None, description="The ID of the custom field option or cascading option to place the moved options after. Required if `position` isn't provided."),
     position: Literal["First", "Last"] | None = Field(None, description="The position the custom field options should be moved to. Required if `after` isn't provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder custom field options within a specific context. Rearranges the display order of custom field options or cascading options by specifying their desired sequence."""
 
     _context_id = _parse_int(context_id)
@@ -3325,7 +3459,7 @@ async def delete_custom_field_option(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the custom field containing the option to delete."),
     context_id: str = Field(..., alias="contextId", description="The unique identifier of the context from which the option should be deleted. This is a numeric ID."),
     option_id: str = Field(..., alias="optionId", description="The unique identifier of the option to delete. This is a numeric ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a custom field option from a specific context. Options with cascading options cannot be deleted until their cascading options are removed first."""
 
     _context_id = _parse_int(context_id)
@@ -3368,7 +3502,7 @@ async def list_field_screens(
     field_id: str = Field(..., alias="fieldId", description="The unique identifier of the field to retrieve screens for."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the paginated results should start. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of screens to return per page. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all screens where a specific field is used. Requires Jira administrator permissions."""
 
     _start_at = _parse_int(start_at)
@@ -3414,7 +3548,7 @@ async def list_field_options(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by running the Get fields operation."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of options to return per page. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all options available for a Connect app-provided select list issue field. This operation only works with field options added by Connect apps, not those created directly in Jira."""
 
     _start_at = _parse_int(start_at)
@@ -3459,7 +3593,7 @@ async def list_field_options(
 async def add_field_option(
     field_key: str = Field(..., alias="fieldKey", description="The unique identifier for the Connect app's custom field, formatted as app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by calling Get fields."),
     value: str = Field(..., description="The display name for the new option as it will appear in Jira. This is the user-facing label for the select list option."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new option to a Connect app's select list issue field. Each field supports up to 10,000 options, and requires Jira administrator permissions."""
 
     # Construct request model with validation
@@ -3503,7 +3637,7 @@ async def list_field_option_suggestions(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of options to return per page. Defaults to 50 items."),
     project_id: str | None = Field(None, alias="projectId", description="Optionally filter results to show only options available in a specific project by providing its numeric ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of selectable options for a Connect app custom issue field that the user can view and select. This operation only works with field options added by Connect apps, not those created natively in Jira."""
 
     _start_at = _parse_int(start_at)
@@ -3551,7 +3685,7 @@ async def search_field_options(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (0-based index). Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of options to return per page. Defaults to 50 if not specified."),
     project_id: str | None = Field(None, alias="projectId", description="Restrict results to options available in a specific project. When omitted, returns options available across all projects."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for visible options in a Connect app custom select list field. Returns paginated results filtered by user permissions and optionally by project."""
 
     _start_at = _parse_int(start_at)
@@ -3597,7 +3731,7 @@ async def search_field_options(
 async def get_field_option(
     field_key: str = Field(..., alias="fieldKey", description="The field key in the format app-key__field-key (e.g., example-add-on__example-issue-field). Find this value in the app's plugin descriptor or by running Get fields to retrieve the key from field details."),
     option_id: str = Field(..., alias="optionId", description="The numeric ID of the option to retrieve. Must be a valid 64-bit integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific option from a Connect app-provided select list issue field. This operation only works with field options added by Connect apps, not those created directly in Jira."""
 
     _option_id = _parse_int(option_id)
@@ -3641,7 +3775,7 @@ async def replace_field_option(
     replace_with: str | None = Field(None, alias="replaceWith", description="The numeric ID of the option that will replace the deselected option. If not provided, the option is simply removed without replacement."),
     jql: str | None = Field(None, description="A JQL query that limits the operation to a specific set of issues (e.g., project=10000). If not provided, the operation applies to all issues with the option selected."),
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="Whether to override screen security to allow editing of uneditable fields. Only available to Connect and Forge app users with Administer Jira permission. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deselects a custom field select-list option from all issues where it is selected, optionally replacing it with a different option. This asynchronous operation works only with options added by Connect or Forge apps and can be scoped to specific issues using JQL."""
 
     _option_id = _parse_int(option_id)
@@ -3683,7 +3817,7 @@ async def replace_field_option(
 
 # Tags: Issue fields
 @mcp.tool()
-async def delete_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to delete.")) -> dict[str, Any]:
+async def delete_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a custom field from Jira, whether it's in the trash or active. This is an asynchronous operation; use the location link in the response to track the deletion task status."""
 
     # Construct request model with validation
@@ -3719,7 +3853,7 @@ async def delete_custom_field(id_: str = Field(..., alias="id", description="The
 
 # Tags: Issue fields
 @mcp.tool()
-async def restore_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to restore from trash.")) -> dict[str, Any]:
+async def restore_custom_field(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to restore from trash.")) -> dict[str, Any] | ToolResult:
     """Restore a custom field from trash back to active use. Requires Administer Jira global permission."""
 
     # Construct request model with validation
@@ -3755,7 +3889,7 @@ async def restore_custom_field(id_: str = Field(..., alias="id", description="Th
 
 # Tags: Issue fields
 @mcp.tool()
-async def move_custom_field_to_trash(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to move to trash.")) -> dict[str, Any]:
+async def move_custom_field_to_trash(id_: str = Field(..., alias="id", description="The unique identifier of the custom field to move to trash.")) -> dict[str, Any] | ToolResult:
     """Move a custom field to trash, making it unavailable for use while preserving the option to permanently delete it later. Requires Administer Jira global permission."""
 
     # Construct request model with validation
@@ -3798,7 +3932,7 @@ async def create_filter(
     favourite: bool | None = Field(None, description="Whether to automatically mark this filter as a favorite for the current user."),
     jql: str | None = Field(None, description="The JQL (Jira Query Language) query that defines which issues the filter returns. For example: project = SSP AND issuetype = Bug."),
     share_permissions: list[_models.SharePermission] | None = Field(None, alias="sharePermissions", description="Groups and projects with whom this filter is shared. Specify as an array of group and project objects to control visibility and access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new filter with a JQL query and optional sharing settings. The filter is shared according to default scope settings and is not automatically marked as a favorite."""
 
     # Construct request model with validation
@@ -3836,7 +3970,7 @@ async def create_filter(
 
 # Tags: Filter sharing
 @mcp.tool()
-async def get_default_share_scope() -> dict[str, Any]:
+async def get_default_share_scope() -> dict[str, Any] | ToolResult:
     """Retrieves the default sharing settings that apply to new filters and dashboards created by the authenticated user in Jira."""
 
     # Extract parameters for API call
@@ -3863,7 +3997,7 @@ async def get_default_share_scope() -> dict[str, Any]:
 
 # Tags: Filters
 @mcp.tool()
-async def list_favorite_filters() -> dict[str, Any]:
+async def list_favorite_filters() -> dict[str, Any] | ToolResult:
     """Retrieves all visible favorite filters for the authenticated user. A filter is visible only if it's owned by the user, shared with a group they belong to, shared with a private project they can browse, shared with a public project, or shared publicly."""
 
     # Extract parameters for API call
@@ -3890,7 +4024,7 @@ async def list_favorite_filters() -> dict[str, Any]:
 
 # Tags: Filters
 @mcp.tool()
-async def list_my_filters(include_favourites: bool | None = Field(None, alias="includeFavourites", description="When enabled, includes the user's favorite filters in the response alongside owned filters. Disabled by default.")) -> dict[str, Any]:
+async def list_my_filters(include_favourites: bool | None = Field(None, alias="includeFavourites", description="When enabled, includes the user's favorite filters in the response alongside owned filters. Disabled by default.")) -> dict[str, Any] | ToolResult:
     """Retrieve filters owned by the authenticated user, with optional inclusion of their favorite filters. Favorite filters are only visible if they are owned by the user, shared with a group the user belongs to, shared with a private project the user can browse, shared with a public project, or shared publicly."""
 
     # Construct request model with validation
@@ -3935,7 +4069,7 @@ async def search_filters(
     start_at: str | None = Field(None, alias="startAt", description="Zero-based index for pagination, indicating which result to start from. Defaults to 0 for the first page."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of filters to return per page. Defaults to 50 results."),
     is_substring_match: bool | None = Field(None, alias="isSubstringMatch", description="When true, performs case-insensitive substring matching on the filter name. When false, uses full text search syntax. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for filters with pagination support, returning filters based on ownership, sharing permissions, and optional search criteria. Only filters accessible to the authenticated user are returned."""
 
     _project_id = _parse_int(project_id)
@@ -3977,7 +4111,7 @@ async def search_filters(
 
 # Tags: Filters
 @mcp.tool()
-async def get_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def get_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a filter by its ID. The filter is only returned if you have access to it through ownership, group sharing, project sharing, or public sharing."""
 
     _id_ = _parse_int(id_)
@@ -4023,7 +4157,7 @@ async def update_filter(
     favourite: bool | None = Field(None, description="A boolean flag indicating whether this filter should be marked as a favorite in the user's filter list."),
     jql: str | None = Field(None, description="The JQL (Jira Query Language) query string that defines which issues this filter returns. For example: project = SSP AND issuetype = Bug."),
     share_permissions: list[_models.SharePermission] | None = Field(None, alias="sharePermissions", description="An array of groups and projects with whom this filter is shared. Order and format are determined by the API's permission structure."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing filter's configuration including name, description, JQL query, and sharing settings. You must own the filter to make changes."""
 
     _id_ = _parse_int(id_)
@@ -4064,7 +4198,7 @@ async def update_filter(
 
 # Tags: Filters
 @mcp.tool()
-async def delete_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to delete, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def delete_filter(id_: str = Field(..., alias="id", description="The unique identifier of the filter to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a filter from Jira. Only the filter creator or users with Administer Jira permission can delete filters."""
 
     _id_ = _parse_int(id_)
@@ -4102,7 +4236,7 @@ async def delete_filter(id_: str = Field(..., alias="id", description="The uniqu
 
 # Tags: Filters
 @mcp.tool()
-async def list_filter_columns(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a valid 64-bit integer.")) -> dict[str, Any]:
+async def list_filter_columns(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves the columns configured for a filter, which are used when viewing filter results in List View with Columns set to Filter. Column details are only returned for filters you own, filters shared with your groups, or filters shared with projects you have access to."""
 
     _id_ = _parse_int(id_)
@@ -4140,7 +4274,7 @@ async def list_filter_columns(id_: str = Field(..., alias="id", description="The
 
 # Tags: Filters
 @mcp.tool()
-async def add_filter_to_favorites(id_: str = Field(..., alias="id", description="The unique identifier of the filter to add as a favorite. Must be a positive integer.")) -> dict[str, Any]:
+async def add_filter_to_favorites(id_: str = Field(..., alias="id", description="The unique identifier of the filter to add as a favorite. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Mark a filter as a favorite for the current user. You can only favorite filters you own, filters shared with your groups or projects, or publicly shared filters."""
 
     _id_ = _parse_int(id_)
@@ -4178,7 +4312,7 @@ async def add_filter_to_favorites(id_: str = Field(..., alias="id", description=
 
 # Tags: Filters
 @mcp.tool()
-async def remove_filter_favorite(id_: str = Field(..., alias="id", description="The unique identifier of the filter to remove from favorites, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def remove_filter_favorite(id_: str = Field(..., alias="id", description="The unique identifier of the filter to remove from favorites, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Remove a filter from the user's favorites list. This operation only removes filters that are currently visible to the user; filters that were favorited but subsequently made private cannot be removed through this operation."""
 
     _id_ = _parse_int(id_)
@@ -4219,7 +4353,7 @@ async def remove_filter_favorite(id_: str = Field(..., alias="id", description="
 async def transfer_filter_ownership(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to transfer. This is a numeric ID that identifies the specific filter in your Jira instance."),
     account_id: str = Field(..., alias="accountId", description="The account ID of the new filter owner. This must be a valid Jira user account ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transfer ownership of a filter to another user. The requesting user must own the filter or have Jira administrator permissions."""
 
     _id_ = _parse_int(id_)
@@ -4260,7 +4394,7 @@ async def transfer_filter_ownership(
 
 # Tags: Filter sharing
 @mcp.tool()
-async def list_filter_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a positive integer.")) -> dict[str, Any]:
+async def list_filter_permissions(id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all share permissions for a filter, including access granted to groups, projects, all logged-in users, or the public. Only returns permissions visible to the requesting user based on their access level."""
 
     _id_ = _parse_int(id_)
@@ -4304,7 +4438,7 @@ async def grant_filter_share_permission(
     project_id: str | None = Field(None, alias="projectId", description="The project identifier to share the filter with. Required when type is set to 'project'."),
     project_role_id: str | None = Field(None, alias="projectRoleId", description="The project role identifier to share the filter with. Required when type is set to 'projectRole'; must be used together with projectId."),
     rights: str | None = Field(None, description="The access rights level for this share permission. Specified as a 32-bit integer representing the permission level."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Grant share permission for a filter to a user, group, project, or project role. Global or authenticated permissions will override all existing share permissions for the filter."""
 
     _id_ = _parse_int(id_)
@@ -4349,7 +4483,7 @@ async def grant_filter_share_permission(
 async def get_filter_share_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter. Must be a positive integer."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the share permission to retrieve. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific share permission for a filter. Returns details about how a filter is shared with groups, projects, all logged-in users, or the public. This operation can be accessed anonymously, but only returns permissions for filters you own, are shared with your groups, or are in projects you can access."""
 
     _id_ = _parse_int(id_)
@@ -4391,7 +4525,7 @@ async def get_filter_share_permission(
 async def remove_filter_share_permission(
     id_: str = Field(..., alias="id", description="The unique identifier of the filter from which to remove the share permission. Must be a positive integer."),
     permission_id: str = Field(..., alias="permissionId", description="The unique identifier of the specific share permission to delete. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a share permission from a filter, restricting access for the specified user or group. Requires ownership of the filter and permission to access Jira."""
 
     _id_ = _parse_int(id_)
@@ -4430,7 +4564,7 @@ async def remove_filter_share_permission(
 
 # Tags: Groups
 @mcp.tool()
-async def create_group(name: str = Field(..., description="The name for the new group. This identifier is used to reference the group in Jira.")) -> dict[str, Any]:
+async def create_group(name: str = Field(..., description="The name for the new group. This identifier is used to reference the group in Jira.")) -> dict[str, Any] | ToolResult:
     """Creates a new group in Jira. Requires site administration permissions to perform this action."""
 
     # Construct request model with validation
@@ -4471,7 +4605,7 @@ async def create_group(name: str = Field(..., description="The name for the new 
 async def delete_group(
     swap_group_id: str | None = Field(None, alias="swapGroupId", description="The ID of an existing group to receive the deleted group's restrictions. Only comments and worklogs are transferred. Omit this parameter if you want restrictions to be removed without transfer. Cannot be used together with the `swapGroup` parameter."),
     group_id: str | None = Field(None, alias="groupId", description="The ID of the group. This parameter cannot be used with the `groupname` parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a group from the system. Optionally transfer group restrictions to another group to preserve access to comments and worklogs; otherwise, these items become inaccessible after deletion."""
 
     # Construct request model with validation
@@ -4515,7 +4649,7 @@ async def list_groups(
     group_name: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="groupName", description="Filter results by one or more group names. Specify multiple names to search for groups matching any of the provided names."),
     access_type: str | None = Field(None, alias="accessType", description="Filter groups by their access level within your Jira instance. Choose from site administrator, administrator, or standard user access levels."),
     application_key: str | None = Field(None, alias="applicationKey", description="Limit results to groups associated with a specific Jira product. Specify the product key to filter groups by their application context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of groups from your Jira instance. Filter by group names, access level, or product application to find specific groups."""
 
     _start_at = _parse_int(start_at)
@@ -4561,7 +4695,7 @@ async def list_group_members(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page should start. Use this for pagination to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per page. Must be between 1 and 50 users."),
     group_id: str | None = Field(None, alias="groupId", description="The ID of the group. This parameter cannot be used with the `groupName` parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all users in a group. Users are ordered by username but usernames are not included in results for privacy reasons."""
 
     _start_at = _parse_int(start_at)
@@ -4605,7 +4739,7 @@ async def list_group_members(
 async def add_user_to_group(
     group_id: str | None = Field(None, alias="groupId", description="The ID of the group. This parameter cannot be used with the `groupName` parameter."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user to a group in Jira. Requires site administration permissions to perform this operation."""
 
     # Construct request model with validation
@@ -4649,7 +4783,7 @@ async def add_user_to_group(
 async def search_groups(
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of groups to return in the results. Limited by the system's autocomplete configuration, typically capped at a system-defined threshold."),
     case_insensitive: bool | None = Field(None, alias="caseInsensitive", description="Whether the group name search should ignore case distinctions. Defaults to case-sensitive matching when not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for groups by name to populate group picker suggestions. Returns matching groups with query terms highlighted in HTML, sorted alphabetically, along with a count summary. Requires Browse projects permission; anonymous users and those without permission receive empty results."""
 
     _max_results = _parse_int(max_results)
@@ -4696,7 +4830,7 @@ async def search_users_and_groups(
     project_id: list[str] | None = Field(None, alias="projectId", description="One or more project IDs to filter results. Returned users and groups must have permission to view all specified projects. Only applicable when fieldId is provided. Projects must be a subset of those enabled for the custom field."),
     issue_type_id: list[str] | None = Field(None, alias="issueTypeId", description="One or more issue type IDs to filter results. Returned users and groups must have permission to view all specified issue types. Supports special values like -1 (all standard types) and -2 (all subtask types). Only applicable when fieldId is provided."),
     case_insensitive: bool | None = Field(None, alias="caseInsensitive", description="Whether group name matching should be case-insensitive. Defaults to false (case-sensitive matching)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users and groups by name or email. Returns matching results with HTML-formatted highlights, useful for populating picker fields. Supports filtering by project, issue type, and custom field permissions."""
 
     _max_results = _parse_int(max_results)
@@ -4740,7 +4874,7 @@ async def create_issue(
     update_history: bool | None = Field(None, alias="updateHistory", description="Whether to add the project to your recently viewed projects list and track the issue type and request type in your project history for future create screen defaults. Defaults to false."),
     fields: dict[str, Any] | None = Field(None, description="List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."),
     update: dict[str, list[_models.FieldUpdateOperation]] | None = Field(None, description="A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new issue or subtask in a Jira project. Define the issue content using fields and optional workflow transitions, with field availability determined by the project's create issue metadata."""
 
     # Construct request model with validation
@@ -4781,7 +4915,7 @@ async def create_issue(
 
 # Tags: Issues
 @mcp.tool()
-async def archive_issues_by_jql(jql: str | None = Field(None, description="JQL query string to select issues for archival. Only issues from software, service management, and business projects can be archived; subtasks must be archived through their parent issues.")) -> dict[str, Any]:
+async def archive_issues_by_jql(jql: str | None = Field(None, description="JQL query string to select issues for archival. Only issues from software, service management, and business projects can be archived; subtasks must be archived through their parent issues.")) -> dict[str, Any] | ToolResult:
     """Asynchronously archive up to 100,000 issues matching a JQL query. Returns a task URL to monitor the archival progress. Requires Jira admin permissions and a Premium or Enterprise license."""
 
     # Construct request model with validation
@@ -4819,7 +4953,7 @@ async def archive_issues_by_jql(jql: str | None = Field(None, description="JQL q
 
 # Tags: Issues
 @mcp.tool()
-async def archive_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue IDs or keys to archive (up to 1000 per request). Subtasks cannot be archived directly; archive them through their parent issues. Only issues from software, service management, and business projects can be archived.")) -> dict[str, Any]:
+async def archive_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue IDs or keys to archive (up to 1000 per request). Subtasks cannot be archived directly; archive them through their parent issues. Only issues from software, service management, and business projects can be archived.")) -> dict[str, Any] | ToolResult:
     """Archive up to 1000 issues by their ID or key in a single request. Returns details of successfully archived issues and any errors encountered. Requires Jira admin permissions and a Premium or Enterprise license."""
 
     # Construct request model with validation
@@ -4857,7 +4991,7 @@ async def archive_issues(issue_ids_or_keys: list[str] | None = Field(None, alias
 
 # Tags: Issues
 @mcp.tool()
-async def create_issues_bulk(issue_updates: list[_models.IssueUpdateDetails] | None = Field(None, alias="issueUpdates", description="Array of issue or subtask definitions to create. Each item specifies fields and updates for one issue. For subtasks, include the parent issue ID or key and set issueType to a subtask type. Order is preserved in processing.")) -> dict[str, Any]:
+async def create_issues_bulk(issue_updates: list[_models.IssueUpdateDetails] | None = Field(None, alias="issueUpdates", description="Array of issue or subtask definitions to create. Each item specifies fields and updates for one issue. For subtasks, include the parent issue ID or key and set issueType to a subtask type. Order is preserved in processing.")) -> dict[str, Any] | ToolResult:
     """Create up to 50 issues and subtasks in bulk with optional workflow transitions and property assignments. Use the Get create issue metadata endpoint to determine available fields for your project."""
 
     # Construct request model with validation
@@ -4895,7 +5029,7 @@ async def create_issues_bulk(issue_updates: list[_models.IssueUpdateDetails] | N
 
 # Tags: Issues
 @mcp.tool()
-async def fetch_issues(issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="Array of issue identifiers to fetch, accepting up to 100 items. You can mix issue IDs and keys in the same request (e.g., both numeric IDs and text keys like 'PROJ-123'). Results are returned in ascending ID order.")) -> dict[str, Any]:
+async def fetch_issues(issue_ids_or_keys: list[str] = Field(..., alias="issueIdsOrKeys", description="Array of issue identifiers to fetch, accepting up to 100 items. You can mix issue IDs and keys in the same request (e.g., both numeric IDs and text keys like 'PROJ-123'). Results are returned in ascending ID order.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for multiple issues by their IDs or keys in a single request. Supports up to 100 issues per request with case-insensitive matching and automatic detection of moved issues."""
 
     # Construct request model with validation
@@ -4937,7 +5071,7 @@ async def list_issue_types_for_creation(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of issue types to return per page, with a maximum of 200. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve issue type metadata for a project to determine which issue types can be created and what fields are required. Use this information to populate requests when creating issues."""
 
     _start_at = _parse_int(start_at)
@@ -4984,7 +5118,7 @@ async def get_issue_creation_fields(
     issue_type_id: str = Field(..., alias="issueTypeId", description="The ID of the issue type for which to retrieve creation field metadata."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first item. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of fields to return per page, up to 200. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the available fields and their metadata for creating issues of a specific type in a project. Use this information to populate requests when creating single or bulk issues."""
 
     _start_at = _parse_int(start_at)
@@ -5026,7 +5160,7 @@ async def get_issue_creation_fields(
 
 # Tags: Issues
 @mcp.tool()
-async def list_issue_limit_violations(is_returning_keys: bool | None = Field(None, alias="isReturningKeys", description="Return issue keys (e.g., PROJ-123) instead of numeric issue IDs in the response. Defaults to false, which returns issue IDs.")) -> dict[str, Any]:
+async def list_issue_limit_violations(is_returning_keys: bool | None = Field(None, alias="isReturningKeys", description="Return issue keys (e.g., PROJ-123) instead of numeric issue IDs in the response. Defaults to false, which returns issue IDs.")) -> dict[str, Any] | ToolResult:
     """Retrieve all issues that are breaching or approaching per-issue limits in Jira. Requires Browse projects permission for the relevant projects or Administer Jira global permission for complete results."""
 
     # Construct request model with validation
@@ -5071,7 +5205,7 @@ async def search_issues_picker(
     show_sub_tasks: bool | None = Field(None, alias="showSubTasks", description="Whether to include subtasks in the suggestions list."),
     show_sub_task_parent: bool | None = Field(None, alias="showSubTaskParent", description="When the excluded issue is a subtask, whether to include its parent issue in the suggestions if it matches the query."),
     query: str | None = Field(None, description="A string to match against text fields in the issue such as title, description, or comments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for issues matching a query string to provide auto-completion suggestions. Returns matching issues from the user's history and from a filtered set defined by JQL."""
 
     # Construct request model with validation
@@ -5112,7 +5246,7 @@ async def search_issues_picker(
 async def set_issue_properties_bulk(
     entities_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, alias="entitiesIds", description="List of issue IDs to update with the specified properties. Accepts between 1 and 10,000 issue identifiers.", min_length=1, max_length=10000),
     properties: dict[str, _models.JsonNode] | None = Field(None, description="A list of entity property keys and values.", min_length=1, max_length=10),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk set or update custom properties on multiple issues in a single transactional operation. Supports up to 10 properties and 10,000 issues, with each property value limited to 32,768 characters."""
 
     # Construct request model with validation
@@ -5150,7 +5284,7 @@ async def set_issue_properties_bulk(
 
 # Tags: Issue properties
 @mcp.tool()
-async def set_issue_properties_bulk_per_issue(issues: list[_models.IssueEntityPropertiesForMultiUpdate] | None = Field(None, description="A list of issues with their respective properties to set or update. Each entry should contain an issue ID and its associated property key-value pairs. Maximum of 100 issues per request, with up to 10 properties per issue.", min_length=1, max_length=100)) -> dict[str, Any]:
+async def set_issue_properties_bulk_per_issue(issues: list[_models.IssueEntityPropertiesForMultiUpdate] | None = Field(None, description="A list of issues with their respective properties to set or update. Each entry should contain an issue ID and its associated property key-value pairs. Maximum of 100 issues per request, with up to 10 properties per issue.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Bulk set or update custom properties on multiple issues. Supports up to 100 issues with up to 10 properties each in a single asynchronous request. Updates are non-transactional, so some entities may succeed while others fail."""
 
     # Construct request model with validation
@@ -5193,7 +5327,7 @@ async def set_issue_property_bulk(
     expression: str | None = Field(None, description="A Jira expression to dynamically calculate the property value for each issue. The expression must return a JSON-serializable object (number, boolean, string, list, or map) with a JSON representation not exceeding 32,768 characters. Available context variables are `issue` and `user`. Either this or `value` should be specified, but not both."),
     filter_: _models.BulkSetIssuePropertyBodyFilter | None = Field(None, alias="filter", description="Filter criteria to identify which issues are eligible for update. Supports filtering by specific issue IDs, current property value, or property existence. Multiple criteria are combined with AND logic. Omit to update all issues where you have edit permission."),
     value: Any | None = Field(None, description="A static JSON value to set on the property. Must be a valid, non-empty JSON object with a maximum length of 32,768 characters. Either this or `expression` should be specified, but not both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk set a property on multiple issues using a constant value or Jira expression. The operation is transactional and asynchronous—either all eligible issues are updated or none are updated. Use the returned task location to monitor progress."""
 
     # Construct request model with validation
@@ -5236,7 +5370,7 @@ async def delete_issue_property_bulk(
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier of the property to delete from issues."),
     current_value: Any | None = Field(None, alias="currentValue", description="Optional filter to only delete the property from issues where it currently has this specific value."),
     entity_ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, alias="entityIds", description="Optional list of specific issue IDs to target for deletion. If provided with currentValue, only issues matching both criteria are affected."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk delete a property from multiple issues based on filter criteria. This operation is transactional and asynchronous—either the property is deleted from all matching issues or no changes are made if errors occur."""
 
     # Construct request model with validation
@@ -5275,7 +5409,7 @@ async def delete_issue_property_bulk(
 
 # Tags: Issues
 @mcp.tool()
-async def restore_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue keys or issue IDs to restore. You can restore up to 1000 issues per request. Subtasks cannot be restored directly; restore their parent issues instead. Only applicable to software, service management, and business projects.")) -> dict[str, Any]:
+async def restore_issues(issue_ids_or_keys: list[str] | None = Field(None, alias="issueIdsOrKeys", description="Array of issue keys or issue IDs to restore. You can restore up to 1000 issues per request. Subtasks cannot be restored directly; restore their parent issues instead. Only applicable to software, service management, and business projects.")) -> dict[str, Any] | ToolResult:
     """Restore up to 1000 archived issues in a single request using their issue keys or IDs. Returns details of successfully restored issues and any errors encountered. Requires Jira admin permissions and a Premium or Enterprise license."""
 
     # Construct request model with validation
@@ -5313,7 +5447,7 @@ async def restore_issues(issue_ids_or_keys: list[str] | None = Field(None, alias
 
 # Tags: Issue watchers
 @mcp.tool()
-async def check_watched_issues_bulk(issue_ids: list[str] = Field(..., alias="issueIds", description="A list of issue IDs to check the watched status for. The order of IDs in the list is preserved in the response.")) -> dict[str, Any]:
+async def check_watched_issues_bulk(issue_ids: list[str] = Field(..., alias="issueIds", description="A list of issue IDs to check the watched status for. The order of IDs in the list is preserved in the response.")) -> dict[str, Any] | ToolResult:
     """Check the watched status of multiple issues for the current user. Returns whether each issue is being watched, with invalid issue IDs returning a watched status of false."""
 
     # Construct request model with validation
@@ -5354,7 +5488,7 @@ async def check_watched_issues_bulk(issue_ids: list[str] = Field(..., alias="iss
 async def retrieve_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The unique identifier for the issue, either its numeric ID or alphanumeric key (e.g., PROJ-123). The search is case-insensitive and will locate moved issues."),
     update_history: bool | None = Field(None, alias="updateHistory", description="When enabled, adds the issue's project to your recently viewed projects list and updates the lastViewed field for JQL searches. Defaults to disabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific issue by its ID or key. The operation performs case-insensitive matching and checks for moved issues, returning the current issue details without redirects. Requires browse permission for the project and any applicable issue-level security permissions."""
 
     # Construct request model with validation
@@ -5400,7 +5534,7 @@ async def update_issue(
     return_issue: bool | None = Field(None, alias="returnIssue", description="Whether to include the updated issue in the response with the same format as the Get issue endpoint. Defaults to false."),
     fields: dict[str, Any] | None = Field(None, description="List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."),
     update: dict[str, list[_models.FieldUpdateOperation]] | None = Field(None, description="A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an issue's fields and properties. Use the Get edit issue metadata endpoint to determine which fields are editable. Note that issue transitions are not supported through this operation; use the Transition issue endpoint instead."""
 
     # Construct request model with validation
@@ -5445,7 +5579,7 @@ async def update_issue(
 async def delete_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The unique identifier or key of the issue to delete (e.g., PROJ-123 or 10001)."),
     delete_subtasks: Literal["true", "false"] | None = Field(None, alias="deleteSubtasks", description="Whether to automatically delete all subtasks when the issue is deleted. Set to 'true' to delete subtasks along with the issue, or 'false' to prevent deletion if subtasks exist. Defaults to 'false'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes an issue from the project. Subtasks must be handled explicitly—either delete them along with the issue or remove them first."""
 
     # Construct request model with validation
@@ -5487,7 +5621,7 @@ async def delete_issue(
 async def assign_issue(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required in requests.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assigns an issue to a user or removes the assignment. Use this operation when you have the Assign Issues permission but lack Edit Issues permission. You can assign to a specific user, the project's default assignee, or leave the issue unassigned."""
 
     # Construct request model with validation
@@ -5529,7 +5663,7 @@ async def assign_issue(
 async def attach_files(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., TEST-123)."),
     body: list[_models.MultipartFile] = Field(..., description="Array of files to attach. Each file is submitted as a multipart form field named 'file'. Multiple files can be attached in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach one or more files to a Jira issue. Files are uploaded as multipart form data and require the X-Atlassian-Token: no-check header."""
 
     # Construct request model with validation
@@ -5574,7 +5708,7 @@ async def list_issue_changelogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first changelog entry. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of changelog entries to return per page. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all changes made to an issue, sorted chronologically from oldest to newest. Requires browse permission for the project and any applicable issue-level security permissions."""
 
     _start_at = _parse_int(start_at)
@@ -5619,7 +5753,7 @@ async def list_issue_changelogs(
 async def fetch_changelogs(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123). Used to locate the issue whose changelogs you want to retrieve."),
     changelog_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="changelogIds", description="A list of changelog IDs to retrieve. Specify the exact IDs of the changelog entries you want to fetch; order is preserved in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve specific changelogs for an issue by their IDs. Returns detailed change history records for the specified changelog identifiers."""
 
     # Construct request model with validation
@@ -5663,7 +5797,7 @@ async def list_issue_comments(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of comments to return per page. Defaults to 100 if not specified."),
     order_by: Literal["created", "-created", "+created"] | None = Field(None, alias="orderBy", description="Sort comments by creation date. Use 'created' for ascending order, '-created' for descending order, or '+created' for ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all comments for a specific issue, with support for pagination and sorting. Comments are filtered based on user permissions and visibility restrictions."""
 
     _start_at = _parse_int(start_at)
@@ -5709,7 +5843,7 @@ async def add_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     body: Any | None = Field(None, description="The comment text formatted using Atlassian Document Format. This field supports rich text formatting including mentions, links, and other document elements."),
     visibility: _models.AddCommentBodyVisibility | None = Field(None, description="Restricts comment visibility to a specific group or role. When omitted, the comment is visible to all users with permission to view the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a comment to a Jira issue. The comment can be formatted using Atlassian Document Format and optionally restricted to specific groups or roles."""
 
     # Construct request model with validation
@@ -5751,7 +5885,7 @@ async def add_comment(
 async def get_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific comment from an issue. Requires browse permissions on the project and any applicable issue-level security or comment visibility restrictions."""
 
     # Construct request model with validation
@@ -5794,7 +5928,7 @@ async def update_comment(
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="Allows bypassing screen security restrictions to edit normally uneditable fields. Only available to administrators and Forge apps with admin privileges. Defaults to false."),
     body: Any | None = Field(None, description="The updated comment text formatted as Atlassian Document Format (ADF)."),
     visibility: _models.UpdateCommentBodyVisibility | None = Field(None, description="Restricts comment visibility to a specific group or role. Child comments inherit visibility from their parent and cannot be modified independently."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing comment on an issue. Requires appropriate permissions to edit the comment and view the issue."""
 
     # Construct request model with validation
@@ -5839,7 +5973,7 @@ async def update_comment(
 async def delete_comment(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a comment from an issue. Requires appropriate permissions based on comment ownership and visibility restrictions."""
 
     # Construct request model with validation
@@ -5878,7 +6012,7 @@ async def delete_comment(
 async def get_issue_editable_fields(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the issue key (e.g., PROJ-123)."),
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="When enabled, returns non-editable fields by bypassing workflow editability checks. Only available to administrators. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the fields that are editable for a specific issue based on the user's permissions, screen configuration, and workflow state. Use this to determine which fields can be modified before submitting an edit request."""
 
     # Construct request model with validation
@@ -5924,7 +6058,7 @@ async def send_issue_notification(
     subject: str | None = Field(None, description="The subject line of the email notification. If not provided, defaults to the issue key and summary."),
     text_body: str | None = Field(None, alias="textBody", description="The plain text body content of the email notification. Used as fallback for email clients that don't support HTML."),
     to: _models.NotifyBodyTo | None = Field(None, description="The list of recipients who should receive the email notification for this issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send an email notification for an issue and queue it for delivery. The notification can be customized with subject and body content, and optionally restricted to users with specific permissions."""
 
     # Construct request model with validation
@@ -5963,7 +6097,7 @@ async def send_issue_notification(
 
 # Tags: Issue properties
 @mcp.tool()
-async def list_issue_property_keys(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the issue key (e.g., PROJ-123) or the numeric issue ID.")) -> dict[str, Any]:
+async def list_issue_property_keys(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the issue key (e.g., PROJ-123) or the numeric issue ID.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys and their URLs associated with a specific issue. This allows you to discover what custom properties are stored on an issue."""
 
     # Construct request model with validation
@@ -6002,7 +6136,7 @@ async def list_issue_property_keys(issue_id_or_key: str = Field(..., alias="issu
 async def get_issue_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the issue key (e.g., PROJ-123) or the numeric issue ID."),
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the property to retrieve from the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific property value associated with an issue by its property key. Returns both the key and value of the requested issue property."""
 
     # Construct request model with validation
@@ -6041,7 +6175,7 @@ async def get_issue_property(
 async def remove_issue_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the issue key (e.g., PROJ-123) or the numeric issue ID."),
     property_key: str = Field(..., alias="propertyKey", description="The unique key identifying the property to delete from the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from an issue. Requires browse and edit permissions for the project, and issue-level security permission if configured."""
 
     # Construct request model with validation
@@ -6080,7 +6214,7 @@ async def remove_issue_property(
 async def list_remote_issue_links(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID (e.g., 10000) or the issue key (e.g., PROJ-123)."),
     global_id: str | None = Field(None, alias="globalId", description="Optional global ID to retrieve a specific remote issue link. If omitted, all remote issue links for the issue are returned. URL-reserved characters in the global ID must be percent-encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve remote issue links for an issue, optionally filtered by a specific global ID. Returns all linked remote issues or a single link matching the provided global ID."""
 
     # Construct request model with validation
@@ -6125,7 +6259,7 @@ async def link_remote_issue(
     application: _models.CreateOrUpdateRemoteIssueLinkBodyApplication | None = Field(None, description="Details about the remote application containing the linked item, such as the application name or identifier (e.g., trello, confluence)."),
     global_id: str | None = Field(None, alias="globalId", description="A unique identifier for the remote item in the external system that enables updating or deleting the link using remote system details instead of the Jira record ID. Maximum length is 255 characters."),
     relationship: str | None = Field(None, description="A description of how the issue relates to the linked item. If not specified, defaults to 'links to'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates a remote issue link to connect an issue with an item in an external system. If a globalId is provided and a matching link exists, it updates the link; otherwise, it creates a new one."""
 
     # Construct request model with validation
@@ -6167,7 +6301,7 @@ async def link_remote_issue(
 async def get_remote_link(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJECT-123)."),
     link_id: str = Field(..., alias="linkId", description="The unique identifier of the remote issue link to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific remote issue link for an issue. Requires issue linking to be enabled and appropriate project permissions."""
 
     # Construct request model with validation
@@ -6210,7 +6344,7 @@ async def update_remote_link(
     application: _models.UpdateRemoteIssueLinkBodyApplication | None = Field(None, description="Details of the remote application containing the linked item, such as Trello or Confluence."),
     global_id: str | None = Field(None, alias="globalId", description="A unique identifier for the remote item in its external system (maximum 255 characters). For example, in Confluence this might be formatted as 'appId=456&pageId=123'. Enables updating or deleting the link using remote system details instead of the Jira link ID."),
     relationship: str | None = Field(None, description="A description of the relationship between the issue and the linked item. If not provided, defaults to 'links to'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing remote issue link for a Jira issue. Unspecified fields in the request will be set to null. Requires issue linking to be enabled and appropriate project permissions."""
 
     # Construct request model with validation
@@ -6252,7 +6386,7 @@ async def update_remote_link(
 async def delete_remote_link_by_id(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID (e.g., 10000) or the issue key (e.g., PROJ-123)."),
     link_id: str = Field(..., alias="linkId", description="The numeric ID of the remote issue link to delete (e.g., 10000)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a remote issue link from an issue. Requires issue linking to be enabled and appropriate project permissions including Browse projects, Edit issues, and Link issues."""
 
     # Construct request model with validation
@@ -6292,7 +6426,7 @@ async def list_issue_transitions_single(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     transition_id: str | None = Field(None, alias="transitionId", description="Optional ID of a specific transition to retrieve. When provided, only that transition is returned if it exists and is available."),
     include_unavailable_transitions: bool | None = Field(None, alias="includeUnavailableTransitions", description="Whether to include transitions that fail their conditions in the response. Defaults to false, returning only transitions that can currently be performed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve available transitions for an issue based on its current status. Returns all possible transitions the user can perform, or a specific transition if requested. An empty list is returned if the requested transition doesn't exist or cannot be performed given the issue's current status."""
 
     # Construct request model with validation
@@ -6336,7 +6470,7 @@ async def transition_issue(
     transition: _models.DoTransitionBodyTransition | None = Field(None, description="Details of a transition. Required when performing a transition, optional when creating or editing an issue."),
     fields: dict[str, Any] | None = Field(None, description="List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."),
     update: dict[str, list[_models.FieldUpdateOperation]] | None = Field(None, description="A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move an issue to a new status by performing a transition. If the transition includes a screen, you can update issue fields as part of the transition."""
 
     # Construct request model with validation
@@ -6375,7 +6509,7 @@ async def transition_issue(
 
 # Tags: Issue votes
 @mcp.tool()
-async def retrieve_issue_votes(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any]:
+async def retrieve_issue_votes(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Retrieve voting details for an issue, including vote count and voter information. Requires the voting feature to be enabled in Jira configuration and appropriate project permissions."""
 
     # Construct request model with validation
@@ -6411,7 +6545,7 @@ async def retrieve_issue_votes(issue_id_or_key: str = Field(..., alias="issueIdO
 
 # Tags: Issue votes
 @mcp.tool()
-async def vote_issue(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any]:
+async def vote_issue(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Register the user's vote on an issue. This action is equivalent to clicking the Vote button in Jira and requires voting to be enabled in Jira's general configuration."""
 
     # Construct request model with validation
@@ -6447,7 +6581,7 @@ async def vote_issue(issue_id_or_key: str = Field(..., alias="issueIdOrKey", des
 
 # Tags: Issue votes
 @mcp.tool()
-async def remove_vote(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any]:
+async def remove_vote(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Remove a user's vote from an issue, equivalent to clicking Unvote in Jira. Requires voting to be enabled in Jira's general configuration."""
 
     # Construct request model with validation
@@ -6483,7 +6617,7 @@ async def remove_vote(issue_id_or_key: str = Field(..., alias="issueIdOrKey", de
 
 # Tags: Issue watchers
 @mcp.tool()
-async def list_issue_watchers(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any]:
+async def list_issue_watchers(issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123).")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of users watching an issue. Requires the 'Allow users to watch issues' option to be enabled in Jira's general configuration."""
 
     # Construct request model with validation
@@ -6522,7 +6656,7 @@ async def list_issue_watchers(issue_id_or_key: str = Field(..., alias="issueIdOr
 async def add_issue_watcher(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     body: str = Field(..., description="The account ID of the user to add as a watcher. If omitted, the authenticated user making the request is added instead."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user as a watcher to an issue. The user will receive notifications about changes to the issue. If no user is specified, the calling user is added as the watcher."""
 
     # Construct request model with validation
@@ -6565,7 +6699,7 @@ async def add_issue_watcher(
 async def remove_issue_watcher(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from watching an issue. Requires the 'Allow users to watch issues' option to be enabled in Jira's general configuration."""
 
     # Construct request model with validation
@@ -6610,7 +6744,7 @@ async def list_issue_worklogs(
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of worklogs to return per page. Defaults to 5000 if not specified."),
     started_after: str | None = Field(None, alias="startedAfter", description="Filter to return only worklogs that started on or after this date and time, specified as a UNIX timestamp in milliseconds."),
     started_before: str | None = Field(None, alias="startedBefore", description="Filter to return only worklogs that started before this date and time, specified as a UNIX timestamp in milliseconds."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time tracking worklogs for an issue, ordered chronologically from oldest to newest. Optionally filter worklogs by start date range using UNIX timestamps in milliseconds."""
 
     _start_at = _parse_int(start_at)
@@ -6666,7 +6800,7 @@ async def record_worklog(
     visibility: _models.AddWorklogBodyVisibility | None = Field(None, description="Optional visibility restrictions for the worklog, such as restricting it to specific users or groups."),
     time_spent: str | None = Field(None, alias="timeSpent", description="The time spent working on the issue as days (\\#d), hours (\\#h), or minutes (\\#m or \\#). Required when creating a worklog if `timeSpentSeconds` isn't provided. Optional when updating a worklog. Cannot be provided if `timeSpentSecond` is provided."),
     time_spent_seconds: str | None = Field(None, alias="timeSpentSeconds", description="The time in seconds spent working on the issue. Required when creating a worklog if `timeSpent` isn't provided. Optional when updating a worklog. Cannot be provided if `timeSpent` is provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record time spent working on an issue. Time tracking must be enabled in Jira for this operation to succeed. The worklog can optionally update the issue's remaining time estimate based on the time recorded."""
 
     _time_spent_seconds = _parse_int(time_spent_seconds)
@@ -6715,7 +6849,7 @@ async def delete_worklogs(
     ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of worklog IDs to delete. All worklogs must belong to the specified issue. Maximum of 5000 IDs per request."),
     adjust_estimate: Literal["leave", "auto"] | None = Field(None, alias="adjustEstimate", description="Controls how the issue's time estimate is updated after deletion. Use 'leave' to keep the estimate unchanged, or 'auto' to automatically reduce it by the total time spent across all deleted worklogs. Defaults to 'auto'."),
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="Set to true to force deletion of worklogs even if the issue is not editable (e.g., closed issues). Only available to Connect and Forge app users with admin permission. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete multiple worklogs from an issue. This experimental operation supports bulk deletion of up to 5000 worklogs at once, with no notifications sent to users. Time tracking must be enabled in Jira for this operation to succeed."""
 
     # Construct request model with validation
@@ -6763,7 +6897,7 @@ async def move_worklogs(
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="When true, allows moving worklogs even if the source or destination issues are not editable (e.g., closed issues). Only available to Connect and Forge app users with admin permission. Defaults to false."),
     issue_id_or_key2: str | None = Field(None, alias="issueIdOrKey", description="The issue ID or key of the destination issue where worklogs will be moved to."),
     ids: Annotated[list[int], AfterValidator(_check_unique_items)] | None = Field(None, description="A list of worklog IDs to move. Maximum of 5000 worklogs per request. Worklogs with attachments or project role visibility restrictions cannot be moved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a list of worklogs from one issue to another. This experimental operation has limitations: maximum 5000 worklogs per request, no support for worklogs with attachments or project role restrictions, and no notifications, webhooks, or issue history are generated. Time tracking must be enabled in Jira."""
 
     # Construct request model with validation
@@ -6808,7 +6942,7 @@ async def move_worklogs(
 async def get_worklog(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     id_: str = Field(..., alias="id", description="The unique identifier of the worklog entry to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific worklog entry for an issue. Time tracking must be enabled in Jira for this operation to succeed."""
 
     # Construct request model with validation
@@ -6854,7 +6988,7 @@ async def update_worklog(
     comment: Any | None = Field(None, description="A comment about the worklog in Atlassian Document Format. Optional for updates."),
     started: str | None = Field(None, description="The date and time when the worklog effort started, in ISO 8601 format. Optional when updating an existing worklog."),
     visibility: _models.UpdateWorklogBodyVisibility | None = Field(None, description="Visibility restrictions for the worklog, such as limiting access to specific groups or roles. Optional for updates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing worklog entry for an issue. Requires time tracking to be enabled in Jira and appropriate permissions to edit the worklog."""
 
     # Construct request model with validation
@@ -6904,7 +7038,7 @@ async def remove_worklog(
     new_estimate: str | None = Field(None, alias="newEstimate", description="The new remaining time estimate for the issue when adjustEstimate is set to 'new'. Specify as a duration using days (d), hours (h), or minutes (m)."),
     increase_by: str | None = Field(None, alias="increaseBy", description="The amount to increase the remaining time estimate when adjustEstimate is set to 'manual'. Specify as a duration using days (d), hours (h), or minutes (m)."),
     override_editable_flag: bool | None = Field(None, alias="overrideEditableFlag", description="Whether to allow deletion even if the issue is not editable (e.g., closed or read-only). Only available to Connect and Forge app users with admin permission. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a worklog entry from an issue and optionally adjust the issue's time estimate. Requires time tracking to be enabled in Jira and appropriate permissions to delete worklogs."""
 
     # Construct request model with validation
@@ -6946,7 +7080,7 @@ async def remove_worklog(
 async def list_worklog_property_keys(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, which can be either the numeric issue ID or the issue key (e.g., PROJECT-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry within the specified issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a specific worklog entry. Use this to discover what custom properties are available for a worklog before retrieving their values."""
 
     # Construct request model with validation
@@ -6986,7 +7120,7 @@ async def get_worklog_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the human-readable key (e.g., PROJ-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry from which to retrieve the property."),
     property_key: str = Field(..., alias="propertyKey", description="The name of the property to retrieve from the worklog."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific property value associated with a worklog entry. Requires appropriate project and issue permissions, plus any worklog visibility restrictions must be satisfied."""
 
     # Construct request model with validation
@@ -7026,7 +7160,7 @@ async def remove_worklog_property(
     issue_id_or_key: str = Field(..., alias="issueIdOrKey", description="The issue identifier, either the numeric ID or the project key followed by issue number (e.g., PROJ-123)."),
     worklog_id: str = Field(..., alias="worklogId", description="The unique identifier of the worklog entry from which the property will be removed."),
     property_key: str = Field(..., alias="propertyKey", description="The identifier of the custom property to delete from the worklog."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a worklog entry. Requires appropriate project and worklog visibility permissions."""
 
     # Construct request model with validation
@@ -7069,7 +7203,7 @@ async def create_issue_link(
     outward_issue_key: str | None = Field(None, alias="outwardIssueKey", description="The key of the outward (source) issue. Required unless the issue ID is provided instead."),
     id_: str | None = Field(None, alias="id", description="The ID of the issue link type and is used as follows:\n\n *  In the [ issueLink](#api-rest-api-3-issueLink-post) resource it is the type of issue link. Required on create when `name` isn't provided. Otherwise, read only.\n *  In the [ issueLinkType](#api-rest-api-3-issueLinkType-post) resource it is read only."),
     name: str | None = Field(None, description="The name of the issue link type and is used as follows:\n\n *  In the [ issueLink](#api-rest-api-3-issueLink-post) resource it is the type of issue link. Required on create when `id` isn't provided. Otherwise, read only.\n *  In the [ issueLinkType](#api-rest-api-3-issueLinkType-post) resource it is required on create and optional on update. Otherwise, read only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a link between two issues to indicate a relationship. Optionally adds a comment to the outward issue. Requires Issue Linking to be enabled on the site."""
 
     # Construct request model with validation
@@ -7110,7 +7244,7 @@ async def create_issue_link(
 
 # Tags: Issue links
 @mcp.tool()
-async def get_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to retrieve.")) -> dict[str, Any]:
+async def get_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details about a specific issue link by its ID. Returns the link information if you have permission to view both linked issues."""
 
     # Construct request model with validation
@@ -7146,7 +7280,7 @@ async def get_issue_link(link_id: str = Field(..., alias="linkId", description="
 
 # Tags: Issue links
 @mcp.tool()
-async def remove_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to delete.")) -> dict[str, Any]:
+async def remove_issue_link(link_id: str = Field(..., alias="linkId", description="The unique identifier of the issue link to delete.")) -> dict[str, Any] | ToolResult:
     """Removes a link between two issues. Requires browse and link issue permissions for the affected projects, and view access if issue-level security is configured."""
 
     # Construct request model with validation
@@ -7182,7 +7316,7 @@ async def remove_issue_link(link_id: str = Field(..., alias="linkId", descriptio
 
 # Tags: Issue link types
 @mcp.tool()
-async def list_issue_link_types() -> dict[str, Any]:
+async def list_issue_link_types() -> dict[str, Any] | ToolResult:
     """Retrieves all available issue link types configured in the Jira instance. Requires issue linking to be enabled and the user to have Browse projects permission."""
 
     # Extract parameters for API call
@@ -7209,7 +7343,7 @@ async def list_issue_link_types() -> dict[str, Any]:
 
 # Tags: Issue link types
 @mcp.tool()
-async def get_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to retrieve.")) -> dict[str, Any]:
+async def get_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific issue link type by its ID. Requires issue linking to be enabled on the site and the user to have Browse projects permission."""
 
     # Construct request model with validation
@@ -7245,7 +7379,7 @@ async def get_issue_link_type(issue_link_type_id: str = Field(..., alias="issueL
 
 # Tags: Issue link types
 @mcp.tool()
-async def delete_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to delete.")) -> dict[str, Any]:
+async def delete_issue_link_type(issue_link_type_id: str = Field(..., alias="issueLinkTypeId", description="The unique identifier of the issue link type to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an issue link type from your Jira instance. Requires issue linking to be enabled and Administer Jira global permission."""
 
     # Construct request model with validation
@@ -7288,7 +7422,7 @@ async def export_archived_issues(
     issue_types: list[str] | None = Field(None, alias="issueTypes", description="Filter results to include only issues of specified issue type IDs. Provide as a list of type identifiers."),
     projects: list[str] | None = Field(None, description="Filter results to include only issues from specified project keys. Provide as a list of project key identifiers."),
     reporters: list[str] | None = Field(None, description="Filter results to include only issues reported by specific user account IDs. Provide as a list of account identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export archived issues to a CSV file for download. An admin can filter archived issues by date range, project, issue type, reporter, or archival user, and will receive an email with a download link upon completion."""
 
     # Construct request model with validation
@@ -7327,7 +7461,7 @@ async def export_archived_issues(
 
 # Tags: Issue types
 @mcp.tool()
-async def list_issue_types() -> dict[str, Any]:
+async def list_issue_types() -> dict[str, Any] | ToolResult:
     """Retrieve all issue types available to the authenticated user. The returned issue types depend on the user's permissions: administrators see all types, users with project browse permissions see types for those projects, and anonymous users see types for projects with anonymous browse access."""
 
     # Extract parameters for API call
@@ -7357,7 +7491,7 @@ async def list_issue_types() -> dict[str, Any]:
 async def list_issue_types_project(
     project_id: str = Field(..., alias="projectId", description="The numeric identifier of the project. This is a 64-bit integer that uniquely identifies the project in your Jira instance."),
     level: str | None = Field(None, description="Optional filter to retrieve issue types at a specific hierarchy level: use -1 for Subtasks, 0 for Base issue types, or 1 for Epics. Omit this parameter to retrieve all issue types regardless of level."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all issue types available for a specific project, optionally filtered by type hierarchy level (Subtask, Base, or Epic)."""
 
     _project_id = _parse_int(project_id)
@@ -7398,7 +7532,7 @@ async def list_issue_types_project(
 
 # Tags: Issue types
 @mcp.tool()
-async def get_issue_type(id_: str = Field(..., alias="id", description="The unique identifier of the issue type to retrieve.")) -> dict[str, Any]:
+async def get_issue_type(id_: str = Field(..., alias="id", description="The unique identifier of the issue type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific issue type by its ID. Requires either Browse projects permission in an associated project or Jira administrator access."""
 
     # Construct request model with validation
@@ -7437,7 +7571,7 @@ async def get_issue_type(id_: str = Field(..., alias="id", description="The uniq
 async def delete_issue_type(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue type to delete."),
     alternative_issue_type_id: str | None = Field(None, alias="alternativeIssueTypeId", description="The unique identifier of the issue type to use as a replacement for any issues currently using the deleted type. Required if the issue type being deleted is in use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes an issue type from your Jira instance. If the issue type is currently in use, all associated issues are automatically reassigned to a replacement issue type that you specify."""
 
     # Construct request model with validation
@@ -7476,7 +7610,7 @@ async def delete_issue_type(
 
 # Tags: Issue types
 @mcp.tool()
-async def list_alternative_issue_types(id_: str = Field(..., alias="id", description="The unique identifier of the issue type for which to find compatible alternatives.")) -> dict[str, Any]:
+async def list_alternative_issue_types(id_: str = Field(..., alias="id", description="The unique identifier of the issue type for which to find compatible alternatives.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of issue types that can replace a given issue type. The alternatives are those sharing the same workflow scheme, field configuration scheme, and screen scheme."""
 
     # Construct request model with validation
@@ -7517,7 +7651,7 @@ async def upload_issue_type_avatar(
     size: str = Field(..., description="The width and height in pixels of the square crop region. This determines the size of the cropped area before resizing."),
     x: str | None = Field(None, description="The horizontal pixel position of the top-left corner of the crop region. Defaults to 0 if not specified."),
     y: str | None = Field(None, description="The vertical pixel position of the top-left corner of the crop region. Defaults to 0 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload and set a custom avatar image for an issue type. The image is automatically cropped to a square and resized into multiple formats (16x16, 24x24, 32x32, 48x48 pixels). Requires Administer Jira global permission."""
 
     _size = _parse_int(size)
@@ -7560,7 +7694,7 @@ async def upload_issue_type_avatar(
 
 # Tags: Issue type properties
 @mcp.tool()
-async def list_issue_type_property_keys(issue_type_id: str = Field(..., alias="issueTypeId", description="The unique identifier of the issue type whose property keys you want to retrieve.")) -> dict[str, Any]:
+async def list_issue_type_property_keys(issue_type_id: str = Field(..., alias="issueTypeId", description="The unique identifier of the issue type whose property keys you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys stored on a specific issue type. Property keys are identifiers for custom data attached to the issue type entity."""
 
     # Construct request model with validation
@@ -7599,7 +7733,7 @@ async def list_issue_type_property_keys(issue_type_id: str = Field(..., alias="i
 async def get_issue_type_property(
     issue_type_id: str = Field(..., alias="issueTypeId", description="The unique identifier of the issue type whose property you want to retrieve."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying which property to retrieve. Use the list issue type property keys operation to discover available property keys for an issue type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific property value stored on an issue type by its key. Returns both the key and value of the requested issue type property."""
 
     # Construct request model with validation
@@ -7640,7 +7774,7 @@ async def list_issue_type_schemes(
     max_results: str | None = Field(None, alias="maxResults", description="The number of issue type schemes to return per page. Defaults to 50 items per page."),
     order_by: Literal["name", "-name", "+name", "id", "-id", "+id"] | None = Field(None, alias="orderBy", description="Sort results by issue type scheme name or ID, with optional ascending (+) or descending (-) direction. Defaults to sorting by ID."),
     query_string: str | None = Field(None, alias="queryString", description="Filter results by performing a case-insensitive partial match against issue type scheme names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of issue type schemes used in classic Jira projects. Requires Administer Jira global permission."""
 
     _start_at = _parse_int(start_at)
@@ -7685,7 +7819,7 @@ async def list_issue_type_schemes_for_projects(
     project_id: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="projectId", description="One or more project IDs to filter schemes by. Provide multiple IDs as an ampersand-separated list in the query string."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of results to return per page. Defaults to 50 items if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve issue type schemes used by specified projects in classic Jira instances. Returns a paginated list showing which projects use each scheme."""
 
     _start_at = _parse_int(start_at)
@@ -7726,7 +7860,7 @@ async def list_issue_type_schemes_for_projects(
 
 # Tags: JQL
 @mcp.tool()
-async def list_jql_autocomplete_data() -> dict[str, Any]:
+async def list_jql_autocomplete_data() -> dict[str, Any] | ToolResult:
     """Retrieve JQL field and function reference data for building and validating JQL queries programmatically. Returns comprehensive metadata including field definitions, available functions, and reserved words to support dynamic query construction."""
 
     # Extract parameters for API call
@@ -7756,7 +7890,7 @@ async def list_jql_autocomplete_data() -> dict[str, Any]:
 async def list_jql_autocomplete_data_filtered(
     include_collapsed_fields: bool | None = Field(None, alias="includeCollapsedFields", description="Include collapsed fields that allow searches across multiple fields with the same name and type. Disabled by default."),
     project_ids: list[int] | None = Field(None, alias="projectIds", description="Filter returned field details by one or more project IDs. Invalid project IDs are ignored; system fields are always included regardless of this filter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve JQL field and function reference data to support programmatic query building and validation. Returns system fields always, with optional filtering by project and support for collapsed fields that enable cross-field searches."""
 
     # Construct request model with validation
@@ -7799,7 +7933,7 @@ async def get_jql_autocomplete_suggestions(
     field_value: str | None = Field(None, alias="fieldValue", description="Partial field value entered by the user to filter suggestions. When provided with fieldName, returns values containing this text."),
     predicate_name: str | None = Field(None, alias="predicateName", description="The CHANGED operator predicate name for which to generate suggestions. Valid values are 'by', 'from', or 'to'. Use with fieldName to get predicate-specific suggestions."),
     predicate_value: str | None = Field(None, alias="predicateValue", description="Partial predicate value entered by the user to filter suggestions. When provided with predicateName and fieldName, returns predicate values containing this text."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve JQL search autocomplete suggestions for a field, optionally filtered by field value or predicate criteria. Use this to populate autocomplete dropdowns when users are constructing JQL queries."""
 
     # Construct request model with validation
@@ -7840,7 +7974,7 @@ async def get_jql_autocomplete_suggestions(
 async def filter_issues_by_jql(
     issue_ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="issueIds", description="A list of issue IDs to evaluate against the JQL queries. Each ID must correspond to an issue the user has permission to view."),
     jqls: list[str] = Field(..., description="A list of JQL (Jira Query Language) queries to match against the provided issues. Each query is evaluated independently for each issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Evaluate whether specified issues match one or more JQL queries. Returns matching results for each issue-query combination, respecting project permissions and issue-level security."""
 
     # Construct request model with validation
@@ -7881,7 +8015,7 @@ async def filter_issues_by_jql(
 async def validate_jql_queries(
     validation: Literal["strict", "warn", "none"] = Field(..., description="Validation mode that determines how strictly to validate queries and what to return on errors. Use 'strict' to reject malformed queries entirely, 'warn' to return structure even if errors exist, or 'none' to skip validation and only check syntax."),
     queries: list[str] = Field(..., description="One or more JQL query strings to parse and validate. Each query is processed independently.", min_length=1),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validates and parses JQL (Jira Query Language) queries to check syntax and structure. Returns parsed query details based on the specified validation mode."""
 
     # Construct request model with validation
@@ -7925,7 +8059,7 @@ async def validate_jql_queries(
 async def list_labels(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to skip earlier results and navigate through pages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of labels to return in a single page, with a default of 1000 items per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all available labels in the system. Use pagination parameters to control which results are returned."""
 
     _start_at = _parse_int(start_at)
@@ -7971,7 +8105,7 @@ async def check_permissions(
     issue_id: str | None = Field(None, alias="issueId", description="The issue ID to check permissions within. When provided, permissions are evaluated in the context of this specific issue, with issue-based permissions determined by the user's relationship to the issue."),
     permissions: str | None = Field(None, description="A comma-separated list of permission keys to check (required when querying specific permissions). Use the Get all permissions operation to discover available permission keys."),
     comment_id: str | None = Field(None, alias="commentId", description="The comment ID to check permissions within. Only the BROWSE_PROJECTS permission is supported for comment context. When provided, the user must have both permission to browse the comment and the project permission for the comment's parent issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Check which permissions the authenticated or anonymous user has in a specific context (global, project, issue, or comment). Permissions are evaluated based on the user's roles and the context provided, with issue-based permissions determined by the user's relationship to that issue."""
 
     # Construct request model with validation
@@ -8009,7 +8143,7 @@ async def check_permissions(
 
 # Tags: Myself
 @mcp.tool()
-async def get_user_preference(key: str = Field(..., description="The preference key to retrieve (e.g., jira.user.locale, jira.user.timezone, user.notifications.watcher). Note that some keys like jira.user.locale and jira.user.timezone are deprecated; use the user management API instead to manage timezone and locale.")) -> dict[str, Any]:
+async def get_user_preference(key: str = Field(..., description="The preference key to retrieve (e.g., jira.user.locale, jira.user.timezone, user.notifications.watcher). Note that some keys like jira.user.locale and jira.user.timezone are deprecated; use the user management API instead to manage timezone and locale.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific preference value for the current user. Use this to fetch user settings like notifications, locale, or timezone preferences."""
 
     # Construct request model with validation
@@ -8047,7 +8181,7 @@ async def get_user_preference(key: str = Field(..., description="The preference 
 
 # Tags: Myself
 @mcp.tool()
-async def get_locale() -> dict[str, Any]:
+async def get_locale() -> dict[str, Any] | ToolResult:
     """Retrieves the locale preference for the current user. If no preference is set, returns the browser locale detected from the Accept-Language header, or the site default locale if no match is found. This operation can be accessed anonymously."""
 
     # Extract parameters for API call
@@ -8074,7 +8208,7 @@ async def get_locale() -> dict[str, Any]:
 
 # Tags: Myself
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated user in Jira. This operation requires valid Jira access permissions."""
 
     # Extract parameters for API call
@@ -8106,7 +8240,7 @@ async def list_notification_scheme_project_mappings(
     max_results: str | None = Field(None, alias="maxResults", description="The number of items to return per page. Defaults to 50 items if not specified."),
     notification_scheme_id: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="notificationSchemeId", description="One or more notification scheme IDs to filter the results. Only mappings for these schemes will be returned."),
     project_id: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="projectId", description="One or more project IDs to filter the results. Only mappings for these projects will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects and their assigned notification schemes. Filter results by specific notification scheme IDs or project IDs, or retrieve all mappings. Only company-managed projects are supported."""
 
     # Construct request model with validation
@@ -8144,7 +8278,7 @@ async def list_notification_scheme_project_mappings(
 
 # Tags: Permissions
 @mcp.tool()
-async def list_permissions() -> dict[str, Any]:
+async def list_permissions() -> dict[str, Any] | ToolResult:
     """Retrieve all available permissions in the system, including global permissions, project-specific permissions, and permissions added by installed plugins. This operation is accessible without authentication."""
 
     # Extract parameters for API call
@@ -8174,7 +8308,7 @@ async def list_permissions() -> dict[str, Any]:
 async def check_permissions_bulk(
     global_permissions: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="globalPermissions", description="List of global permission keys to check. Only permissions included in this list will be evaluated for the user."),
     project_permissions: Annotated[list[_models.BulkProjectPermissions], AfterValidator(_check_unique_items)] | None = Field(None, alias="projectPermissions", description="Project and issue-specific permissions to check. For each permission, specify the projects and issues to validate access against. Up to 1000 projects and 1000 issues can be checked per request; invalid IDs are ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Verify which global and project permissions a user has, optionally checking access to specific projects and issues. Returns granted permissions and accessible resources for the specified user or the authenticated user if no account ID is provided."""
 
     # Construct request model with validation
@@ -8212,7 +8346,7 @@ async def check_permissions_bulk(
 
 # Tags: Permissions
 @mcp.tool()
-async def list_permitted_projects(permissions: list[str] = Field(..., description="A list of permission keys to filter projects by. Only projects where the user has all specified permissions will be returned. Permission keys should be provided as strings in the array.")) -> dict[str, Any]:
+async def list_permitted_projects(permissions: list[str] = Field(..., description="A list of permission keys to filter projects by. Only projects where the user has all specified permissions will be returned. Permission keys should be provided as strings in the array.")) -> dict[str, Any] | ToolResult:
     """Retrieve all projects where the authenticated user has been granted specific permissions. This operation helps identify which projects a user can access based on their assigned permission keys."""
 
     # Construct request model with validation
@@ -8254,7 +8388,7 @@ async def list_plans(
     include_trashed: bool | None = Field(None, alias="includeTrashed", description="Include trashed plans in the results. By default, only active plans are returned."),
     include_archived: bool | None = Field(None, alias="includeArchived", description="Include archived plans in the results. By default, only active plans are returned."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of plans to return per page. Must be between 1 and 50, defaults to 50."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of plans. Requires Jira administrator permissions. Optionally filter results to include trashed or archived plans."""
 
     _max_results = _parse_int(max_results)
@@ -8302,7 +8436,7 @@ async def create_plan(
     custom_fields: Annotated[list[_models.CreateCustomFieldRequest], AfterValidator(_check_unique_items)] | None = Field(None, alias="customFields", description="Custom fields to associate with the plan. Specify as an array of field configurations."),
     exclusion_rules: _models.CreatePlanBodyExclusionRules | None = Field(None, alias="exclusionRules", description="Rules that define which issues should be excluded from the plan based on specified criteria."),
     permissions: Annotated[list[_models.CreatePermissionRequest], AfterValidator(_check_unique_items)] | None = Field(None, description="Access control settings that define which users or groups can view or modify the plan."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new plan in Jira with specified issue sources, scheduling configuration, and optional cross-project releases and custom fields. Requires Administer Jira global permission."""
 
     # Construct request model with validation
@@ -8340,7 +8474,7 @@ async def create_plan(
 
 # Tags: Plans
 @mcp.tool()
-async def retrieve_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to retrieve, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def retrieve_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to retrieve, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific plan by its ID. Requires Jira administrator permissions."""
 
     _plan_id = _parse_int(plan_id)
@@ -8381,7 +8515,7 @@ async def retrieve_plan(plan_id: str = Field(..., alias="planId", description="T
 async def update_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to update. Must be a positive integer."),
     body: dict[str, Any] = Field(..., description="JSON Patch document (RFC 6902) containing one or more operations to update plan properties. Each operation specifies an action (add, replace, remove), a JSON pointer path to the target property, and the new value. Supports updates to: name, leadAccountId, scheduling (estimation type, start/end dates, inferred dates, dependencies), issueSources, exclusionRules, crossProjectReleases, customFields, and permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates plan details including name, lead account, scheduling configuration, issue sources, exclusion rules, cross-project releases, custom fields, and permissions using JSON Patch operations. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8425,7 +8559,7 @@ async def update_plan(
 
 # Tags: Plans
 @mcp.tool()
-async def archive_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to archive, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def archive_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to archive, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Archives a plan, removing it from active use while preserving its data. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8466,7 +8600,7 @@ async def archive_plan(plan_id: str = Field(..., alias="planId", description="Th
 async def duplicate_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to duplicate. Must be a valid 64-bit integer."),
     name: str = Field(..., description="The name for the duplicated plan. This will be the display name of the new plan copy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a duplicate copy of an existing plan with a new name. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8510,7 +8644,7 @@ async def duplicate_plan(
 async def list_plan_teams(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan for which to retrieve teams."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of teams to return per page, up to a maximum of 50. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all teams associated with a plan, including both plan-only teams and Atlassian teams. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8559,7 +8693,7 @@ async def add_team_to_plan(
     capacity: float | None = Field(None, description="The team's capacity allocation for the plan, expressed as a numeric value."),
     issue_source_id: str | None = Field(None, alias="issueSourceId", description="The identifier of the issue source that will supply work items for this team's planning."),
     sprint_length: str | None = Field(None, alias="sprintLength", description="The duration of sprints in days for Scrum-based teams."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an existing Atlassian team to a plan and configures their planning settings including capacity, planning methodology, and sprint configuration."""
 
     _plan_id = _parse_int(plan_id)
@@ -8605,7 +8739,7 @@ async def add_team_to_plan(
 async def get_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a valid 64-bit integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team whose planning settings should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve planning settings and configuration for an Atlassian team within a specific plan. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8647,7 +8781,7 @@ async def update_team_planning_settings(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team to update within the plan."),
     body: dict[str, Any] = Field(..., description="JSON Patch operations array specifying the updates to apply. Each operation must include 'op' (replace/add/remove), 'path' (e.g., /planningStyle, /sprintLength, /capacity, /issueSourceId), and 'value' for replace/add operations. Array order is not significant for add operations; retrieve the current team configuration to determine existing element positions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify planning configuration for an Atlassian team within a plan, including planning style, issue source, sprint length, and capacity settings. Uses JSON Patch format for updates."""
 
     _plan_id = _parse_int(plan_id)
@@ -8694,7 +8828,7 @@ async def update_team_planning_settings(
 async def remove_team_from_plan(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan from which the team will be removed. Must be a valid 64-bit integer."),
     atlassian_team_id: str = Field(..., alias="atlassianTeamId", description="The unique identifier of the Atlassian team to remove from the plan."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an Atlassian team from a plan and delete their associated planning settings. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8740,7 +8874,7 @@ async def create_plan_only_team(
     issue_source_id: str | None = Field(None, alias="issueSourceId", description="The unique identifier of the issue source that will supply work items to this plan-only team."),
     member_account_ids: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="memberAccountIds", description="A list of Jira account IDs for the team members to be added to this plan-only team."),
     sprint_length: str | None = Field(None, alias="sprintLength", description="The duration of sprints for this team, specified in days. Only applicable when using Scrum planning style."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a plan-only team within a Jira plan and configures their planning settings, including capacity, members, and sprint configuration. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8786,7 +8920,7 @@ async def create_plan_only_team(
 async def get_plan_only_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team whose settings you want to retrieve. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve planning settings and configuration for a specific plan-only team within a plan. Requires Jira administrator permissions."""
 
     _plan_id = _parse_int(plan_id)
@@ -8829,7 +8963,7 @@ async def update_plan_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team to update. Must be a positive integer."),
     body: dict[str, Any] = Field(..., description="JSON Patch operations array specifying the updates to apply. Each operation must include 'op' (replace, add, remove), 'path' (target field), and 'value' (for replace/add operations). Note that add operations do not respect array indexes; retrieve the team first to determine current array order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update planning settings for a plan-only team, including name, planning style, issue source, sprint length, capacity, and team members. Uses JSON Patch format to specify changes."""
 
     _plan_id = _parse_int(plan_id)
@@ -8877,7 +9011,7 @@ async def update_plan_team(
 async def remove_plan_only_team(
     plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan containing the team to be removed. Must be a positive integer."),
     plan_only_team_id: str = Field(..., alias="planOnlyTeamId", description="The unique identifier of the plan-only team to delete. Must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a plan-only team from a plan and deletes their associated planning settings. Requires Jira administrator permissions."""
 
     _plan_id = _parse_int(plan_id)
@@ -8916,7 +9050,7 @@ async def remove_plan_only_team(
 
 # Tags: Plans
 @mcp.tool()
-async def trash_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to move to trash. Must be a valid 64-bit integer.")) -> dict[str, Any]:
+async def trash_plan(plan_id: str = Field(..., alias="planId", description="The unique identifier of the plan to move to trash. Must be a valid 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Move a plan to trash, removing it from active use. Requires Administer Jira global permission."""
 
     _plan_id = _parse_int(plan_id)
@@ -8954,7 +9088,7 @@ async def trash_plan(plan_id: str = Field(..., alias="planId", description="The 
 
 # Tags: Issue priorities
 @mcp.tool()
-async def get_priority(id_: str = Field(..., alias="id", description="The unique identifier of the issue priority to retrieve.")) -> dict[str, Any]:
+async def get_priority(id_: str = Field(..., alias="id", description="The unique identifier of the issue priority to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific issue priority in Jira. Returns the priority configuration including its name, description, and other metadata."""
 
     # Construct request model with validation
@@ -8990,7 +9124,7 @@ async def get_priority(id_: str = Field(..., alias="id", description="The unique
 
 # Tags: Issue priorities
 @mcp.tool()
-async def remove_priority(id_: str = Field(..., alias="id", description="The unique identifier of the priority to delete.")) -> dict[str, Any]:
+async def remove_priority(id_: str = Field(..., alias="id", description="The unique identifier of the priority to delete.")) -> dict[str, Any] | ToolResult:
     """Removes an issue priority from the Jira instance. This is an asynchronous operation; check the returned location link to monitor task status."""
 
     # Construct request model with validation
@@ -9030,7 +9164,7 @@ async def list_available_priorities(
     scheme_id: str = Field(..., alias="schemeId", description="The unique identifier of the priority scheme for which to retrieve available priorities."),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of priorities to return per page. Defaults to 50 items if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of priorities that can be added to a specific priority scheme. Use this to discover which priorities are available for assignment within your priority scheme."""
 
     # Construct request model with validation
@@ -9072,7 +9206,7 @@ async def list_priorities(
     scheme_id: str = Field(..., alias="schemeId", description="The unique identifier of the priority scheme from which to retrieve priorities."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large result sets. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of priorities to return in a single page of results. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of priorities configured in a specific priority scheme. Use this to fetch all available priorities for a given scheme with optional pagination control."""
 
     # Construct request model with validation
@@ -9127,7 +9261,7 @@ async def create_project(
     project_template_key: Literal["com.pyxis.greenhopper.jira:gh-simplified-agility-kanban", "com.pyxis.greenhopper.jira:gh-simplified-agility-scrum", "com.pyxis.greenhopper.jira:gh-simplified-basic", "com.pyxis.greenhopper.jira:gh-simplified-kanban-classic", "com.pyxis.greenhopper.jira:gh-simplified-scrum-classic", "com.pyxis.greenhopper.jira:gh-cross-team-template", "com.pyxis.greenhopper.jira:gh-cross-team-planning-template", "com.atlassian.servicedesk:simplified-it-service-management", "com.atlassian.servicedesk:simplified-it-service-management-basic", "com.atlassian.servicedesk:simplified-it-service-management-operations", "com.atlassian.servicedesk:simplified-general-service-desk", "com.atlassian.servicedesk:simplified-internal-service-desk", "com.atlassian.servicedesk:simplified-external-service-desk", "com.atlassian.servicedesk:simplified-hr-service-desk", "com.atlassian.servicedesk:simplified-facilities-service-desk", "com.atlassian.servicedesk:simplified-legal-service-desk", "com.atlassian.servicedesk:simplified-marketing-service-desk", "com.atlassian.servicedesk:simplified-finance-service-desk", "com.atlassian.servicedesk:simplified-analytics-service-desk", "com.atlassian.servicedesk:simplified-design-service-desk", "com.atlassian.servicedesk:simplified-sales-service-desk", "com.atlassian.servicedesk:simplified-halp-service-desk", "com.atlassian.servicedesk:next-gen-it-service-desk", "com.atlassian.servicedesk:next-gen-hr-service-desk", "com.atlassian.servicedesk:next-gen-legal-service-desk", "com.atlassian.servicedesk:next-gen-marketing-service-desk", "com.atlassian.servicedesk:next-gen-facilities-service-desk", "com.atlassian.servicedesk:next-gen-general-service-desk", "com.atlassian.servicedesk:next-gen-analytics-service-desk", "com.atlassian.servicedesk:next-gen-finance-service-desk", "com.atlassian.servicedesk:next-gen-design-service-desk", "com.atlassian.servicedesk:next-gen-sales-service-desk", "com.atlassian.jira-core-project-templates:jira-core-simplified-content-management", "com.atlassian.jira-core-project-templates:jira-core-simplified-document-approval", "com.atlassian.jira-core-project-templates:jira-core-simplified-lead-tracking", "com.atlassian.jira-core-project-templates:jira-core-simplified-process-control", "com.atlassian.jira-core-project-templates:jira-core-simplified-procurement", "com.atlassian.jira-core-project-templates:jira-core-simplified-project-management", "com.atlassian.jira-core-project-templates:jira-core-simplified-recruitment", "com.atlassian.jira-core-project-templates:jira-core-simplified-task-", "com.atlassian.jcs:customer-service-management"] | None = Field(None, alias="projectTemplateKey", description="A predefined project configuration template that sets up workflows, issue types, and screens. The template type must match the projectTypeKey (e.g., software templates for software projects). Cannot be combined with fieldScheme, issueTypeScheme, issueTypeScreenScheme, or workflowScheme."),
     url: str | None = Field(None, description="A URL pointing to project documentation, guidelines, or related resources."),
     workflow_scheme: str | None = Field(None, alias="workflowScheme", description="The numeric ID of the workflow scheme that defines the issue lifecycle and transitions for this project. Cannot be combined with projectTemplateKey. Retrieve available scheme IDs using the Get all workflow schemes operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Jira project based on a project type template (business, software, service_desk, or customer_service). Requires Administer Jira global permission and a unique project key."""
 
     _avatar_id = _parse_int(avatar_id)
@@ -9178,7 +9312,7 @@ async def create_project(
 async def create_project_from_template(
     details: _models.CreateProjectWithCustomTemplateBodyDetails | None = Field(None, description="Project details: name, description, access level, assignee type, avatar, category, language, URL, and other project-level settings."),
     template: _models.CreateProjectWithCustomTemplateBodyTemplate | None = Field(None, description="Project template configuration: boards, field schemes, issue types, notification schemes, permission schemes, roles, security levels, workflows, and their mappings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Jira project based on a custom template with specified capabilities. This asynchronous operation configures project details, workflows, permissions, fields, and other components. Requires Jira Enterprise edition and Administer Jira global permission."""
 
     # Construct request model with validation
@@ -9216,7 +9350,7 @@ async def create_project_from_template(
 
 # Tags: Projects
 @mcp.tool()
-async def list_recent_projects() -> dict[str, Any]:
+async def list_recent_projects() -> dict[str, Any] | ToolResult:
     """Retrieve up to 20 projects recently viewed by the user, filtered to show only those the user has permission to access. This operation can be used anonymously and respects project-level and global permissions."""
 
     # Extract parameters for API call
@@ -9253,7 +9387,7 @@ async def list_projects(
     action: Literal["view", "browse", "edit", "create"] | None = Field(None, description="Filter results by the user's permission level on projects: `view` (has browse or admin permissions), `browse` (has browse permission), `edit` (has admin permission), or `create` (can create issues). Defaults to `view`."),
     status: list[Literal["live", "archived", "deleted"]] | None = Field(None, description="Filter results by project status: `live` for active projects, `archived` for archived projects, or `deleted` for projects in the recycle bin. This is an experimental feature."),
     property_query: str | None = Field(None, alias="propertyQuery", description="Search projects by custom property values using dot-notation syntax. Enclose property keys in square brackets to support keys containing dots or equals signs. This is an experimental feature."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects visible to the user based on their permissions. Supports filtering by project keys, type, category, and status, with flexible sorting options."""
 
     _start_at = _parse_int(start_at)
@@ -9295,7 +9429,7 @@ async def list_projects(
 
 # Tags: Project types
 @mcp.tool()
-async def list_project_types() -> dict[str, Any]:
+async def list_project_types() -> dict[str, Any] | ToolResult:
     """Retrieves all available project types in the Jira instance, including both licensed and unlicensed types. This operation requires no authentication and can be accessed anonymously."""
 
     # Extract parameters for API call
@@ -9322,7 +9456,7 @@ async def list_project_types() -> dict[str, Any]:
 
 # Tags: Project types
 @mcp.tool()
-async def list_accessible_project_types() -> dict[str, Any]:
+async def list_accessible_project_types() -> dict[str, Any] | ToolResult:
     """Retrieve all project types available with valid licenses in your Jira instance. Use this to discover which project type options are available for creating new projects."""
 
     # Extract parameters for API call
@@ -9349,7 +9483,7 @@ async def list_accessible_project_types() -> dict[str, Any]:
 
 # Tags: Project types
 @mcp.tool()
-async def get_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the following: software, service_desk, business, or product_discovery.")) -> dict[str, Any]:
+async def get_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the following: software, service_desk, business, or product_discovery.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project type by its key. This operation is publicly accessible and requires no authentication or permissions."""
 
     # Construct request model with validation
@@ -9385,7 +9519,7 @@ async def get_project_type(project_type_key: Literal["software", "service_desk",
 
 # Tags: Project types
 @mcp.tool()
-async def get_accessible_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the four supported project types: software, service_desk, business, or product_discovery.")) -> dict[str, Any]:
+async def get_accessible_project_type(project_type_key: Literal["software", "service_desk", "business", "product_discovery"] = Field(..., alias="projectTypeKey", description="The unique identifier for the project type. Must be one of the four supported project types: software, service_desk, business, or product_discovery.")) -> dict[str, Any] | ToolResult:
     """Retrieves a project type if it is accessible to the authenticated user. Returns project type details for the specified project type key."""
 
     # Construct request model with validation
@@ -9421,7 +9555,7 @@ async def get_accessible_project_type(project_type_key: Literal["software", "ser
 
 # Tags: Projects
 @mcp.tool()
-async def get_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code). Project keys are typically short uppercase abbreviations like 'PROJ'.")) -> dict[str, Any]:
+async def get_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code). Project keys are typically short uppercase abbreviations like 'PROJ'.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project, including its configuration and metadata. Requires Browse projects permission for the target project."""
 
     # Construct request model with validation
@@ -9468,7 +9602,7 @@ async def update_project(
     permission_scheme: str | None = Field(None, alias="permissionScheme", description="The numeric ID of the permission scheme that defines user roles and permissions. Use the Get all permission schemes operation to find available scheme IDs."),
     released_project_keys: Annotated[list[str], AfterValidator(_check_unique_items)] | None = Field(None, alias="releasedProjectKeys", description="An array of previous project keys to release from the current project. Released keys must belong to the current project and cannot include the current project key."),
     url: str | None = Field(None, description="A URL pointing to project documentation or related information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update project details including name, description, avatar, category, and associated schemes. All parameters are optional; only included fields will be updated while omitted ones remain unchanged."""
 
     _avatar_id = _parse_int(avatar_id)
@@ -9516,7 +9650,7 @@ async def update_project(
 async def delete_project(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either the numeric project ID or the project key (case-sensitive)."),
     enable_undo: bool | None = Field(None, alias="enableUndo", description="Whether to move the project to the Jira recycle bin for later restoration instead of permanently deleting it. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a Jira project. Archived projects must be restored before deletion. Requires Jira administrator permissions."""
 
     # Construct request model with validation
@@ -9555,7 +9689,7 @@ async def delete_project(
 
 # Tags: Projects
 @mcp.tool()
-async def archive_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any]:
+async def archive_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any] | ToolResult:
     """Archive a project to prevent further modifications while preserving its data. Archived projects cannot be deleted directly; restore the project first if deletion is needed."""
 
     # Construct request model with validation
@@ -9594,7 +9728,7 @@ async def archive_project(project_id_or_key: str = Field(..., alias="projectIdOr
 async def set_project_avatar(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key."),
     id_: str = Field(..., alias="id", description="The unique identifier of the avatar image to display. This avatar must have been previously uploaded to the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets the avatar image displayed for a project. The avatar must first be uploaded using the load project avatar operation before it can be set as the displayed avatar."""
 
     # Construct request model with validation
@@ -9636,7 +9770,7 @@ async def set_project_avatar(
 async def remove_project_avatar(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key."),
     id_: str = Field(..., alias="id", description="The numeric identifier of the avatar to delete. Must be a valid 64-bit integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom avatar from a project. Only custom avatars can be deleted; system-provided avatars are protected and cannot be removed. Requires Administer projects permission."""
 
     _id_ = _parse_int(id_)
@@ -9679,7 +9813,7 @@ async def upload_project_avatar(
     x: str | None = Field(None, description="The X coordinate (in pixels) of the top-left corner of the crop region. Defaults to 0 if not specified."),
     y: str | None = Field(None, description="The Y coordinate (in pixels) of the top-left corner of the crop region. Defaults to 0 if not specified."),
     size: str | None = Field(None, description="The side length (in pixels) of the square crop region. Defaults to 0, which uses the smaller of the image's height or width."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload and process an image file as a project avatar. The image is automatically cropped to a square and resized into multiple formats (16x16, 24x24, 32x32, 48x48). Requires the Administer projects permission."""
 
     _x = _parse_int(x)
@@ -9722,7 +9856,7 @@ async def upload_project_avatar(
 
 # Tags: Project avatars
 @mcp.tool()
-async def list_project_avatars(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key.")) -> dict[str, Any]:
+async def list_project_avatars(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the case-sensitive project key.")) -> dict[str, Any] | ToolResult:
     """Retrieves all avatars available for a project, organized into system-provided and custom avatar groups. Requires browse project permission and can be accessed anonymously."""
 
     # Construct request model with validation
@@ -9758,7 +9892,7 @@ async def list_project_avatars(project_id_or_key: str = Field(..., alias="projec
 
 # Tags: Project classification levels
 @mcp.tool()
-async def get_project_classification(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any]:
+async def get_project_classification(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieve the default data classification level assigned to a project. This determines the default sensitivity or confidentiality level for issues and data within the project."""
 
     # Construct request model with validation
@@ -9800,7 +9934,7 @@ async def list_project_components(
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of components to return per page. Defaults to 50 items."),
     order_by: Literal["description", "-description", "+description", "issueCount", "-issueCount", "+issueCount", "lead", "-lead", "+lead", "name", "-name", "+name"] | None = Field(None, alias="orderBy", description="Sort results by component attribute: name, description, issue count, or project lead. Prefix with `-` for descending or `+` for ascending order."),
     component_source: Literal["jira", "compass", "auto"] | None = Field(None, alias="componentSource", description="The component source to return: `jira` for Jira components, `compass` for Compass components, or `auto` to return Compass components if available, otherwise Jira components."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all components in a project. Returns Jira components by default, or Compass components if configured. Requires Browse Projects permission."""
 
     _start_at = _parse_int(start_at)
@@ -9845,7 +9979,7 @@ async def list_project_components(
 async def get_project_components_all(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the project ID or project key (case-sensitive)."),
     component_source: Literal["jira", "compass", "auto"] | None = Field(None, alias="componentSource", description="The source of components to return: use 'jira' for Jira components (default), 'compass' for Compass components, or 'auto' to return Compass components if available, otherwise Jira components."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all components in a project, including Compass components if the project is opted into Compass. Requires Browse Projects permission and can be accessed anonymously."""
 
     # Construct request model with validation
@@ -9884,7 +10018,7 @@ async def get_project_components_all(
 
 # Tags: Projects
 @mcp.tool()
-async def delete_project_async(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive).")) -> dict[str, Any]:
+async def delete_project_async(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Asynchronously delete a project. The operation is transactional—if any part fails, the project remains unchanged. Monitor the returned task location to track deletion progress."""
 
     # Construct request model with validation
@@ -9920,7 +10054,7 @@ async def delete_project_async(project_id_or_key: str = Field(..., alias="projec
 
 # Tags: Project features
 @mcp.tool()
-async def list_project_features(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier or key of the project. You can use either the numeric project ID or the case-sensitive project key to identify the project.")) -> dict[str, Any]:
+async def list_project_features(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier or key of the project. You can use either the numeric project ID or the case-sensitive project key to identify the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all available features for a specified project. Features represent optional capabilities or modules that can be enabled or configured within the project."""
 
     # Construct request model with validation
@@ -9956,7 +10090,7 @@ async def list_project_features(project_id_or_key: str = Field(..., alias="proje
 
 # Tags: Project properties
 @mcp.tool()
-async def list_project_property_keys(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any]:
+async def list_project_property_keys(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys stored for a specific project. Property keys are identifiers for custom data associated with the project."""
 
     # Construct request model with validation
@@ -9995,7 +10129,7 @@ async def list_project_property_keys(project_id_or_key: str = Field(..., alias="
 async def get_project_property(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the project property to retrieve. Use the list project property keys operation to discover available property keys for a project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the value of a specific project property by its key. Requires Browse Projects permission for the project containing the property."""
 
     # Construct request model with validation
@@ -10034,7 +10168,7 @@ async def get_project_property(
 async def remove_project_property(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     property_key: str = Field(..., alias="propertyKey", description="The key identifying the project property to delete. Retrieve available property keys using the list project properties operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a project. Requires Administer Jira global permission or Administer Projects permission for the target project."""
 
     # Construct request model with validation
@@ -10070,7 +10204,7 @@ async def remove_project_property(
 
 # Tags: Projects
 @mcp.tool()
-async def restore_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case sensitive).")) -> dict[str, Any]:
+async def restore_project(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case sensitive).")) -> dict[str, Any] | ToolResult:
     """Restore a project that has been archived or moved to the Jira recycle bin. Requires Administer Jira global permission for Company managed projects, or Administer Jira global permission or Administer projects project permission for Team managed projects."""
 
     # Construct request model with validation
@@ -10106,7 +10240,7 @@ async def restore_project(project_id_or_key: str = Field(..., alias="projectIdOr
 
 # Tags: Project roles
 @mcp.tool()
-async def list_project_roles(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any]:
+async def list_project_roles(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive).")) -> dict[str, Any] | ToolResult:
     """Retrieve all project roles available for a specific project, including their names and API endpoints. Project roles are shared across all projects in Jira Cloud."""
 
     # Construct request model with validation
@@ -10146,7 +10280,7 @@ async def get_project_role(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to retrieve. Use the get_project_roles operation to discover available project role IDs."),
     exclude_inactive_users: bool | None = Field(None, alias="excludeInactiveUsers", description="When enabled, filters out inactive users from the returned actors list. Defaults to false, including all users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a project role's details and the list of actors (users and groups) assigned to it within a specific project. The actors are returned sorted by display name."""
 
     _id_ = _parse_int(id_)
@@ -10191,7 +10325,7 @@ async def add_project_role_actors(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive string)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to add actors to. Retrieve available project role IDs using the get_project_roles operation."),
     user: list[str] | None = Field(None, description="An array of user account IDs to add to the project role. Each entry should be a valid user account ID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds actors (users or groups) to a project role. Use this to grant role-based permissions to additional actors in a project."""
 
     _id_ = _parse_int(id_)
@@ -10236,7 +10370,7 @@ async def replace_project_role_actors(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive string)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role to modify. Retrieve available project role IDs using the get all project roles operation."),
     categorised_actors: dict[str, list[str]] | None = Field(None, alias="categorisedActors", description="The actors to assign to the project role, replacing all current assignments. Specify groups by ID (recommended) or name, and users by account ID. Use the appropriate actor type key (atlassian-group-role-actor-id, atlassian-group-role-actor, or atlassian-user-role-actor) with an array of identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Replace all actors assigned to a project role. This operation overwrites the existing actor list entirely; to add actors without removing existing ones, use the add actors operation instead."""
 
     _id_ = _parse_int(id_)
@@ -10281,7 +10415,7 @@ async def remove_actor_from_project_role(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     id_: str = Field(..., alias="id", description="The numeric ID of the project role. Retrieve available project role IDs using the get all project roles operation."),
     user: str | None = Field(None, description="The user account ID of the actor to remove from the project role. If omitted, the operation will fail as a user must be specified for removal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an actor (user) from a project role. Requires project administration permissions or global Jira administration rights."""
 
     _id_ = _parse_int(id_)
@@ -10326,7 +10460,7 @@ async def list_project_roles_with_details(
     project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (case-sensitive)."),
     current_member: bool | None = Field(None, alias="currentMember", description="Filter roles to show only those assigned to the current user. Defaults to false to return all roles."),
     exclude_other_service_roles: bool | None = Field(None, alias="excludeOtherServiceRoles", description="Exclude service management roles that don't apply to the project type. Defaults to false to include all roles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all project roles and their details for a specific project. Project roles are shared across all projects in the Jira instance."""
 
     # Construct request model with validation
@@ -10365,7 +10499,7 @@ async def list_project_roles_with_details(
 
 # Tags: Projects
 @mcp.tool()
-async def list_project_statuses(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive). Use the key for human-readable references or the ID for programmatic consistency.")) -> dict[str, Any]:
+async def list_project_statuses(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The project identifier, either the numeric project ID or the project key (which is case-sensitive). Use the key for human-readable references or the ID for programmatic consistency.")) -> dict[str, Any] | ToolResult:
     """Retrieves all valid statuses for a project, organized by issue type. Each issue type within the project has its own set of valid statuses that can be used for workflow transitions."""
 
     # Construct request model with validation
@@ -10407,7 +10541,7 @@ async def list_project_versions(
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of versions to return per page. Defaults to 50 items."),
     order_by: Literal["description", "-description", "+description", "name", "-name", "+name", "releaseDate", "-releaseDate", "+releaseDate", "sequence", "-sequence", "+sequence", "startDate", "-startDate", "+startDate"] | None = Field(None, alias="orderBy", description="Sort the results by a specific field: description, name, releaseDate (oldest first), sequence (UI order), or startDate (oldest first). Prefix with '-' for descending order or '+' for ascending order."),
     status: str | None = Field(None, description="Filter versions by status using a comma-separated list. Valid statuses are: released, unreleased, and archived."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all versions in a project. Use this operation when you need to browse versions with pagination control; for a complete unpaginated list, use the alternative get_project_versions operation instead."""
 
     _start_at = _parse_int(start_at)
@@ -10449,7 +10583,7 @@ async def list_project_versions(
 
 # Tags: Project versions
 @mcp.tool()
-async def list_project_versions_all(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any]:
+async def list_project_versions_all(project_id_or_key: str = Field(..., alias="projectIdOrKey", description="The unique identifier for the project, either as the project ID (numeric) or project key (case-sensitive alphanumeric code).")) -> dict[str, Any] | ToolResult:
     """Retrieves all versions for a specified project in a single non-paginated response. Use this operation when you need the complete list of versions; for paginated results, use the paginated versions endpoint instead."""
 
     # Construct request model with validation
@@ -10485,7 +10619,7 @@ async def list_project_versions_all(project_id_or_key: str = Field(..., alias="p
 
 # Tags: Project email
 @mcp.tool()
-async def get_project_email(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project. Must be a positive integer.")) -> dict[str, Any]:
+async def get_project_email(project_id: str = Field(..., alias="projectId", description="The unique identifier of the project. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieves the sender email address configured for a project. This email is used as the from address for project notifications and communications."""
 
     _project_id = _parse_int(project_id)
@@ -10523,7 +10657,7 @@ async def get_project_email(project_id: str = Field(..., alias="projectId", desc
 
 # Tags: Projects
 @mcp.tool()
-async def get_issue_type_hierarchy(project_id: str = Field(..., alias="projectId", description="The numeric identifier of the project for which to retrieve the issue type hierarchy.")) -> dict[str, Any]:
+async def get_issue_type_hierarchy(project_id: str = Field(..., alias="projectId", description="The numeric identifier of the project for which to retrieve the issue type hierarchy.")) -> dict[str, Any] | ToolResult:
     """Retrieve the issue type hierarchy for a next-gen project, which defines the structural levels of issue types (Epic, Story/Task/Bug, and Subtask) and their relationships. Requires Browse projects permission."""
 
     _project_id = _parse_int(project_id)
@@ -10561,7 +10695,7 @@ async def get_issue_type_hierarchy(project_id: str = Field(..., alias="projectId
 
 # Tags: Project permission schemes
 @mcp.tool()
-async def list_security_levels_project(project_key_or_id: str = Field(..., alias="projectKeyOrId", description="The project identifier, either the project key (case-sensitive) or the project ID.")) -> dict[str, Any]:
+async def list_security_levels_project(project_key_or_id: str = Field(..., alias="projectKeyOrId", description="The project identifier, either the project key (case-sensitive) or the project ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve all issue security levels available in a project that the authenticated user can access. Security levels are only returned for users with the Set Issue Security permission."""
 
     # Construct request model with validation
@@ -10597,7 +10731,7 @@ async def list_security_levels_project(project_key_or_id: str = Field(..., alias
 
 # Tags: Project categories
 @mcp.tool()
-async def list_project_categories() -> dict[str, Any]:
+async def list_project_categories() -> dict[str, Any] | ToolResult:
     """Retrieves all available project categories in Jira. Use this to populate category selections or understand the complete category taxonomy."""
 
     # Extract parameters for API call
@@ -10627,7 +10761,7 @@ async def list_project_categories() -> dict[str, Any]:
 async def create_project_category(
     description: str | None = Field(None, description="Optional text describing the purpose and scope of this project category."),
     name: str | None = Field(None, description="The name of the project category. Required on create, optional on update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project category in Jira. Requires Administer Jira global permission."""
 
     # Construct request model with validation
@@ -10665,7 +10799,7 @@ async def create_project_category(
 
 # Tags: Project categories
 @mcp.tool()
-async def get_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category as a 64-bit integer.")) -> dict[str, Any]:
+async def get_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific project category by its ID. Returns the category details for use in project organization and filtering."""
 
     _id_ = _parse_int(id_)
@@ -10706,7 +10840,7 @@ async def get_project_category(id_: str = Field(..., alias="id", description="Th
 async def update_project_category(
     id_: str = Field(..., alias="id", description="The unique identifier of the project category to update. This is a numeric ID that identifies which category to modify."),
     description: str | None = Field(None, description="The new description text for the project category. This field is optional and can be used to update the category's descriptive information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing project category with new metadata. Requires Jira administrator permissions to perform this action."""
 
     _id_ = _parse_int(id_)
@@ -10747,7 +10881,7 @@ async def update_project_category(
 
 # Tags: Project categories
 @mcp.tool()
-async def delete_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category to delete, specified as a 64-bit integer.")) -> dict[str, Any]:
+async def delete_project_category(id_: str = Field(..., alias="id", description="The unique identifier of the project category to delete, specified as a 64-bit integer.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a project category from Jira. Requires Administer Jira global permission."""
 
     _id_ = _parse_int(id_)
@@ -10791,7 +10925,7 @@ async def list_project_fields(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination (zero-indexed). Use this to retrieve subsequent pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of fields to return per page. Must be between 1 and 100 items."),
     field_id: list[str] | None = Field(None, alias="fieldId", description="Optional list of specific field IDs to retrieve. If omitted, all available fields for the project and work type combination are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve available fields for specified projects and work types. Returns a paginated list of fields that are applicable to the given project and work type combination, with optional filtering by specific field IDs."""
 
     _start_at = _parse_int(start_at)
@@ -10832,7 +10966,7 @@ async def list_project_fields(
 
 # Tags: Project key and name validation
 @mcp.tool()
-async def validate_project_key() -> dict[str, Any]:
+async def validate_project_key() -> dict[str, Any] | ToolResult:
     """Validates a project key to ensure it is a properly formatted string and is not already in use by another project. Use this to verify key availability before creating a new project."""
 
     # Extract parameters for API call
@@ -10859,7 +10993,7 @@ async def validate_project_key() -> dict[str, Any]:
 
 # Tags: Project key and name validation
 @mcp.tool()
-async def validate_project_key_generate() -> dict[str, Any]:
+async def validate_project_key_generate() -> dict[str, Any] | ToolResult:
     """Validates a project key and generates a valid random alternative if the provided key is invalid or already in use. No authentication required."""
 
     # Extract parameters for API call
@@ -10886,7 +11020,7 @@ async def validate_project_key_generate() -> dict[str, Any]:
 
 # Tags: Project key and name validation
 @mcp.tool()
-async def validate_project_name(name: str = Field(..., description="The desired project name to validate for availability.")) -> dict[str, Any]:
+async def validate_project_name(name: str = Field(..., description="The desired project name to validate for availability.")) -> dict[str, Any] | ToolResult:
     """Validates whether a project name is available. Returns the provided name if unused, attempts to generate an alternative name by appending a sequence number if the name is taken, or returns an error if no valid alternative can be generated."""
 
     # Construct request model with validation
@@ -10924,7 +11058,7 @@ async def validate_project_name(name: str = Field(..., description="The desired 
 
 # Tags: Issue redaction
 @mcp.tool()
-async def redact_issue_fields(redactions: Annotated[list[_models.SingleRedactionRequest], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of field redaction specifications defining which issue fields should have their data redacted. Each item specifies the field identifier and redaction parameters.")) -> dict[str, Any]:
+async def redact_issue_fields(redactions: Annotated[list[_models.SingleRedactionRequest], AfterValidator(_check_unique_items)] | None = Field(None, description="Array of field redaction specifications defining which issue fields should have their data redacted. Each item specifies the field identifier and redaction parameters.")) -> dict[str, Any] | ToolResult:
     """Submit an asynchronous job to redact sensitive data from specified issue fields. Use the returned job ID to poll the redaction status."""
 
     # Construct request model with validation
@@ -10966,7 +11100,7 @@ async def list_resolutions(
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 represents the first item. Use this to navigate through pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of resolutions to return per page. Defaults to 50 items if not specified."),
     only_default: bool | None = Field(None, alias="onlyDefault", description="When enabled, returns only default resolutions. If specific resolution IDs are provided and none are marked as default, an empty page is returned. Only applies to company-managed projects."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of issue resolutions, optionally filtered by resolution IDs or default status. Useful for populating resolution dropdowns or validating resolution values in Jira."""
 
     # Construct request model with validation
@@ -11004,7 +11138,7 @@ async def list_resolutions(
 
 # Tags: Issue resolutions
 @mcp.tool()
-async def get_resolution(id_: str = Field(..., alias="id", description="The unique identifier of the resolution value to retrieve.")) -> dict[str, Any]:
+async def get_resolution(id_: str = Field(..., alias="id", description="The unique identifier of the resolution value to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific issue resolution value by its ID. This returns metadata about how an issue can be resolved in Jira."""
 
     # Construct request model with validation
@@ -11044,7 +11178,7 @@ async def update_resolution(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue resolution to update."),
     name: str = Field(..., description="The name of the resolution. Must be unique across all resolutions and limited to 60 characters maximum.", max_length=60),
     description: str | None = Field(None, description="The description of the resolution. Limited to 255 characters maximum.", max_length=255),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing issue resolution in Jira. Requires Administer Jira global permission to perform this action."""
 
     # Construct request model with validation
@@ -11086,7 +11220,7 @@ async def update_resolution(
 async def delete_resolution(
     id_: str = Field(..., alias="id", description="The unique identifier of the issue resolution to delete."),
     replace_with: str = Field(..., alias="replaceWith", description="The unique identifier of the issue resolution that will replace the deleted one for all affected issues. This parameter is required to ensure no issues are left without a resolution."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes an issue resolution from Jira. All issues currently using the deleted resolution will be reassigned to the specified replacement resolution. This is an asynchronous operation; check the returned task location to monitor completion status."""
 
     # Construct request model with validation
@@ -11125,7 +11259,7 @@ async def delete_resolution(
 
 # Tags: Project roles
 @mcp.tool()
-async def list_project_roles_global() -> dict[str, Any]:
+async def list_project_roles_global() -> dict[str, Any] | ToolResult:
     """Retrieve all project roles available in the Jira instance, including their details and default actors. Project roles are used globally across all projects for permission schemes, notifications, issue security, and workflow conditions."""
 
     # Extract parameters for API call
@@ -11152,7 +11286,7 @@ async def list_project_roles_global() -> dict[str, Any]:
 
 # Tags: Project roles
 @mcp.tool()
-async def get_project_role_global(id_: str = Field(..., alias="id", description="The unique identifier of the project role as a 64-bit integer. Retrieve available project role IDs using the list project roles operation.")) -> dict[str, Any]:
+async def get_project_role_global(id_: str = Field(..., alias="id", description="The unique identifier of the project role as a 64-bit integer. Retrieve available project role IDs using the list project roles operation.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific project role, including its default actors sorted by display name. Requires Jira administrator permissions."""
 
     _id_ = _parse_int(id_)
@@ -11193,7 +11327,7 @@ async def get_project_role_global(id_: str = Field(..., alias="id", description=
 async def update_project_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to update. This is a 64-bit integer that can be obtained from the list of all project roles."),
     description: str | None = Field(None, description="The new description for the project role. This field is optional for partial updates and will only be applied if the name is not provided in the same request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a project role by modifying either its name or description. Note that only one field can be updated per request; if both are provided, only the name will be updated."""
 
     _id_ = _parse_int(id_)
@@ -11238,7 +11372,7 @@ async def update_project_role_full(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to update. This is a numeric ID that can be retrieved from the list of all project roles."),
     description: str | None = Field(None, description="The new description for the project role. This field is required when fully updating a project role."),
     name: str | None = Field(None, description="The name of the project role. Must be unique. Cannot begin or end with whitespace. The maximum length is 255 characters. Required when creating a project role. Optional when partially updating a project role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Fully update a project role by replacing its name and description. Both name and description are required for this operation."""
 
     _id_ = _parse_int(id_)
@@ -11282,7 +11416,7 @@ async def update_project_role_full(
 async def delete_project_role(
     id_: str = Field(..., alias="id", description="The unique identifier of the project role to delete. Retrieve available project role IDs using the list project roles operation."),
     swap: str | None = Field(None, description="The unique identifier of a project role to replace the deleted role across all schemes, workflows, worklogs, and comments. Required if the role being deleted is currently in use."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a project role from your Jira instance. If the role is currently in use, you must specify a replacement role to reassign its associations in schemes, workflows, worklogs, and comments."""
 
     _id_ = _parse_int(id_)
@@ -11324,7 +11458,7 @@ async def delete_project_role(
 
 # Tags: Screens
 @mcp.tool()
-async def list_screen_fields(screen_id: str = Field(..., alias="screenId", description="The unique identifier of the screen. Must be a positive integer.")) -> dict[str, Any]:
+async def list_screen_fields(screen_id: str = Field(..., alias="screenId", description="The unique identifier of the screen. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all fields available to be added to a screen tab. This helps identify which fields can be configured for a specific screen layout."""
 
     _screen_id = _parse_int(screen_id)
@@ -11362,7 +11496,7 @@ async def list_screen_fields(screen_id: str = Field(..., alias="screenId", descr
 
 # Tags: Issue search
 @mcp.tool()
-async def count_issues(jql: str | None = Field(None, description="A JQL query expression to filter issues. The query must include at least one search restriction (bounded query) for performance reasons.")) -> dict[str, Any]:
+async def count_issues(jql: str | None = Field(None, description="A JQL query expression to filter issues. The query must include at least one search restriction (bounded query) for performance reasons.")) -> dict[str, Any] | ToolResult:
     """Get an estimated count of issues matching a JQL query. Returns a fast approximate count for issues the user has permission to view; note that recent updates may not be immediately reflected."""
 
     # Construct request model with validation
@@ -11404,7 +11538,7 @@ async def search_issues(
     jql: str | None = Field(None, description="A JQL expression to filter issues. Must include a search restriction (bounded query) for performance—for example, filtering by project, assignee, or status. The orderBy clause supports a maximum of 7 fields. Unbounded queries like 'order by key desc' are not permitted."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of issues to return per page, up to 5000. The API may return fewer items when many fields or properties are requested. Defaults to 50 items per page."),
     reconcile_issues: list[int] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use this when read-after-write consistency is critical. The same list should be included across all paginated requests."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for issues using JQL (Jira Query Language) with optional read-after-write consistency reconciliation. Results reflect issues where you have browse permissions on the containing project and any applicable issue-level security permissions."""
 
     _max_results = _parse_int(max_results)
@@ -11448,7 +11582,7 @@ async def search_issues_jql(
     jql: str | None = Field(None, description="A JQL expression to filter issues. Must include at least one search restriction (e.g., assignee, project, status) to be considered bounded. The orderBy clause supports a maximum of 7 fields."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of issues to return per page, up to 5000. Defaults to 50 items per page. Actual results may be fewer when requesting many fields."),
     reconcile_issues: list[int] | None = Field(None, alias="reconcileIssues", description="List of up to 50 issue IDs to reconcile with search results for stronger consistency guarantees. Use the same list across all paginated requests to ensure consistency."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for issues using JQL with optional read-after-write consistency reconciliation. Requires a bounded query with at least one search restriction for optimal performance."""
 
     _max_results = _parse_int(max_results)
@@ -11488,7 +11622,7 @@ async def search_issues_jql(
 
 # Tags: Issue security level
 @mcp.tool()
-async def get_security_level(id_: str = Field(..., alias="id", description="The unique identifier of the issue security level to retrieve.")) -> dict[str, Any]:
+async def get_security_level(id_: str = Field(..., alias="id", description="The unique identifier of the issue security level to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific issue security level. Use this to get security level properties after obtaining the level ID from the issue security scheme."""
 
     # Construct request model with validation
@@ -11524,7 +11658,7 @@ async def get_security_level(id_: str = Field(..., alias="id", description="The 
 
 # Tags: Workflow statuses
 @mcp.tool()
-async def list_statuses() -> dict[str, Any]:
+async def list_statuses() -> dict[str, Any] | ToolResult:
     """Retrieves all statuses associated with active workflows in Jira. This operation is useful for understanding the available status values that can be assigned to issues across your projects."""
 
     # Extract parameters for API call
@@ -11551,7 +11685,7 @@ async def list_statuses() -> dict[str, Any]:
 
 # Tags: Workflow statuses
 @mcp.tool()
-async def get_status(id_or_name: str = Field(..., alias="idOrName", description="The unique identifier or display name of the status. Using the status ID is preferred when the name may not be unique across your instance.")) -> dict[str, Any]:
+async def get_status(id_or_name: str = Field(..., alias="idOrName", description="The unique identifier or display name of the status. Using the status ID is preferred when the name may not be unique across your instance.")) -> dict[str, Any] | ToolResult:
     """Retrieve a status associated with an active workflow by its ID or name. If multiple statuses share the same name, the first match is returned; using the status ID is recommended for precise identification."""
 
     # Construct request model with validation
@@ -11587,7 +11721,7 @@ async def get_status(id_or_name: str = Field(..., alias="idOrName", description=
 
 # Tags: Workflow status categories
 @mcp.tool()
-async def list_status_categories() -> dict[str, Any]:
+async def list_status_categories() -> dict[str, Any] | ToolResult:
     """Retrieves all available status categories in Jira. Status categories group statuses by their workflow state (e.g., To Do, In Progress, Done)."""
 
     # Extract parameters for API call
@@ -11614,7 +11748,7 @@ async def list_status_categories() -> dict[str, Any]:
 
 # Tags: Workflow status categories
 @mcp.tool()
-async def get_status_category(id_or_key: str = Field(..., alias="idOrKey", description="The unique identifier or key of the status category to retrieve.")) -> dict[str, Any]:
+async def get_status_category(id_or_key: str = Field(..., alias="idOrKey", description="The unique identifier or key of the status category to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a status category by its ID or key. Status categories are used to group and organize statuses in Jira workflows."""
 
     # Construct request model with validation
@@ -11650,7 +11784,7 @@ async def get_status_category(id_or_key: str = Field(..., alias="idOrKey", descr
 
 # Tags: Status
 @mcp.tool()
-async def list_statuses_bulk(id_: list[str] = Field(..., alias="id", description="One or more status IDs to retrieve. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any]:
+async def list_statuses_bulk(id_: list[str] = Field(..., alias="id", description="One or more status IDs to retrieve. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for one or more statuses by their IDs. Useful for fetching status configurations needed for workflow operations or validation."""
 
     # Construct request model with validation
@@ -11688,7 +11822,7 @@ async def list_statuses_bulk(id_: list[str] = Field(..., alias="id", description
 
 # Tags: Status
 @mcp.tool()
-async def delete_statuses(id_: list[str] = Field(..., alias="id", description="One or more status IDs to delete. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any]:
+async def delete_statuses(id_: list[str] = Field(..., alias="id", description="One or more status IDs to delete. Provide between 1 and 50 IDs in a single request.")) -> dict[str, Any] | ToolResult:
     """Permanently delete one or more statuses by their IDs. Requires either Administer projects or Administer Jira permission."""
 
     # Construct request model with validation
@@ -11729,7 +11863,7 @@ async def delete_statuses(id_: list[str] = Field(..., alias="id", description="O
 async def list_statuses_by_name(
     name: list[str] = Field(..., description="One or more status names to retrieve. Provide between 1 and 50 names as an ampersand-separated list."),
     project_id: str | None = Field(None, alias="projectId", description="Optional project ID to scope the status lookup to a specific project. Omit or use null to retrieve global statuses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of statuses by their names. Supports bulk lookup of up to 50 status names, optionally scoped to a specific project or global statuses."""
 
     # Construct request model with validation
@@ -11773,7 +11907,7 @@ async def search_statuses(
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of statuses to return per page. Defaults to 200 if not specified."),
     search_string: str | None = Field(None, alias="searchString", description="A search term to match against status names. Omit or leave empty to return all statuses in the search scope. Limited to 255 characters.", max_length=255),
     status_category: str | None = Field(None, alias="statusCategory", description="Filter results by status category: TODO, IN_PROGRESS, or DONE. Omit to include all categories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for statuses by name or project, returning paginated results. Requires project administration or Jira administration permissions."""
 
     _start_at = _parse_int(start_at)
@@ -11818,7 +11952,7 @@ async def list_issue_type_usages(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status to query for issue type usage."),
     project_id: str = Field(..., alias="projectId", description="The unique identifier of the project to filter issue type usages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of results to return per page. Must be between 1 and 200, defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the issue types currently using a specific status within a project. Returns paginated results showing which issue types are associated with the given status."""
 
     _max_results = _parse_int(max_results)
@@ -11862,7 +11996,7 @@ async def list_issue_type_usages(
 async def list_project_usages_by_status(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status to query for project usage."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of results to return per page. Must be between 1 and 200, defaults to 50 results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of projects that use a specific status. Useful for understanding status adoption and impact across your Jira instance."""
 
     _max_results = _parse_int(max_results)
@@ -11906,7 +12040,7 @@ async def list_project_usages_by_status(
 async def list_workflow_usages_by_status(
     status_id: str = Field(..., alias="statusId", description="The unique identifier of the status for which to retrieve workflow usages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of workflow results to return per page. Must be between 1 and 200, with a default of 50 results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of workflows that use a specific status. This helps identify which workflows are affected by changes to a given status."""
 
     _max_results = _parse_int(max_results)
@@ -11947,7 +12081,7 @@ async def list_workflow_usages_by_status(
 
 # Tags: Tasks
 @mcp.tool()
-async def get_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to retrieve status and results for.")) -> dict[str, Any]:
+async def get_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to retrieve status and results for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and results of a long-running asynchronous task. Once completed, returns the JSON response applicable to the task; details are retained for 14 days."""
 
     # Construct request model with validation
@@ -11983,7 +12117,7 @@ async def get_task(task_id: str = Field(..., alias="taskId", description="The un
 
 # Tags: Tasks
 @mcp.tool()
-async def cancel_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to cancel.")) -> dict[str, Any]:
+async def cancel_task(task_id: str = Field(..., alias="taskId", description="The unique identifier of the task to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancels an active task in Jira. Requires either Jira administrator permissions or creator status of the task."""
 
     # Construct request model with validation
@@ -12022,7 +12156,7 @@ async def cancel_task(task_id: str = Field(..., alias="taskId", description="The
 async def list_avatars(
     type_: Literal["project", "issuetype", "priority"] = Field(..., alias="type", description="The category of avatar to retrieve: project, issue type, or priority."),
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the entity (project, issue type, or priority) associated with the avatars."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all available avatars (system and custom) for a project, issue type, or priority. Supports anonymous access for system and priority avatars, with permission checks for custom project and issue type avatars."""
 
     # Construct request model with validation
@@ -12064,7 +12198,7 @@ async def upload_avatar(
     size: str = Field(..., description="The width and height (in pixels) of the square crop region. The cropped area is extracted from the uploaded image starting at the specified X and Y coordinates."),
     x: str | None = Field(None, description="The X coordinate (in pixels) of the top-left corner of the crop region. Defaults to 0 if not specified."),
     y: str | None = Field(None, description="The Y coordinate (in pixels) of the top-left corner of the crop region. Defaults to 0 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a custom avatar image for a project, issue type, or priority. The image is automatically cropped to a square and resized into multiple formats (16x16, 24x24, 32x32, 48x48 pixels). Requires Administer Jira global permission."""
 
     _size = _parse_int(size)
@@ -12111,7 +12245,7 @@ async def delete_avatar(
     type_: Literal["project", "issuetype", "priority"] = Field(..., alias="type", description="The category of object the avatar belongs to: project, issue type, or priority."),
     owning_object_id: str = Field(..., alias="owningObjectId", description="The unique identifier of the project, issue type, or priority that owns the avatar."),
     id_: str = Field(..., alias="id", description="The unique numeric identifier of the avatar to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a custom avatar from a project, issue type, or priority. Requires Jira administrator permissions."""
 
     _id_ = _parse_int(id_)
@@ -12154,7 +12288,7 @@ async def get_avatar_image_by_avatar_id(
     id_: str = Field(..., alias="id", description="The unique identifier of the avatar to retrieve."),
     size: Literal["xsmall", "small", "medium", "large", "xlarge"] | None = Field(None, description="The desired image size: 'xsmall', 'small', 'medium', 'large', or 'xlarge'. If omitted, the default size is returned."),
     format_: Literal["png", "svg"] | None = Field(None, alias="format", description="The image format to return: either 'png' or 'svg'. If omitted, the avatar's original format is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves an avatar image for a project, issue type, or priority by ID. Returns the image in the requested size and format, or defaults to the original if not specified."""
 
     _id_ = _parse_int(id_)
@@ -12200,7 +12334,7 @@ async def get_avatar_image_by_entity(
     entity_id: str = Field(..., alias="entityId", description="The unique identifier of the entity (project or issue type) that owns the avatar."),
     size: Literal["xsmall", "small", "medium", "large", "xlarge"] | None = Field(None, description="The desired avatar image size: xsmall, small, medium, large, or xlarge. Defaults to the original size if not specified."),
     format_: Literal["png", "svg"] | None = Field(None, alias="format", description="The image format to return: either 'png' or 'svg'. Defaults to the original content format if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the avatar image for a project, issue type, or priority in the specified size and format. This operation can be accessed anonymously, though custom avatars may require project browse permissions."""
 
     # Construct request model with validation
@@ -12239,7 +12373,7 @@ async def get_avatar_image_by_entity(
 
 # Tags: Users
 @mcp.tool()
-async def get_user(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required.", max_length=128)) -> dict[str, Any]:
+async def get_user(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required.", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieve a user's profile information from Jira. Privacy controls are applied based on the user's preferences, which may hide sensitive details like email addresses."""
 
     # Construct request model with validation
@@ -12280,7 +12414,7 @@ async def get_user(account_id: str | None = Field(None, alias="accountId", descr
 async def create_user(
     email_address: str = Field(..., alias="emailAddress", description="The email address for the new user. This serves as the unique identifier for the user account."),
     products: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="An array of products the user should have access to. Valid options include jira-core, jira-servicedesk, jira-product-discovery, and jira-software. Pass an empty array to create a user without any product access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new user in Jira with specified product access. Returns 201 if the user is created or already exists with access, or 400 if the user exists without access. Requires Administer Jira global permission and organization admin status."""
 
     # Construct request model with validation
@@ -12318,7 +12452,7 @@ async def create_user(
 
 # Tags: Users
 @mcp.tool()
-async def delete_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a string identifier up to 128 characters long (for example, 5b10ac8d82e05b22cc7d4ef5).", max_length=128)) -> dict[str, Any]:
+async def delete_user(account_id: str = Field(..., alias="accountId", description="The unique account ID that identifies the user across all Atlassian products. This is a string identifier up to 128 characters long (for example, 5b10ac8d82e05b22cc7d4ef5).", max_length=128)) -> dict[str, Any] | ToolResult:
     """Permanently removes a user from Jira's user base. Note that this operation only deletes the user's Jira account and does not affect their Atlassian account."""
 
     # Construct request model with validation
@@ -12360,7 +12494,7 @@ async def list_assignable_users_multiproject(
     project_keys: str = Field(..., alias="projectKeys", description="Comma-separated list of project keys (case-sensitive) to search for assignable users. At least one project key is required."),
     start_at: str | None = Field(None, alias="startAt", description="Zero-based index for pagination to specify which result page to return. Defaults to 0 if not provided."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of users to return per page. Defaults to 50 if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve users who can be assigned issues across one or more projects. Results are filtered based on user attributes and privacy settings, and may return fewer users than requested due to pagination constraints."""
 
     _start_at = _parse_int(start_at)
@@ -12407,7 +12541,7 @@ async def list_assignable_users(
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of users to return per page. Defaults to 50. Note: the operation may return fewer users than requested, as it filters results to only assignable users."),
     action_descriptor_id: str | None = Field(None, alias="actionDescriptorId", description="The workflow transition ID to check assignability during a state change. Use with issueKey or issueId to validate users for a specific transition."),
     account_type: list[str] | None = Field(None, alias="accountType", description="Filter results by account type (e.g., atlassian, app, customer). Specify as a comma-separated list if multiple types are needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of users who can be assigned to an issue, optionally filtered by project, issue, or workflow transition. Use this to populate assignee dropdowns or validate user assignment eligibility."""
 
     _start_at = _parse_int(start_at)
@@ -12453,7 +12587,7 @@ async def list_users_by_account_ids(
     account_id: list[str] = Field(..., alias="accountId", description="One or more user account IDs to retrieve. Specify multiple account IDs to fetch multiple users in a single request. Each account ID must not exceed 128 characters.", max_length=128),
     start_at: str | None = Field(None, alias="startAt", description="The starting position for pagination, where 0 is the first user. Use this to navigate through pages of results."),
     max_results: str | None = Field(None, alias="maxResults", description="The number of users to return per page. Defaults to 10 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of Jira users by their account IDs. Requires permission to access Jira."""
 
     _start_at = _parse_int(start_at)
@@ -12499,7 +12633,7 @@ async def list_user_account_ids(
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of user results to return in a single page. Defaults to 10 items per page."),
     key: list[str] | None = Field(None, description="Key of a user. To specify multiple users, pass multiple copies of this parameter. For example, `key=fred&key=barney`. Required if `username` isn't provided. Cannot be provided if `username` is present."),
     username: list[str] | None = Field(None, description="Username of a user. To specify multiple users, pass multiple copies of this parameter. For example, `username=fred&username=barney`. Required if `key` isn't provided. Cannot be provided if `key` is present."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve account IDs for specified users by their key or username. This operation supports pagination and is useful for migrating or bulk-processing user data."""
 
     _start_at = _parse_int(start_at)
@@ -12540,7 +12674,7 @@ async def list_user_account_ids(
 
 # Tags: Users
 @mcp.tool()
-async def list_user_default_columns() -> dict[str, Any]:
+async def list_user_default_columns() -> dict[str, Any] | ToolResult:
     """Retrieves the default issue table columns configured for a user. Returns the calling user's column preferences unless an account ID is specified, which requires Jira administration permissions."""
 
     # Extract parameters for API call
@@ -12567,7 +12701,7 @@ async def list_user_default_columns() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def list_user_groups(account_id: str = Field(..., alias="accountId", description="The unique account ID of the user across all Atlassian products (up to 128 characters).", max_length=128)) -> dict[str, Any]:
+async def list_user_groups(account_id: str = Field(..., alias="accountId", description="The unique account ID of the user across all Atlassian products (up to 128 characters).", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieve all groups that a user belongs to. Requires Browse users and groups global permission."""
 
     # Construct request model with validation
@@ -12611,7 +12745,7 @@ async def search_users_by_permissions(
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of users to return per page, up to 50 results. Defaults to 50. Note that the actual number returned may be fewer due to search filtering."),
     project_key: str | None = Field(None, alias="projectKey", description="The project key for the project (case sensitive)."),
     issue_key: str | None = Field(None, alias="issueKey", description="The issue key for the issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users who have specific permissions in a project or issue and match optional search criteria. Returns matching users with privacy controls applied based on user preferences."""
 
     _start_at = _parse_int(start_at)
@@ -12656,7 +12790,7 @@ async def search_users_picker(
     query: str = Field(..., description="Search query matched against user attributes such as displayName and emailAddress. Supports prefix matching, so partial names and email prefixes will return relevant results."),
     max_results: str | None = Field(None, alias="maxResults", description="Maximum number of users to return in the results, up to 1000. Defaults to 50 if not specified. The total count of matched users is provided separately."),
     exclude_account_ids: list[str] | None = Field(None, alias="excludeAccountIds", description="List of user account IDs to exclude from search results. Accepts comma-separated or ampersand-separated format for multiple IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users by matching query terms against user attributes like display name and email address. Returns matching users with highlighted query matches in HTML format, with optional filtering to exclude specific users."""
 
     _max_results = _parse_int(max_results)
@@ -12696,7 +12830,7 @@ async def search_users_picker(
 
 # Tags: User properties
 @mcp.tool()
-async def list_user_property_keys(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128)) -> dict[str, Any]:
+async def list_user_property_keys(account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128)) -> dict[str, Any] | ToolResult:
     """Retrieves all property keys associated with a user. These are custom properties stored at the user level, distinct from Jira user profile properties."""
 
     # Construct request model with validation
@@ -12737,7 +12871,7 @@ async def list_user_property_keys(account_id: str | None = Field(None, alias="ac
 async def get_user_property(
     property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the user property you want to retrieve."),
     account_id: str | None = Field(None, alias="accountId", description="The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the value of a specific property associated with a user account. Requires either Jira administrator permissions to access any user's properties, or standard Jira access to retrieve properties from your own user record."""
 
     # Construct request model with validation
@@ -12776,7 +12910,7 @@ async def get_user_property(
 
 # Tags: User properties
 @mcp.tool()
-async def remove_user_property(property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the user property to delete. This key must match an existing property on the user's profile.")) -> dict[str, Any]:
+async def remove_user_property(property_key: str = Field(..., alias="propertyKey", description="The unique identifier for the user property to delete. This key must match an existing property on the user's profile.")) -> dict[str, Any] | ToolResult:
     """Removes a custom property from a user's profile. Requires either Jira administrator permissions to delete properties from any user, or standard Jira access to delete properties from your own user record."""
 
     # Construct request model with validation
@@ -12818,7 +12952,7 @@ async def search_users(
     property_: str | None = Field(None, alias="property", description="A property query string to filter users by custom properties using dot notation for nested values (e.g., `propertykey.nested.field=value`). Required unless `accountId` or `query` is specified."),
     query: str | None = Field(None, description="A query string that is matched against user attributes ( `displayName`, and `emailAddress`) to find relevant users. The string can match the prefix of the attribute's value. For example, *query=john* matches a user with a `displayName` of *John Smith* and a user with an `emailAddress` of *johnson@example.com*. Required, unless `accountId` or `property` is specified."),
     account_id: str | None = Field(None, alias="accountId", description="A query string that is matched exactly against a user `accountId`. Required, unless `query` or `property` is specified.", max_length=128),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for active users by name or property. Returns matching users with privacy controls applied based on user preferences. Requires Browse users and groups permission; anonymous calls return empty results."""
 
     _start_at = _parse_int(start_at)
@@ -12863,7 +12997,7 @@ async def search_users_query(
     query: str = Field(..., description="A structured query string to filter users. Supports queries like 'is assignee of PROJ', 'is reporter of (PROJ-1, PROJ-2)', or custom property matching with AND/OR operators for complex filters."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page begins. Use this to paginate through results in combination with maxResults."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per page. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users using structured queries based on their involvement with issues, projects, or custom properties. Returns a paginated list of matching user details."""
 
     _start_at = _parse_int(start_at)
@@ -12908,7 +13042,7 @@ async def search_users_by_query(
     query: str = Field(..., description="A structured query string using statements like 'is assignee of PROJ', 'is reporter of (PROJ-1, PROJ-2)', or property matching syntax. Multiple statements can be combined with AND/OR operators to create complex queries."),
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index where the result page begins. Use this to paginate through results in combination with maxResult."),
     max_result: str | None = Field(None, alias="maxResult", description="The maximum number of user keys to return per page, up to 100 items. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users using structured query syntax to find assignees, reporters, watchers, voters, commenters, or transitioners of specific issues, or match users by custom properties. Returns a paginated list of user keys matching the query criteria."""
 
     _start_at = _parse_int(start_at)
@@ -12955,7 +13089,7 @@ async def search_browsable_users(
     query: str | None = Field(None, description="A query string that is matched against user attributes, such as `displayName` and `emailAddress`, to find relevant users. The string can match the prefix of the attribute's value. For example, *query=john* matches a user with a `displayName` of *John Smith* and a user with an `emailAddress` of *johnson@example.com*. Required, unless `accountId` is specified."),
     project_key: str | None = Field(None, alias="projectKey", description="The project key for the project (case sensitive). Required, unless `issueKey` is specified."),
     issue_key: str | None = Field(None, alias="issueKey", description="The issue key for the issue. Required, unless `projectKey` is specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for users who have permission to browse issues and match the given search criteria. Results can be filtered by a specific issue or project, with privacy controls applied based on user preferences."""
 
     _start_at = _parse_int(start_at)
@@ -12999,7 +13133,7 @@ async def search_browsable_users(
 async def list_users_default(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from. Use this to paginate through large result sets."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per request, up to a limit of 1000. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all users in the Jira instance, including active, inactive, and previously deleted users with Atlassian accounts. Response data is filtered based on user privacy preferences."""
 
     _start_at = _parse_int(start_at)
@@ -13043,7 +13177,7 @@ async def list_users_default(
 async def list_users(
     start_at: str | None = Field(None, alias="startAt", description="The zero-based index position to start returning results from, enabling pagination through large user lists. Defaults to 0 if not specified."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of users to return per request, capped at 1000. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all users in the Jira instance, including active, inactive, and previously deleted users with Atlassian accounts. Response visibility is filtered based on user privacy preferences."""
 
     _start_at = _parse_int(start_at)
@@ -13094,7 +13228,7 @@ async def create_version(
     released: bool | None = Field(None, description="Whether the version has been released. Once released, subsequent release requests are ignored. Only applicable when updating a version."),
     start_date: str | None = Field(None, alias="startDate", description="The date when work on the version begins, specified in ISO 8601 format (yyyy-mm-dd)."),
     name: str | None = Field(None, description="The unique name of the version. Required when creating a version. Optional when updating a version. The maximum length is 255 characters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project version in Jira. Requires the project ID and appropriate permissions to administer the project."""
 
     _project_id = _parse_int(project_id)
@@ -13134,7 +13268,7 @@ async def create_version(
 
 # Tags: Project versions
 @mcp.tool()
-async def get_version(id_: str = Field(..., alias="id", description="The unique identifier of the version to retrieve.")) -> dict[str, Any]:
+async def get_version(id_: str = Field(..., alias="id", description="The unique identifier of the version to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific project version by its ID. This operation can be accessed anonymously and requires Browse projects permission for the project containing the version."""
 
     # Construct request model with validation
@@ -13180,7 +13314,7 @@ async def update_version(
     release_date: str | None = Field(None, alias="releaseDate", description="The date when this version is released, specified in ISO 8601 format (yyyy-mm-dd)."),
     released: bool | None = Field(None, description="Set whether this version is released. Once released, subsequent release requests are ignored."),
     start_date: str | None = Field(None, alias="startDate", description="The date when work on this version begins, specified in ISO 8601 format (yyyy-mm-dd)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing project version with new metadata such as release dates, status, and driver assignment. Requires Administer Jira global permission or Administer Projects permission for the target project."""
 
     _project_id = _parse_int(project_id)
@@ -13224,7 +13358,7 @@ async def update_version(
 async def merge_versions(
     id_: str = Field(..., alias="id", description="The ID of the version to delete. This version will be removed after all its issues are reassigned to the target version."),
     move_issues_to: str = Field(..., alias="moveIssuesTo", description="The ID of the version to merge into. All issues currently assigned to the source version will be reassigned to this version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merges two project versions by deleting the source version and reassigning all issues from it to the target version. Requires Administer Jira or Administer Projects permission."""
 
     # Construct request model with validation
@@ -13264,7 +13398,7 @@ async def reorder_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to reorder."),
     after: str | None = Field(None, description="The URL (self link) of the version after which to place the moved version. Cannot be used with `position`."),
     position: Literal["Earlier", "Later", "First", "Last"] | None = Field(None, description="An absolute position in which to place the moved version. Cannot be used with `after`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Changes the sequence position of a version within its project, affecting how versions are displayed in Jira. Requires browse permissions on the project containing the version."""
 
     # Construct request model with validation
@@ -13303,7 +13437,7 @@ async def reorder_version(
 
 # Tags: Project versions
 @mcp.tool()
-async def count_version_related_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related issue counts.")) -> dict[str, Any]:
+async def count_version_related_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves counts of issues related to a specific version, including issues where the version is set as a fix version, affected version, or in a custom version field. Requires Browse projects permission for the project containing the version."""
 
     # Construct request model with validation
@@ -13339,7 +13473,7 @@ async def count_version_related_issues(id_: str = Field(..., alias="id", descrip
 
 # Tags: Project versions
 @mcp.tool()
-async def list_related_work(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related work items.")) -> dict[str, Any]:
+async def list_related_work(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve related work items.")) -> dict[str, Any] | ToolResult:
     """Retrieves all related work items associated with a specific version. Requires Browse projects permission for the project containing the version."""
 
     # Construct request model with validation
@@ -13380,7 +13514,7 @@ async def create_related_work(
     category: str = Field(..., description="The category classification for the related work item."),
     title: str | None = Field(None, description="The display title or name of the related work item."),
     url: str | None = Field(None, description="The web address pointing to the related work item. Required for all related work types except native release notes, which will have a null URL. Must be a valid URI format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a generic related work item linked to a specific version. The related work ID is automatically generated and does not need to be provided."""
 
     # Construct request model with validation
@@ -13425,7 +13559,7 @@ async def update_related_work(
     title: str | None = Field(None, description="The display name or title for the related work."),
     url: str | None = Field(None, description="The web address pointing to the related work resource. Required for all related work types except native release notes, which use null."),
     related_work_id: str | None = Field(None, alias="relatedWorkId", description="The id of the related work. For the native release note related work item, this will be null, and Rest API does not support updating it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing related work item for a version. Only generic link related works can be modified through this API; archived version-related works cannot be edited."""
 
     # Construct request model with validation
@@ -13467,7 +13601,7 @@ async def update_related_work(
 async def delete_and_replace_version(
     id_: str = Field(..., alias="id", description="The unique identifier of the version to delete. Must be a valid version ID from the target project."),
     custom_field_replacement_list: list[_models.CustomFieldReplacement] | None = Field(None, alias="customFieldReplacementList", description="An optional array of mappings to reassign custom fields containing the deleted version. Each mapping specifies a custom field ID and the replacement version ID to use. All replacement versions must belong to the same project as the deleted version and cannot be the version being deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a project version and optionally reassigns issues to alternative versions. Issues referencing the deleted version in fixVersion, affectedVersion, or version picker custom fields will be updated with the provided replacements or cleared if no alternatives are specified."""
 
     # Construct request model with validation
@@ -13506,7 +13640,7 @@ async def delete_and_replace_version(
 
 # Tags: Project versions
 @mcp.tool()
-async def get_version_unresolved_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve issue counts.")) -> dict[str, Any]:
+async def get_version_unresolved_issues(id_: str = Field(..., alias="id", description="The unique identifier of the version for which to retrieve issue counts.")) -> dict[str, Any] | ToolResult:
     """Retrieves the count of total and unresolved issues for a specific project version. Useful for tracking version completion status and identifying outstanding work."""
 
     # Construct request model with validation
@@ -13545,7 +13679,7 @@ async def get_version_unresolved_issues(id_: str = Field(..., alias="id", descri
 async def delete_related_work(
     version_id: str = Field(..., alias="versionId", description="The unique identifier of the version containing the related work to be deleted."),
     related_work_id: str = Field(..., alias="relatedWorkId", description="The unique identifier of the related work item to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a related work item from a specific version. Requires permissions to resolve and edit issues in the project containing the version."""
 
     # Construct request model with validation
@@ -13581,7 +13715,7 @@ async def delete_related_work(
 
 # Tags: Workflows
 @mcp.tool()
-async def list_workflow_history(workflow_id: str | None = Field(None, alias="workflowId", description="The unique identifier of the workflow whose history you want to retrieve.")) -> dict[str, Any]:
+async def list_workflow_history(workflow_id: str | None = Field(None, alias="workflowId", description="The unique identifier of the workflow whose history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves workflow history entries for a specified workflow, showing past changes and events. Note that historical data is only available for the last 60 days and entries before October 30th, 2025 are not accessible."""
 
     # Construct request model with validation
@@ -13623,7 +13757,7 @@ async def list_workflow_issue_type_usages(
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier of the workflow to query for issue type usage."),
     project_id: str = Field(..., alias="projectId", description="The unique identifier of the project in which to find issue type usages."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of issue types to return per page. Must be between 1 and 200, defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the issue types within a project that are currently using a specified workflow. Returns paginated results of issue type assignments."""
 
     _project_id = _parse_int(project_id)
@@ -13668,7 +13802,7 @@ async def list_workflow_issue_type_usages(
 async def list_workflow_projects(
     workflow_id: str = Field(..., alias="workflowId", description="The unique identifier of the workflow to query for project usage."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of projects to return per page, between 1 and 200. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects that use a specified workflow. Useful for understanding workflow adoption and impact across your Jira instance."""
 
     _max_results = _parse_int(max_results)
@@ -13713,7 +13847,7 @@ async def list_workflow_capabilities(
     workflow_id: str | None = Field(None, alias="workflowId", description="The unique identifier of the workflow. Use this to retrieve capabilities for a specific workflow by ID."),
     project_id: str | None = Field(None, alias="projectId", description="The unique identifier of the project. Use this with issueTypeId as an alternative to workflowId to identify the workflow by project context."),
     issue_type_id: str | None = Field(None, alias="issueTypeId", description="The unique identifier of the issue type. Use this with projectId as an alternative to workflowId to identify the workflow by issue type context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve available workflow capabilities including rules, scope, and project types. Requires either a workflow ID or a project and issue type ID pair to identify the target workflow."""
 
     # Construct request model with validation
@@ -13751,7 +13885,7 @@ async def list_workflow_capabilities(
 
 # Tags: Workflows
 @mcp.tool()
-async def get_workflow_default_editor() -> dict[str, Any]:
+async def get_workflow_default_editor() -> dict[str, Any] | ToolResult:
     """Retrieve the user's default workflow editor preference, which can be either the new editor or the legacy editor."""
 
     # Extract parameters for API call
@@ -13781,7 +13915,7 @@ async def get_workflow_default_editor() -> dict[str, Any]:
 async def preview_workflows(
     project_id: str = Field(..., alias="projectId", description="The project ID for permission validation and workflow association. Required to identify the project context and enforce access controls."),
     issue_type_ids: list[str] | None = Field(None, alias="issueTypeIds", description="List of issue type IDs to filter workflows. Specify up to 25 issue type IDs; at least one lookup criterion (issueTypeIds, workflowNames, or workflowIds) is required.", min_length=0, max_length=25),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a read-only preview of workflows for a specified project. Returns workflow configuration details filtered by issue types, project permissions, and lookup criteria."""
 
     # Construct request model with validation
@@ -13819,7 +13953,7 @@ async def preview_workflows(
 
 # Tags: Workflow scheme project associations
 @mcp.tool()
-async def list_workflow_schemes_by_projects(project_id: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="projectId", description="One or more project IDs to retrieve associated workflow schemes for. Provide between 1 and 100 project IDs; non-existent or team-managed projects are ignored without error.", min_length=1, max_length=100)) -> dict[str, Any]:
+async def list_workflow_schemes_by_projects(project_id: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., alias="projectId", description="One or more project IDs to retrieve associated workflow schemes for. Provide between 1 and 100 project IDs; non-existent or team-managed projects are ignored without error.", min_length=1, max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieves the workflow schemes associated with specified projects, showing which projects are linked to each scheme. Team-managed and non-existent projects are silently ignored. The Default Workflow Scheme is returned without an ID."""
 
     # Construct request model with validation
@@ -13860,7 +13994,7 @@ async def list_workflow_schemes_by_projects(project_id: Annotated[list[int], Aft
 async def list_workflow_scheme_projects(
     workflow_scheme_id: str = Field(..., alias="workflowSchemeId", description="The unique identifier of the workflow scheme for which to retrieve associated projects."),
     max_results: str | None = Field(None, alias="maxResults", description="The maximum number of projects to return per page, between 1 and 200. Defaults to 50 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of projects that are currently using a specified workflow scheme."""
 
     _max_results = _parse_int(max_results)
@@ -13901,7 +14035,7 @@ async def list_workflow_scheme_projects(
 
 # Tags: Issue worklogs
 @mcp.tool()
-async def list_deleted_worklogs(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the deletion window. Only worklogs deleted after this timestamp are returned. Defaults to 0 (epoch start) if not specified.")) -> dict[str, Any]:
+async def list_deleted_worklogs(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the deletion window. Only worklogs deleted after this timestamp are returned. Defaults to 0 (epoch start) if not specified.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of worklog IDs and deletion timestamps for worklogs deleted after a specified date and time. Results are ordered from oldest to youngest, with up to 1000 worklogs per page."""
 
     _since = _parse_int(since)
@@ -13941,7 +14075,7 @@ async def list_deleted_worklogs(since: str | None = Field(None, description="The
 
 # Tags: Issue worklogs
 @mcp.tool()
-async def get_worklogs(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of worklog IDs to retrieve. Only worklogs that are viewable by all users or where you have project role or group permissions will be returned, up to a maximum of 1000 items.")) -> dict[str, Any]:
+async def get_worklogs(ids: Annotated[list[int], AfterValidator(_check_unique_items)] = Field(..., description="A list of worklog IDs to retrieve. Only worklogs that are viewable by all users or where you have project role or group permissions will be returned, up to a maximum of 1000 items.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed worklog information for a specified list of worklog IDs. Returns up to 1000 worklogs where you have permission to view them."""
 
     # Construct request model with validation
@@ -13979,7 +14113,7 @@ async def get_worklogs(ids: Annotated[list[int], AfterValidator(_check_unique_it
 
 # Tags: Issue worklogs
 @mcp.tool()
-async def list_worklogs_modified_since(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the time range. Only worklogs updated after this timestamp are returned. Defaults to 0 (epoch start) if not specified. Note: worklogs updated during the minute immediately preceding the request are excluded.")) -> dict[str, Any]:
+async def list_worklogs_modified_since(since: str | None = Field(None, description="The UNIX timestamp in milliseconds marking the start of the time range. Only worklogs updated after this timestamp are returned. Defaults to 0 (epoch start) if not specified. Note: worklogs updated during the minute immediately preceding the request are excluded.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of worklog IDs and their update timestamps for all worklogs modified after a specified date and time. Results are ordered from oldest to youngest, with a maximum of 1000 worklogs per page."""
 
     _since = _parse_int(since)
