@@ -1,7 +1,7 @@
 """
 Notion MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:27:11 UTC
+Generated: 2026-04-23 21:30:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

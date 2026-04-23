@@ -5,7 +5,7 @@ Notion MCP Server
 API Info:
 - Terms of Service: https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac
 
-Generated: 2026-04-14 18:27:11 UTC
+Generated: 2026-04-23 21:30:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.notion.com")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -826,16 +944,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -849,6 +968,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -891,6 +1011,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -902,7 +1037,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -910,27 +1044,18 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'bearerAuth',
-    'basicAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["bearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
+    _auth_handlers["bearerAuth"] = _auth.OAuth2Auth()
     logging.info("Authentication configured: bearerAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for bearerAuth not configured: {error_msg}")
     _auth_handlers["bearerAuth"] = None
-try:
-    _auth_handlers["basicAuth"] = _auth.BasicAuth(env_var_username="BASIC_AUTH_USERNAME", env_var_password="BASIC_AUTH_PASSWORD")
-    logging.info("Authentication configured: basicAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for basicAuth not configured: {error_msg}")
-    _auth_handlers["basicAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1052,7 +1177,7 @@ mcp = FastMCP("Notion", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Users
 @mcp.tool()
-async def get_self(notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11.")) -> dict[str, Any]:
+async def get_self(notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11.")) -> dict[str, Any] | ToolResult:
     """Retrieve the bot user associated with your API token. This returns information about the authenticated user making the request."""
 
     # Construct request model with validation
@@ -1091,7 +1216,7 @@ async def get_self(notion_version: Literal["2026-03-11"] = Field(..., alias="Not
 async def get_user(
     user_id: str = Field(..., description="The unique identifier of the user to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific user by their ID. Returns the user's profile information and details."""
 
     # Construct request model with validation
@@ -1131,7 +1256,7 @@ async def get_user(
 async def list_users(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="API version to use for this request. Must be set to the latest version 2026-03-11 to ensure compatibility with current API behavior."),
     page_size: float | None = Field(None, description="Number of users to return per page for pagination. Controls the batch size of results in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all users in the system. Use pagination parameters to control result size and navigate through user records."""
 
     # Construct request model with validation
@@ -1179,7 +1304,7 @@ async def create_page(
     children: list[_models.BlockObjectRequest] | None = Field(None, description="An optional array of child blocks to add to the page during creation. Maximum of 100 blocks allowed.", max_length=100),
     template: _models.PostPageBodyTemplate | None = Field(None, description="An optional template configuration to apply to the page upon creation."),
     position: _models.PagePositionSchema | None = Field(None, description="An optional position specification to control where the page appears relative to siblings (e.g., before/after another page)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new page in Notion. Specify the parent location, page properties, and optional visual elements like icons and covers. You can also include child blocks and apply templates during creation."""
 
     # Construct request model with validation
@@ -1222,7 +1347,7 @@ async def get_page(
     page_id: str = Field(..., description="The unique identifier of the page to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     filter_properties: list[str] | None = Field(None, description="Optional list of property IDs to include in the response. Only properties that exist on the page will be returned; up to 100 properties can be specified. Properties not in this list will be excluded from the response.", max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single page by its ID from Notion. Optionally filter the response to include only specified properties."""
 
     # Construct request model with validation
@@ -1273,7 +1398,7 @@ async def update_page(
     erase_content: bool | None = Field(None, description="Whether to erase all existing page content. When used with a template, the template content replaces the erased content. When used alone, simply clears the page."),
     in_trash: bool | None = Field(None, description="Whether to move the page to or restore it from trash."),
     is_archived: bool | None = Field(None, description="Whether to archive the page, hiding it from the workspace while preserving its content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Notion page's properties, appearance, content, and metadata. Supports modifying page title/properties, icon, cover image, lock status, archived state, and content via template replacement or erasure."""
 
     # Construct request model with validation
@@ -1317,7 +1442,7 @@ async def move_page(
     page_id: str = Field(..., description="The unique identifier of the page to move."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
     parent: _models.MovePageBodyParentV0 | _models.MovePageBodyParentV1 = Field(..., description="The new parent location for the page. This specifies where the page will be moved to in the hierarchy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a page to a new parent location within Notion. The page will be relocated under the specified parent, updating its position in the page hierarchy."""
 
     # Construct request model with validation
@@ -1362,7 +1487,7 @@ async def get_page_property(
     property_id: str = Field(..., description="The unique identifier of the property to retrieve from the page."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 or later for compatibility with current API features."),
     page_size: int | None = Field(None, description="The maximum number of items to return in the response. Controls pagination size for the property results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific property item from a Notion page. Use this to fetch individual property values associated with a page."""
 
     # Construct request model with validation
@@ -1406,7 +1531,7 @@ async def get_page_markdown(
     page_id: str = Field(..., description="The unique identifier of the Notion page to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     include_transcript: bool | None = Field(None, description="Whether to include full meeting note transcripts in the markdown output. When false (default), meeting notes are represented as placeholders with URLs instead of full transcript text."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a Notion page in markdown format. Optionally include meeting note transcripts or use placeholder URLs instead."""
 
     # Construct request model with validation
@@ -1454,7 +1579,7 @@ async def update_page_markdown(
     replace_content_range: _models.UpdatePageMarkdownBodyReplaceContentRange | None = Field(None, description="Configuration for replacing a specific range of content within the page using markdown."),
     update_content: _models.UpdatePageMarkdownBodyUpdateContent | None = Field(None, description="Configuration for updating content using search-and-replace operations to find and modify specific text."),
     replace_content: _models.UpdatePageMarkdownBodyReplaceContent | None = Field(None, description="Configuration for replacing the entire page content with new markdown, removing all existing content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Notion page's content using markdown. Supports inserting new content, replacing specific ranges, performing search-and-replace operations, or replacing the entire page content."""
 
     # Construct request model with validation
@@ -1497,7 +1622,7 @@ async def update_page_markdown(
 async def get_block(
     block_id: str = Field(..., description="The unique identifier of the block to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 (the latest version)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific block by its ID from Notion. Returns the block's properties and content."""
 
     # Construct request model with validation
@@ -1538,7 +1663,7 @@ async def update_block(
     block_id: str = Field(..., description="The unique identifier of the block to update."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     body: _models.UpdateABlockBodyV0V0 | _models.UpdateABlockBodyV0V1 | _models.UpdateABlockBodyV0V2 | _models.UpdateABlockBodyV0V3 | _models.UpdateABlockBodyV0V4 | _models.UpdateABlockBodyV0V5 | _models.UpdateABlockBodyV0V6 | _models.UpdateABlockBodyV0V7 | _models.UpdateABlockBodyV0V8 | _models.UpdateABlockBodyV0V9 | _models.UpdateABlockBodyV0V10 | _models.UpdateABlockBodyV0V11 | _models.UpdateABlockBodyV0V12 | _models.UpdateABlockBodyV0V13 | _models.UpdateABlockBodyV0V14 | _models.UpdateABlockBodyV0V15 | _models.UpdateABlockBodyV0V16 | _models.UpdateABlockBodyV0V17 | _models.UpdateABlockBodyV0V18 | _models.UpdateABlockBodyV0V19 | _models.UpdateABlockBodyV0V20 | _models.UpdateABlockBodyV0V21 | _models.UpdateABlockBodyV0V22 | _models.UpdateABlockBodyV0V23 | _models.UpdateABlockBodyV0V24 | _models.UpdateABlockBodyV0V25 | _models.UpdateABlockBodyV0V26 | _models.UpdateABlockBodyV0V27 | _models.UpdateABlockBodyV0V28 | _models.UpdateABlockBodyV0V29 | _models.UpdateABlockBodyV1 = Field(..., description="The block update payload containing the properties to modify."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the properties of an existing block in Notion. Modify block content, formatting, or other attributes using the provided block ID."""
 
     # Construct request model with validation
@@ -1582,7 +1707,7 @@ async def update_block(
 async def delete_block(
     block_id: str = Field(..., description="The unique identifier of the block to delete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a block from a Notion workspace. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1623,7 +1748,7 @@ async def list_block_children(
     block_id: str = Field(..., description="The unique identifier of the parent block whose children you want to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 or later for compatibility with current API features."),
     page_size: float | None = Field(None, description="The maximum number of child blocks to return in a single response. Use pagination to retrieve additional results if needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all child blocks contained within a specified parent block. Use this to navigate the hierarchical structure of Notion blocks and access nested content."""
 
     # Construct request model with validation
@@ -1668,7 +1793,7 @@ async def append_block_children(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     children: list[_models.BlockObjectRequest] = Field(..., description="An array of child block objects to append. Maximum of 100 blocks per request. Order in the array determines the sequence of appended blocks.", max_length=100),
     position: _models.ContentPositionSchema | None = Field(None, description="Optional positioning configuration that specifies where the child blocks should be inserted relative to existing children."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Append child blocks to a parent block. Allows adding up to 100 child blocks in a single request, with optional positioning control."""
 
     # Construct request model with validation
@@ -1711,7 +1836,7 @@ async def append_block_children(
 async def get_data_source(
     data_source_id: str = Field(..., description="The unique identifier of the data source to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific data source by its ID. Returns the complete configuration and metadata for the requested data source."""
 
     # Construct request model with validation
@@ -1756,7 +1881,7 @@ async def update_data_source(
     icon: _models.FileUploadPageIconRequest | _models.EmojiPageIconRequest | _models.ExternalPageIconRequest | _models.CustomEmojiPageIconRequest | _models.IconPageIconRequest | None = Field(None, description="The icon to display for the data source page."),
     properties: dict[str, _models.UpdateADataSourceBodyPropertiesValueV0 | _models.UpdateADataSourceBodyPropertiesValueV1] | None = Field(None, description="The property schema configuration for the data source. Provide an object where keys are property names or IDs and values are property configuration objects. Set a property to null to remove it."),
     in_trash: bool | None = Field(None, description="Whether to move the data source to or from the trash. If not provided, the trash status remains unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a data source in Notion, including its title, icon, properties, and trash status. Use the database_id to specify the parent database containing this data source."""
 
     # Construct request model with validation
@@ -1806,7 +1931,7 @@ async def query_data_source(
     page_size: float | None = Field(None, description="The maximum number of results to return per request. Used for pagination control."),
     in_trash: bool | None = Field(None, description="If true, include only items in the trash. If false or omitted, exclude trashed items."),
     result_type: Literal["page", "data_source"] | None = Field(None, description="Optionally restrict results to a specific type: 'page' for pages only, or 'data_source' for data sources only. Defaults to returning both types (wiki databases only)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a query against a data source to retrieve filtered, sorted results. Supports pagination and optional filtering by result type (pages or data sources)."""
 
     # Construct request model with validation
@@ -1855,7 +1980,7 @@ async def create_data_source(
     properties: dict[str, _models.PropertyConfigurationRequest] = Field(..., description="The property schema object that defines the structure and types of properties for this data source."),
     title: list[_models.RichTextItemRequest] | None = Field(None, description="The display name for the data source as it will appear in Notion. Limited to a maximum of 100 characters.", max_length=100),
     icon: _models.FileUploadPageIconRequest | _models.EmojiPageIconRequest | _models.ExternalPageIconRequest | _models.CustomEmojiPageIconRequest | _models.IconPageIconRequest | None = Field(None, description="An icon to visually represent the data source in the Notion interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new data source within a Notion database by defining its property schema. This establishes the structure and metadata for how data will be organized in the specified parent database."""
 
     # Construct request model with validation
@@ -1900,7 +2025,7 @@ async def list_data_source_templates(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Currently supports version 2026-03-11."),
     name: str | None = Field(None, description="Filter templates by name using case-insensitive substring matching. Only templates whose names contain this value will be returned."),
     page_size: int | None = Field(None, description="The maximum number of templates to return in the response. Must be between 1 and 100 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of templates available within a specific data source, with optional filtering by name."""
 
     # Construct request model with validation
@@ -1943,7 +2068,7 @@ async def list_data_source_templates(
 async def get_database(
     database_id: str = Field(..., description="The unique identifier of the database to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific database by its ID. Returns the database's properties, configuration, and metadata."""
 
     # Construct request model with validation
@@ -1991,7 +2116,7 @@ async def update_database(
     cover: _models.FileUploadPageCoverRequest | _models.ExternalPageCoverRequest | None = Field(None, description="The new cover image for the database. If omitted, the current cover is preserved."),
     in_trash: bool | None = Field(None, description="Whether to move the database to trash (true) or restore it from trash (false). If omitted, the current trash status is preserved."),
     is_locked: bool | None = Field(None, description="Whether to lock the database from editing in the Notion app UI. If omitted, the current lock state is preserved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing database in Notion, including its title, description, icon, cover, parent location, inline display status, trash status, and lock state. Only provided fields will be updated; omitted fields remain unchanged."""
 
     # Construct request model with validation
@@ -2040,7 +2165,7 @@ async def create_database(
     properties: dict[str, _models.PropertyConfigurationRequest] | None = Field(None, description="The property schema defining the initial columns and data structure for the database. Use this to pre-configure database fields when creating the database."),
     icon: _models.FileUploadPageIconRequest | _models.EmojiPageIconRequest | _models.ExternalPageIconRequest | _models.CustomEmojiPageIconRequest | _models.IconPageIconRequest | None = Field(None, description="An icon to visually represent the database in the Notion interface."),
     cover: _models.FileUploadPageCoverRequest | _models.ExternalPageCoverRequest | None = Field(None, description="A cover image displayed at the top of the database page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new database in Notion within a specified parent page or workspace. Optionally configure the database with a title, description, properties schema, icon, and cover image."""
 
     # Construct request model with validation
@@ -2088,7 +2213,7 @@ async def search_pages_by_property(
     value: Literal["page", "data_source"] = Field(..., description="The type of result to return: page (for Notion pages) or data_source (for connected data sources)."),
     query: str | None = Field(None, description="The search query text to filter pages by title or content. Leave empty to retrieve all results without text filtering."),
     page_size: float | None = Field(None, description="The maximum number of results to return per request. Use for pagination control."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for pages in Notion by filtering on a specific property value, with results sorted by last edited time in your preferred direction."""
 
     # Construct request model with validation
@@ -2133,7 +2258,7 @@ async def list_comments(
     block_id: str = Field(..., description="The unique identifier of the block for which to retrieve comments."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     page_size: int | None = Field(None, description="The maximum number of comments to return in the response. Must be between 1 and 100 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of comments for a specific block in Notion. Use pagination parameters to control the number of results returned."""
 
     # Construct request model with validation
@@ -2175,7 +2300,7 @@ async def list_comments(
 async def create_comment(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11`, which is the latest supported version."),
     body: _models.CreateACommentBody = Field(..., description="The request body containing the comment data to be created, including content and any required metadata fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new comment in Notion. The request body should contain the comment content and metadata required by the Notion API."""
 
     # Construct request model with validation
@@ -2218,7 +2343,7 @@ async def create_comment(
 async def get_comment(
     comment_id: str = Field(..., description="The unique identifier of the comment to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific comment by its ID from the Notion API. Returns the full comment object with all associated metadata."""
 
     # Construct request model with validation
@@ -2259,7 +2384,7 @@ async def list_file_uploads(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="API version to use for this request. Must be set to the latest version: 2026-03-11."),
     status: Literal["pending", "uploaded", "expired", "failed"] | None = Field(None, description="Filter results to only include file uploads with a specific status: pending (awaiting processing), uploaded (successfully completed), expired (no longer available), or failed (encountered an error)."),
     page_size: int | None = Field(None, description="Number of file uploads to return per page, between 1 and 100 items. Use this to control pagination size for large result sets.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of file uploads with optional filtering by status. Use this to monitor the progress and state of files being uploaded to the system."""
 
     # Construct request model with validation
@@ -2305,7 +2430,7 @@ async def create_file_upload(
     content_type: str | None = Field(None, description="MIME type of the file (e.g., `application/pdf`, `image/png`). Recommended for multi-part uploads and must match both the file being sent and the filename extension if provided."),
     number_of_parts: int | None = Field(None, description="For multi-part uploads, specify the total number of parts you will upload. Must be between 1 and 10,000 and match the final part number sent.", ge=1, le=10000),
     external_url: str | None = Field(None, description="When using `external_url` mode, provide the HTTPS URL of a publicly accessible file to import into your workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a file upload to Notion, supporting single-part uploads for files under 20MB, multi-part uploads for larger files, or external URL imports for publicly hosted files."""
 
     # Construct request model with validation
@@ -2349,7 +2474,7 @@ async def send_file_upload(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be `2026-03-11` or later."),
     file_: dict[str, Any] = Field(..., alias="file", description="The raw binary file contents to upload."),
     part_number: str | None = Field(None, description="The current part number when uploading files in multiple parts (required for files larger than 20MB). Must be an integer between 1 and 1,000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload file contents to a file upload session, supporting multipart uploads for files larger than 20MB."""
 
     # Construct request model with validation
@@ -2393,7 +2518,7 @@ async def send_file_upload(
 async def complete_file_upload(
     file_upload_id: str = Field(..., description="The unique identifier of the file upload session to complete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11` or later for compatibility with current API features."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Finalize a multi-part file upload by marking it as complete. This operation signals that all file chunks have been uploaded and the file is ready for processing."""
 
     # Construct request model with validation
@@ -2433,7 +2558,7 @@ async def complete_file_upload(
 async def get_file_upload(
     file_upload_id: str = Field(..., description="The unique identifier of the file upload to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to `2026-03-11` for the latest version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details about a specific file upload by its ID. Use this to check the status and metadata of a previously initiated file upload."""
 
     # Construct request model with validation
@@ -2474,7 +2599,7 @@ async def list_custom_emojis(
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version: 2026-03-11."),
     page_size: int | None = Field(None, description="Maximum number of custom emojis to return in the response, between 1 and 100 items.", ge=1, le=100),
     name: str | None = Field(None, description="Filter results to a custom emoji with an exact name match. Useful for looking up a specific emoji's ID by name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of custom emojis from your Notion workspace. Optionally filter by exact name match to resolve a specific emoji to its ID."""
 
     # Construct request model with validation
@@ -2518,7 +2643,7 @@ async def list_views(
     database_id: str | None = Field(None, description="Filter results to views belonging to a specific database. Omit to include views from all databases."),
     data_source_id: str | None = Field(None, description="Filter results to views associated with a specific data source. Omit to include views from all data sources."),
     page_size: int | None = Field(None, description="Number of views to return per page. Must be between 1 and 100 items. Defaults to a server-determined limit if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of views, optionally filtered by database or data source. Use this to discover available views in your workspace."""
 
     # Construct request model with validation
@@ -2574,7 +2699,7 @@ async def create_view(
     configuration: _models.TableViewConfigRequest | _models.BoardViewConfigRequest | _models.CalendarViewConfigRequest | _models.TimelineViewConfigRequest | _models.GalleryViewConfigRequest | _models.ListViewConfigRequest | _models.MapViewConfigRequest | _models.FormViewConfigRequest | _models.ChartViewConfigRequest | None = Field(None, description="View-specific presentation configuration. The configuration type must match the specified view type."),
     position: _models.CreateViewBodyPosition | None = Field(None, description="The position where this view should appear in the database's view tab bar. Only applicable when database_id is provided. Defaults to appending at the end."),
     placement: _models.CreateViewBodyPlacement | None = Field(None, description="The placement location for this widget within a dashboard view. Only applicable when view_id is provided. Defaults to creating a new row at the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view within a database, dashboard, or as a new database on a page. Views can be tables, boards, lists, calendars, timelines, galleries, forms, charts, maps, or dashboards with optional filtering, sorting, and quick filters."""
 
     # Construct request model with validation
@@ -2620,7 +2745,7 @@ async def create_view(
 async def get_view(
     view_id: str = Field(..., description="The unique identifier of the view to retrieve."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific view by its ID from Notion. Returns the view's configuration and metadata."""
 
     # Construct request model with validation
@@ -2665,7 +2790,7 @@ async def update_view(
     sorts: list[_models.ViewPropertySortRequest] | None = Field(None, description="An ordered list of property-based sorts to apply to the view (up to 100 sorts). Pass null to clear all sorts.", max_length=100),
     quick_filters: dict[str, _models.QuickFilterConditionRequest] | None = Field(None, description="Quick filter definitions for the view's filter bar, keyed by property name or ID. Set a key to a filter condition to add or update that quick filter, set it to null to remove it, or pass null for the entire field to clear all quick filters. Unspecified quick filters are preserved."),
     configuration: _models.TableViewConfigRequest | _models.BoardViewConfigRequest | _models.CalendarViewConfigRequest | _models.TimelineViewConfigRequest | _models.GalleryViewConfigRequest | _models.ListViewConfigRequest | _models.MapViewConfigRequest | _models.FormViewConfigRequest | _models.ChartViewConfigRequest | None = Field(None, description="View presentation configuration object. The type field must match the view's type. Individual fields within the configuration can be set to null to clear them."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a view's configuration, including its name, filters, sorts, quick filters, and presentation settings. Changes are applied to the specified view."""
 
     # Construct request model with validation
@@ -2708,7 +2833,7 @@ async def update_view(
 async def delete_view(
     view_id: str = Field(..., description="The unique identifier of the view to delete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to the latest version 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a view by its ID. This operation removes the view and cannot be undone."""
 
     # Construct request model with validation
@@ -2749,7 +2874,7 @@ async def create_view_query(
     view_id: str = Field(..., description="The unique identifier of the view where the query will be created."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Currently supports version 2026-03-11."),
     page_size: int | None = Field(None, description="The maximum number of results to return per page, between 1 and 100 items.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new query within a Notion view to retrieve filtered or sorted results. Specify pagination preferences to control the number of results returned per request."""
 
     # Construct request model with validation
@@ -2794,7 +2919,7 @@ async def get_view_query_results(
     query_id: str = Field(..., description="The unique identifier of the query whose results should be retrieved."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The Notion API version to use for this request. Must be set to 2026-03-11 or later."),
     page_size: int | None = Field(None, description="Number of results to return per page, between 1 and 100 inclusive. Defaults to a standard page size if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the results of a query executed against a Notion view. Returns paginated results from the specified view and query."""
 
     # Construct request model with validation
@@ -2838,7 +2963,7 @@ async def delete_view_query(
     view_id: str = Field(..., description="The unique identifier of the view containing the query to delete."),
     query_id: str = Field(..., description="The unique identifier of the query to delete."),
     notion_version: Literal["2026-03-11"] = Field(..., alias="Notion-Version", description="The API version to use for this request. Must be set to the latest version: 2026-03-11."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific query from a view. This operation removes the query and cannot be undone."""
 
     # Construct request model with validation

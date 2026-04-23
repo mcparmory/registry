@@ -1,11 +1,12 @@
 # Notion MCP Server
+<!-- mcp-name: com.mcparmory/notion -->
 
 Base URL: https://api.notion.com
 | | |
 |---|---|
 | **Category** | Productivity |
 | **Tools** | 41 |
-| **Auth** | Bearer Token, HTTP Basic |
+| **Auth** | OAuth2 |
 
 ## API Info
 - **Terms of Service:** [https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac](https://notion.notion.site/Terms-and-Privacy-28ffdd083dc3473e9c2da6ec011b58ac)
@@ -17,9 +18,9 @@ Base URL: https://api.notion.com
 ### Quick Start (recommended)
 
 ```bash
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 uvx mcparmory-notion
 ```
 
@@ -27,9 +28,9 @@ uvx mcparmory-notion
 
 ```bash
 pip install mcparmory-notion
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 mcparmory-notion
 ```
 
@@ -44,14 +45,16 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-notion"],
       "env": {
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
-        "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
+        "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
+        "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
+        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES"
       }
     }
   }
 }
 ```
+
+Set `OAUTH2_SCOPES` to a comma-separated list of scopes your app requires (e.g. `OAUTH2_SCOPES=scope_a,scope_b`). Open `.env` to see all available scopes with descriptions.
 
 ---
 
@@ -59,10 +62,24 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `BEARER_TOKEN` — Bearer token
-- `BASIC_AUTH_USERNAME` — Username
-- `BASIC_AUTH_PASSWORD` — Password
+- `OAUTH2_CLIENT_ID` — OAuth2 client ID
+- `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
+- `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 Do not commit credentials to version control.
+
+### OAuth2
+
+Add this **redirect URI** to your OAuth provider's allowed redirect URIs:
+
+```
+http://localhost:9400/callback
+```
+
+If you change `OAUTH2_CALLBACK_PORT` in `.env`, update the redirect URI to match.
+
+On first use, a browser window opens automatically for OAuth authorization. Grant access when prompted — tokens are saved to `tokens/oauth2_tokens.json` and refreshed automatically.
+
+**Re-authorization:** Delete `tokens/oauth2_tokens.json` and restart the server.
 
 ---
 
@@ -95,14 +112,32 @@ Example (if server is at `/home/user/mcp-servers/notion`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  ghcr.io/mcparmory/notion:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
 docker build -t notion .
-docker run -p 8000:8000 --env-file .env notion
+mkdir -p tokens
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env notion
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
+
+On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
