@@ -1,7 +1,7 @@
 """
 Authentication module for Linkup MCP server.
 
-Generated: 2026-04-14 18:25:32 UTC
+Generated: 2026-04-23 21:26:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:

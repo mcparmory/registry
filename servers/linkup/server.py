@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Linkup MCP Server
-Generated: 2026-04-14 18:25:32 UTC
+Generated: 2026-04-23 21:26:57 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.linkup.so")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -822,16 +940,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -845,6 +964,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -887,6 +1007,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -898,7 +1033,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1039,7 +1173,7 @@ mcp = FastMCP("Linkup", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Credits
 @mcp.tool()
-async def get_credits_balance() -> dict[str, Any]:
+async def get_credits_balance() -> dict[str, Any] | ToolResult:
     """Retrieve your current account credits balance. This endpoint returns the total number of credits available in your account."""
 
     # Extract parameters for API call
@@ -1071,7 +1205,7 @@ async def get_webpage(
     render_js: bool | None = Field(None, alias="renderJs", description="Whether to render JavaScript before extracting content. Disabled by default; enable for dynamic pages that require script execution."),
     include_raw_html: bool | None = Field(None, alias="includeRawHtml", description="Whether to include the raw HTML markup in the response. Disabled by default; enable if you need the unprocessed HTML source."),
     extract_images: bool | None = Field(None, alias="extractImages", description="Whether to extract and return images found on the webpage. Disabled by default; enable to retrieve image URLs and metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Fetch and parse a single webpage from a given URL, with optional JavaScript rendering, raw HTML inclusion, and image extraction."""
 
     # Construct request model with validation
@@ -1122,7 +1256,7 @@ async def search_web_content(
     exclude_domains: list[str] | None = Field(None, alias="excludeDomains", description="Exclude specific domains from search results. By default, no domains are excluded."),
     include_inline_citations: bool | None = Field(None, alias="includeInlineCitations", description="When using `sourcedAnswer` output type, include inline citations within the answer text to indicate source attribution."),
     max_results: float | None = Field(None, alias="maxResults", description="The maximum number of results to return. The actual number of results returned will not exceed this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web content by natural language query with configurable search depth, output formatting, and result filtering. Supports structured responses, date ranges, domain filtering, and optional citations or images."""
 
     # Construct request model with validation
@@ -1160,7 +1294,7 @@ async def search_web_content(
 
 # Tags: Research
 @mcp.tool()
-async def list_research_tasks() -> dict[str, Any]:
+async def list_research_tasks() -> dict[str, Any] | ToolResult:
     """Retrieve all research tasks created within your authenticated organization with pagination support. This endpoint is currently in beta and may be subject to changes."""
 
     # Extract parameters for API call
@@ -1199,7 +1333,7 @@ async def create_research_task(
     exclude_domains: list[str] | None = Field(None, alias="excludeDomains", description="Exclude specific domains from the search results. Provide domain names to filter out (e.g., 'wikipedia.com'). By default, no domains are excluded."),
     include_inline_citations: bool | None = Field(None, alias="includeInlineCitations", description="When using `sourcedAnswer` output type, set to `true` to include inline citations within the answer text. Defaults to `false`."),
     max_results: float | None = Field(None, alias="maxResults", description="The maximum number of search results to return. The actual number of results returned will not exceed this value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an asynchronous web research task that performs comprehensive research based on a natural language question. Returns structured or sourced answers with optional filtering by date range, domains, and result count."""
 
     # Construct request model with validation
@@ -1237,7 +1371,7 @@ async def create_research_task(
 
 # Tags: Research
 @mcp.tool()
-async def get_research(id_: str = Field(..., alias="id", description="The unique identifier of the research task to retrieve.")) -> dict[str, Any]:
+async def get_research(id_: str = Field(..., alias="id", description="The unique identifier of the research task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific research task by its identifier. This endpoint is currently in beta and may be subject to changes."""
 
     # Construct request model with validation

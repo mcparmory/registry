@@ -1,4 +1,5 @@
 # Linkup MCP Server
+<!-- mcp-name: com.mcparmory/linkup -->
 
 Base URL: https://api.linkup.so
 | | |
@@ -84,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/linkup`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/linkup:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -91,7 +102,9 @@ docker build -t linkup .
 docker run -p 8000:8000 --env-file .env linkup
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
