@@ -1,11 +1,12 @@
 # E2B MCP Server
+<!-- mcp-name: com.mcparmory/e2b -->
 
 Base URL: https://api.e2b.app
 | | |
 |---|---|
 | **Category** | Developer Tools |
 | **Tools** | 43 |
-| **Auth** | API Key, Bearer Token |
+| **Auth** | API Key |
 
 ---
 
@@ -14,11 +15,7 @@ Base URL: https://api.e2b.app
 ### Quick Start (recommended)
 
 ```bash
-API_KEY_AUTH=YOUR_API_KEY_AUTH \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-SUPABASE1_TOKEN_AUTH_API_KEY=YOUR_SUPABASE1_TOKEN_AUTH_API_KEY \
-SUPABASE2_TEAM_AUTH_API_KEY=YOUR_SUPABASE2_TEAM_AUTH_API_KEY \
-ADMIN_TOKEN_AUTH_API_KEY=YOUR_ADMIN_TOKEN_AUTH_API_KEY \
+API_KEY=YOUR_API_KEY \
 uvx mcparmory-e2b
 ```
 
@@ -26,11 +23,7 @@ uvx mcparmory-e2b
 
 ```bash
 pip install mcparmory-e2b
-API_KEY_AUTH=YOUR_API_KEY_AUTH \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-SUPABASE1_TOKEN_AUTH_API_KEY=YOUR_SUPABASE1_TOKEN_AUTH_API_KEY \
-SUPABASE2_TEAM_AUTH_API_KEY=YOUR_SUPABASE2_TEAM_AUTH_API_KEY \
-ADMIN_TOKEN_AUTH_API_KEY=YOUR_ADMIN_TOKEN_AUTH_API_KEY \
+API_KEY=YOUR_API_KEY \
 mcparmory-e2b
 ```
 
@@ -45,11 +38,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-e2b"],
       "env": {
-        "API_KEY_AUTH": "YOUR_API_KEY_AUTH",
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
-        "SUPABASE1_TOKEN_AUTH_API_KEY": "YOUR_SUPABASE1_TOKEN_AUTH_API_KEY",
-        "SUPABASE2_TEAM_AUTH_API_KEY": "YOUR_SUPABASE2_TEAM_AUTH_API_KEY",
-        "ADMIN_TOKEN_AUTH_API_KEY": "YOUR_ADMIN_TOKEN_AUTH_API_KEY"
+        "API_KEY": "YOUR_API_KEY"
       }
     }
   }
@@ -62,11 +51,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY_AUTH` — API Key Authentication (X-API-Key)
-- `BEARER_TOKEN` — Bearer token
-- `SUPABASE1_TOKEN_AUTH_API_KEY` — API Key Authentication (X-Supabase-Token)
-- `SUPABASE2_TEAM_AUTH_API_KEY` — API Key Authentication (X-Supabase-Team)
-- `ADMIN_TOKEN_AUTH_API_KEY` — API Key Authentication (X-Admin-Token)
+- `API_KEY` — API Key Authentication (X-API-Key)
 Do not commit credentials to version control.
 
 ---
@@ -100,6 +85,16 @@ Example (if server is at `/home/user/mcp-servers/e2b`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/e2b:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -107,7 +102,9 @@ docker build -t e2b .
 docker run -p 8000:8000 --env-file .env e2b
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

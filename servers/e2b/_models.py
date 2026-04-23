@@ -1,7 +1,7 @@
 """
 E2b MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:20:03 UTC
+Generated: 2026-04-23 21:14:22 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 E2B MCP Server
-Generated: 2026-04-14 18:20:03 UTC
+Generated: 2026-04-23 21:14:22 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import AfterValidator, Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.e2b.app")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +713,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +769,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +835,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +869,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -883,16 +996,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -906,6 +1020,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -948,6 +1063,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -959,62 +1089,25 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
-    'AccessTokenAuth',
     'ApiKeyAuth',
-    'Supabase1TokenAuth',
-    'Supabase2TeamAuth',
-    'AdminTokenAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["AccessTokenAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
-    logging.info("Authentication configured: AccessTokenAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for AccessTokenAuth not configured: {error_msg}")
-    _auth_handlers["AccessTokenAuth"] = None
-try:
-    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY_AUTH", location="header", param_name="X-API-Key")
+    _auth_handlers["ApiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="X-API-Key")
     logging.info("Authentication configured: ApiKeyAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for ApiKeyAuth not configured: {error_msg}")
     _auth_handlers["ApiKeyAuth"] = None
-try:
-    _auth_handlers["Supabase1TokenAuth"] = _auth.APIKeyAuth(env_var="SUPABASE1_TOKEN_AUTH_API_KEY", location="header", param_name="X-Supabase-Token")
-    logging.info("Authentication configured: Supabase1TokenAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for Supabase1TokenAuth not configured: {error_msg}")
-    _auth_handlers["Supabase1TokenAuth"] = None
-try:
-    _auth_handlers["Supabase2TeamAuth"] = _auth.APIKeyAuth(env_var="SUPABASE2_TEAM_AUTH_API_KEY", location="header", param_name="X-Supabase-Team")
-    logging.info("Authentication configured: Supabase2TeamAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for Supabase2TeamAuth not configured: {error_msg}")
-    _auth_handlers["Supabase2TeamAuth"] = None
-try:
-    _auth_handlers["AdminTokenAuth"] = _auth.APIKeyAuth(env_var="ADMIN_TOKEN_AUTH_API_KEY", location="header", param_name="X-Admin-Token")
-    logging.info("Authentication configured: AdminTokenAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for AdminTokenAuth not configured: {error_msg}")
-    _auth_handlers["AdminTokenAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1136,7 +1229,7 @@ mcp = FastMCP("E2B", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: auth
 @mcp.tool()
-async def list_teams() -> dict[str, Any]:
+async def list_teams() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all teams in the system. Use this operation to discover available teams for management or assignment purposes."""
 
     # Extract parameters for API call
@@ -1167,7 +1260,7 @@ async def get_team_metrics(
     team_id: str = Field(..., alias="teamID", description="The unique identifier of the team for which to retrieve metrics."),
     start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the metrics interval. If omitted, defaults to the beginning of the current period."),
     end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics interval. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve performance and activity metrics for a specific team over an optional time interval. If no time range is specified, returns metrics for the current period."""
 
     _start = _parse_int(start)
@@ -1214,7 +1307,7 @@ async def get_team_metrics_maximum(
     metric: Literal["concurrent_sandboxes", "sandbox_start_rate"] = Field(..., description="The specific metric to retrieve the maximum value for during the interval."),
     start: str | None = Field(None, description="Unix timestamp in seconds marking the start of the interval. If omitted, metrics from the earliest available data are included."),
     end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the interval. If omitted, metrics up to the current time are included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the maximum value for a specified metric within a given time interval for a team. Useful for understanding peak performance or resource utilization."""
 
     _start = _parse_int(start)
@@ -1266,7 +1359,7 @@ async def create_sandbox(
     env_vars: Any | None = Field(None, alias="envVars", description="Environment variables to inject into the sandbox runtime environment."),
     mcp: dict[str, Any] | None = Field(None, description="Model Context Protocol (MCP) configuration settings for the sandbox."),
     volume_mounts: list[_models.SandboxVolumeMount] | None = Field(None, alias="volumeMounts", description="Volume mounts to attach to the sandbox, enabling access to external storage or data sources."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new sandbox instance from a specified template. The sandbox can be configured with network policies, environment variables, and storage mounts."""
 
     # Construct request model with validation
@@ -1310,7 +1403,7 @@ async def list_sandboxes(
     metadata: str | None = Field(None, description="Filter sandboxes by metadata key-value pairs. Use URL encoding for both keys and values (e.g., user=abc&app=prod)."),
     state: list[Literal["running", "paused"]] | None = Field(None, description="Filter sandboxes by one or more states. Provide as an array of state values."),
     limit: str | None = Field(None, description="Maximum number of sandboxes to return per page. Must be between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all sandboxes with optional filtering by metadata and state. Results are paginated with a configurable limit."""
 
     _limit = _parse_int(limit)
@@ -1353,7 +1446,7 @@ async def list_sandboxes(
 
 # Tags: sandboxes
 @mcp.tool()
-async def list_sandbox_metrics(sandbox_ids: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="One or more sandbox IDs to retrieve metrics for. Provide as a comma-separated list of sandbox identifiers.", max_length=100)) -> dict[str, Any]:
+async def list_sandbox_metrics(sandbox_ids: Annotated[list[str], AfterValidator(_check_unique_items)] = Field(..., description="One or more sandbox IDs to retrieve metrics for. Provide as a comma-separated list of sandbox identifiers.", max_length=100)) -> dict[str, Any] | ToolResult:
     """Retrieve performance and usage metrics for specified sandboxes. Supports querying multiple sandboxes in a single request."""
 
     # Construct request model with validation
@@ -1399,7 +1492,7 @@ async def list_sandbox_logs(
     cursor: str | None = Field(None, description="Starting timestamp in milliseconds from which logs should be returned. Use this to paginate through results or retrieve logs after a specific point in time."),
     limit: str | None = Field(None, description="Maximum number of log entries to return in a single response."),
     direction: Literal["forward", "backward"] | None = Field(None, description="Order in which logs should be returned relative to the cursor timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve logs from a specific sandbox with optional filtering by time range and result limit. Logs can be returned in forward or backward chronological order."""
 
     _cursor = _parse_int(cursor)
@@ -1441,7 +1534,7 @@ async def list_sandbox_logs(
 
 # Tags: sandboxes
 @mcp.tool()
-async def get_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to retrieve.")) -> dict[str, Any]:
+async def get_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific sandbox by its unique identifier. Use this operation to fetch detailed information about a sandbox environment."""
 
     # Construct request model with validation
@@ -1477,7 +1570,7 @@ async def get_sandbox(sandbox_id: str = Field(..., alias="sandboxID", descriptio
 
 # Tags: sandboxes
 @mcp.tool()
-async def terminate_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to terminate.")) -> dict[str, Any]:
+async def terminate_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to terminate.")) -> dict[str, Any] | ToolResult:
     """Terminate and remove a sandbox environment by its ID. This operation permanently deletes the sandbox and all associated resources."""
 
     # Construct request model with validation
@@ -1517,7 +1610,7 @@ async def get_sandbox_metrics(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox for which to retrieve metrics."),
     start: str | None = Field(None, description="Unix timestamp in seconds marking the beginning of the metrics collection interval. If omitted, metrics are retrieved from the earliest available data."),
     end: str | None = Field(None, description="Unix timestamp in seconds marking the end of the metrics collection interval. If omitted, metrics are retrieved up to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve performance and resource metrics for a specific sandbox over an optional time interval. Metrics are aggregated between the specified start and end timestamps."""
 
     _start = _parse_int(start)
@@ -1559,7 +1652,7 @@ async def get_sandbox_metrics(
 
 # Tags: sandboxes
 @mcp.tool()
-async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to pause.")) -> dict[str, Any]:
+async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to pause.")) -> dict[str, Any] | ToolResult:
     """Pause an active sandbox to temporarily suspend its execution and resource consumption. The sandbox can be resumed later without losing its state."""
 
     # Construct request model with validation
@@ -1598,7 +1691,7 @@ async def pause_sandbox(sandbox_id: str = Field(..., alias="sandboxID", descript
 async def connect_sandbox(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to connect to."),
     timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Establish a connection to a sandbox and extend its time-to-live. If the sandbox is paused, it will be automatically resumed."""
 
     _timeout = _parse_int(timeout)
@@ -1642,7 +1735,7 @@ async def connect_sandbox(
 async def set_sandbox_timeout(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to configure."),
     timeout: str = Field(..., description="The number of seconds from the current time until the sandbox should automatically expire. Must be a non-negative integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set the expiration time for a sandbox by specifying a timeout duration in seconds from the current request time. Calling this operation multiple times resets the sandbox's time-to-live (TTL), with each call using the current timestamp as the new starting point."""
 
     _timeout = _parse_int(timeout)
@@ -1686,7 +1779,7 @@ async def set_sandbox_timeout(
 async def refresh_sandbox(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox to refresh."),
     duration: int | None = Field(None, description="The duration in seconds to extend the sandbox's time to live. If not specified, a default duration will be applied.", ge=0, le=3600),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extend the time to live of an active sandbox by refreshing it. Optionally specify a custom duration to keep the sandbox alive."""
 
     # Construct request model with validation
@@ -1728,7 +1821,7 @@ async def refresh_sandbox(
 async def create_sandbox_snapshot(
     sandbox_id: str = Field(..., alias="sandboxID", description="The unique identifier of the sandbox from which to create the snapshot."),
     name: str | None = Field(None, description="Optional name for the snapshot. If a snapshot with this name already exists, a new build will be assigned to the existing snapshot instead of creating a new one."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a persistent snapshot of the sandbox's current state that can be used to create new sandboxes and persists beyond the original sandbox's lifetime."""
 
     # Construct request model with validation
@@ -1770,7 +1863,7 @@ async def create_sandbox_snapshot(
 async def list_snapshots(
     sandbox_id: str | None = Field(None, alias="sandboxID", description="Filter results to snapshots created from a specific sandbox ID."),
     limit: str | None = Field(None, description="Number of snapshots to return per page. Useful for paginating through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all snapshots for your team, with optional filtering by source sandbox and pagination support."""
 
     _limit = _parse_int(limit)
@@ -1815,7 +1908,7 @@ async def create_template(
     tags: list[str] | None = Field(None, description="Tags to assign to the template for organization and categorization. Tags help identify and group related templates."),
     cpu_count: str | None = Field(None, alias="cpuCount", description="Number of CPU cores to allocate to the sandbox. Must be at least 1 core."),
     memory_mb: str | None = Field(None, alias="memoryMB", description="Memory to allocate to the sandbox in mebibytes (MiB). Must be at least 128 MiB."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new template with optional resource specifications and organizational tags. Templates define sandbox configurations for reproducible environments."""
 
     _cpu_count = _parse_int(cpu_count)
@@ -1859,7 +1952,7 @@ async def create_template(
 async def get_template_files_upload_link(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve the files upload link."),
     hash_: str = Field(..., alias="hash", description="The cryptographic hash that identifies the specific version or snapshot of the template files to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a download link for a tar archive containing the build layer files associated with a specific template. The link is generated based on the template ID and file hash."""
 
     # Construct request model with validation
@@ -1895,7 +1988,7 @@ async def get_template_files_upload_link(
 
 # Tags: templates
 @mcp.tool()
-async def list_templates(team_id: str | None = Field(None, alias="teamID", description="Filter templates to a specific team. If omitted, returns templates accessible to all teams or the default scope.")) -> dict[str, Any]:
+async def list_templates(team_id: str | None = Field(None, alias="teamID", description="Filter templates to a specific team. If omitted, returns templates accessible to all teams or the default scope.")) -> dict[str, Any] | ToolResult:
     """Retrieve all templates available in the system, optionally filtered by a specific team. Use this to discover and display template options for users."""
 
     # Construct request model with validation
@@ -1936,7 +2029,7 @@ async def list_templates(team_id: str | None = Field(None, alias="teamID", descr
 async def list_template_builds(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve builds."),
     limit: str | None = Field(None, description="The maximum number of builds to return in a single page of results. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all builds associated with a specific template. Use pagination to control the number of results returned per page."""
 
     _limit = _parse_int(limit)
@@ -1977,7 +2070,7 @@ async def list_template_builds(
 
 # Tags: templates
 @mcp.tool()
-async def delete_template(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to delete.")) -> dict[str, Any]:
+async def delete_template(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a template by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2022,7 +2115,7 @@ async def start_template_build(
     steps: list[_models.TemplateStep] | None = Field(None, description="Ordered list of build steps to execute. Each step represents a discrete build operation performed sequentially."),
     start_cmd: str | None = Field(None, alias="startCmd", description="Command to execute within the template after the build completes, typically used to start services or initialize the environment."),
     ready_cmd: str | None = Field(None, alias="readyCmd", description="Command to execute after the build to verify the template is ready and operational, used for health checks or readiness validation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a build process for a specific template. This operation executes the build with optional customization including base template selection, build steps, and post-build commands."""
 
     # Construct request model with validation
@@ -2064,7 +2157,7 @@ async def start_template_build(
 async def update_template(
     template_id: str = Field(..., alias="templateID", description="The unique identifier of the template to update."),
     public: bool | None = Field(None, description="Controls template visibility. When true, the template is accessible to anyone; when false, it is restricted to team members only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing template's properties, such as its visibility settings. Modify template accessibility to be public or restricted to team members only."""
 
     # Construct request model with validation
@@ -2109,7 +2202,7 @@ async def get_template_build_status(
     logs_offset: str | None = Field(None, alias="logsOffset", description="The starting index for build logs to return. Use this to paginate through large log sets."),
     limit: str | None = Field(None, description="The maximum number of build logs to return in the response. Useful for controlling response size and pagination."),
     level: Literal["debug", "info", "warn", "error"] | None = Field(None, description="Filter logs by severity level. Returns only logs matching the specified level or higher priority."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status and build logs for a specific template build. Returns build information with optional log filtering by offset, limit, and severity level."""
 
     _logs_offset = _parse_int(logs_offset)
@@ -2159,7 +2252,7 @@ async def list_template_build_logs(
     direction: Literal["forward", "backward"] | None = Field(None, description="Order in which log entries should be returned relative to the cursor timestamp."),
     level: Literal["debug", "info", "warn", "error"] | None = Field(None, description="Filter logs by severity level. Only entries matching the specified level will be returned."),
     source: Literal["temporary", "persistent"] | None = Field(None, description="Filter logs by their storage source. Temporary logs are transient, while persistent logs are retained long-term."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve logs from a template build execution. Supports filtering by log level and source, with pagination and directional traversal of log entries."""
 
     _cursor = _parse_int(cursor)
@@ -2204,7 +2297,7 @@ async def list_template_build_logs(
 async def assign_template_tags(
     target: str = Field(..., description="The target template specified in 'name:tag' format, where name is the template identifier and tag is the specific build version."),
     tags: list[str] = Field(..., description="Array of tags to assign to the template. Tags are applied in the order provided and can be used for categorization and filtering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign one or more tags to a specific template build. Tags help organize and categorize templates for easier discovery and management."""
 
     # Construct request model with validation
@@ -2245,7 +2338,7 @@ async def assign_template_tags(
 async def remove_template_tags(
     name: str = Field(..., description="The name of the template from which tags will be removed."),
     tags: list[str] = Field(..., description="An array of tag names to remove from the template. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more tags from a specific template. This operation allows bulk deletion of tags associated with a template."""
 
     # Construct request model with validation
@@ -2283,7 +2376,7 @@ async def remove_template_tags(
 
 # Tags: tags
 @mcp.tool()
-async def list_template_tags(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve tags.")) -> dict[str, Any]:
+async def list_template_tags(template_id: str = Field(..., alias="templateID", description="The unique identifier of the template for which to retrieve tags.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific template. Tags are used to categorize and organize templates for easier discovery and management."""
 
     # Construct request model with validation
@@ -2319,7 +2412,7 @@ async def list_template_tags(template_id: str = Field(..., alias="templateID", d
 
 # Tags: templates
 @mcp.tool()
-async def check_template_alias(alias: str = Field(..., description="The unique identifier or name of the template to check for existence.")) -> dict[str, Any]:
+async def check_template_alias(alias: str = Field(..., description="The unique identifier or name of the template to check for existence.")) -> dict[str, Any] | ToolResult:
     """Verify whether a template with the specified alias exists in the system."""
 
     # Construct request model with validation
@@ -2355,7 +2448,7 @@ async def check_template_alias(alias: str = Field(..., description="The unique i
 
 # Tags: admin
 @mcp.tool()
-async def list_nodes() -> dict[str, Any]:
+async def list_nodes() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all available nodes in the system. Use this operation to discover and monitor all nodes."""
 
     # Extract parameters for API call
@@ -2385,7 +2478,7 @@ async def list_nodes() -> dict[str, Any]:
 async def get_node(
     node_id: str = Field(..., alias="nodeID", description="The unique identifier of the node to retrieve."),
     cluster_id: str | None = Field(None, alias="clusterID", description="The cluster to which the node belongs. Use this to scope the node lookup to a specific cluster."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific node, optionally filtered by cluster membership."""
 
     # Construct request model with validation
@@ -2428,7 +2521,7 @@ async def update_node_status(
     node_id: str = Field(..., alias="nodeID", description="The unique identifier of the node to update."),
     status: Literal["ready", "draining", "connecting", "unhealthy"] = Field(..., description="The desired operational status for the node. Determines how the node handles workloads and cluster participation."),
     cluster_id: str | None = Field(None, alias="clusterID", description="The unique identifier of the cluster containing the node. Required to scope the node operation within the correct cluster context."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the operational status of a node within a cluster. This operation allows you to transition a node between different states such as ready, draining, connecting, or unhealthy."""
 
     # Construct request model with validation
@@ -2467,7 +2560,7 @@ async def update_node_status(
 
 # Tags: admin
 @mcp.tool()
-async def terminate_team_sandboxes(team_id: str = Field(..., alias="teamID", description="The unique identifier of the team whose sandboxes should be terminated.")) -> dict[str, Any]:
+async def terminate_team_sandboxes(team_id: str = Field(..., alias="teamID", description="The unique identifier of the team whose sandboxes should be terminated.")) -> dict[str, Any] | ToolResult:
     """Terminates all active sandboxes for a specified team. This operation will immediately stop and remove all sandbox instances associated with the team."""
 
     # Construct request model with validation
@@ -2503,7 +2596,7 @@ async def terminate_team_sandboxes(team_id: str = Field(..., alias="teamID", des
 
 # Tags: access-tokens
 @mcp.tool()
-async def create_access_token(name: str = Field(..., description="A descriptive name for the access token to help identify its purpose or associated application.")) -> dict[str, Any]:
+async def create_access_token(name: str = Field(..., description="A descriptive name for the access token to help identify its purpose or associated application.")) -> dict[str, Any] | ToolResult:
     """Create a new access token for API authentication. The token can be used to authorize requests to protected endpoints."""
 
     # Construct request model with validation
@@ -2541,7 +2634,7 @@ async def create_access_token(name: str = Field(..., description="A descriptive 
 
 # Tags: access-tokens
 @mcp.tool()
-async def revoke_access_token(access_token_id: str = Field(..., alias="accessTokenID", description="The unique identifier of the access token to revoke and delete.")) -> dict[str, Any]:
+async def revoke_access_token(access_token_id: str = Field(..., alias="accessTokenID", description="The unique identifier of the access token to revoke and delete.")) -> dict[str, Any] | ToolResult:
     """Revoke and delete an access token, immediately invalidating it for future API requests."""
 
     # Construct request model with validation
@@ -2577,7 +2670,7 @@ async def revoke_access_token(access_token_id: str = Field(..., alias="accessTok
 
 # Tags: api-keys
 @mcp.tool()
-async def list_api_keys() -> dict[str, Any]:
+async def list_api_keys() -> dict[str, Any] | ToolResult:
     """Retrieve all API keys associated with your team. Use this to view and manage authentication credentials for API access."""
 
     # Extract parameters for API call
@@ -2604,7 +2697,7 @@ async def list_api_keys() -> dict[str, Any]:
 
 # Tags: api-keys
 @mcp.tool()
-async def create_api_key(name: str = Field(..., description="A descriptive name for the API key to help identify its purpose or associated application.")) -> dict[str, Any]:
+async def create_api_key(name: str = Field(..., description="A descriptive name for the API key to help identify its purpose or associated application.")) -> dict[str, Any] | ToolResult:
     """Create a new API key for your team to authenticate API requests. The key can be used to access team resources and data."""
 
     # Construct request model with validation
@@ -2645,7 +2738,7 @@ async def create_api_key(name: str = Field(..., description="A descriptive name 
 async def update_api_key(
     api_key_id: str = Field(..., alias="apiKeyID", description="The unique identifier of the API key to update."),
     name: str = Field(..., description="The new name for the API key. Use a descriptive name to identify the key's purpose or associated application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the name of a team API key. Allows you to rename an existing API key for better organization and identification."""
 
     # Construct request model with validation
@@ -2684,7 +2777,7 @@ async def update_api_key(
 
 # Tags: api-keys
 @mcp.tool()
-async def delete_api_key(api_key_id: str = Field(..., alias="apiKeyID", description="The unique identifier of the API key to delete.")) -> dict[str, Any]:
+async def delete_api_key(api_key_id: str = Field(..., alias="apiKeyID", description="The unique identifier of the API key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team API key. This action cannot be undone and will invalidate any requests using this key."""
 
     # Construct request model with validation
@@ -2720,7 +2813,7 @@ async def delete_api_key(api_key_id: str = Field(..., alias="apiKeyID", descript
 
 # Tags: volumes
 @mcp.tool()
-async def list_volumes() -> dict[str, Any]:
+async def list_volumes() -> dict[str, Any] | ToolResult:
     """Retrieve all volumes available to the team. This operation returns a complete list of storage volumes with their metadata and configuration details."""
 
     # Extract parameters for API call
@@ -2747,7 +2840,7 @@ async def list_volumes() -> dict[str, Any]:
 
 # Tags: volumes
 @mcp.tool()
-async def create_volume(name: str = Field(..., description="The name identifier for the volume. Must contain only letters, numbers, hyphens, and underscores.", pattern="^[a-zA-Z0-9_-]+$")) -> dict[str, Any]:
+async def create_volume(name: str = Field(..., description="The name identifier for the volume. Must contain only letters, numbers, hyphens, and underscores.", pattern="^[a-zA-Z0-9_-]+$")) -> dict[str, Any] | ToolResult:
     """Create a new team volume for storing and organizing data. The volume name must be unique within the team and follow alphanumeric naming conventions."""
 
     # Construct request model with validation
@@ -2785,7 +2878,7 @@ async def create_volume(name: str = Field(..., description="The name identifier 
 
 # Tags: volumes
 @mcp.tool()
-async def get_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to retrieve.")) -> dict[str, Any]:
+async def get_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific team volume by its unique identifier."""
 
     # Construct request model with validation
@@ -2821,7 +2914,7 @@ async def get_volume(volume_id: str = Field(..., alias="volumeID", description="
 
 # Tags: volumes
 @mcp.tool()
-async def delete_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to delete.")) -> dict[str, Any]:
+async def delete_volume(volume_id: str = Field(..., alias="volumeID", description="The unique identifier of the volume to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a team volume by its ID. This action cannot be undone."""
 
     # Construct request model with validation
