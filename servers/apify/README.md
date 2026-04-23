@@ -1,6 +1,7 @@
 # Apify MCP Server
+<!-- mcp-name: com.mcparmory/apify -->
 
-Base URL: https://api.apify.com
+Base URL: https://api.apify.com/v2
 | | |
 |---|---|
 | **Category** | Developer Tools |
@@ -91,6 +92,17 @@ Example (if server is at `/home/user/mcp-servers/apify`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/apify:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -98,7 +110,9 @@ docker build -t apify .
 docker run -p 8000:8000 --env-file .env apify
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

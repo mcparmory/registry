@@ -1,7 +1,7 @@
 """
 Authentication module for Apify MCP server.
 
-Generated: 2026-04-14 18:14:06 UTC
+Generated: 2026-04-23 20:57:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -168,7 +168,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_actor_webhooks": [["httpBearer"], ["apiKey"]],
     "list_actor_builds": [["httpBearer"], ["apiKey"]],
     "build_actor": [["httpBearer"], ["apiKey"]],
-    "get_default_actor_build": [],
+    "get_default_actor_build": [["httpBearer"], ["apiKey"]],
     "list_actor_runs_by_actor": [["httpBearer"], ["apiKey"]],
     "run_actor": [["httpBearer"], ["apiKey"]],
     "run_actor_sync_no_input": [["httpBearer"], ["apiKey"]],
@@ -202,7 +202,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "resurrect_run": [["httpBearer"], ["apiKey"]],
     "charge_run_event": [["httpBearer"], ["apiKey"]],
     "list_builds": [["httpBearer"], ["apiKey"]],
-    "get_actor_build": [],
+    "get_actor_build": [["httpBearer"], ["apiKey"]],
     "delete_build": [["httpBearer"], ["apiKey"]],
     "abort_build": [["httpBearer"], ["apiKey"]],
     "get_build_log": [["httpBearer"], ["apiKey"]],

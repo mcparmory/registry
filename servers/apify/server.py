@@ -5,7 +5,7 @@ Apify MCP Server
 API Info:
 - API License: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0.html)
 
-Generated: 2026-04-14 18:14:06 UTC
+Generated: 2026-04-23 20:57:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,9 +41,10 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
-BASE_URL = os.getenv("BASE_URL", "https://api.apify.com")
+BASE_URL = os.getenv("BASE_URL", "https://api.apify.com/v2")
 SERVER_NAME = "Apify"
 SERVER_VERSION = "1.0.0"
 
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -843,16 +956,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -866,6 +980,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -908,6 +1023,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -919,7 +1049,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1075,7 +1204,7 @@ async def list_actors(
     limit: float | None = Field(None, description="Maximum number of Actors to return in a single response. Accepts values between 1 and 1000, with 1000 being both the default and the upper limit."),
     desc: bool | None = Field(None, description="When set to true, reverses the sort order so that the most recently created (or most recently run, if sorting by last run) Actors appear first."),
     sort_by: Literal["createdAt", "stats.lastRunStartedAt"] | None = Field(None, alias="sortBy", description="Determines the field used to order results. Use 'createdAt' to sort by when the Actor was created, or 'stats.lastRunStartedAt' to sort by the most recent run start time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of Actors the user has created or used, with options to filter to owned Actors only and sort by creation date or last run time. Returns up to 1000 records per request."""
 
     # Construct request model with validation
@@ -1140,7 +1269,7 @@ async def create_actor(
     should_pass_actor_input: bool | None = Field(None, alias="shouldPassActorInput", description="Whether the Actor's input should be forwarded to Standby mode instances when they are activated."),
     body: str | None = Field(None, description="Raw JSON string representing the default input body passed to the Actor run."),
     content_type: str | None = Field(None, alias="contentType", description="MIME content type of the input body, specifying encoding and format for correct parsing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Actor on the Apify platform with the specified configuration, including source code versions, run options, and publishing settings. At least one version of the source code must be defined; set isPublic to true along with a title and categories to list the Actor in Apify Store."""
 
     # Construct request model with validation
@@ -1184,7 +1313,7 @@ async def create_actor(
 
 # Tags: Actors
 @mcp.tool()
-async def get_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to retrieve, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any]:
+async def get_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to retrieve, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details for a specific Actor, including its configuration, settings, and metadata. Use this to inspect an Actor before running it or to verify its current state."""
 
     # Construct request model with validation
@@ -1253,7 +1382,7 @@ async def update_actor(
     body: str | None = Field(None, description="The raw JSON request body payload containing the Actor settings to update, serialized as a string."),
     content_type: str | None = Field(None, alias="contentType", description="The MIME content type of the request body, which must be set to application/json."),
     is_deprecated: bool | None = Field(None, alias="isDeprecated", description="Whether the Actor is marked as deprecated, signaling to users that it should no longer be used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the settings and configuration of an existing Actor by applying only the properties provided in the JSON request body. Returns the full updated Actor object after the changes are applied."""
 
     # Construct request model with validation
@@ -1298,7 +1427,7 @@ async def update_actor(
 
 # Tags: Actors
 @mcp.tool()
-async def delete_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to delete, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any]:
+async def delete_actor(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor to delete, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes the specified Actor and all associated data. This action is irreversible."""
 
     # Construct request model with validation
@@ -1337,7 +1466,7 @@ async def delete_actor(actor_id: str = Field(..., alias="actorId", description="
 
 # Tags: Actors/Actor versions
 @mcp.tool()
-async def list_actor_versions(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any]:
+async def list_actor_versions(actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name.")) -> dict[str, Any] | ToolResult:
     """Retrieves all versions of a specific Actor, returning a list of Version objects with basic information about each version."""
 
     # Construct request model with validation
@@ -1387,7 +1516,7 @@ async def create_actor_version(
     git_repo_url: str | None = Field(None, alias="gitRepoUrl", description="The URL of the Git repository containing the Actor's source code; required when sourceType is GIT_REPO."),
     tarball_url: str | None = Field(None, alias="tarballUrl", description="The URL of a tarball archive containing the Actor's source code; required when sourceType is TARBALL."),
     git_hub_gist_url: str | None = Field(None, alias="gitHubGistUrl", description="The URL of a GitHub Gist containing the Actor's source code; required when sourceType is GITHUB_GIST."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new version of an Actor by specifying a version number and source type along with the corresponding source details. The source type determines which additional properties are required (e.g., a Git repository URL for GIT_REPO, a tarball URL for TARBALL)."""
 
     # Construct request model with validation
@@ -1432,7 +1561,7 @@ async def create_actor_version(
 async def get_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to retrieve, following a major.minor versioning format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific version of an Actor, including its configuration and metadata. Useful for inspecting the exact state of a particular Actor version."""
 
     # Construct request model with validation
@@ -1482,7 +1611,7 @@ async def update_actor_version(
     git_repo_url: str | None = Field(None, alias="gitRepoUrl", description="The URL of the Git repository containing the Actor's source code; required when sourceType is GIT_REPO."),
     tarball_url: str | None = Field(None, alias="tarballUrl", description="The URL of the tarball archive containing the Actor's source code; required when sourceType is TARBALL."),
     git_hub_gist_url: str | None = Field(None, alias="gitHubGistUrl", description="The URL of the GitHub Gist containing the Actor's source code; required when sourceType is GITHUB_GIST."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a specific version of an Actor with the provided fields, leaving unspecified properties unchanged. Send a JSON payload with only the fields you want to modify."""
 
     # Construct request model with validation
@@ -1527,7 +1656,7 @@ async def update_actor_version(
 async def delete_actor_version(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to delete, following major.minor versioning format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific version of an Actor's source code. This action is irreversible and removes the version along with its associated configuration."""
 
     # Construct request model with validation
@@ -1569,7 +1698,7 @@ async def delete_actor_version(
 async def list_actor_version_env_vars(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor whose environment variables should be retrieved, following major.minor versioning format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all environment variables configured for a specific version of an Actor. Returns a list of environment variable objects, each containing the variable's key, value, and related metadata."""
 
     # Construct request model with validation
@@ -1614,7 +1743,7 @@ async def create_actor_env_var(
     name: str = Field(..., description="The name of the environment variable, typically uppercase with underscores following standard environment variable naming conventions."),
     value: str = Field(..., description="The value assigned to the environment variable."),
     is_secret: bool | None = Field(None, alias="isSecret", description="Indicates whether the environment variable should be treated as a secret, hiding its value from logs and the UI."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new environment variable for a specific version of an Actor. Requires a name and value, with an optional flag to mark the variable as secret."""
 
     # Construct request model with validation
@@ -1660,7 +1789,7 @@ async def get_actor_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor to retrieve the environment variable from, following major.minor versioning format."),
     env_var_name: str = Field(..., alias="envVarName", description="The exact name of the environment variable to retrieve, typically uppercase with underscores."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details of a specific environment variable for a given Actor version. If the variable is marked as secret, its value will be omitted from the response."""
 
     # Construct request model with validation
@@ -1706,7 +1835,7 @@ async def update_actor_env_var(
     name: str = Field(..., description="The updated name for the environment variable, typically uppercase with underscores following standard environment variable naming conventions."),
     value: str = Field(..., description="The updated value to assign to the environment variable."),
     is_secret: bool | None = Field(None, alias="isSecret", description="Indicates whether the environment variable should be treated as a secret. Secret variables are encrypted at rest and masked in logs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing environment variable for a specific Actor version. Only the properties included in the request body will be modified; omitted properties retain their current values."""
 
     # Construct request model with validation
@@ -1752,7 +1881,7 @@ async def delete_actor_version_env_var(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as an Actor ID or a tilde-separated combination of the owner's username and Actor name."),
     version_number: str = Field(..., alias="versionNumber", description="The version number of the Actor from which the environment variable will be deleted, following major.minor versioning format."),
     env_var_name: str = Field(..., alias="envVarName", description="The exact name of the environment variable to delete, typically uppercase with underscores as separators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific environment variable from a given Actor version. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1796,7 +1925,7 @@ async def list_actor_webhooks(
     offset: float | None = Field(None, description="Number of webhooks to skip from the beginning of the result set, used for paginating through records. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of webhooks to return in a single response. Accepts values between 1 and 1000, defaulting to 1000."),
     desc: bool | None = Field(None, description="When set to true, reverses the sort order so that the most recently created webhooks appear first instead of last."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of webhooks associated with a specific Actor, returning basic information about each webhook. Results are sorted by creation date ascending by default, with a maximum of 1000 records per request."""
 
     # Construct request model with validation
@@ -1841,7 +1970,7 @@ async def list_actor_builds(
     offset: float | None = Field(None, description="Number of build records to skip from the beginning of the result set, used for paginating through results. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of build records to return in a single response. Accepts values up to 1000, which is also the default."),
     desc: bool | None = Field(None, description="When set to true, sorts the returned builds by their start time in descending order (newest first). Defaults to ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of builds for a specific Actor, with each record containing basic build information. Results are sorted by start time in ascending order by default, supporting incremental fetching as new builds are created."""
 
     # Construct request model with validation
@@ -1888,7 +2017,7 @@ async def build_actor(
     beta_packages: bool | None = Field(None, alias="betaPackages", description="When enabled, the Actor is built using beta versions of Apify NPM packages instead of the default latest stable versions."),
     tag: str | None = Field(None, description="A label applied to the build upon successful completion; if omitted, the tag defaults to the value set in the Actor version's buildTag property."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Number of seconds the server will wait for the build to complete before returning a response; must be between 0 and 60, where 0 returns immediately with a transitional status and higher values may return a terminal status if the build finishes in time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers a new build for a specified Actor version, compiling its source code and dependencies into a runnable image. Returns the resulting build object, which may reflect a terminal or transitional status depending on wait time."""
 
     # Construct request model with validation
@@ -1931,7 +2060,7 @@ async def build_actor(
 async def get_default_actor_build(
     actor_id: str = Field(..., alias="actorId", description="The unique identifier of the Actor, either as a standalone Actor ID or as a tilde-separated combination of the owner's username and Actor name."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the build to finish before returning; if the build completes within this window the response will reflect a terminal status (e.g. SUCCEEDED), otherwise a transitional status (e.g. RUNNING) is returned. Accepts values from 0 (default, no wait) up to 60."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the default build for a specified Actor, optionally waiting synchronously for the build to reach a terminal state. No authentication token is required, though unauthenticated requests will have certain usage cost fields omitted from the response."""
 
     # Construct request model with validation
@@ -1979,7 +2108,7 @@ async def list_actor_runs_by_actor(
     status: str | None = Field(None, description="Filters results to only include runs matching the specified status or comma-separated list of statuses (e.g., SUCCEEDED, FAILED, RUNNING)."),
     started_after: str | None = Field(None, alias="startedAfter", description="Filters results to only include runs that started at or after this point in time, specified as an ISO 8601 datetime string in UTC."),
     started_before: str | None = Field(None, alias="startedBefore", description="Filters results to only include runs that started at or before this point in time, specified as an ISO 8601 datetime string in UTC."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of runs for a specific Actor, with each item containing basic run metadata. Supports filtering by status and start time, and sorting in ascending or descending order."""
 
     # Construct request model with validation
@@ -2032,7 +2161,7 @@ async def run_actor(
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
     body: dict[str, Any] | None = Field(None, description="The input payload passed to the Actor as INPUT, typically a JSON object. The Content-Type header of the request is forwarded alongside this body."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts an Actor run asynchronously and immediately returns a Run object without waiting for completion. Pass input data as the request body and use the returned run ID or defaultDatasetId to retrieve results later."""
 
     # Call helper functions
@@ -2090,7 +2219,7 @@ async def run_actor_sync_no_input(
     build: str | None = Field(None, description="Specifies which build of the Actor to execute, provided as either a build tag or a build number. Defaults to the build defined in the Actor's configuration, typically the latest tag."),
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs a specific Actor synchronously without input and returns its output directly in the response. The run must complete within 300 seconds; if it exceeds this limit or the connection breaks, a timeout error is returned."""
 
     # Call helper functions
@@ -2145,7 +2274,7 @@ async def run_actor_sync(
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
     body: dict[str, Any] | None = Field(None, description="The input payload passed to the Actor as its INPUT record. The Content-Type header of the request is forwarded alongside this body, typically as application/json."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs a specific Actor synchronously, passing the request body as INPUT, and returns the Actor's OUTPUT from its default key-value store. If the Actor run exceeds 300 seconds, the response will return a 408 timeout status."""
 
     # Call helper functions
@@ -2220,7 +2349,7 @@ async def run_actor_sync_get_dataset_items(
     skip_failed_pages: bool | None = Field(None, alias="skipFailedPages", description="When set to true, excludes all items that contain an errorInfo property from the output. Provided for compatibility with legacy Apify Crawler API v1 behavior. Not recommended for new integrations."),
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs a specific Actor synchronously without input and returns its dataset items directly in the response. The Actor must complete within 300 seconds; if it exceeds this limit or the connection breaks, a timeout error is returned."""
 
     # Call helper functions
@@ -2288,7 +2417,7 @@ async def run_actor_sync_get_dataset_items_with_input(
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
     body: dict[str, Any] | None = Field(None, description="The input payload passed to the Actor as its INPUT, with the request's Content-Type header forwarded alongside it. Typically a JSON object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs a specific Actor synchronously with the provided input payload and returns the resulting dataset items directly in the response. Supports the same output formatting and filtering options as the Get Dataset Items endpoint; times out with HTTP 408 if the Actor run exceeds 300 seconds."""
 
     # Call helper functions
@@ -2342,7 +2471,7 @@ async def resurrect_actor_run(
     timeout: float | None = Field(None, description="Maximum duration the resurrected run is allowed to execute, in seconds. Defaults to the timeout value from the original run."),
     memory: float | None = Field(None, description="Memory allocated to the resurrected run in megabytes; must be a power of 2 and at least 128 MB. Defaults to the memory limit from the original run."),
     restart_on_error: bool | None = Field(None, alias="restartOnError", description="Whether the resurrected run should automatically restart if it encounters a failure. Defaults to the same setting used in the original run."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restarts a finished Actor run (with status FINISHED, FAILED, ABORTED, or TIMED-OUT), resuming execution with the same storages and updating its status back to RUNNING. Optionally override the build, timeout, memory, or error-restart behavior from the original run."""
 
     # Construct request model with validation
@@ -2385,7 +2514,7 @@ async def resurrect_actor_run(
 async def get_last_actor_run(
     actor_id: str = Field(..., alias="actorId", description="The unique ID of the Actor, or a tilde-separated combination of the owner's username and Actor name."),
     status: str | None = Field(None, description="Filters the result to only return the last run matching the specified status, ensuring you retrieve a run in a particular state (e.g. only succeeded runs)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recent run of a specified Actor, with optional filtering by run status. Also serves as the base path for accessing the last run's default storages (log, key-value store, dataset, and request queue) via sub-endpoints."""
 
     # Construct request model with validation
@@ -2429,7 +2558,7 @@ async def list_tasks(
     offset: float | None = Field(None, description="Number of tasks to skip from the beginning of the result set, used for paginating through large lists."),
     limit: float | None = Field(None, description="Maximum number of tasks to return in a single response, up to a maximum of 1000."),
     desc: bool | None = Field(None, description="When set to true, sorts tasks by creation date in descending order (newest first); defaults to ascending order (oldest first)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all actor tasks created or used by the authenticated user. Results are sorted by creation date and capped at 1000 records per request."""
 
     # Construct request model with validation
@@ -2468,7 +2597,7 @@ async def list_tasks(
 
 # Tags: Actor tasks
 @mcp.tool()
-async def create_task(body: _models.ActorTasksPostBody | None = Field(None, description="JSON object defining the new task's configuration, including the actor to run, the task name, and execution options such as build version, timeout, and memory allocation.")) -> dict[str, Any]:
+async def create_task(body: _models.ActorTasksPostBody | None = Field(None, description="JSON object defining the new task's configuration, including the actor to run, the task name, and execution options such as build version, timeout, and memory allocation.")) -> dict[str, Any] | ToolResult:
     """Creates a new actor task with the specified configuration, including the target actor, build version, timeout, and memory settings. Returns the full task object upon successful creation."""
 
     # Construct request model with validation
@@ -2510,7 +2639,7 @@ async def create_task(body: _models.ActorTasksPostBody | None = Field(None, desc
 
 # Tags: Actor tasks
 @mcp.tool()
-async def get_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to retrieve, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any]:
+async def get_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to retrieve, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any] | ToolResult:
     """Retrieve full details of a specific actor task, including its configuration, settings, and metadata. Use this to inspect an existing task before running or modifying it."""
 
     # Construct request model with validation
@@ -2567,7 +2696,7 @@ async def update_task(
     idle_timeout_secs: int | None = Field(None, alias="idleTimeoutSecs", description="Duration in seconds the Standby Actor is allowed to remain idle before it is considered inactive and shut down."),
     disable_standby_fields_override: bool | None = Field(None, alias="disableStandbyFieldsOverride", description="When true, prevents task-level Standby field values from overriding the Actor's default Standby configuration."),
     should_pass_actor_input: bool | None = Field(None, alias="shouldPassActorInput", description="When true, the Actor's own input is passed through to the task run in addition to the task's configured input."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the settings, input configuration, and runtime options of an existing Actor task. Only properties included in the request body are modified; omitted properties retain their current values."""
 
     # Construct request model with validation
@@ -2611,7 +2740,7 @@ async def update_task(
 
 # Tags: Actor tasks
 @mcp.tool()
-async def delete_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to delete, either as a standalone task ID or as a tilde-separated combination of the owner's username and task name.")) -> dict[str, Any]:
+async def delete_task(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the task to delete, either as a standalone task ID or as a tilde-separated combination of the owner's username and task name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes the specified actor task and all associated configuration. This action is irreversible and removes the task from the account."""
 
     # Construct request model with validation
@@ -2650,7 +2779,7 @@ async def delete_task(actor_task_id: str = Field(..., alias="actorTaskId", descr
 
 # Tags: Actor tasks
 @mcp.tool()
-async def get_task_input(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any]:
+async def get_task_input(actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name.")) -> dict[str, Any] | ToolResult:
     """Retrieves the input configuration for a specified actor task. Returns the input object that defines the parameters passed to the actor when the task runs."""
 
     # Construct request model with validation
@@ -2692,7 +2821,7 @@ async def get_task_input(actor_task_id: str = Field(..., alias="actorTaskId", de
 async def update_task_input(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task to update, either as a standalone task ID or as a tilde-separated combination of the owner's username and the task's name."),
     body: dict[str, Any] | None = Field(None, description="A JSON object containing the input fields to update on the task. Only the specified properties will be modified; any properties not included will remain unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the input configuration of a specific actor task by merging the provided JSON object with the existing input. Only the properties included in the request body are updated; omitted properties retain their current values."""
 
     # Construct request model with validation
@@ -2740,7 +2869,7 @@ async def list_task_webhooks(
     offset: float | None = Field(None, description="Number of webhooks to skip from the beginning of the result set, used for paginating through records. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of webhooks to return in a single response. Accepts values between 1 and 1000, with 1000 as both the default and upper limit."),
     desc: bool | None = Field(None, description="When set to true, reverses the sort order so that the most recently created webhooks appear first. By default, results are sorted by creation date in ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of webhooks associated with a specific Actor task. Results are sorted by creation date and capped at 1000 records per request."""
 
     # Construct request model with validation
@@ -2786,7 +2915,7 @@ async def list_task_runs(
     limit: float | None = Field(None, description="Maximum number of runs to return in a single response. Accepts values between 1 and 1000, defaulting to 1000."),
     desc: bool | None = Field(None, description="When set to true, sorts runs by their start time in descending order (newest first). By default, runs are returned in ascending order."),
     status: str | None = Field(None, description="Filters results to only runs matching the specified status or comma-separated list of statuses. Valid statuses follow the Apify actor run lifecycle (e.g., SUCCEEDED, FAILED, RUNNING)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of runs for a specific actor task, including essential metadata for each run. Results can be filtered by status and sorted ascending or descending by start time."""
 
     # Construct request model with validation
@@ -2838,7 +2967,7 @@ async def run_task(
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
     body: dict[str, Any] | None = Field(None, description="JSON object containing input properties to override the task's default input configuration. Any properties not included here will fall back to the task's or Actor's default values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts an Actor task run asynchronously and immediately returns a run object without waiting for completion. Optionally override the task's input configuration via the request body, and use the returned run ID to poll for results or fetch dataset output."""
 
     # Call helper functions
@@ -2894,7 +3023,7 @@ async def run_task_sync_get(
     output_record_key: str | None = Field(None, alias="outputRecordKey", description="The key of the record in the run's default key-value store whose value will be returned as the response body. Defaults to 'OUTPUT' if not specified."),
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs a specific actor task synchronously and returns its output directly in the response. The task must complete within 300 seconds; if it exceeds this limit or the connection drops, the request fails but the underlying run continues."""
 
     # Call helper functions
@@ -2949,7 +3078,7 @@ async def run_task_sync(
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
     body: dict[str, Any] | None = Field(None, description="A JSON object used to override specific input fields defined in the Actor task configuration. Any fields not included here will fall back to the task's default values. Requires the Content-Type header to be set to application/json."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs an Actor task synchronously and returns its output directly in the response. The task must complete within 300 seconds; optionally, you can override the task's default input by providing a JSON payload."""
 
     # Call helper functions
@@ -3022,7 +3151,7 @@ async def run_task_sync_and_get_dataset_items(
     skip_failed_pages: bool | None = Field(None, alias="skipFailedPages", description="When set to true, items containing an errorInfo property are excluded from the output. Provided for backward compatibility with legacy Apify Crawler integrations and not recommended for new integrations."),
     webhook_event_types: list[str] | None = Field(None, description="List of event types to trigger the webhook. Common values: 'ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.ABORTED', 'ACTOR.RUN.TIMED_OUT'."),
     webhook_request_url: str | None = Field(None, description="URL that will receive the webhook POST request when the event fires."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronously runs a specific actor task and returns its dataset items directly in the response. The task must complete within 300 seconds; if it exceeds this limit the request times out, though the underlying run continues executing."""
 
     # Call helper functions
@@ -3088,7 +3217,7 @@ async def run_task_sync_get_dataset_items(
     skip_hidden: bool | None = Field(None, alias="skipHidden", description="When set to true, fields whose names begin with the # character are excluded from the output."),
     skip_empty: bool | None = Field(None, alias="skipEmpty", description="When set to true, items with no fields or all-null values are excluded from the output. Note that the total number of returned items may be less than the specified limit when this option is active."),
     body: dict[str, Any] | None = Field(None, description="Optional JSON object to override specific input fields defined in the Actor task configuration. Fields not included in this payload retain their default values from the task or Actor input schema. Must be sent with Content-Type: application/json."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Runs an Actor task synchronously and returns the resulting dataset items directly in the response. Optionally override task input via the POST body and control output format, pagination, and field selection through query parameters."""
 
     # Construct request model with validation
@@ -3135,7 +3264,7 @@ async def run_task_sync_get_dataset_items(
 async def get_last_task_run(
     actor_task_id: str = Field(..., alias="actorTaskId", description="The unique identifier of the actor task, either as a task ID or a tilde-separated combination of the owner's username and task name."),
     status: str | None = Field(None, description="Restricts the result to the last run matching the specified status, ensuring runs in other states are ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recent run of a specified actor task, with optional filtering by run status. Also serves as the base path for accessing the last run's default storages (log, key-value store, dataset, request queue) via sub-endpoints."""
 
     # Construct request model with validation
@@ -3182,7 +3311,7 @@ async def list_actor_runs(
     status: str | None = Field(None, description="Filters results to only runs matching the given status or statuses; accepts a single status value or a comma-separated list of status values (e.g., SUCCEEDED, FAILED, RUNNING)."),
     started_after: str | None = Field(None, alias="startedAfter", description="Filters results to only runs that started at or after this point in time; must be a valid ISO 8601 datetime string in UTC."),
     started_before: str | None = Field(None, alias="startedBefore", description="Filters results to only runs that started at or before this point in time; must be a valid ISO 8601 datetime string in UTC."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all Actor runs for the authenticated user, with each item containing basic run metadata. Supports filtering by status and start time, and sorting in ascending or descending order."""
 
     # Construct request model with validation
@@ -3224,7 +3353,7 @@ async def list_actor_runs(
 async def get_actor_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to retrieve."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the run to reach a terminal status before responding. Accepts values from 0 to 60; if the run finishes within the specified time the response will reflect its final status, otherwise it will reflect the current transitional status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all details about a specific Actor run, including its status, timing, and usage statistics. Optionally waits synchronously for the run to finish, eliminating the need for repeated polling."""
 
     # Construct request model with validation
@@ -3267,7 +3396,7 @@ async def get_actor_run(
 async def update_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to update."),
     body: _models.ActorRunPutBody | None = Field(None, description="Request body containing the fields to update on the run. Supports setting a status message (with an optional terminal flag indicating it is the final message) and/or the general resource access level, which controls anonymous or restricted visibility of the run and its default storages and logs. Allowed access values are: FOLLOW_USER_SETTING, ANYONE_WITH_ID_CAN_READ, or RESTRICTED."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an Actor run's status message and/or general resource access level. Use this to communicate progress to users via the Apify Console UI or to control who can view the run and its associated storages and logs."""
 
     # Construct request model with validation
@@ -3310,7 +3439,7 @@ async def update_run(
 
 # Tags: Actor runs
 @mcp.tool()
-async def delete_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the actor run to delete. The run must be in a finished state before it can be deleted.")) -> dict[str, Any]:
+async def delete_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the actor run to delete. The run must be in a finished state before it can be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a finished actor run. Only completed runs can be deleted, and only by the user or organization that initiated the run."""
 
     # Construct request model with validation
@@ -3352,7 +3481,7 @@ async def delete_actor_run(run_id: str = Field(..., alias="runId", description="
 async def abort_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to abort."),
     gracefully: bool | None = Field(None, description="When true, the run is aborted gracefully by sending 'aborting' and 'persistState' events before force-stopping after 30 seconds, which is useful if you intend to resurrect the run later."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aborts a currently starting or running Actor run, returning full run details. Runs already in a terminal state (FINISHED, FAILED, ABORTING, TIMED-OUT) are unaffected."""
 
     # Construct request model with validation
@@ -3396,7 +3525,7 @@ async def metamorph_run(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to be transformed."),
     target_actor_id: str = Field(..., alias="targetActorId", description="The unique identifier of the target Actor that this run should be transformed into."),
     build: str | None = Field(None, description="Specifies which build of the target Actor to use, either as a build tag or build number. Defaults to the build defined in the target Actor's default run configuration (typically `latest`)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transforms an active Actor run into a run of a different Actor with new input, seamlessly handing off work without creating a new run. The original run's default storages are preserved and the new input is stored in the same key-value store."""
 
     # Construct request model with validation
@@ -3436,7 +3565,7 @@ async def metamorph_run(
 
 # Tags: Actor runs
 @mcp.tool()
-async def reboot_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to reboot. The run must currently have a RUNNING status.")) -> dict[str, Any]:
+async def reboot_actor_run(run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to reboot. The run must currently have a RUNNING status.")) -> dict[str, Any] | ToolResult:
     """Reboots a currently running Actor run by restarting its container, returning the updated run details. Only runs with a RUNNING status can be rebooted; any data not persisted to a key-value store, dataset, or request queue will be lost."""
 
     # Construct request model with validation
@@ -3483,7 +3612,7 @@ async def resurrect_run(
     max_items: float | None = Field(None, alias="maxItems", description="Maximum number of dataset items that will be charged for pay-per-result Actors; does not cap the actual items returned, only the billable count. Accessible inside the Actor via the ACTOR_MAX_PAID_DATASET_ITEMS environment variable."),
     max_total_charge_usd: float | None = Field(None, alias="maxTotalChargeUsd", description="Maximum total cost in USD allowed for the resurrected run, intended for pay-per-event Actors to cap charges to your subscription. Accessible inside the Actor via the ACTOR_MAX_TOTAL_CHARGE_USD environment variable."),
     restart_on_error: bool | None = Field(None, alias="restartOnError", description="Whether the resurrected run should automatically restart if it encounters a failure. If omitted, the setting from the original run is preserved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restarts a finished Actor run (with status FINISHED, FAILED, ABORTED, or TIMED-OUT) by restarting its container with the same storages, updating its status back to RUNNING. Optionally override the build, timeout, memory, and cost limits used for the resurrected run."""
 
     # Construct request model with validation
@@ -3527,7 +3656,7 @@ async def charge_run_event(
     run_id: str = Field(..., alias="runId", description="The unique identifier of the Actor run to charge events against."),
     event_name: str = Field(..., alias="eventName", description="The name of the billing event to charge for, which must exactly match one of the events configured in the Actor's pay-per-event settings."),
     count: int = Field(..., description="The number of event occurrences to charge for in this request; must be a positive integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Charge for one or more occurrences of a configured pay-per-event (PPE) billing event within a specific Actor run. Must be called from within the Actor run using the same API token that started the run."""
 
     # Construct request model with validation
@@ -3573,7 +3702,7 @@ async def list_builds(
     offset: float | None = Field(None, description="Number of builds to skip from the beginning of the result set, used for paginating through large result sets."),
     limit: float | None = Field(None, description="Maximum number of builds to return in a single response, capped at 1000 records."),
     desc: bool | None = Field(None, description="When set to true, sorts builds by their start time in descending order (newest first); defaults to ascending order (oldest first)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of all builds for the authenticated user, with each entry containing basic build information. Records are sorted by start time and the endpoint returns a maximum of 1000 records per request."""
 
     # Construct request model with validation
@@ -3615,7 +3744,7 @@ async def list_builds(
 async def get_actor_build(
     build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to retrieve."),
     wait_for_finish: float | None = Field(None, alias="waitForFinish", description="Maximum number of seconds the server will wait for the build to reach a terminal status before responding. Accepts values from 0 (default, return immediately) to 60. If the build finishes within the timeout, the response will reflect a terminal status such as SUCCEEDED; otherwise a transitional status such as RUNNING is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves full details about a specific Actor build, including its status, timing, and resource usage. Supports synchronous waiting via an optional timeout parameter to avoid polling when monitoring build completion."""
 
     # Construct request model with validation
@@ -3655,7 +3784,7 @@ async def get_actor_build(
 
 # Tags: Actor builds
 @mcp.tool()
-async def delete_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to delete, found in the build's Info tab.")) -> dict[str, Any]:
+async def delete_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to delete, found in the build's Info tab.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific Actor build by its ID. The current default build for an Actor cannot be deleted; only users with build permissions for the Actor may perform this action."""
 
     # Construct request model with validation
@@ -3694,7 +3823,7 @@ async def delete_build(build_id: str = Field(..., alias="buildId", description="
 
 # Tags: Actor builds
 @mcp.tool()
-async def abort_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to abort, available in the build's Info tab.")) -> dict[str, Any]:
+async def abort_build(build_id: str = Field(..., alias="buildId", description="The unique identifier of the Actor build to abort, available in the build's Info tab.")) -> dict[str, Any] | ToolResult:
     """Aborts a running or starting Actor build, immediately halting execution and returning the build's full details. Builds already in a terminal state (FINISHED, FAILED, ABORTING, TIMED-OUT) are unaffected by this call."""
 
     # Construct request model with validation
@@ -3736,7 +3865,7 @@ async def abort_build(build_id: str = Field(..., alias="buildId", description="T
 async def get_build_log(
     build_id: str = Field(..., alias="buildId", description="The unique identifier of the actor build whose log you want to retrieve."),
     stream: bool | None = Field(None, description="When set to true, the response will stream log output continuously as long as the build is still running, rather than returning a static snapshot."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the log output for a specific actor build. Supports real-time log streaming while the build is in progress."""
 
     # Construct request model with validation
@@ -3782,7 +3911,7 @@ async def list_key_value_stores(
     desc: bool | None = Field(None, description="When set to true, reverses the sort order so that the most recently created stores appear first."),
     unnamed: bool | None = Field(None, description="When set to true, returns both named and unnamed stores. By default, only named stores are included in the response."),
     ownership: Literal["ownedByMe", "sharedWithMe"] | None = Field(None, description="Filters results by ownership relationship. Omitting this parameter returns all accessible stores regardless of ownership."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of key-value stores accessible to the user, including basic metadata for each store. Results are sorted by creation date ascending by default, supporting incremental pagination as new stores are created."""
 
     # Construct request model with validation
@@ -3821,7 +3950,7 @@ async def list_key_value_stores(
 
 # Tags: Storage/Key-value stores
 @mcp.tool()
-async def create_key_value_store(name: str | None = Field(None, description="Optional unique name for the store, making it easy to identify and retrieve later. If omitted, an unnamed store is created and subject to the platform's data retention policy.")) -> dict[str, Any]:
+async def create_key_value_store(name: str | None = Field(None, description="Optional unique name for the store, making it easy to identify and retrieve later. If omitted, an unnamed store is created and subject to the platform's data retention policy.")) -> dict[str, Any] | ToolResult:
     """Creates a new key-value store and returns its store object. If a store with the specified name already exists, the existing store is returned instead of creating a duplicate."""
 
     # Construct request model with validation
@@ -3860,7 +3989,7 @@ async def create_key_value_store(name: str | None = Field(None, description="Opt
 
 # Tags: Storage/Key-value stores
 @mcp.tool()
-async def get_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to retrieve, either as a store ID or in the format username~store-name.")) -> dict[str, Any]:
+async def get_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to retrieve, either as a store ID or in the format username~store-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details about a specific key-value store, including its configuration and metadata. Use this to inspect store properties before reading or writing data."""
 
     # Construct request model with validation
@@ -3903,7 +4032,7 @@ async def update_key_value_store(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to update, either as a store ID or in the format username~store-name."),
     name: str | None = Field(None, description="The new name to assign to the key-value store."),
     general_access: Literal["ANYONE_WITH_ID_CAN_READ", "ANYONE_WITH_NAME_CAN_READ", "FOLLOW_USER_SETTING", "RESTRICTED"] | None = Field(None, alias="generalAccess", description="The general access level for the key-value store, controlling who can read or interact with it. Use RESTRICTED to limit access, ANYONE_WITH_ID_CAN_READ or ANYONE_WITH_NAME_CAN_READ for broader read access, or FOLLOW_USER_SETTING to inherit the owner's default setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a key-value store's name and general access level using the provided JSON payload. Returns the updated store object reflecting the applied changes."""
 
     # Construct request model with validation
@@ -3945,7 +4074,7 @@ async def update_key_value_store(
 
 # Tags: Storage/Key-value stores
 @mcp.tool()
-async def delete_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to delete, either as a store ID or in the format username~store-name.")) -> dict[str, Any]:
+async def delete_key_value_store(store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store to delete, either as a store ID or in the format username~store-name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a key-value store and all of its contents. This action is irreversible and removes the store along with all stored key-value pairs."""
 
     # Construct request model with validation
@@ -3990,7 +4119,7 @@ async def list_key_value_store_keys(
     limit: float | None = Field(None, description="Maximum number of keys to return in a single response. Must be between 1 and 1000."),
     collection: str | None = Field(None, description="Restricts results to keys belonging to a specific collection defined in the key-value store's schema. Requires the store to have a schema configured."),
     prefix: str | None = Field(None, description="Restricts results to keys that begin with the specified string prefix, useful for filtering logically grouped keys."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of keys from a specified key-value store, including metadata about each key's associated value such as size. Supports filtering by collection or key prefix."""
 
     # Construct request model with validation
@@ -4034,7 +4163,7 @@ async def get_key_value_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key under which the record is stored in the key-value store."),
     attachment: bool | None = Field(None, description="When set to true, the response is served with a Content-Disposition: attachment header, prompting browsers to download the file rather than render it, and bypasses Apify's HTML security modifications to return raw content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the value stored under a specific key in a key-value store, returning the record with its original content type and encoding. Use the attachment parameter to fetch raw HTML content without Apify's security modifications."""
 
     # Construct request model with validation
@@ -4078,7 +4207,7 @@ async def put_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key under which the value will be stored; must be unique within the store and is used to retrieve the record later."),
     body: dict[str, Any] | None = Field(None, description="The value to store in the record; any data type or structure is supported, with the content type specified via the Content-Type request header."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stores a value under a specific key in a key-value store, with the content type defined by the Content-Type header. Supports Gzip, Deflate, and Brotli compression via the Content-Encoding header to reduce payload size and improve upload speed."""
 
     # Construct request model with validation
@@ -4124,7 +4253,7 @@ async def put_store_record(
 async def delete_key_value_store_record(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key identifying the specific record to delete within the store."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a single record from a key-value store by its key. The store itself and all other records remain unaffected."""
 
     # Construct request model with validation
@@ -4166,7 +4295,7 @@ async def delete_key_value_store_record(
 async def check_key_value_store_record_exists(
     store_id: str = Field(..., alias="storeId", description="The unique identifier of the key-value store, either as a store ID or in the format username~store-name."),
     record_key: str = Field(..., alias="recordKey", description="The key identifying the record to check for existence within the key-value store."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether a record exists in a key-value store under a specific key without retrieving its value. Useful for lightweight existence checks before performing read or write operations."""
 
     # Construct request model with validation
@@ -4211,7 +4340,7 @@ async def list_datasets(
     desc: bool | None = Field(None, description="When set to true, results are sorted by creation date in descending order (newest first). By default, results are sorted in ascending order."),
     unnamed: bool | None = Field(None, description="When set to true, both named and unnamed datasets are returned. By default, only named datasets are included in the response."),
     ownership: Literal["ownedByMe", "sharedWithMe"] | None = Field(None, description="Filters results by ownership relationship. Use 'ownedByMe' to return only datasets you own, or 'sharedWithMe' to return only datasets shared with you by others. Omit to return all accessible datasets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of datasets accessible to the user, including basic metadata for each. Supports sorting, filtering by ownership, and optionally including unnamed datasets."""
 
     # Construct request model with validation
@@ -4250,7 +4379,7 @@ async def list_datasets(
 
 # Tags: Storage/Datasets
 @mcp.tool()
-async def create_dataset(name: str | None = Field(None, description="Optional unique human-readable name for the dataset, allowing easy identification and retrieval in the future. If omitted, the dataset is unnamed and subject to the platform's data retention policy.")) -> dict[str, Any]:
+async def create_dataset(name: str | None = Field(None, description="Optional unique human-readable name for the dataset, allowing easy identification and retrieval in the future. If omitted, the dataset is unnamed and subject to the platform's data retention policy.")) -> dict[str, Any] | ToolResult:
     """Creates a new dataset for storing structured data and returns its object. If a name is provided and a dataset with that name already exists, the existing dataset object is returned instead."""
 
     # Construct request model with validation
@@ -4289,7 +4418,7 @@ async def create_dataset(name: str | None = Field(None, description="Optional un
 
 # Tags: Storage/Datasets
 @mcp.tool()
-async def get_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a standalone dataset ID or in the combined username~dataset-name format.")) -> dict[str, Any]:
+async def get_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a standalone dataset ID or in the combined username~dataset-name format.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and storage information for a specific dataset by its ID. Note that item count fields may lag up to 5 seconds behind actual data; use the list dataset items endpoint to retrieve the dataset's contents."""
 
     # Construct request model with validation
@@ -4332,7 +4461,7 @@ async def update_dataset(
     dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset to update, either as a standalone dataset ID or in the format username~dataset-name."),
     name: str | None = Field(None, description="The new display name to assign to the dataset."),
     general_access: Literal["ANYONE_WITH_ID_CAN_READ", "ANYONE_WITH_NAME_CAN_READ", "FOLLOW_USER_SETTING", "RESTRICTED"] | None = Field(None, alias="generalAccess", description="Controls who can access the dataset: restrict to specific users, allow anyone with the ID or name to read, or inherit from the user's default sharing setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a dataset's name and general access level by dataset ID or username-scoped name. Returns the full updated dataset object."""
 
     # Construct request model with validation
@@ -4374,7 +4503,7 @@ async def update_dataset(
 
 # Tags: Storage/Datasets
 @mcp.tool()
-async def delete_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset to delete, accepted either as a standalone dataset ID or as a combined username and dataset name in the format `username~dataset-name`.")) -> dict[str, Any]:
+async def delete_dataset(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset to delete, accepted either as a standalone dataset ID or as a combined username and dataset name in the format `username~dataset-name`.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific dataset and its associated data. This action is irreversible and removes the dataset from the account."""
 
     # Construct request model with validation
@@ -4430,7 +4559,7 @@ async def list_dataset_items(
     skip_hidden: bool | None = Field(None, alias="skipHidden", description="When set to `true` or `1`, excludes hidden fields (top-level fields whose names begin with `#`) from the output. Equivalent to enabling `clean`."),
     skip_empty: bool | None = Field(None, alias="skipEmpty", description="When set to `true` or `1`, excludes empty items from the output. Be aware that the number of returned items may be less than the specified `limit` when this option is active."),
     view: str | None = Field(None, description="Name of a predefined view configuration defined in the dataset's schema, which controls how items are filtered and presented. Refer to the dataset schema documentation for how views are defined."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves items stored in a dataset, supporting multiple output formats (JSON, JSONL, XML, HTML, CSV, XLSX, RSS) with options for pagination, field filtering, sorting, and data transformation. Use this to export or inspect dataset contents produced by an Actor run."""
 
     # Construct request model with validation
@@ -4473,7 +4602,7 @@ async def list_dataset_items(
 async def append_dataset_items(
     dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the target dataset, either as a dataset ID or in the format username~dataset-name."),
     body: list[_models.PutItemsRequest] | None = Field(None, description="A single JSON object or an array of JSON objects to append to the dataset in order; total payload must not exceed 5 MB, so split larger arrays into smaller batches."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Appends one or more JSON objects to the end of the specified dataset. The entire request is rejected with a 400 error if any item fails schema validation; payloads must not exceed 5 MB."""
 
     # Construct request model with validation
@@ -4516,7 +4645,7 @@ async def append_dataset_items(
 
 # Tags: Storage/Datasets
 @mcp.tool()
-async def get_dataset_statistics(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a dataset ID or in the format username~dataset-name.")) -> dict[str, Any]:
+async def get_dataset_statistics(dataset_id: str = Field(..., alias="datasetId", description="The unique identifier of the dataset, either as a dataset ID or in the format username~dataset-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves field-level statistics for a specified dataset. Returns aggregated metrics such as value counts, null rates, and type distributions for each field in the dataset."""
 
     # Construct request model with validation
@@ -4561,7 +4690,7 @@ async def list_request_queues(
     desc: bool | None = Field(None, description="When set to true, reverses the sort order so queues are returned with the most recently created first instead of oldest first."),
     unnamed: bool | None = Field(None, description="When set to true, returns both named and unnamed queues. By default, only named queues are included in the results."),
     ownership: Literal["ownedByMe", "sharedWithMe"] | None = Field(None, description="Filters results by ownership relationship. Omitting this parameter returns all accessible queues, while specifying a value limits results to queues owned by the user or shared with them by others."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of the user's request queues, returning basic metadata for each. Results are sorted by creation date ascending by default, supporting incremental fetching as new queues are created."""
 
     # Construct request model with validation
@@ -4600,7 +4729,7 @@ async def list_request_queues(
 
 # Tags: Storage/Request queues
 @mcp.tool()
-async def create_request_queue(name: str | None = Field(None, description="Optional unique name for the request queue, allowing easy identification and retrieval in the future. If omitted, an unnamed queue is created and subject to data retention limits.")) -> dict[str, Any]:
+async def create_request_queue(name: str | None = Field(None, description="Optional unique name for the request queue, allowing easy identification and retrieval in the future. If omitted, an unnamed queue is created and subject to data retention limits.")) -> dict[str, Any] | ToolResult:
     """Creates a new request queue and returns its object, or returns the existing queue object if a queue with the given name already exists. Unnamed queues are subject to the platform's data retention policy."""
 
     # Construct request model with validation
@@ -4639,7 +4768,7 @@ async def create_request_queue(name: str | None = Field(None, description="Optio
 
 # Tags: Storage/Request queues
 @mcp.tool()
-async def get_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to retrieve. Accepts either the queue's ID or a combined username and queue name in the format username~queue-name.")) -> dict[str, Any]:
+async def get_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to retrieve. Accepts either the queue's ID or a combined username and queue name in the format username~queue-name.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and configuration details for a specific request queue. Returns the full queue object including its properties and current state."""
 
     # Construct request model with validation
@@ -4681,7 +4810,7 @@ async def get_request_queue(queue_id: str = Field(..., alias="queueId", descript
 async def update_request_queue(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to update, either as a queue ID or in the format username~queue-name."),
     body: _models.RequestQueuePutBody | None = Field(None, description="JSON object containing the fields to update on the request queue, such as its name or general resource access level."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a request queue's name and resource access level by submitting a JSON payload with the desired changes. Returns the full updated request queue object upon success."""
 
     # Construct request model with validation
@@ -4724,7 +4853,7 @@ async def update_request_queue(
 
 # Tags: Storage/Request queues
 @mcp.tool()
-async def delete_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to delete, either as a queue ID or in the format username~queue-name.")) -> dict[str, Any]:
+async def delete_request_queue(queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue to delete, either as a queue ID or in the format username~queue-name.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a request queue and all its associated data. This action is irreversible and removes the queue identified by its ID or name."""
 
     # Construct request model with validation
@@ -4768,7 +4897,7 @@ async def batch_add_requests(
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the calling client, used to detect whether the queue is being accessed by multiple clients simultaneously. Omitting this value causes the system to treat the call as originating from a new client."),
     forefront: str | None = Field(None, description="Controls whether each request in the batch is inserted at the front (head) or back (end) of the queue. Accepts a boolean string value; defaults to false, placing requests at the end."),
     body: list[_models.RequestDraft] | None = Field(None, description="An array of request objects to add to the queue, with a maximum of 25 items per batch. Each item should include the request details such as URL and uniqueKey; order within the array does not affect queue priority."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds up to 25 requests to a specified request queue in a single batch operation. Returns arrays of successfully processed and unprocessed requests, with unprocessed entries recommended for retry using exponential backoff."""
 
     # Construct request model with validation
@@ -4817,7 +4946,7 @@ async def batch_delete_queue_requests(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to application/json."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client accessing the queue, used to detect whether the queue has been accessed by multiple clients. If omitted, the system treats this call as originating from a new client."),
     body: list[_models.RequestDraftDelete] | None = Field(None, description="An array of request objects to delete, each identified by either an ID or uniqueKey field. The batch is limited to 25 requests; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Batch-deletes up to 25 requests from a specified request queue, identified by their ID or uniqueKey. Any requests that fail due to rate limiting or internal errors are returned in the response for retry, with exponential backoff recommended."""
 
     # Construct request model with validation
@@ -4865,7 +4994,7 @@ async def batch_delete_queue_requests(
 async def unlock_queue_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client accessing the queue, used to track whether multiple clients have accessed the same queue. If omitted, the system treats the request as originating from a new client."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlocks all currently locked requests in the specified request queue that are held by the calling client. Within an Actor run, this releases locks held by both the current run and the same clientKey; outside a run, it releases all locks associated with the provided clientKey."""
 
     # Construct request model with validation
@@ -4909,7 +5038,7 @@ async def list_queue_requests(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     exclusive_start_id: str | None = Field(None, alias="exclusiveStartId", description="Cursor for pagination — all requests up to and including this request ID are excluded from the results, returning only subsequent requests."),
     limit: float | None = Field(None, description="Maximum number of requests to return in a single response. Must be between 1 and 10000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of requests from a specified request queue. Use exclusiveStartId and limit to page through large queues efficiently."""
 
     # Construct request model with validation
@@ -4956,7 +5085,7 @@ async def add_queue_request(
     method: str = Field(..., description="The HTTP method to use when executing this request (e.g., GET, POST, PUT, DELETE)."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client making this request, used to detect whether the queue has been accessed by multiple clients."),
     forefront: str | None = Field(None, description="Controls where the request is inserted in the queue. Set to true to add at the front (head) of the queue, or false to append at the end. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new URL request to a specified request queue for processing. If a request with the same uniqueKey already exists in the queue, returns the ID of the existing request instead of creating a duplicate."""
 
     # Construct request model with validation
@@ -5002,7 +5131,7 @@ async def add_queue_request(
 async def get_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request to retrieve from the specified queue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific request from a request queue by its ID. Returns the full request details including URL, metadata, and processing status."""
 
     # Construct request model with validation
@@ -5055,7 +5184,7 @@ async def update_queue_request(
     label: str | None = Field(None, description="An optional label for categorizing or routing the request during processing."),
     image: str | None = Field(None, description="An optional URI pointing to an image associated with this request, must be a valid URI."),
     no_retry: bool | None = Field(None, alias="noRetry", description="When set to `true`, prevents the request from being retried automatically if its processing fails."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing request in a queue, allowing you to modify its properties or mark it as handled. Setting `handledAt` to the current time removes the request from the head of the queue and releases any lock on it."""
 
     # Construct request model with validation
@@ -5103,7 +5232,7 @@ async def delete_queue_request(
     queue_id: str = Field(..., alias="queueId", description="The unique identifier of the request queue, either as a queue ID or in the format username~queue-name."),
     request_id: str = Field(..., alias="requestId", description="The unique identifier of the request to delete from the queue."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string (1–32 characters) identifying the client making this call, used to track whether the queue has been accessed by multiple clients. If omitted, the system treats this call as originating from a new client."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific request from a request queue by its ID. Use this to discard requests that are no longer needed for processing."""
 
     # Construct request model with validation
@@ -5147,7 +5276,7 @@ async def get_request_queue_head(
     queue_id: str = Field(..., alias="queueId", description="The unique ID of the request queue, or a combined identifier in the format `username~queue-name`."),
     limit: float | None = Field(None, description="The maximum number of requests to return from the head of the queue. If omitted, a default limit is applied."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the calling client, used to track whether the queue is being accessed by multiple clients. Omitting this value causes the system to treat the call as originating from a new, distinct client."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the first N requests from the head of a request queue. Returns a `hadMultipleClients` flag indicating whether the queue has been accessed by more than one client, which helps SDKs determine local cache consistency."""
 
     # Construct request model with validation
@@ -5192,7 +5321,7 @@ async def lock_queue_head_requests(
     lock_secs: float = Field(..., alias="lockSecs", description="The duration in seconds for which the retrieved requests will be locked and unavailable to other clients or runs."),
     limit: float | None = Field(None, description="The maximum number of requests to retrieve from the head of the queue, between 1 and 25.", le=25),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the calling client, used to detect whether the queue is being accessed by multiple distinct clients. Omitting this value causes the system to treat the call as originating from a new client."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves and locks a specified number of requests from the head of a request queue, preventing other clients or runs from accessing them for the duration of the lock period. Returns a flag indicating whether the queue has been accessed by multiple clients."""
 
     # Construct request model with validation
@@ -5238,7 +5367,7 @@ async def prolong_request_lock(
     lock_secs: float = Field(..., alias="lockSecs", description="The number of seconds to extend the lock duration from the current time. Must be a positive value."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client accessing the queue. Must match the client key used when the request was originally locked in order to prolong or delete the lock."),
     forefront: str | None = Field(None, description="Controls where the request is placed in the queue after its lock expires — set to true to move it to the front of the queue, or false to place it at the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Extends the lock duration on a specific request in a queue, preventing other clients from acquiring it. Only the client that originally locked the request can prolong its lock."""
 
     # Construct request model with validation
@@ -5284,7 +5413,7 @@ async def delete_request_lock(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be application/json."),
     client_key: str | None = Field(None, alias="clientKey", description="A unique string identifier (1–32 characters) representing the client releasing the lock. Must match the client key used when the lock was originally acquired."),
     forefront: str | None = Field(None, description="Controls where the request is re-inserted in the queue after the lock is removed — set to true to place it at the front of the queue, or false to append it to the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Releases a lock on a specific request in a queue, making it available for other clients to process. Only the client that originally locked the request (via the lock head operation) can delete its lock."""
 
     # Construct request model with validation
@@ -5329,7 +5458,7 @@ async def list_webhooks(
     offset: float | None = Field(None, description="Number of records to skip from the beginning of the result set, used for paginating through results."),
     limit: float | None = Field(None, description="Maximum number of webhook records to return in a single request, with an upper bound of 1000."),
     desc: bool | None = Field(None, description="When set to true, results are sorted by creation date in descending order (newest first); defaults to ascending order (oldest first)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of webhooks created by the authenticated user. Results are sorted by creation date and capped at 1000 records per request."""
 
     # Construct request model with validation
@@ -5382,7 +5511,7 @@ async def create_webhook(
     headers_template: str | None = Field(None, alias="headersTemplate", description="A JSON-like template string defining custom HTTP headers sent with the webhook request. Supports Apify template variables. Note: host, Content-Type, X-Apify-Webhook, X-Apify-Webhook-Dispatch-Id, and X-Apify-Request-Origin are always overwritten with defaults."),
     description: str | None = Field(None, description="Optional human-readable label for the webhook to help identify its purpose."),
     should_interpolate_strings: bool | None = Field(None, alias="shouldInterpolateStrings", description="When true, Apify template variables found inside string values within the payloadTemplate are interpolated. When false, only top-level variable placeholders are replaced."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new webhook that triggers HTTP POST requests to a target URL when specified Actor or task events occur. Use an idempotency key to safely retry creation without duplicating webhooks."""
 
     # Construct request model with validation
@@ -5424,7 +5553,7 @@ async def create_webhook(
 
 # Tags: Webhooks/Webhooks
 @mcp.tool()
-async def get_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves full details of a specific webhook by its unique identifier. Returns all webhook configuration and metadata."""
 
     # Construct request model with validation
@@ -5477,7 +5606,7 @@ async def update_webhook(
     headers_template: str | None = Field(None, alias="headersTemplate", description="A template string defining custom HTTP headers included with each webhook request. Supports variable interpolation using double curly brace syntax."),
     description: str | None = Field(None, description="A human-readable description of the webhook's purpose or configuration for identification."),
     should_interpolate_strings: bool | None = Field(None, alias="shouldInterpolateStrings", description="When true, string values within the payload and headers templates will have variable placeholders interpolated before the request is sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing webhook's configuration by its ID, applying only the properties provided in the JSON request body. Returns the full updated webhook object."""
 
     # Construct request model with validation
@@ -5520,7 +5649,7 @@ async def update_webhook(
 
 # Tags: Webhooks/Webhooks
 @mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to delete.")) -> dict[str, Any]:
+async def delete_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook by its unique identifier. This action is irreversible and will stop all event notifications associated with the webhook."""
 
     # Construct request model with validation
@@ -5559,7 +5688,7 @@ async def delete_webhook(webhook_id: str = Field(..., alias="webhookId", descrip
 
 # Tags: Webhooks/Webhooks
 @mcp.tool()
-async def test_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to test.")) -> dict[str, Any]:
+async def test_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook to test.")) -> dict[str, Any] | ToolResult:
     """Sends a test dispatch to the specified webhook using a dummy payload. Useful for verifying that the webhook endpoint is correctly configured and reachable."""
 
     # Construct request model with validation
@@ -5598,7 +5727,7 @@ async def test_webhook(webhook_id: str = Field(..., alias="webhookId", descripti
 
 # Tags: Webhooks/Webhooks
 @mcp.tool()
-async def list_webhook_dispatches_by_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook whose dispatch history you want to retrieve.")) -> dict[str, Any]:
+async def list_webhook_dispatches_by_webhook(webhook_id: str = Field(..., alias="webhookId", description="The unique identifier of the webhook whose dispatch history you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of dispatch records for a specific webhook, showing its delivery history and execution events."""
 
     # Construct request model with validation
@@ -5641,7 +5770,7 @@ async def list_webhook_dispatches(
     offset: float | None = Field(None, description="Number of records to skip from the beginning of the result set, used for paginating through results. Defaults to 0."),
     limit: float | None = Field(None, description="Maximum number of webhook dispatch records to return in a single response. Accepts values up to 1000, which is also the default."),
     desc: bool | None = Field(None, description="When set to true, sorts the returned records by the createdAt field in descending order (newest first). Defaults to ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of webhook dispatches associated with the authenticated user. Results are sorted by creation date and capped at 1000 records per request."""
 
     # Construct request model with validation
@@ -5680,7 +5809,7 @@ async def list_webhook_dispatches(
 
 # Tags: Webhooks/Webhook dispatches
 @mcp.tool()
-async def get_webhook_dispatch(dispatch_id: str = Field(..., alias="dispatchId", description="The unique identifier of the webhook dispatch record to retrieve.")) -> dict[str, Any]:
+async def get_webhook_dispatch(dispatch_id: str = Field(..., alias="dispatchId", description="The unique identifier of the webhook dispatch record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a webhook dispatch record by its unique ID, returning full details about the dispatch event, status, and payload."""
 
     # Construct request model with validation
@@ -5723,7 +5852,7 @@ async def list_schedules(
     offset: float | None = Field(None, description="Number of schedules to skip from the beginning of the result set, used for paginating through records."),
     limit: float | None = Field(None, description="Maximum number of schedules to return in a single request, capped at 1000."),
     desc: bool | None = Field(None, description="When set to true, sorts the returned schedules by creation date in descending order instead of the default ascending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of schedules created by the user. Results are sorted by creation date ascending by default, with a maximum of 1000 records per request."""
 
     # Construct request model with validation
@@ -5771,7 +5900,7 @@ async def create_schedule(
     description: str | None = Field(None, description="Human-readable explanation of the schedule's purpose, useful for documentation and identifying what the schedule does."),
     title: str | None = Field(None, description="Display-friendly label for the schedule shown in the UI, distinct from the programmatic name."),
     actions: list[_models.ScheduleCreateActions] | None = Field(None, description="List of actions to execute when the schedule triggers. Each item defines an action type and its configuration; order determines execution sequence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new schedule with the specified configuration, including timing, timezone, and associated actions. Returns the fully created schedule object upon success."""
 
     # Construct request model with validation
@@ -5812,7 +5941,7 @@ async def create_schedule(
 
 # Tags: Schedules
 @mcp.tool()
-async def get_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any]:
+async def get_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a schedule object with all associated details by its unique identifier. Use this to inspect scheduling configuration, timing, and related metadata for a specific schedule."""
 
     # Construct request model with validation
@@ -5861,7 +5990,7 @@ async def update_schedule(
     description: str | None = Field(None, description="A human-readable explanation of the schedule's purpose or context, useful for documentation and identification."),
     title: str | None = Field(None, description="A human-friendly display name for the schedule, intended for presentation in UIs or dashboards."),
     actions: list[_models.ScheduleCreateActions] | None = Field(None, description="An ordered list of action objects that the schedule will execute when triggered. Each item defines the type and configuration of an action to perform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing schedule by its ID, applying only the properties provided in the request body while leaving unspecified properties unchanged. Returns the full updated schedule object."""
 
     # Construct request model with validation
@@ -5903,7 +6032,7 @@ async def update_schedule(
 
 # Tags: Schedules
 @mcp.tool()
-async def delete_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to delete.")) -> dict[str, Any]:
+async def delete_schedule(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a schedule by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5942,7 +6071,7 @@ async def delete_schedule(schedule_id: str = Field(..., alias="scheduleId", desc
 
 # Tags: Schedules
 @mcp.tool()
-async def get_schedule_log(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule whose invocation log you want to retrieve.")) -> dict[str, Any]:
+async def get_schedule_log(schedule_id: str = Field(..., alias="scheduleId", description="The unique identifier of the schedule whose invocation log you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the execution log for a specific schedule, returning a JSON array of up to 1000 recent invocation records. Useful for auditing schedule activity and diagnosing execution history."""
 
     # Construct request model with validation
@@ -5990,7 +6119,7 @@ async def list_store_actors(
     username: str | None = Field(None, description="Filters results to only include Actors published by the specified username."),
     pricing_model: Literal["FREE", "FLAT_PRICE_PER_MONTH", "PRICE_PER_DATASET_ITEM", "PAY_PER_EVENT"] | None = Field(None, alias="pricingModel", description="Filters results to only include Actors with the specified pricing model. Must be one of the supported pricing model values."),
     allows_agentic_users: bool | None = Field(None, alias="allowsAgenticUsers", description="When true, restricts results to Actors that permit agentic users; when false, restricts results to Actors that do not permit agentic users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of publicly available Actors from the Apify Store, with support for keyword search, filtering, and sorting. Returns up to 1,000 results and supports pagination."""
 
     # Construct request model with validation
@@ -6033,7 +6162,7 @@ async def get_run_log(
     build_or_run_id: str = Field(..., alias="buildOrRunId", description="The unique identifier of the Actor build or run whose logs you want to retrieve."),
     stream: bool | None = Field(None, description="When set to true, the response streams log output continuously while the build or run is still active, rather than returning a static snapshot."),
     raw: bool | None = Field(None, description="When set to true, logs are returned verbatim including ANSI escape codes. By default, ANSI escape codes are stripped and only printable characters are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the log output for a specific Actor build or run. Supports real-time streaming for active runs and optional preservation of raw ANSI escape codes."""
 
     # Construct request model with validation
@@ -6073,7 +6202,7 @@ async def get_run_log(
 
 # Tags: Users
 @mcp.tool()
-async def get_user(user_id: str = Field(..., alias="userId", description="The unique identifier or username of the user whose public profile data should be retrieved.")) -> dict[str, Any]:
+async def get_user(user_id: str = Field(..., alias="userId", description="The unique identifier or username of the user whose public profile data should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves public profile information for a specific user account, equivalent to what is visible on their public profile page. No authentication is required to call this endpoint."""
 
     # Construct request model with validation
@@ -6112,7 +6241,7 @@ async def get_user(user_id: str = Field(..., alias="userId", description="The un
 
 # Tags: Users
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves both public and private profile data for the authenticated user account identified by the provided token. Note that plan, email, and profile fields are excluded when accessed from within an Actor run."""
 
     # Extract parameters for API call
@@ -6142,7 +6271,7 @@ async def get_current_user() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def get_monthly_usage(date: str | None = Field(None, description="The date within the billing cycle you want to retrieve usage for, in YYYY-MM-DD format. If omitted, the current billing cycle is returned.")) -> dict[str, Any]:
+async def get_monthly_usage(date: str | None = Field(None, description="The date within the billing cycle you want to retrieve usage for, in YYYY-MM-DD format. If omitted, the current billing cycle is returned.")) -> dict[str, Any] | ToolResult:
     """Retrieves a complete summary of your usage for the current or a specified billing cycle, including storage, data transfer, and request queue usage with both an overall total and a daily breakdown."""
 
     # Construct request model with validation
@@ -6181,7 +6310,7 @@ async def get_monthly_usage(date: str | None = Field(None, description="The date
 
 # Tags: Users
 @mcp.tool()
-async def get_account_limits() -> dict[str, Any]:
+async def get_account_limits() -> dict[str, Any] | ToolResult:
     """Retrieves a complete summary of the authenticated account's limits, current usage cycle, and usage statistics, equivalent to the Limits page in the Apify console."""
 
     # Extract parameters for API call

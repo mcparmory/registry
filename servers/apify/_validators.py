@@ -1,7 +1,7 @@
 """
 Apify MCP Server - Validators
 
-Generated: 2026-04-14 18:14:06 UTC
+Generated: 2026-04-23 20:57:56 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
