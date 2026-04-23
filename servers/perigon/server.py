@@ -5,7 +5,7 @@ Perigon API MCP Server
 API Info:
 - Contact: Perigon Support <data@perigon.io> (https://docs.perigon.io/)
 
-Generated: 2026-04-14 18:30:19 UTC
+Generated: 2026-04-23 21:36:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.perigon.io")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +722,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +778,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +844,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +878,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -850,16 +968,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -873,6 +992,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -915,6 +1035,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -926,7 +1061,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -939,7 +1073,7 @@ AUTH_SCHEME_PRIORITY = [
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
 try:
-    _auth_handlers["apiKeyAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
+    _auth_handlers["apiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY", location="query", param_name="apiKey")
     logging.info("Authentication configured: apiKeyAuth")
 except ValueError as e:
     # Extract credential names from error message (first sentence before "Leave empty")
@@ -1142,7 +1276,7 @@ async def search_articles(
     negative_sentiment_to: float | None = Field(None, alias="negativeSentimentTo", description="Filter articles with negative sentiment score less than or equal to the specified value. Scores range from 0 to 1, with higher values indicating stronger negative tone."),
     taxonomy: list[str] | None = Field(None, description="Filter by Google Content Categories using full category names (e.g., /Finance/Banking/Other, /Finance/Investing/Funds). Refer to Google's category list for complete options. Multiple values create an OR filter."),
     prefix_taxonomy: str | None = Field(None, alias="prefixTaxonomy", description="Filter by Google Content Categories using category prefix only (e.g., /Finance). Matches all categories starting with the specified prefix."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter news articles across Perigon's database using flexible query parameters. Returns paginated results with support for text search, date ranges, geographic filters, entity mentions, sentiment analysis, and content categorization."""
 
     _page = _parse_int(page)
@@ -1160,11 +1294,10 @@ async def search_articles(
     # Extract parameters for API call
     _http_path = "/v1/articles/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_articles")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_articles", "GET", _http_path, _request_id)
@@ -1176,7 +1309,6 @@ async def search_articles(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1198,7 +1330,7 @@ async def search_companies(
     sector: str | None = Field(None, description="Filter by company sector classifications using Boolean operators (AND, OR, NOT), exact phrases with quotes, and wildcards (* for multiple characters, ? for single character)."),
     size: str | None = Field(None, description="Number of companies to return per page. Must be between 1 and 100 inclusive."),
     page: str | None = Field(None, description="Zero-indexed page number to retrieve from the paginated results. Must be 0 or greater."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter companies tracked by Perigon using multiple criteria including name, domain, ticker symbol, industry, sector, and company metadata. Supports Boolean search logic for flexible querying across company attributes."""
 
     _num_employees_from = _parse_int(num_employees_from)
@@ -1218,11 +1350,10 @@ async def search_companies(
     # Extract parameters for API call
     _http_path = "/v1/companies/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_companies")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_companies", "GET", _http_path, _request_id)
@@ -1234,7 +1365,6 @@ async def search_companies(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1254,7 +1384,7 @@ async def search_journalists(
     country: list[str] | None = Field(None, description="Filter by countries journalists commonly cover. Use ISO 3166-1 alpha-2 country codes in lowercase (e.g., us, gb, jp). Matches any country in the list (OR operation)."),
     updated_at_from: str | None = Field(None, alias="updatedAtFrom", description="Filter for journalist profiles updated on or after this date. Accepts ISO 8601 format (e.g., 2023-03-01T00:00:00) or yyyy-mm-dd format."),
     updated_at_to: str | None = Field(None, alias="updatedAtTo", description="Filter for journalist profiles updated on or before this date. Accepts ISO 8601 format (e.g., 2023-03-01T23:59:59) or yyyy-mm-dd format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter journalists from a global database of over 230,000 profiles. Use multiple filter criteria to find journalists by name, coverage topics, publication sources, and other attributes."""
 
     _size = _parse_int(size)
@@ -1272,11 +1402,10 @@ async def search_journalists(
     # Extract parameters for API call
     _http_path = "/v1/journalists/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_journalists")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_journalists", "GET", _http_path, _request_id)
@@ -1288,14 +1417,13 @@ async def search_journalists(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
 
 # Tags: v1
 @mcp.tool()
-async def get_journalist(id_: str = Field(..., alias="id", description="The unique identifier of the journalist. This ID is provided in article response objects and is used to fetch the journalist's full profile.")) -> dict[str, Any]:
+async def get_journalist(id_: str = Field(..., alias="id", description="The unique identifier of the journalist. This ID is provided in article response objects and is used to fetch the journalist's full profile.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific journalist using their unique identifier. Use this to access journalist profiles and biographical details referenced in article responses."""
 
     # Construct request model with validation
@@ -1309,11 +1437,11 @@ async def get_journalist(id_: str = Field(..., alias="id", description="The uniq
 
     # Extract parameters for API call
     _http_path = _build_path("/v1/journalists/{id}", _request.path.model_dump(by_alias=True)) if _request.path else "/v1/journalists/{id}"
-    _http_headers = {}
+    _http_query = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_journalist")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_journalist", "GET", _http_path, _request_id)
@@ -1324,7 +1452,7 @@ async def get_journalist(id_: str = Field(..., alias="id", description="The uniq
         method="GET",
         path=_http_path,
         request_id=_request_id,
-        headers=_http_headers,
+        params=_http_query,
     )
 
     return _response_data
@@ -1337,7 +1465,7 @@ async def search_people(
     occupation_label: str | None = Field(None, alias="occupationLabel", description="Search by occupation or profession (e.g., politician, actor, CEO, athlete) using Boolean operators (AND, OR, NOT), exact phrase matching with quotes, and wildcards (* and ?) for flexible occupation-based filtering."),
     page: str | None = Field(None, description="Specify which page of results to retrieve in the paginated response, starting from page 0. Use with size parameter to navigate through large result sets."),
     size: str | None = Field(None, description="Set the number of people to return per page, between 1 and 100 results. Combine with page parameter to control pagination through results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve detailed information on known persons from Perigon's database of over 650,000 people worldwide. Results include Wikidata identifiers for cross-referencing additional biographical data."""
 
     _page = _parse_int(page)
@@ -1355,11 +1483,10 @@ async def search_people(
     # Extract parameters for API call
     _http_path = "/v1/people/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_people")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_people", "GET", _http_path, _request_id)
@@ -1371,7 +1498,6 @@ async def search_people(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1395,7 +1521,7 @@ async def search_media_sources(
     label: list[str] | None = Field(None, description="Filter sources by content label patterns (e.g., Opinion, Paid-news, Non-news). Returns sources where the label commonly appears in published content. Multiple values use OR logic."),
     paywall: bool | None = Field(None, description="Filter by paywall status: true for sources with paywalls, false for sources without paywalls."),
     show_subdomains: bool | None = Field(None, alias="showSubdomains", description="Control subdomain handling in results. When true (default), subdomains appear as separate sources. When false, results consolidate to parent domains only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter from 200,000+ media sources to find publishers matching your criteria. Results include detailed source information with flexible filtering by domain, geography, content focus, and publication characteristics."""
 
     _page = _parse_int(page)
@@ -1413,11 +1539,10 @@ async def search_media_sources(
     # Extract parameters for API call
     _http_path = "/v1/sources/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_media_sources")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_media_sources", "GET", _http_path, _request_id)
@@ -1429,7 +1554,6 @@ async def search_media_sources(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1467,7 +1591,7 @@ async def search_stories(
     neutral_sentiment_to: float | None = Field(None, alias="neutralSentimentTo", description="Filter stories with aggregate neutral sentiment score at or below this threshold. Scores range from 0 to 1, with higher values indicating stronger neutral tone."),
     negative_sentiment_from: float | None = Field(None, alias="negativeSentimentFrom", description="Filter stories with aggregate negative sentiment score at or above this threshold. Scores range from 0 to 1, with higher values indicating stronger negative tone."),
     negative_sentiment_to: float | None = Field(None, alias="negativeSentimentTo", description="Filter stories with aggregate negative sentiment score at or below this threshold. Scores range from 0 to 1, with higher values indicating stronger negative tone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter news story clusters to track evolving narratives, monitor sentiment trends, and identify coverage patterns across global publishers. Returns structured story metadata including summaries, key entities, sentiment scores, and article counts."""
 
     _page = _parse_int(page)
@@ -1488,11 +1612,10 @@ async def search_stories(
     # Extract parameters for API call
     _http_path = "/v1/stories/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_stories")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_stories", "GET", _http_path, _request_id)
@@ -1504,7 +1627,6 @@ async def search_stories(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1517,7 +1639,7 @@ async def list_story_history(
     page: str | None = Field(None, description="Zero-based page number for pagination, ranging from 0 to 10000. Use this to navigate through large result sets."),
     size: str | None = Field(None, description="Number of story results to return per page, ranging from 0 to 100. Larger values reduce the number of requests needed but increase response size."),
     changelog_exists: bool | None = Field(None, alias="changelogExists", description="Filter to include only clusters that have a changelog (true) or exclude clusters with changelogs (false). Omit to return all clusters regardless of changelog status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of story history records with optional filtering by cluster, sorting, and changelog status. Use this to track story creation and refresh events across your clusters."""
 
     _page = _parse_int(page)
@@ -1535,11 +1657,10 @@ async def list_story_history(
     # Extract parameters for API call
     _http_path = "/v1/stories/history"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("list_story_history")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("list_story_history", "GET", _http_path, _request_id)
@@ -1551,7 +1672,6 @@ async def list_story_history(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1590,7 +1710,7 @@ async def get_story_counts_by_time_interval(
     neutral_sentiment_to: float | None = Field(None, alias="neutralSentimentTo", description="Filter stories with aggregate neutral sentiment score at or below the specified threshold. Scores range from 0 to 1, with higher values indicating stronger neutral tone."),
     negative_sentiment_from: float | None = Field(None, alias="negativeSentimentFrom", description="Filter stories with aggregate negative sentiment score at or above the specified threshold. Scores range from 0 to 1, with higher values indicating stronger negative tone."),
     negative_sentiment_to: float | None = Field(None, alias="negativeSentimentTo", description="Filter stories with aggregate negative sentiment score at or below the specified threshold. Scores range from 0 to 1, with higher values indicating stronger negative tone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated story count statistics grouped by specified time intervals (hour, day, week, or month). Supports comprehensive filtering by story attributes, entities, sentiment, and geographic location to analyze news trends and story evolution over time."""
 
     _page = _parse_int(page)
@@ -1611,11 +1731,10 @@ async def get_story_counts_by_time_interval(
     # Extract parameters for API call
     _http_path = "/v1/stories/stats"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("get_story_counts_by_time_interval")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("get_story_counts_by_time_interval", "GET", _http_path, _request_id)
@@ -1627,7 +1746,6 @@ async def get_story_counts_by_time_interval(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1718,7 +1836,7 @@ async def search_and_summarize_articles(
     temperature: float | None = Field(None, description="Sampling temperature for the LLM controlling randomness. Range: 0.0 (deterministic) to 2.0 (very creative). Default: 0.7.", ge=0, le=2),
     top_p: float | None = Field(None, alias="topP", description="Nucleus sampling (top-p) parameter for the LLM controlling diversity. Range: 0.0 to 1.0. Default: 1.0.", ge=0, le=1),
     max_tokens: str | None = Field(None, alias="maxTokens", description="Maximum number of tokens to generate in the summary. Default: 2,048 tokens."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a single, concise summary synthesizing insights from articles matching your search filters and criteria. Use custom prompts to guide which themes and findings to highlight in the summary."""
 
     _page = _parse_int(page)
@@ -1741,11 +1859,10 @@ async def search_and_summarize_articles(
     _http_path = "/v1/summarize"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_and_summarize_articles")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_and_summarize_articles", "POST", _http_path, _request_id)
@@ -1758,7 +1875,6 @@ async def search_and_summarize_articles(
         request_id=_request_id,
         params=_http_query,
         body=_http_body,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1771,7 +1887,7 @@ async def search_topics(
     subcategory: str | None = Field(None, description="Narrow results to a specific subcategory within the selected category for more granular topic classification."),
     page: str | None = Field(None, description="Specify which page of results to retrieve in the paginated response. Page numbering starts at 0."),
     size: str | None = Field(None, description="Set the maximum number of topics to return per page. Must be a non-negative integer."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and browse all available topics in the Perigon database, with filtering by name, category, and subcategory. Results are paginated for efficient data retrieval."""
 
     _page = _parse_int(page)
@@ -1789,11 +1905,10 @@ async def search_topics(
     # Extract parameters for API call
     _http_path = "/v1/topics/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_topics")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_topics", "GET", _http_path, _request_id)
@@ -1805,7 +1920,6 @@ async def search_topics(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1820,7 +1934,7 @@ async def search_news_articles(
     show_reprints: bool | None = Field(None, alias="showReprints", description="Include or exclude reprinted articles (wire service content from sources like AP or Reuters that appear across multiple outlets). Defaults to including reprints."),
     size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 100 articles. Defaults to 10."),
     page: str | None = Field(None, description="Page number to retrieve for paginated results. Must be between 0 and 10000. Defaults to the first page (0)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search news articles from the past 6 months using natural language queries with semantic relevance matching. Returns a ranked list of articles most closely aligned with your search intent, with optional filtering by publication date and content type."""
 
     _size = _parse_int(size)
@@ -1837,12 +1951,12 @@ async def search_news_articles(
 
     # Extract parameters for API call
     _http_path = "/v1/vector/news/all"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_news_articles")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_news_articles", "POST", _http_path, _request_id)
@@ -1853,8 +1967,8 @@ async def search_news_articles(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1866,7 +1980,7 @@ async def search_wikipedia(
     filter_: _models.VectorSearchWikipediaBodyFilter | None = Field(None, alias="filter", description="Optional filter to narrow search results by specific criteria."),
     size: str | None = Field(None, description="Number of results to return per page, between 1 and 100 items. Defaults to 10."),
     page: str | None = Field(None, description="Page number for pagination, starting from 0 up to 10000. Defaults to 0 for the first page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search Wikipedia using natural language queries to find page sections ranked by semantic relevance to your search intent."""
 
     _size = _parse_int(size)
@@ -1883,12 +1997,12 @@ async def search_wikipedia(
 
     # Extract parameters for API call
     _http_path = "/v1/vector/wikipedia/all"
+    _http_query = {}
     _http_body = _request.body.model_dump(by_alias=True, exclude_none=True) if _request.body else None
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_wikipedia")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_wikipedia", "POST", _http_path, _request_id)
@@ -1899,8 +2013,8 @@ async def search_wikipedia(
         method="POST",
         path=_http_path,
         request_id=_request_id,
+        params=_http_query,
         body=_http_body,
-        headers=_http_headers,
     )
 
     return _response_data
@@ -1923,7 +2037,7 @@ async def search_wikipedia_pages(
     page: str | None = Field(None, description="Specify which page of results to retrieve in the paginated response, starting from 0. Maximum page number is 10000."),
     size: str | None = Field(None, description="Set the number of articles to return per page in the paginated response. Maximum is 1000 results per page."),
     sort_by: Literal["relevance", "revisionTsDesc", "revisionTsAsc", "pageViewsDesc", "pageViewsAsc", "scrapedAtDesc", "scrapedAtAsc"] | None = Field(None, alias="sortBy", description="Sort results by relevance (default), revision timestamp (ascending or descending for recently edited), page views (ascending or descending for viewership), or scrape timestamp (ascending or descending for recently updated)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve Wikipedia pages from the Perigon API using flexible filtering criteria across titles, summaries, content, and references. Results are returned as paginated collections that can be sorted by relevance, recency, or viewership."""
 
     _page = _parse_int(page)
@@ -1941,11 +2055,10 @@ async def search_wikipedia_pages(
     # Extract parameters for API call
     _http_path = "/v1/wikipedia/all"
     _http_query = _request.query.model_dump(by_alias=True, exclude_none=True) if _request.query else {}
-    _http_headers = {}
 
     # Inject per-operation authentication
     _auth = await _get_auth_for_operation("search_wikipedia_pages")
-    _http_headers.update(_auth.get("headers", {}))
+    _http_query.update(_auth.get("params", {}))
 
     _request_id = str(uuid.uuid4())
     _log_tool_invocation("search_wikipedia_pages", "GET", _http_path, _request_id)
@@ -1957,7 +2070,6 @@ async def search_wikipedia_pages(
         path=_http_path,
         request_id=_request_id,
         params=_http_query,
-        headers=_http_headers,
     )
 
     return _response_data

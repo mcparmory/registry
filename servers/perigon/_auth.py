@@ -1,7 +1,7 @@
 """
 Authentication module for Perigon API MCP server.
 
-Generated: 2026-04-14 18:30:19 UTC
+Generated: 2026-04-23 21:36:15 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -17,7 +17,7 @@ import os
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "BearerTokenAuth",
+    "APIKeyAuth",
     "OPERATION_AUTH_MAP",
 ]
 
@@ -25,47 +25,75 @@ __all__ = [
 # Authentication Classes
 # ============================================================================
 
-class BearerTokenAuth:
+class APIKeyAuth:
     """
-    Bearer token authentication for Perigon API.
+    API Key authentication for Perigon API.
 
-    Configuration:
-        Provide the raw token in the environment variable.
-        The authorization scheme prefix is automatically inserted.
+    Supports header, query parameter, cookie, and path-based API key injection.
+    Configure location and parameter name via constructor arguments.
     """
 
-    def __init__(self, env_var: str = "BEARER_TOKEN", token_format: str = "Bearer"):
-        """Initialize bearer token authentication from environment variable.
+    def __init__(self, env_var: str = "API_KEY", location: str = "header",
+                 param_name: str = "Authorization", prefix: str = ""):
+        """Initialize API key authentication from environment variable.
 
         Args:
-            env_var: Environment variable name containing the bearer token.
-            token_format: Authorization scheme prefix (e.g., 'Bearer').
+            env_var: Environment variable name containing the API key.
+            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
+            param_name: Name of the header, query parameter, cookie, or path placeholder.
+            prefix: Optional prefix before the key value (e.g., 'Bearer').
         """
-        self.token_format = token_format
-        self.token = os.getenv(env_var, "").strip()
+        self.location = location
+        self.param_name = param_name
+        self.prefix = prefix
+        self.api_key = os.getenv(env_var, "").strip()
 
-        # Check for empty token
-        if not self.token:
+        # Check for empty API key
+        if not self.api_key:
             raise ValueError(
                 f"{env_var} environment variable not set. "
-                "Leave empty in .env to disable Bearer Token auth."
+                "Leave empty in .env to disable API Key auth."
             )
 
         # Detect common placeholder patterns
-        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "sk_test_placeholder"]
-        token_lower = self.token.lower()
+        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "bot placeholder"]
+        api_key_lower = self.api_key.lower()
 
-        if any(p in token_lower for p in placeholders):
+        if any(p in api_key_lower for p in placeholders):
             raise ValueError(
-                f"Bearer token appears to be a placeholder ({self.token[:20]}...). "
-                "Please set a real token or leave empty to disable Bearer Token auth."
+                f"API key appears to be a placeholder ({self.api_key[:20]}...). "
+                "Please set a real API key or leave empty to disable API Key auth."
             )
 
     def get_auth_headers(self) -> dict[str, str]:
         """Get authentication headers for API requests."""
-        return {
-            'Authorization': f'{self.token_format} {self.token}'
-        }
+        if self.location != "header":
+            return {}
+        if self.param_name == "Authorization":
+            # Use explicit prefix if set; otherwise send the key raw (no Bearer assumption —
+            # apiKey schemes that happen to use the Authorization header don't imply Bearer)
+            prefix = self.prefix + " " if self.prefix else ""
+            return {"Authorization": f"{prefix}{self.api_key}"}
+        value = f"{self.prefix} {self.api_key}" if self.prefix else self.api_key
+        return {self.param_name: value}
+
+    def get_auth_params(self) -> dict[str, str]:
+        """Get authentication query parameters."""
+        if self.location != "query":
+            return {}
+        return {self.param_name: self.api_key}
+
+    def get_auth_cookies(self) -> dict[str, str]:
+        """Get authentication cookies."""
+        if self.location != "cookie":
+            return {}
+        return {self.param_name: self.api_key}
+
+    def get_auth_path_params(self) -> dict[str, str]:
+        """Get authentication path parameters for URL template substitution."""
+        if self.location != "path":
+            return {}
+        return {self.param_name: self.api_key}
 
 
 # ============================================================================

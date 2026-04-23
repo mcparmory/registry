@@ -1,11 +1,12 @@
 # Perigon API MCP Server
+<!-- mcp-name: com.mcparmory/perigon -->
 
 Base URL: https://api.perigon.io
 | | |
 |---|---|
 | **Category** | Media & Entertainment |
 | **Tools** | 14 |
-| **Auth** | Bearer Token |
+| **Auth** | API Key |
 
 ## API Info
 - **Contact:** Perigon Support (data@perigon.io) — [https://docs.perigon.io/](https://docs.perigon.io/)
@@ -17,7 +18,7 @@ Base URL: https://api.perigon.io
 ### Quick Start (recommended)
 
 ```bash
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
+API_KEY=YOUR_API_KEY \
 uvx mcparmory-perigon
 ```
 
@@ -25,7 +26,7 @@ uvx mcparmory-perigon
 
 ```bash
 pip install mcparmory-perigon
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
+API_KEY=YOUR_API_KEY \
 mcparmory-perigon
 ```
 
@@ -40,7 +41,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-perigon"],
       "env": {
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
+        "API_KEY": "YOUR_API_KEY"
       }
     }
   }
@@ -53,7 +54,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `BEARER_TOKEN` — Bearer token
+- `API_KEY` — API Key Authentication (apiKey)
 Do not commit credentials to version control.
 
 ---
@@ -87,6 +88,16 @@ Example (if server is at `/home/user/mcp-servers/perigon`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e API_KEY=YOUR_API_KEY \
+  ghcr.io/mcparmory/perigon:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -94,7 +105,9 @@ docker build -t perigon .
 docker run -p 8000:8000 --env-file .env perigon
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
