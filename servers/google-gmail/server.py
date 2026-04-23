@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-14 18:23:34 UTC
+Generated: 2026-04-23 21:21:28 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -44,6 +45,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://gmail.googleapis.com")
@@ -475,12 +477,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -502,7 +529,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -544,18 +575,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -627,7 +727,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -675,6 +783,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -737,7 +849,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -763,10 +883,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -917,16 +1035,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -940,6 +1059,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -982,6 +1102,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -993,7 +1128,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1134,7 +1268,7 @@ mcp = FastMCP("Google Gmail", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: users
 @mcp.tool()
-async def get_profile(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any]:
+async def get_profile(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves the Gmail profile information for the authenticated user or a specified user, including account details and settings."""
 
     # Construct request model with validation
@@ -1175,7 +1309,7 @@ async def list_drafts(
     include_spam_trash: bool | None = Field(None, alias="includeSpamTrash", description="Whether to include draft messages from the SPAM and TRASH folders in the results."),
     max_results: int | None = Field(None, alias="maxResults", description="Maximum number of drafts to return. The default is 100 and the maximum allowed value is 500."),
     q: str | None = Field(None, description="Filter draft messages using Gmail search query syntax. Supports the same query operators as the Gmail search box (e.g., from:, rfc822msgid:, is:unread)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of draft messages from the user's mailbox. Supports filtering by search query and optional inclusion of drafts from spam and trash folders."""
 
     # Construct request model with validation
@@ -1228,7 +1362,7 @@ async def create_draft(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new email draft with the DRAFT label in Gmail. The draft can optionally include classification labels and custom label IDs."""
 
     # Call helper functions
@@ -1276,7 +1410,7 @@ async def get_draft(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to retrieve."),
     format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the draft message content and metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific draft message by ID. Returns the draft in the requested format for viewing or further editing."""
 
     # Construct request model with validation
@@ -1330,7 +1464,7 @@ async def update_draft(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the content of an existing draft message. Replaces the draft's message body and metadata with the provided values."""
 
     # Call helper functions
@@ -1377,7 +1511,7 @@ async def update_draft(
 async def delete_draft(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose draft should be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the draft message to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a draft message without moving it to trash. This action is immediate and irreversible."""
 
     # Construct request model with validation
@@ -1428,7 +1562,7 @@ async def send_draft(
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
     id_: str | None = Field(None, alias="id", description="The immutable ID of the draft."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends an existing draft message to recipients specified in the To, Cc, and Bcc headers. The draft must already exist and contain valid recipient information."""
 
     # Call helper functions
@@ -1479,7 +1613,7 @@ async def list_mailbox_history(
     label_id: str | None = Field(None, alias="labelId", description="Filter results to only include messages with a specific label ID."),
     max_results: int | None = Field(None, alias="maxResults", description="Maximum number of history records to return per request. Defaults to 100 if not specified."),
     start_history_id: str | None = Field(None, alias="startHistoryId", description="Starting point for retrieving history records. Provide a historyId from a previous response or message to retrieve all changes after that point. History IDs are valid for at least a week but may expire sooner in rare cases. If an HTTP 404 error occurs, perform a full sync. Omit this parameter for the initial sync request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the chronological history of all changes to a mailbox, including message additions, deletions, and label modifications. Results are returned in chronological order by historyId and support pagination for efficient sync operations."""
 
     # Construct request model with validation
@@ -1518,7 +1652,7 @@ async def list_mailbox_history(
 
 # Tags: users
 @mcp.tool()
-async def list_labels(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any]:
+async def list_labels(user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves all labels in the user's mailbox. Labels are used to organize and categorize emails in Gmail."""
 
     # Construct request model with validation
@@ -1560,7 +1694,7 @@ async def create_label(
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list in Gmail's web interface."),
     name: str | None = Field(None, description="The display name for the label as it appears in Gmail."),
     type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type for the label. User labels are created and managed by the user and can be applied to any message or thread. System labels are internally created and cannot be modified or deleted by users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new custom label in Gmail for organizing messages and threads. Labels can be configured with specific visibility settings in the Gmail web interface."""
 
     # Construct request model with validation
@@ -1602,7 +1736,7 @@ async def create_label(
 async def get_label(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific Gmail label by its ID. Use this to fetch detailed information about a label, such as its name, visibility settings, and other metadata."""
 
     # Construct request model with validation
@@ -1645,7 +1779,7 @@ async def update_label(
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list in Gmail's web interface."),
     name: str | None = Field(None, description="The display name of the label as shown to the user in Gmail."),
     type_: Literal["system", "user"] | None = Field(None, alias="type", description="The owner type of the label. User labels can be modified and deleted; system labels are managed by Gmail and cannot be altered."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing Gmail label with new properties such as display name and visibility settings. Only user-created labels can be modified; system labels cannot be changed."""
 
     # Construct request model with validation
@@ -1691,7 +1825,7 @@ async def update_label_partial(
     message_list_visibility: Literal["show", "hide"] | None = Field(None, alias="messageListVisibility", description="Controls whether messages with this label are visible in the message list within Gmail's web interface."),
     name: str | None = Field(None, description="The human-readable name displayed for this label in the Gmail interface."),
     type_: Literal["system", "user"] | None = Field(None, alias="type", description="Indicates whether this is a system label (created and managed by Gmail) or a user label (created and managed by the user). System labels cannot be modified or deleted, while user labels can be fully customized."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of a Gmail label using partial update semantics. Modify visibility settings, display name, or other label attributes without replacing the entire label configuration."""
 
     # Construct request model with validation
@@ -1733,7 +1867,7 @@ async def update_label_partial(
 async def delete_label(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the label to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a label and removes it from all messages and threads it is applied to. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1772,7 +1906,7 @@ async def delete_label(
 async def delete_messages_batch(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to indicate the authenticated user."),
     ids: list[str] | None = Field(None, description="An array of message IDs to delete. The order of IDs is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes multiple messages by their IDs. Note that this operation provides no guarantees about message existence or prior deletion status."""
 
     # Construct request model with validation
@@ -1816,7 +1950,7 @@ async def update_message_labels_batch(
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="Label IDs to add to the specified messages. Order is not significant."),
     ids: list[str] | None = Field(None, description="The message IDs to modify. Maximum of 1000 IDs per request."),
     remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="Label IDs to remove from the specified messages. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modifies labels on specified messages by adding and/or removing label IDs. Supports batch operations on up to 1000 messages per request."""
 
     # Construct request model with validation
@@ -1860,7 +1994,7 @@ async def get_message(
     id_: str = Field(..., alias="id", description="The ID of the message to retrieve, typically obtained from messages.list, messages.insert, or messages.import operations."),
     format_: Literal["minimal", "full", "raw", "metadata"] | None = Field(None, alias="format", description="The format in which to return the message content and structure."),
     metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to `metadata`, specify which message headers to include in the response. Headers should be provided as an array of header names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific message by ID from the user's mailbox. Supports multiple output formats including full message content, headers only, or raw RFC 2822 format."""
 
     # Construct request model with validation
@@ -1902,7 +2036,7 @@ async def get_message(
 async def delete_message(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message will be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently and immediately deletes a specified message. This action cannot be undone; consider using trash_message for recoverable deletion instead."""
 
     # Construct request model with validation
@@ -1956,7 +2090,7 @@ async def import_message(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Imports a message into the user's mailbox with standard email delivery scanning and classification. The message is processed similarly to SMTP delivery, with a maximum size limit of 150MB."""
 
     # Call helper functions
@@ -2017,7 +2151,7 @@ async def list_messages(
     before_date: str | None = Field(None, description="Filter messages before this date (YYYY/MM/DD format)"),
     after_date: str | None = Field(None, description="Filter messages after this date (YYYY/MM/DD format)"),
     custom_query: str | None = Field(None, description="Custom Gmail query string for advanced filters (e.g., 'rfc822msgid:<id>')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of messages from the user's mailbox, with optional filtering by labels and inclusion of spam/trash folders. Supports pagination through the maxResults parameter."""
 
     # Call helper functions
@@ -2075,7 +2209,7 @@ async def insert_message(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Inserts a message directly into the user's mailbox, bypassing scanning and classification, similar to IMAP APPEND. This operation does not send a message but adds it to the mailbox with optional metadata."""
 
     # Call helper functions
@@ -2127,7 +2261,7 @@ async def update_message_labels(
     id_: str = Field(..., alias="id", description="The unique identifier of the message to modify."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="A list of label IDs to add to the message. Maximum of 100 labels can be added in a single request."),
     remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from the message. Maximum of 100 labels can be removed in a single request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the labels applied to a specific message by adding and/or removing label IDs. You can modify up to 100 labels per request."""
 
     # Construct request model with validation
@@ -2180,7 +2314,7 @@ async def send_message(
     email_reply_to: str | None = Field(None, description="Reply-To header address"),
     email_in_reply_to: str | None = Field(None, description="In-Reply-To header (Message-ID of original message)"),
     email_references: str | None = Field(None, description="References header (Message-IDs of related messages), space-separated"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends an email message to recipients specified in the To, Cc, and Bcc headers. The message is delivered immediately to all specified recipients."""
 
     # Call helper functions
@@ -2227,7 +2361,7 @@ async def send_message(
 async def move_message_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value `me` to reference the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to move to trash."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a specified message to the trash folder. The message can be restored from trash before permanent deletion."""
 
     # Construct request model with validation
@@ -2266,7 +2400,7 @@ async def move_message_to_trash(
 async def remove_message_from_trash(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose message should be restored. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the message to restore from trash."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a message from the trash by removing it from the trash folder. The message will be returned to its previous labels or inbox."""
 
     # Construct request model with validation
@@ -2306,7 +2440,7 @@ async def get_message_attachment(
     user_id: str = Field(..., alias="userId", description="The email address of the account owner. Use the special value `me` to refer to the authenticated user's account."),
     message_id: str = Field(..., alias="messageId", description="The unique identifier of the message containing the attachment."),
     id_: str = Field(..., alias="id", description="The unique identifier of the attachment to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific attachment from a Gmail message. Use this to download or access attachment metadata by providing the message ID and attachment ID."""
 
     # Construct request model with validation
@@ -2342,7 +2476,7 @@ async def get_message_attachment(
 
 # Tags: users
 @mcp.tool()
-async def get_auto_forwarding(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the email address associated with the account, or use the special value \"me\" to refer to the authenticated user's account.")) -> dict[str, Any]:
+async def get_auto_forwarding(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the email address associated with the account, or use the special value \"me\" to refer to the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Retrieves the auto-forwarding configuration for the specified Gmail account. This includes the forwarding address and whether auto-forwarding is enabled."""
 
     # Construct request model with validation
@@ -2378,7 +2512,7 @@ async def get_auto_forwarding(user_id: str = Field(..., alias="userId", descript
 
 # Tags: users
 @mcp.tool()
-async def get_vacation_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
+async def get_vacation_settings(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves the vacation responder settings for a Gmail account, including whether auto-reply is enabled and the message content."""
 
     # Construct request model with validation
@@ -2417,7 +2551,7 @@ async def get_vacation_settings(user_id: str = Field(..., alias="userId", descri
 async def list_cse_identities(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of identities to return per page. If not specified, defaults to 20 entries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all client-side encrypted identities for an authenticated user. Administrators with domain-wide delegation can manage identities for their organization, while users managing their own identities require hardware key encryption to be enabled."""
 
     # Construct request model with validation
@@ -2459,7 +2593,7 @@ async def list_cse_identities(
 async def create_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to indicate the authenticated user."),
     email_address: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates and configures a client-side encryption identity for sending encrypted mail from a user account. The S/MIME certificate is published to a shared domain-wide directory, enabling secure communication within a Google Workspace organization."""
 
     # Construct request model with validation
@@ -2501,7 +2635,7 @@ async def create_cse_identity(
 async def get_cse_identity(
     user_id: str = Field(..., alias="userId", description="The requester's primary email address. Use the special value `me` to refer to the authenticated user."),
     cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity configuration to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a client-side encryption identity configuration for a specified email address. Administrators require service account with domain-wide delegation authority, while users require hardware key encryption to be enabled."""
 
     # Construct request model with validation
@@ -2540,7 +2674,7 @@ async def get_cse_identity(
 async def delete_cse_identity(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     cse_email_address: str = Field(..., alias="cseEmailAddress", description="The primary email address associated with the client-side encryption identity to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a client-side encryption identity, preventing further use for sending encrypted messages. The identity cannot be restored; create a new identity with the same configuration if needed."""
 
     # Construct request model with validation
@@ -2580,7 +2714,7 @@ async def update_cse_identity_keypair(
     user_id: str = Field(..., alias="userId", description="The user identifier. Use the special value `me` to refer to the authenticated user, or provide the user's primary email address."),
     email_address: str = Field(..., alias="emailAddress", description="The email address of the client-side encryption identity to update."),
     email_address2: str | None = Field(None, alias="emailAddress", description="The email address for the sending identity. Must be the primary email address of the authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associates a new key pair with an existing client-side encryption identity. The updated key pair must validate against Google's S/MIME certificate profiles. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
 
     # Construct request model with validation
@@ -2622,7 +2756,7 @@ async def update_cse_identity_keypair(
 async def list_cse_keypairs(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of key pairs to return per page. If not specified, defaults to 20 entries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all client-side encryption key pairs for a user. Administrators with domain-wide delegation can manage keypairs for users in their organization, while individual users require hardware key encryption to be enabled."""
 
     # Construct request model with validation
@@ -2665,7 +2799,7 @@ async def create_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     pkcs7: str | None = Field(None, description="The public key and its certificate chain in PKCS#7 format with PEM encoding and ASCII armor."),
     private_key_metadata: list[_models.CsePrivateKeyMetadata] | None = Field(None, alias="privateKeyMetadata", description="An ordered array of metadata objects for instances of this key pair's private key. Order significance and item structure should follow the API specification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates and uploads a client-side encryption S/MIME public key certificate chain and private key metadata for Gmail. Requires either domain-wide delegation authority for administrators or hardware key encryption enabled for individual users."""
 
     # Construct request model with validation
@@ -2707,7 +2841,7 @@ async def create_cse_keypair(
 async def disable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value 'me' to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disables a client-side encryption key pair, preventing the user from decrypting incoming CSE messages or signing outgoing CSE mail. The key pair can be re-enabled later using enable_cse_keypair, or permanently deleted after 30 days using obliterate_cse_keypair."""
 
     # Construct request model with validation
@@ -2746,7 +2880,7 @@ async def disable_cse_keypair(
 async def enable_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The user's primary email address. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to reactivate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reactivates a previously disabled client-side encryption key pair for use with associated encryption identities. Administrators require service account with domain-wide delegation authority; end users require hardware key encryption to be enabled."""
 
     # Construct request model with validation
@@ -2785,7 +2919,7 @@ async def enable_cse_keypair(
 async def get_cse_keypair(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair is being retrieved. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the encryption key pair to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a client-side encryption key pair for Gmail. Administrators require service account authorization with domain-wide delegation, while users must have hardware key encryption enabled."""
 
     # Construct request model with validation
@@ -2824,7 +2958,7 @@ async def get_cse_keypair(
 async def delete_cse_keypair_permanently(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose key pair will be obliterated. Use the special value `me` to refer to the authenticated user."),
     key_pair_id: str = Field(..., alias="keyPairId", description="The unique identifier of the key pair to permanently delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently and immediately deletes a client-side encryption key pair. The key pair must be disabled for at least 30 days before obliteration. Once obliterated, all messages encrypted with this key become permanently inaccessible to all users."""
 
     # Construct request model with validation
@@ -2860,7 +2994,7 @@ async def delete_cse_keypair_permanently(
 
 # Tags: users
 @mcp.tool()
-async def list_delegates(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's full email address.")) -> dict[str, Any]:
+async def list_delegates(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide the user's full email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves the list of delegates for the specified Gmail account. This operation requires service account credentials with domain-wide delegation authority."""
 
     # Construct request model with validation
@@ -2899,7 +3033,7 @@ async def list_delegates(user_id: str = Field(..., alias="userId", description="
 async def get_delegate(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose delegates are being queried. Use the special value 'me' to refer to the authenticated user."),
     delegate_email: str = Field(..., alias="delegateEmail", description="The primary email address of the delegate whose relationship details should be retrieved. Email aliases cannot be used; the primary email address is required."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the delegate relationship for a specified email address. This operation requires service account clients with domain-wide authority and uses the delegate's primary email address (not aliases)."""
 
     # Construct request model with validation
@@ -2935,7 +3069,7 @@ async def get_delegate(
 
 # Tags: users
 @mcp.tool()
-async def list_filters(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any]:
+async def list_filters(user_id: str = Field(..., alias="userId", description="The Gmail user account identifier. Use the special value 'me' to refer to the authenticated user, or provide a specific email address.")) -> dict[str, Any] | ToolResult:
     """Retrieves all message filters configured for a Gmail account. Filters define rules for automatically organizing, labeling, or processing incoming messages."""
 
     # Construct request model with validation
@@ -2974,7 +3108,7 @@ async def list_filters(user_id: str = Field(..., alias="userId", description="Th
 async def get_filter(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to refer to the authenticated user, or provide the user's email address."),
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific Gmail filter by its ID. Use this to fetch the configuration and rules of an existing filter."""
 
     # Construct request model with validation
@@ -3013,7 +3147,7 @@ async def get_filter(
 async def delete_filter(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose filter will be deleted. Use the special value \"me\" to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the filter to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified Gmail filter. This action is immediate and cannot be undone."""
 
     # Construct request model with validation
@@ -3049,7 +3183,7 @@ async def delete_filter(
 
 # Tags: users
 @mcp.tool()
-async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the authenticated user's email address, or specify 'me' to refer to the currently authenticated user.")) -> dict[str, Any]:
+async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the authenticated user's email address, or specify 'me' to refer to the currently authenticated user.")) -> dict[str, Any] | ToolResult:
     """Retrieves all forwarding addresses configured for the specified Gmail account. Forwarding addresses are alternative email addresses where incoming messages can be automatically sent."""
 
     # Construct request model with validation
@@ -3088,7 +3222,7 @@ async def list_forwarding_addresses(user_id: str = Field(..., alias="userId", de
 async def get_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use the special value 'me' to refer to the authenticated user's account, or provide the user's full email address."),
     forwarding_email: str = Field(..., alias="forwardingEmail", description="The email address for which forwarding configuration should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the configuration details for a specified forwarding address associated with a Gmail account. Use this to view forwarding settings for a particular email address."""
 
     # Construct request model with validation
@@ -3127,7 +3261,7 @@ async def get_forwarding_address(
 async def delete_forwarding_address(
     user_id: str = Field(..., alias="userId", description="The user's email address or 'me' to reference the authenticated user."),
     forwarding_email: str = Field(..., alias="forwardingEmail", description="The forwarding email address to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a forwarding address and revokes any associated verification. This operation requires service account credentials with domain-wide delegation authority."""
 
     # Construct request model with validation
@@ -3163,7 +3297,7 @@ async def delete_forwarding_address(
 
 # Tags: users
 @mcp.tool()
-async def list_send_as_aliases(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to reference the authenticated user's account.")) -> dict[str, Any]:
+async def list_send_as_aliases(user_id: str = Field(..., alias="userId", description="The Gmail account identifier. Use 'me' to reference the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Retrieves all send-as aliases configured for the specified Gmail account, including the primary email address and any custom 'from' aliases."""
 
     # Construct request model with validation
@@ -3202,7 +3336,7 @@ async def list_send_as_aliases(user_id: str = Field(..., alias="userId", descrip
 async def get_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address of the send-as alias to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific send-as alias configuration for a user. Returns an HTTP 404 error if the specified email address is not configured as a send-as alias."""
 
     # Construct request model with validation
@@ -3252,7 +3386,7 @@ async def update_send_as_alias(
     security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication."),
     username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is used only during creation or updates and is never returned in responses."),
     treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting applies only to custom 'from' aliases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a send-as alias configuration for a Gmail account, including display name, reply-to address, and optional HTML signature. Service accounts with domain-wide delegation can update non-primary addresses; standard users can only modify their own aliases."""
 
     _port = _parse_int(port)
@@ -3308,7 +3442,7 @@ async def update_send_as_alias_partial(
     security_mode: Literal["securityModeUnspecified", "none", "ssl", "starttls"] | None = Field(None, alias="securityMode", description="The security protocol for SMTP communication. Determines how the connection to the SMTP server is encrypted or secured."),
     username: str | None = Field(None, description="The username for SMTP authentication. This write-only field is never returned in responses and must be provided when configuring SMTP settings."),
     treat_as_alias: bool | None = Field(None, alias="treatAsAlias", description="Whether Gmail should treat this address as an alias for the user's primary email address. This setting only applies to custom 'from' aliases and affects how Gmail handles replies and threading."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a send-as alias configuration for a Gmail account. Use this to modify display name, default status, reply-to address, signature, SMTP settings, or alias treatment without replacing the entire resource."""
 
     _port = _parse_int(port)
@@ -3353,7 +3487,7 @@ async def update_send_as_alias_partial(
 async def send_verification_email_to_send_as_alias(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value 'me' to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The send-as alias email address that requires verification."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sends a verification email to a send-as alias address to confirm ownership. The alias must have a pending verification status and requires service account with domain-wide delegation authority."""
 
     # Construct request model with validation
@@ -3393,7 +3527,7 @@ async def get_smime_info(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
     id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the S/MIME configuration for a specified send-as alias. This allows you to access the details of a specific S/MIME certificate associated with an email alias."""
 
     # Construct request model with validation
@@ -3433,7 +3567,7 @@ async def delete_send_as_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for messages sent using this send-as alias."),
     id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes the S/MIME configuration for a specified send-as alias. This removes the security certificate associated with the alias used for signing and encrypting outgoing emails."""
 
     # Construct request model with validation
@@ -3472,7 +3606,7 @@ async def delete_send_as_smime_config(
 async def list_smime_configs(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address configured as a send-as alias. This is the address that appears in the From header for emails sent using this alias."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all S/MIME configurations for a specified send-as alias. S/MIME configs define the certificates and encryption settings used when sending emails from this alias."""
 
     # Construct request model with validation
@@ -3515,7 +3649,7 @@ async def create_smime_config(
     expiration: str | None = Field(None, description="Certificate expiration timestamp in milliseconds since epoch (Unix time)."),
     is_default: bool | None = Field(None, alias="isDefault", description="Whether to set this S/MIME certificate as the default for this send-as address."),
     pkcs12: str | None = Field(None, description="The S/MIME certificate in PKCS#12 format. Must contain a single private/public key pair and certificate chain. The private key may be encrypted; if so, provide the password in encryptedKeyPassword."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload and configure an S/MIME certificate for a send-as alias. The certificate must be provided in PKCS#12 format containing a private/public key pair and certificate chain."""
 
     # Construct request model with validation
@@ -3558,7 +3692,7 @@ async def set_default_smime_config(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     send_as_email: str = Field(..., alias="sendAsEmail", description="The email address that appears in the From header for mail sent using this send-as alias."),
     id_: str = Field(..., alias="id", description="The immutable identifier for the S/MIME configuration to set as default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets the default S/MIME configuration for the specified send-as alias. This determines which S/MIME certificate will be used by default when sending emails from this alias."""
 
     # Construct request model with validation
@@ -3599,7 +3733,7 @@ async def get_thread(
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to retrieve."),
     format_: Literal["full", "metadata", "minimal"] | None = Field(None, alias="format", description="The format in which to return thread messages. Controls the level of detail included in the response."),
     metadata_headers: list[str] | None = Field(None, alias="metadataHeaders", description="When format is set to metadata, specify which email headers to include in the response. Headers should be provided as an array of header names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific email thread by ID. Returns thread messages in the requested format with optional filtering of metadata headers."""
 
     # Construct request model with validation
@@ -3641,7 +3775,7 @@ async def get_thread(
 async def delete_thread(
     user_id: str = Field(..., alias="userId", description="The email address of the user whose thread will be deleted. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a thread and all messages within it. This action cannot be undone; consider using trash_thread as a safer alternative."""
 
     # Construct request model with validation
@@ -3683,7 +3817,7 @@ async def list_threads(
     label_ids: list[str] | None = Field(None, alias="labelIds", description="Filter results to only return threads that have all of the specified label IDs. Provide as an array of label ID strings."),
     max_results: int | None = Field(None, alias="maxResults", description="Maximum number of threads to return in the response."),
     q: str | None = Field(None, description="Filter results using Gmail search query syntax (e.g., sender, subject, date filters, read status). Not supported when using the gmail.metadata scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of message threads from the user's mailbox, with optional filtering by labels, search query, and inclusion of spam/trash folders."""
 
     # Construct request model with validation
@@ -3727,7 +3861,7 @@ async def update_thread_labels(
     id_: str = Field(..., alias="id", description="The ID of the thread to modify."),
     add_label_ids: list[str] | None = Field(None, alias="addLabelIds", description="A list of label IDs to add to this thread. Up to 100 labels can be added per request."),
     remove_label_ids: list[str] | None = Field(None, alias="removeLabelIds", description="A list of label IDs to remove from this thread. Up to 100 labels can be removed per request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modifies the labels applied to a thread, affecting all messages within it. Supports adding and removing labels in a single operation."""
 
     # Construct request model with validation
@@ -3769,7 +3903,7 @@ async def update_thread_labels(
 async def move_thread_to_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address or the special value 'me' to reference the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to move to trash."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a thread and all its associated messages to the trash. The thread and its messages can be permanently deleted or recovered from trash."""
 
     # Construct request model with validation
@@ -3808,7 +3942,7 @@ async def move_thread_to_trash(
 async def remove_thread_from_trash(
     user_id: str = Field(..., alias="userId", description="The user's email address. Use the special value `me` to refer to the authenticated user."),
     id_: str = Field(..., alias="id", description="The unique identifier of the thread to restore from trash."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a thread from trash by removing it and all its associated messages from the trash folder."""
 
     # Construct request model with validation

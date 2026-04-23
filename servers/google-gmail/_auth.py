@@ -1,7 +1,7 @@
 """
 Authentication module for Google Gmail MCP server.
 
-Generated: 2026-04-14 18:23:34 UTC
+Generated: 2026-04-23 21:21:28 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -68,17 +68,12 @@ class OAuth2Auth:
         Format: JSON with access_token, refresh_token, expires_at
 
     URLs:
-        Authorization URL: https://accounts.google.com/o/oauth2/auth
-        Token URL: https://accounts.google.com/o/oauth2/token
+        Authorization URL: https://accounts.google.com/o/oauth2/v2/auth
+        Token URL: https://oauth2.googleapis.com/token
 
     Available Scopes (configure via OAUTH2_SCOPES):
         - https://mail.google.com/
-        - https://www.googleapis.com/auth/gmail.addons.current.action.compose
-        - https://www.googleapis.com/auth/gmail.addons.current.message.action
-        - https://www.googleapis.com/auth/gmail.addons.current.message.metadata
-        - https://www.googleapis.com/auth/gmail.addons.current.message.readonly
         - https://www.googleapis.com/auth/gmail.compose
-        - https://www.googleapis.com/auth/gmail.insert
         - https://www.googleapis.com/auth/gmail.labels
         - https://www.googleapis.com/auth/gmail.metadata
         - https://www.googleapis.com/auth/gmail.modify
@@ -86,6 +81,11 @@ class OAuth2Auth:
         - https://www.googleapis.com/auth/gmail.send
         - https://www.googleapis.com/auth/gmail.settings.basic
         - https://www.googleapis.com/auth/gmail.settings.sharing
+        - https://www.googleapis.com/auth/gmail.insert
+        - https://www.googleapis.com/auth/gmail.addons.current.action.compose
+        - https://www.googleapis.com/auth/gmail.addons.current.message.action
+        - https://www.googleapis.com/auth/gmail.addons.current.message.metadata
+        - https://www.googleapis.com/auth/gmail.addons.current.message.readonly
     """
 
     def __init__(self):
@@ -125,8 +125,8 @@ class OAuth2Auth:
         self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
-        self.token_url = "https://accounts.google.com/o/oauth2/token"
-        self.auth_url = "https://accounts.google.com/o/oauth2/auth"
+        self.token_url = "https://oauth2.googleapis.com/token"
+        self.auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
         self.refresh_url = None
 
         # Token storage (secure file-based, unique per scheme)
