@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcparmory-codacy"
+name = "mcparmory-rootly"
 version = "1.0.0"
-description = "MCP server for Codacy"
+description = "Manage incident alerts, events, and workflows with custom automations"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
-mcparmory-codacy = "server:main"
+mcparmory-rootly = "server:main"
 
 [project.urls]
 Homepage = "https://mcparmory.com"

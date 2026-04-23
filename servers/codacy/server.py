@@ -6,7 +6,7 @@ API Info:
 - API License: Codacy. All rights reserved (https://www.codacy.com)
 - Contact: Codacy Team <code@codacy.com> (https://www.codacy.com)
 
-Generated: 2026-04-14 18:18:14 UTC
+Generated: 2026-04-23 21:09:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.codacy.com/api/v3")
@@ -471,12 +473,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -498,7 +525,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -540,18 +571,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -623,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -671,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -733,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -759,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -919,16 +1032,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -942,6 +1056,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -984,6 +1099,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -995,7 +1125,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1142,7 +1271,7 @@ async def list_organization_repositories_with_analysis(
     limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned repositories to those whose names contain the provided string."),
     segments: str | None = Field(None, description="Restricts results to repositories belonging to the specified segments, provided as a comma-separated list of numeric segment identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves repositories belonging to a specified organization on a Git provider, including their analysis metadata. Supports filtering by name or segment, with pagination cursor that must be URL-encoded for Bitbucket."""
 
     _limit = _parse_int(limit)
@@ -1188,7 +1317,7 @@ async def search_organization_repositories(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used by the provider."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100 inclusive."),
     names: list[str] | None = Field(None, description="Filter results to only the specified repository names. Each item should be a repository name string; order does not affect results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search repositories within an organization on a specified Git provider, returning results enriched with analysis information. Supports filtering by repository name and paginated results."""
 
     _limit = _parse_int(limit)
@@ -1237,7 +1366,7 @@ async def get_repository_analysis(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="The name of a branch enabled on Codacy for this repository. If omitted, the main branch configured in Codacy repository settings is used. Use the listRepositoryBranches endpoint to retrieve valid branch names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed analysis information for a specific repository on Codacy, including code quality metrics and insights for the authenticated user. Optionally scoped to a specific enabled branch, defaulting to the repository's main branch."""
 
     # Construct request model with validation
@@ -1280,7 +1409,7 @@ async def list_repository_tools(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the analysis tool settings configured for a specific repository, including which tools are enabled and their configurations. No authentication is required when accessing public repositories."""
 
     # Construct request model with validation
@@ -1320,7 +1449,7 @@ async def list_tool_conflicts(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of analysis tools that have configuration conflicts in the specified repository. Useful for diagnosing tool setup issues that may affect code analysis results."""
 
     # Construct request model with validation
@@ -1364,7 +1493,7 @@ async def configure_repository_tool(
     enabled: bool | None = Field(None, description="Set to true to enable the tool for analysis or false to disable it entirely for this repository."),
     use_configuration_file: bool | None = Field(None, alias="useConfigurationFile", description="Set to true to have the tool read its settings from a configuration file in the repository, or false to use Codacy-managed settings."),
     patterns: list[_models.ConfigurePattern] | None = Field(None, description="List of pattern objects to enable or disable for this tool; each item should specify the pattern identifier and its desired enabled state. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable an analysis tool and its patterns for a specific repository. Changes are applied immediately without checking whether the repository is linked to a coding standard."""
 
     # Construct request model with validation
@@ -1418,7 +1547,7 @@ async def list_repository_tool_patterns(
     sort: str | None = Field(None, description="The field by which to sort the returned patterns. Valid values are category, recommended, and severity."),
     direction: str | None = Field(None, description="The direction in which to sort results, either ascending (asc) or descending (desc)."),
     limit: str | None = Field(None, description="Maximum number of patterns to return in a single response, between 1 and 100 inclusive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the code pattern configurations for a specific analysis tool applied to a repository. Returns standard organization-level settings if applied, otherwise falls back to repository-specific settings."""
 
     _limit = _parse_int(limit)
@@ -1471,7 +1600,7 @@ async def bulk_update_repository_tool_patterns(
     tags: str | None = Field(None, description="Comma-separated list of pattern tags to restrict the update to patterns that carry any of the specified tags."),
     search: str | None = Field(None, description="Free-text search string used to filter patterns by name or description before applying the bulk update."),
     recommended: bool | None = Field(None, description="When set to `true`, restricts the update to recommended patterns only; when set to `false`, restricts it to non-recommended patterns only. Omit to include patterns regardless of recommended status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk enables or disables code patterns for a specific tool in a repository. Use optional filters to target a subset of patterns by language, category, severity, tags, or search term; omit all filters to apply the change to every pattern for the tool."""
 
     # Construct request model with validation
@@ -1519,7 +1648,7 @@ async def get_repository_tool_pattern_config(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     tool_uuid: str = Field(..., alias="toolUuid", description="The UUID uniquely identifying the analysis tool whose pattern configuration is being retrieved."),
     pattern_id: str = Field(..., alias="patternId", description="The identifier for the specific pattern within the tool whose configuration is being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the pattern configuration for a specific tool pattern applied to a repository. Returns the organization-level standard configuration if one is applied, otherwise falls back to the repository-level settings."""
 
     # Construct request model with validation
@@ -1567,7 +1696,7 @@ async def get_tool_patterns_overview(
     search: str | None = Field(None, description="Search string used to filter patterns by matching against pattern names or descriptions."),
     enabled: bool | None = Field(None, description="When set to true, returns only enabled patterns; when set to false, returns only disabled patterns. Omit to return patterns regardless of enabled status."),
     recommended: bool | None = Field(None, description="When set to true, returns only patterns marked as recommended; when set to false, returns only non-recommended patterns. Omit to return patterns regardless of recommended status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves an overview of code patterns for a specific analysis tool in a repository, showing counts and summaries by category, severity, and status. Uses standard settings if applied, otherwise falls back to repository-level tool configuration."""
 
     # Construct request model with validation
@@ -1611,7 +1740,7 @@ async def list_tool_pattern_conflicts(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     tool_uuid: str = Field(..., alias="toolUuid", description="The UUID uniquely identifying the analysis tool whose pattern conflicts should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of patterns for a specific tool that conflict with the repository's configured Coding Standards, helping identify rule inconsistencies that may affect code analysis."""
 
     # Construct request model with validation
@@ -1652,7 +1781,7 @@ async def get_repository_analysis_progress(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization that owns the repository on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the organization on the Git provider."),
     branch: str | None = Field(None, description="The branch to check analysis progress for; must be a branch enabled in Codacy repository settings. Defaults to the main branch configured in Codacy if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the analysis progress overview for a specific repository on Codacy, indicating how far along the initial analysis has advanced. No authentication is required when accessing public repositories."""
 
     # Construct request model with validation
@@ -1698,7 +1827,7 @@ async def list_pull_requests(
     limit: str | None = Field(None, description="Maximum number of pull requests to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned pull requests to those whose names or metadata contain the provided string."),
     include_not_analyzed: bool | None = Field(None, alias="includeNotAnalyzed", description="When set to true, includes pull requests that have not yet been analyzed by Codacy alongside analyzed ones."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of pull requests for a specified repository, supporting sorting by last-updated, impact, or merged status. No authentication is required for public repositories."""
 
     _limit = _parse_int(limit)
@@ -1744,7 +1873,7 @@ async def get_pull_request(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique numeric identifier of the pull request within the repository, as assigned by the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed analysis data for a specific pull request in a repository. No authentication is required when accessing public repositories."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -1787,7 +1916,7 @@ async def get_pull_request_coverage(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request for which to retrieve coverage data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves code coverage information for a specific pull request in a repository. No authentication is required when accessing public repositories."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -1830,7 +1959,7 @@ async def list_pull_request_file_coverage(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request for which file coverage data is being requested."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves per-file code coverage information for a specific pull request in a repository. No authentication is required when accessing public repositories."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -1873,7 +2002,7 @@ async def reanalyze_pull_request_coverage(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request whose coverage report should be reanalyzed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers a reanalysis of the latest coverage report uploaded for a specific pull request. Useful when coverage data needs to be reprocessed without uploading a new report."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -1917,7 +2046,7 @@ async def list_pull_request_commits(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository, as assigned by the Git provider."),
     limit: str | None = Field(None, description="Maximum number of commit results to return in a single response. Accepts values between 1 and 100; defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analysis results for all commits within a specified pull request, including code quality and issue data per commit. Results are paginated and scoped to a repository on a supported Git provider."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -1964,7 +2093,7 @@ async def bypass_pull_request_analysis(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request whose analysis status should be bypassed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bypasses the analysis status check for a specific pull request, allowing it to proceed regardless of analysis results. Useful when overriding blocking analysis gates in CI/CD workflows."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2007,7 +2136,7 @@ async def trigger_pull_request_ai_review(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="Name of the repository within the organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The numeric identifier of the pull request to be reviewed, as assigned by the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers an AI-powered code review for a specific pull request in a repository. Initiates automated analysis and feedback generation for the pull request's changes."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2050,7 +2179,7 @@ async def list_pull_request_coverage_reports(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all coverage reports uploaded for both the common ancestor commit and the head commit of a pull request branch. Useful for comparing coverage changes introduced by the pull request."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2096,7 +2225,7 @@ async def list_pull_request_issues(
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters issues by their status relative to the pull request. Use 'new' for issues introduced, 'fixed' for issues resolved, or 'all' to return both."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to potential issues only, which are lower-confidence findings that may require additional review."),
     limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of issues found in a specific pull request for a given repository. Use the status filter to narrow results to new, fixed, or all issues, and optionally surface only potential issues."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2146,7 +2275,7 @@ async def list_pull_request_clones(
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters returned clones by their status relative to the pull request: 'new' for clones introduced, 'fixed' for clones resolved, or 'all' for every detected clone regardless of status."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to only potential (lower-confidence) duplicate code blocks rather than confirmed clones."),
     limit: str | None = Field(None, description="Maximum number of clone results to return in a single response, between 1 and 100 inclusive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves duplicate code blocks (clones) detected in a specific pull request for a repository. Use the status filter to narrow results to new, fixed, or all duplicate occurrences."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2196,7 +2325,7 @@ async def list_commit_clones(
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters duplicate code blocks by their status relative to the commit: all returns every clone, new returns only newly introduced clones, and fixed returns only clones resolved in this commit."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to only potential duplicate code issues, excluding confirmed clones."),
     limit: str | None = Field(None, description="Maximum number of duplicate code block results to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves duplicate code blocks (clones) detected in a specific commit for a repository. Use the status parameter to filter results by new, fixed, or all duplicate occurrences."""
 
     _limit = _parse_int(limit)
@@ -2242,7 +2371,7 @@ async def list_pull_request_logs(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository, as assigned by the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analysis logs for a specific pull request in a repository, useful for diagnosing issues or reviewing the details of a Codacy analysis run."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2285,7 +2414,7 @@ async def list_commit_analysis_logs(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The unique identifier of the commit whose analysis logs are being requested, provided as a UUID or full commit SHA hash."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the analysis log entries for a specific commit in a repository, providing details about the analysis process and any issues encountered during execution."""
 
     # Construct request model with validation
@@ -2332,7 +2461,7 @@ async def list_commit_files(
     search: str | None = Field(None, description="Filters the results to only include files whose relative path contains the specified string."),
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(None, alias="sortColumn", description="The field by which to sort the returned files: 'filename' (default) sorts alphabetically, 'deltaCoverage' sorts by coverage change, and 'totalCoverage' sorts by overall coverage value."),
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="The direction in which to sort results: 'asc' for ascending order (default) or 'desc' for descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of files changed in a specific commit along with their static analysis and coverage results. Supports filtering, searching, sorting, and pagination to narrow down results."""
 
     _limit = _parse_int(limit)
@@ -2381,7 +2510,7 @@ async def list_pull_request_files(
     limit: str | None = Field(None, description="Maximum number of file results to return per request. Must be between 1 and 100."),
     sort_column: Literal["totalCoverage", "deltaCoverage", "filename"] | None = Field(None, alias="sortColumn", description="The field by which to sort the returned files. Use `filename` to sort alphabetically by file path, `deltaCoverage` to sort by the change in coverage, or `totalCoverage` to sort by the overall coverage value."),
     column_order: Literal["asc", "desc"] | None = Field(None, alias="columnOrder", description="The direction in which to order the sorted results, either ascending or descending."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of files changed in a pull request along with their static analysis results. Supports sorting by filename, coverage delta, or total coverage."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -2427,7 +2556,7 @@ async def follow_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization to follow."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Follow a repository that has already been added to Codacy, enabling tracking of its analysis and quality metrics for the authenticated user."""
 
     # Construct request model with validation
@@ -2467,7 +2596,7 @@ async def unfollow_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization to unfollow."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stops following a repository in the specified organization on a Git provider, removing it from the list of monitored repositories."""
 
     # Construct request model with validation
@@ -2513,7 +2642,7 @@ async def update_repository_quality_settings(
     max_complex_files_percentage: str | None = Field(None, alias="maxComplexFilesPercentage", description="The maximum acceptable percentage of complex files; the repository is flagged as unhealthy if this threshold is exceeded. Must be a non-negative integer representing a percentage."),
     file_duplication_block_threshold: str | None = Field(None, alias="fileDuplicationBlockThreshold", description="The number of cloned blocks above which a file is considered duplicated within this repository. Must be zero or greater."),
     file_complexity_value_threshold: str | None = Field(None, alias="fileComplexityValueThreshold", description="The complexity score above which a file is considered complex within this repository. Must be zero or greater."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the quality gate thresholds for a specific repository, defining the criteria under which the repository is considered healthy or unhealthy across issues, duplication, coverage, and complexity metrics."""
 
     _max_issue_percentage = _parse_int(max_issue_percentage)
@@ -2563,7 +2692,7 @@ async def regenerate_repository_ssh_user_key(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository, such as gh for GitHub, gl for GitLab, or bb for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Regenerates the user SSH key Codacy uses to clone the specified repository, automatically adding the new public key to the user's account on the Git provider. Using a user SSH key is recommended when the repository includes submodules."""
 
     # Construct request model with validation
@@ -2603,7 +2732,7 @@ async def regenerate_repository_ssh_key(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Regenerates the SSH key Codacy uses to clone a specific repository, automatically updating the new public key on the Git provider."""
 
     # Construct request model with validation
@@ -2643,7 +2772,7 @@ async def get_repository_ssh_key(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recently generated public SSH key associated with a repository, which may be either a user or repository-level SSH key. Useful for verifying or displaying the active SSH key configured for repository access."""
 
     # Construct request model with validation
@@ -2683,7 +2812,7 @@ async def sync_repository(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears under the organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronizes a repository's name and visibility settings in Codacy with the current state from the upstream Git provider. Useful after renaming or changing the visibility of a repository directly on the provider."""
 
     # Construct request model with validation
@@ -2723,7 +2852,7 @@ async def get_build_server_analysis_setting(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of the 'Run analysis on your build server' setting for a specific repository. Use this to check whether build server analysis is enabled or disabled."""
 
     # Construct request model with validation
@@ -2763,7 +2892,7 @@ async def list_repository_languages(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears within the Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all programming languages detected in a repository, including their associated file extensions and whether each language is enabled for analysis."""
 
     # Construct request model with validation
@@ -2804,7 +2933,7 @@ async def configure_repository_language_settings(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     languages: list[_models.RepositoryLanguageUpdate] = Field(..., description="The complete list of languages to configure for this repository. Each item should represent a language identifier; order is not significant, and the full desired set must be provided as this replaces existing settings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the language response settings for a specific repository, controlling which programming languages are recognized and analyzed. Use this to tailor language detection behavior for a given repository within an organization."""
 
     # Construct request model with validation
@@ -2847,7 +2976,7 @@ async def get_repository_commit_quality_settings(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the quality gate settings applied to commits for a specific repository. Note that diff coverage threshold is not included, as it is not currently supported for commit-level quality checks."""
 
     # Construct request model with validation
@@ -2887,7 +3016,7 @@ async def reset_repository_commit_quality_settings(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider under which the repository resides."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization whose commit quality settings will be reset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resets the commit quality settings for a specific repository to Codacy's default values, discarding any custom configurations previously applied."""
 
     # Construct request model with validation
@@ -2927,7 +3056,7 @@ async def reset_repository_quality_settings(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The exact repository name as it appears under the organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resets all quality settings for a specific repository back to Codacy's default values, discarding any custom configurations that were previously applied."""
 
     # Construct request model with validation
@@ -2968,7 +3097,7 @@ async def list_organization_pull_requests(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of pull requests to return per request. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters pull requests by matching the provided string against repository names or other relevant fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves pull requests across all repositories in an organization that the authenticated user has access to. Results can be sorted by last updated date (default), impact, or merged status."""
 
     _limit = _parse_int(limit)
@@ -3015,7 +3144,7 @@ async def list_commit_statistics(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="The repository branch to retrieve commit statistics for, which must be a branch enabled in Codacy settings. Defaults to the main branch configured in the Codacy repository settings if omitted."),
     days: str | None = Field(None, description="The number of days of commit statistics to return, ranging from 1 to 365. Returns the most recent days that have analysis data, defaulting to 31 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves daily commit analysis statistics for a repository over the last N days that have available analysis data. Note that returned days reflect days with actual data, which may not align with the last N consecutive calendar days."""
 
     _days = _parse_int(days)
@@ -3061,7 +3190,7 @@ async def list_repository_category_overviews(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="Name of the repository within the specified organization on the Git provider."),
     branch: str | None = Field(None, description="Name of a branch enabled on Codacy for which to retrieve category overviews; defaults to the main branch configured in Codacy repository settings if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analysis category overviews (e.g., code quality, security, complexity) for a specific repository, summarizing issue counts and grades per category. Authentication is not required for public repositories."""
 
     # Construct request model with validation
@@ -3105,7 +3234,7 @@ async def search_repository_issues(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of issues to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Searches and returns issues found by Codacy in a specific repository, equivalent to the Issues page view. Supports filtering via request body to narrow results by category, severity, or other criteria."""
 
     _limit = _parse_int(limit)
@@ -3153,7 +3282,7 @@ async def bulk_ignore_repository_issues(
     issue_ids: list[str] = Field(..., alias="issueIds", description="An unordered list of unique issue IDs to ignore. Maximum of 50 IDs per request; each item should be a valid issue identifier."),
     reason: str | None = Field(None, description="An optional reason categorizing why the issues are being ignored, used for tracking and audit purposes."),
     comment: str | None = Field(None, description="An optional free-text comment providing additional context or explanation for ignoring the specified issues."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Ignores a batch of issues in a specified repository, suppressing them from analysis results. Accepts up to 50 issue IDs per request, with an optional reason and comment for audit purposes."""
 
     # Construct request model with validation
@@ -3196,7 +3325,7 @@ async def get_repository_issues_overview(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a summary of issues found by Codacy in a specific repository, including issue counts and breakdowns as shown on the Issues page. Supports filtering via request body parameters."""
 
     # Construct request model with validation
@@ -3237,7 +3366,7 @@ async def get_repository_issue(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     issue_id: str = Field(..., alias="issueId", description="The unique numeric identifier of the open issue to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific open issue in a repository. Requires identifying the Git provider, organization, repository, and issue ID."""
 
     _issue_id = _parse_int(issue_id)
@@ -3283,7 +3412,7 @@ async def set_issue_ignored_state(
     ignored: bool = Field(..., description="Set to true to ignore the issue or false to unignore it and restore it to an active state."),
     reason: Literal["AcceptedUse", "FalsePositive", "NotExploitable", "TestCode", "ExternalCode"] | None = Field(None, description="Predefined category explaining why the issue is being ignored; required when ignoring an issue to ensure consistent classification."),
     comment: str | None = Field(None, description="Free-text comment providing additional context or justification for the ignore action, supplementing the predefined reason."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Ignore or unignore a specific code analysis issue in a repository, optionally providing a predefined reason and comment to justify the action."""
 
     # Construct request model with validation
@@ -3327,7 +3456,7 @@ async def ignore_issue_false_positive(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     issue_id: str = Field(..., alias="issueId", description="The unique identifier of the issue whose false positive result should be ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Marks a false positive result on a specific issue as ignored, suppressing it from future analysis reports. Use this to dismiss incorrectly flagged issues within a repository."""
 
     # Construct request model with validation
@@ -3368,7 +3497,7 @@ async def list_ignored_issues(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of ignored issues to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of issues that Codacy detected but were manually marked as ignored in the specified repository. Supports filtering via request body parameters."""
 
     _limit = _parse_int(limit)
@@ -3415,7 +3544,7 @@ async def list_repository_commits(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="The name of a branch enabled on Codacy for this repository, as returned by listRepositoryBranches. Defaults to the main branch configured in Codacy repository settings if omitted."),
     limit: str | None = Field(None, description="Maximum number of commit results to return. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Codacy analysis results for commits in a specified branch of a repository. Defaults to the main branch if no branch is specified."""
 
     _limit = _parse_int(limit)
@@ -3461,7 +3590,7 @@ async def get_commit_analysis(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The full SHA hash or UUID that uniquely identifies the commit to retrieve analysis results for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the analysis results for a specific commit in a repository, including code quality metrics and issue findings. Useful for inspecting the impact of a particular commit on overall code health."""
 
     # Construct request model with validation
@@ -3502,7 +3631,7 @@ async def get_commit_delta_statistics(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The unique identifier for the commit, provided as a UUID or full SHA hash string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves quality metric deltas introduced by a specific commit, showing how the commit changed code quality indicators. Returns zero or null values for metrics if Codacy has not yet analyzed the commit."""
 
     # Construct request model with validation
@@ -3547,7 +3676,7 @@ async def list_commit_delta_issues(
     status: Literal["all", "new", "fixed"] | None = Field(None, description="Filters results by issue status: all returns every delta issue, new returns only introduced issues, and fixed returns only resolved issues."),
     only_potential: bool | None = Field(None, alias="onlyPotential", description="When set to true, restricts results to potential issues only, excluding confirmed issues from the response."),
     limit: str | None = Field(None, description="Maximum number of issues to return per request; must be between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves issues introduced or fixed by a specific commit, calculated as a delta between the source commit and its parent (or an optional target commit). Use this to audit code quality changes at the commit level."""
 
     _limit = _parse_int(limit)
@@ -3588,7 +3717,7 @@ async def list_commit_delta_issues(
 
 # Tags: account
 @mcp.tool()
-async def get_authenticated_user() -> dict[str, Any]:
+async def get_authenticated_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated user. Useful for confirming identity, accessing user metadata, or personalizing responses based on the active session."""
 
     # Extract parameters for API call
@@ -3618,7 +3747,7 @@ async def get_authenticated_user() -> dict[str, Any]:
 async def update_current_user(
     name: str | None = Field(None, description="The display name to assign to the authenticated user's profile."),
     should_do_client_qualification: bool | None = Field(None, alias="shouldDoClientQualification", description="Whether the system should trigger client qualification checks for this user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates profile settings for the currently authenticated user. Only the fields provided will be modified."""
 
     # Construct request model with validation
@@ -3656,7 +3785,7 @@ async def update_current_user(
 
 # Tags: account
 @mcp.tool()
-async def list_organizations(limit: str | None = Field(None, description="Maximum number of organizations to return in a single response, between 1 and 100.")) -> dict[str, Any]:
+async def list_organizations(limit: str | None = Field(None, description="Maximum number of organizations to return in a single response, between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all organizations that the currently authenticated user belongs to. Returns a paginated list up to the specified limit."""
 
     _limit = _parse_int(limit)
@@ -3699,7 +3828,7 @@ async def list_organizations(limit: str | None = Field(None, description="Maximu
 async def list_organizations_by_provider(
     provider: str = Field(..., description="The Git provider to query for organizations. Use the short identifier code for the desired platform (e.g., GitHub, GitLab, Bitbucket)."),
     limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all organizations associated with the authenticated user for a specified Git provider. Useful for discovering available organizations before performing organization-scoped operations."""
 
     _limit = _parse_int(limit)
@@ -3743,7 +3872,7 @@ async def list_organizations_by_provider(
 async def get_organization_for_user(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific organization associated with the authenticated user on a given Git provider. Useful for confirming organization membership and accessing organization-level metadata."""
 
     # Construct request model with validation
@@ -3779,7 +3908,7 @@ async def get_organization_for_user(
 
 # Tags: account
 @mcp.tool()
-async def list_emails() -> dict[str, Any]:
+async def list_emails() -> dict[str, Any] | ToolResult:
     """Retrieves all email addresses associated with the authenticated user's account, including primary and secondary addresses along with their verification and visibility status."""
 
     # Extract parameters for API call
@@ -3806,7 +3935,7 @@ async def list_emails() -> dict[str, Any]:
 
 # Tags: account
 @mcp.tool()
-async def remove_user_email() -> dict[str, Any]:
+async def remove_user_email() -> dict[str, Any] | ToolResult:
     """Removes a specified email address from the authenticated user's account. The primary email and the last remaining email address cannot be removed."""
 
     # Extract parameters for API call
@@ -3833,7 +3962,7 @@ async def remove_user_email() -> dict[str, Any]:
 
 # Tags: account
 @mcp.tool()
-async def set_default_email() -> dict[str, Any]:
+async def set_default_email() -> dict[str, Any] | ToolResult:
     """Designates a specified email address as the primary default for the authenticated user, automatically removing the default status from any previously designated email. Only one email address can hold default status at a time."""
 
     # Extract parameters for API call
@@ -3860,7 +3989,7 @@ async def set_default_email() -> dict[str, Any]:
 
 # Tags: account
 @mcp.tool()
-async def list_integrations(limit: str | None = Field(None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
+async def list_integrations(limit: str | None = Field(None, description="Maximum number of integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all integrations connected to the authenticated user's account. Returns a paginated list of integration records up to the specified limit."""
 
     _limit = _parse_int(limit)
@@ -3900,7 +4029,7 @@ async def list_integrations(limit: str | None = Field(None, description="Maximum
 
 # Tags: account
 @mcp.tool()
-async def delete_integration(provider: str = Field(..., description="The identifier for the Git provider whose integration should be deleted. Accepted values include short codes for supported providers such as GitHub, GitLab, and Bitbucket.")) -> dict[str, Any]:
+async def delete_integration(provider: str = Field(..., description="The identifier for the Git provider whose integration should be deleted. Accepted values include short codes for supported providers such as GitHub, GitLab, and Bitbucket.")) -> dict[str, Any] | ToolResult:
     """Permanently removes the connected Git provider integration for the authenticated user. Once deleted, the user will need to re-authenticate to restore access for that provider."""
 
     # Construct request model with validation
@@ -3939,7 +4068,7 @@ async def delete_integration(provider: str = Field(..., description="The identif
 async def get_organization(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific organization from a Git provider. Returns organization metadata such as name, settings, and associated information."""
 
     # Construct request model with validation
@@ -3978,7 +4107,7 @@ async def get_organization(
 async def delete_organization(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes an organization from Codacy by deleting its association with the specified Git provider. This action cannot be undone and will remove all related configuration and data within Codacy."""
 
     # Construct request model with validation
@@ -4017,7 +4146,7 @@ async def delete_organization(
 async def get_organization_by_installation_id(
     provider: str = Field(..., description="The git provider identifier for the installation. Currently only GitHub ('gh') is supported."),
     installation_id: str = Field(..., alias="installationId", description="The unique numeric identifier of the Codacy installation to look up the associated organization for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves an organization associated with a specific provider installation ID. Currently supports GitHub ('gh') as the git provider."""
 
     _installation_id = _parse_int(installation_id)
@@ -4058,7 +4187,7 @@ async def get_organization_by_installation_id(
 async def get_organization_billing(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed billing information for a specific organization on a Git provider, including subscription and usage details."""
 
     # Construct request model with validation
@@ -4097,7 +4226,7 @@ async def get_organization_billing(
 async def update_organization_billing(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the billing information for a specified organization on a given Git provider. Use this to modify billing details associated with the organization's Codacy account."""
 
     # Construct request model with validation
@@ -4136,7 +4265,7 @@ async def update_organization_billing(
 async def get_organization_billing_card(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the payment card details associated with an organization's billing account on a specified Git provider. Useful for reviewing current billing payment method information."""
 
     # Construct request model with validation
@@ -4175,7 +4304,7 @@ async def get_organization_billing_card(
 async def add_billing_card(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a payment card to the specified organization's billing profile using a Stripe token. The token must be obtained from the Stripe /v1/tokens API prior to calling this endpoint."""
 
     # Construct request model with validation
@@ -4216,7 +4345,7 @@ async def estimate_organization_billing(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     payment_plan_code: str = Field(..., alias="paymentPlanCode", description="The code identifying the payment plan to estimate costs for. Available plan codes can be retrieved using the listPaymentPlans operation."),
     promo_code: str | None = Field(None, alias="promoCode", description="An optional promotional code to apply discounts or adjustments to the billing estimation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a billing cost estimation for an organization based on a specified payment plan and optional promotional code. Useful for previewing pricing before committing to a plan."""
 
     # Construct request model with validation
@@ -4258,7 +4387,7 @@ async def estimate_organization_billing(
 async def change_organization_billing_plan(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Changes the billing plan for a specified organization on a Git provider. Available plan codes can be retrieved using the list_payment_plans operation."""
 
     # Construct request model with validation
@@ -4297,7 +4426,7 @@ async def change_organization_billing_plan(
 async def apply_organization_provider_settings(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by its short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Applies the organization's default provider settings to all repositories within the specified Git provider organization. Use this to propagate updated integration settings uniformly across all repositories at once."""
 
     # Construct request model with validation
@@ -4336,7 +4465,7 @@ async def apply_organization_provider_settings(
 async def get_provider_settings(
     provider: str = Field(..., description="The Git provider identifier representing the source control platform to query (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Git provider integration settings for a specific organization, including configuration details for the connected provider account."""
 
     # Construct request model with validation
@@ -4384,7 +4513,7 @@ async def configure_provider_settings(
     ai_pull_request_reviewer: bool | None = Field(None, alias="aiPullRequestReviewer", description="Enables or disables the AI Pull Request Reviewer, which automatically analyzes pull requests and posts comments on code quality and potential issues. Supported on GitHub only."),
     ai_pull_request_reviewer_automatic: bool | None = Field(None, alias="aiPullRequestReviewerAutomatic", description="Enables or disables automatic triggering of the AI Pull Request Reviewer on each new pull request; after the initial automatic review, subsequent reviews must be explicitly requested. Supported on GitHub only."),
     pull_request_unified_summary: bool | None = Field(None, alias="pullRequestUnifiedSummary", description="Enables or disables a unified pull request summary that combines both coverage and analysis results into a single Codacy comment. Supported on GitHub only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or updates Git provider integration settings for an organization, controlling which Codacy features are active such as status checks, pull request annotations, AI-powered reviews, and coverage summaries."""
 
     # Construct request model with validation
@@ -4427,7 +4556,7 @@ async def get_repository_provider_integration_settings(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Git provider integration settings for a specific repository, including configuration details that control how Codacy interacts with the provider for that repository."""
 
     # Construct request model with validation
@@ -4476,7 +4605,7 @@ async def update_repository_integration_settings(
     ai_pull_request_reviewer: bool | None = Field(None, alias="aiPullRequestReviewer", description="Enables or disables the AI Pull Request Reviewer, which automatically analyzes pull requests and posts comments on code quality and potential issues. Available on GitHub only."),
     ai_pull_request_reviewer_automatic: bool | None = Field(None, alias="aiPullRequestReviewerAutomatic", description="Enables or disables automatic triggering of the AI Pull Request Reviewer on each new pull request; after the initial automatic review, subsequent reviews must be explicitly requested. Available on GitHub only."),
     pull_request_unified_summary: bool | None = Field(None, alias="pullRequestUnifiedSummary", description="Enables or disables a unified pull request summary that combines both coverage and analysis results into a single comment. Available on GitHub only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the Git provider integration settings for a specific repository, controlling which Codacy features are active such as status checks, pull request comments, AI reviews, and coverage summaries."""
 
     # Construct request model with validation
@@ -4519,7 +4648,7 @@ async def create_post_commit_hook(
     provider: str = Field(..., description="Short identifier for the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider under which the repository resides."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization for which the post-commit hook will be created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a post-commit hook integration for a repository, enabling Codacy to receive commit notifications and trigger analysis automatically after each push."""
 
     # Construct request model with validation
@@ -4559,7 +4688,7 @@ async def refresh_repository_provider_integration(
     provider: str = Field(..., description="The Git provider hosting the repository. Accepted values are 'gh' for GitHub, 'gl' for GitLab, or 'bb' for Bitbucket. Note: this operation is only supported for GitLab and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or workspace on the Git provider under which the repository resides."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Refreshes the Git provider integration for a specific repository on GitLab or Bitbucket, using the authenticated user's credentials to enable commenting on new pull requests."""
 
     # Construct request model with validation
@@ -4603,7 +4732,7 @@ async def list_organization_repositories(
     filter_: Literal["Synced", "NotSynced", "AllSynced"] | None = Field(None, alias="filter", description="Controls which repositories are returned based on their sync status: `Synced` returns repositories the user has access to, `NotSynced` returns repositories fetched from the provider but not yet synced, and `AllSynced` returns all organization repositories (requires admin access)."),
     languages: str | None = Field(None, description="Filters results to repositories that use the specified programming languages, provided as a comma-separated list of language names."),
     segments: str | None = Field(None, description="Filters results to repositories belonging to the specified segments, provided as a comma-separated list of integer segment identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves repositories belonging to a specific organization on a Git provider for the authenticated user. Supports filtering by sync status, language, and segment, with cursor-based pagination (Bitbucket cursors must be URL-encoded before use in subsequent requests)."""
 
     _limit = _parse_int(limit)
@@ -4647,7 +4776,7 @@ async def list_organization_repositories(
 async def get_organization_onboarding_progress(
     provider: str = Field(..., description="Short code identifying the Git provider where the organization is hosted. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current onboarding progress for a specific organization on a Git provider. Useful for tracking setup completion status during the organization integration workflow."""
 
     # Construct request model with validation
@@ -4689,7 +4818,7 @@ async def list_organization_people(
     limit: str | None = Field(None, description="Maximum number of people to return per request; must be between 1 and 100 inclusive."),
     search: str | None = Field(None, description="Filters the returned people by matching the provided string against their name or related identifiers."),
     only_members: bool | None = Field(None, alias="onlyMembers", description="When true, restricts results to only registered Codacy users; when false, also includes commit authors who have not joined Codacy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of people associated with a specific organization on a Git provider, including Codacy users and optionally commit authors who are not Codacy users."""
 
     _limit = _parse_int(limit)
@@ -4733,7 +4862,7 @@ async def list_organization_people(
 async def add_organization_members(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds people to an organization on the specified Git provider, assigning them as members or committers based on whether they have a pending join request."""
 
     # Construct request model with validation
@@ -4772,7 +4901,7 @@ async def add_organization_members(
 async def export_organization_people_csv(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by its short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generates and returns a CSV file listing all people in the specified organization, including their name, email, last login date, and last analysis date."""
 
     # Construct request model with validation
@@ -4812,7 +4941,7 @@ async def remove_organization_members(
     provider: str = Field(..., description="The Git provider hosting the organization. Use the short identifier for the target platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
     emails: list[str] = Field(..., description="List of member email addresses to remove from the organization. Each item must be a valid email address; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more members from a Git provider organization by their email addresses. Useful for revoking access when offboarding users or managing organization membership."""
 
     # Construct request model with validation
@@ -4854,7 +4983,7 @@ async def remove_organization_members(
 async def get_git_provider_app_permissions(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current status of Codacy's Git provider app permissions for a specified organization, indicating which permissions have been granted or are missing."""
 
     # Construct request model with validation
@@ -4895,7 +5024,7 @@ async def list_organization_people_suggestions(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of people suggestions to return per request. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned suggestions to those whose name or identifier contains the provided search string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves suggested people (users) to add to an organization on a specified Git provider. Useful for discovering potential members based on activity or association with the organization."""
 
     _limit = _parse_int(limit)
@@ -4942,7 +5071,7 @@ async def reanalyze_commit(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The full UUID or SHA hash string that uniquely identifies the commit to be reanalyzed."),
     clean_cache: bool | None = Field(None, alias="cleanCache", description="When set to true, clears any cached analysis data before reanalyzing the commit, ensuring the results are not influenced by previous runs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Triggers a reanalysis of a specific commit in a repository. Optionally clears the cache before running the analysis to ensure fresh results."""
 
     # Construct request model with validation
@@ -4985,7 +5114,7 @@ async def get_repository(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears within the organization on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific repository within an organization on a given Git provider. Authentication is not required when accessing public repositories."""
 
     # Construct request model with validation
@@ -5025,7 +5154,7 @@ async def delete_repository(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The exact name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes the specified repository from the organization on the given Git provider. This action cannot be undone and will remove all associated data from Codacy."""
 
     # Construct request model with validation
@@ -5067,7 +5196,7 @@ async def list_repository_people_suggestions(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of people suggestions to return. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned suggestions to those whose names or identifiers match the provided search string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves suggested people (collaborators or contributors) for a specific repository within an organization. Useful for discovering relevant users to add or assign within a given repository context."""
 
     _limit = _parse_int(limit)
@@ -5117,7 +5246,7 @@ async def list_repository_branches(
     search: str | None = Field(None, description="A string used to filter branches by name, returning only branches whose names contain the provided value."),
     sort: str | None = Field(None, description="The field by which to sort the returned branches. Accepted values are 'name' to sort alphabetically or 'last-updated' to sort by most recent activity."),
     direction: str | None = Field(None, description="The direction in which to sort the results. Use 'asc' for ascending order or 'desc' for descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of branches for a specified repository, with optional filtering by enabled status or search term. No authentication is required when accessing public repositories."""
 
     _limit = _parse_int(limit)
@@ -5164,7 +5293,7 @@ async def configure_branch_analysis(
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears under the organization on the Git provider."),
     branch_name: str = Field(..., alias="branchName", description="The exact name of the branch within the repository to configure."),
     is_enabled: bool | None = Field(None, alias="isEnabled", description="Set to true to enable Codacy analysis on this branch, or false to disable it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable Codacy analysis for a specific repository branch. Use this to control which branches are actively analyzed within a given organization and repository."""
 
     # Construct request model with validation
@@ -5207,7 +5336,7 @@ async def set_organization_join_mode(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
     join_mode: Literal["auto", "adminAuto", "request"] = Field(..., alias="joinMode", description="The join mode to apply to the organization: 'auto' allows anyone to join automatically, 'adminAuto' grants automatic access after admin approval, and 'request' requires members to submit a join request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the membership join mode for an organization on a specified Git provider, controlling how new members are admitted (automatically, admin-approved automatically, or by request)."""
 
     # Construct request model with validation
@@ -5251,7 +5380,7 @@ async def set_default_branch(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="Name of the repository within the organization on the Git provider."),
     branch_name: str = Field(..., alias="branchName", description="Name of the branch to designate as the new default; this branch must already be enabled on Codacy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets the default branch for a specified repository on Codacy. The target branch must already be enabled on Codacy before it can be designated as the default."""
 
     # Construct request model with validation
@@ -5292,7 +5421,7 @@ async def list_branch_required_checks(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     branch_name: str = Field(..., alias="branchName", description="The name of the branch for which required status checks will be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the required status checks configured for a specific branch in a repository. These checks must pass before pull requests can be merged into the branch."""
 
     # Construct request model with validation
@@ -5331,7 +5460,7 @@ async def list_branch_required_checks(
 async def add_codacy_badge(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a pull request that adds the Codacy static analysis badge to the repository's README. Only applies to public GitHub repositories that do not already have the badge; the pull request is created asynchronously and may fail after a successful response."""
 
     # Construct request model with validation
@@ -5370,7 +5499,7 @@ async def add_codacy_badge(
 async def check_organization_leave_eligibility(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether the authenticated user is eligible to leave the specified organization, returning either confirmation or the specific reasons preventing them from leaving."""
 
     # Construct request model with validation
@@ -5411,7 +5540,7 @@ async def list_organization_join_requests(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of join requests to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned join requests to those matching the provided search string, such as a username or partial name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all pending requests from users asking to join a specified organization on a Git provider. Supports filtering by search term and pagination via a result limit."""
 
     _limit = _parse_int(limit)
@@ -5455,7 +5584,7 @@ async def list_organization_join_requests(
 async def join_organization(
     provider: str = Field(..., description="Short code identifying the Git provider where the organization is hosted. Accepted values include identifiers for GitHub, GitLab, and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider. This must match the organization's remote identifier on that platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Joins an organization on a specified Git provider, granting the authenticated user membership in that organization. Requires the provider identifier and the organization's remote name."""
 
     # Construct request model with validation
@@ -5494,7 +5623,7 @@ async def join_organization(
 async def decline_organization_join_requests(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the target platform (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. This must match the exact organization identifier used by the provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Declines pending requests from users seeking to join a specified organization on a Git provider. Targets the organization by provider and name, rejecting the specified user emails."""
 
     # Construct request model with validation
@@ -5534,7 +5663,7 @@ async def delete_organization_join_request(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     account_identifier: str = Field(..., alias="accountIdentifier", description="The unique numeric identifier of the user account whose join request should be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancels or removes a pending request for a user to join an organization on the specified Git provider. Identified by the provider, organization name, and the user's account identifier."""
 
     _account_identifier = _parse_int(account_identifier)
@@ -5575,7 +5704,7 @@ async def delete_organization_join_request(
 async def add_repository(
     repository_full_path: str = Field(..., alias="repositoryFullPath", description="The full path of the repository on the Git provider, beginning at the organization level with each path segment separated by a forward slash."),
     provider: str = Field(..., description="The Git provider that hosts the repository, identifying the source platform where the repository resides."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new repository to an existing Codacy organization, enabling code quality analysis and tracking for that repository."""
 
     # Construct request model with validation
@@ -5619,7 +5748,7 @@ async def add_organization(
     name: str = Field(..., description="The display name of the organization as it appears on the Git provider."),
     type_: Literal["Account", "Organization"] = Field(..., alias="type", description="Specifies whether the entity is a personal account or a shared organization, which determines available features and permissions."),
     products: list[Literal["quality", "coverage"]] | None = Field(None, description="A list of Codacy products to enable for the organization, where each item represents a product identifier. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Registers an organization from a Git provider with Codacy, enabling code quality analysis and management for that organization's repositories."""
 
     # Construct request model with validation
@@ -5657,7 +5786,7 @@ async def add_organization(
 
 # Tags: enterprise
 @mcp.tool()
-async def delete_enterprise_token(provider: str = Field(..., description="Identifier for the Git provider whose enterprise token should be deleted. Accepts short provider codes representing supported Git hosting services.")) -> dict[str, Any]:
+async def delete_enterprise_token(provider: str = Field(..., description="Identifier for the Git provider whose enterprise token should be deleted. Accepts short provider codes representing supported Git hosting services.")) -> dict[str, Any] | ToolResult:
     """Deletes the stored GitHub Enterprise account token for the authenticated user. Once removed, the token will no longer be used to access enterprise-level resources."""
 
     # Construct request model with validation
@@ -5693,7 +5822,7 @@ async def delete_enterprise_token(provider: str = Field(..., description="Identi
 
 # Tags: enterprise
 @mcp.tool()
-async def list_enterprise_provider_tokens() -> dict[str, Any]:
+async def list_enterprise_provider_tokens() -> dict[str, Any] | ToolResult:
     """Retrieves all enterprise provider account tokens configured by the authenticated user on Codacy's platform. Useful for auditing or managing active integrations with enterprise identity and source control providers."""
 
     # Extract parameters for API call
@@ -5723,7 +5852,7 @@ async def list_enterprise_provider_tokens() -> dict[str, Any]:
 async def add_enterprise_token(
     token: str = Field(..., description="The GitHub Enterprise personal access token with read permissions to be stored and used for authenticating enterprise-level resource requests."),
     provider: str = Field(..., description="The Git hosting provider associated with the enterprise account token being added."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a GitHub Enterprise account token with read permissions for the authenticated user, enabling access to enterprise-level resources and repositories."""
 
     # Construct request model with validation
@@ -5761,7 +5890,7 @@ async def add_enterprise_token(
 
 # Tags: account
 @mcp.tool()
-async def list_api_tokens(limit: str | None = Field(None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
+async def list_api_tokens(limit: str | None = Field(None, description="Maximum number of API tokens to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves all API tokens associated with the authenticated user's account. Useful for auditing active tokens or managing programmatic access credentials."""
 
     _limit = _parse_int(limit)
@@ -5801,7 +5930,7 @@ async def list_api_tokens(limit: str | None = Field(None, description="Maximum n
 
 # Tags: account
 @mcp.tool()
-async def create_api_token(expires_at: str | None = Field(None, alias="expiresAt", description="Optional expiration date and time for the API token in ISO 8601 format. If omitted, the token does not expire.")) -> dict[str, Any]:
+async def create_api_token(expires_at: str | None = Field(None, alias="expiresAt", description="Optional expiration date and time for the API token in ISO 8601 format. If omitted, the token does not expire.")) -> dict[str, Any] | ToolResult:
     """Creates a new account-level API token for the authenticated user, optionally scoped to a specific expiration date. API tokens are used to authenticate requests to the Codacy."""
 
     # Construct request model with validation
@@ -5839,7 +5968,7 @@ async def create_api_token(expires_at: str | None = Field(None, alias="expiresAt
 
 # Tags: account
 @mcp.tool()
-async def delete_user_token(token_id: str = Field(..., alias="tokenId", description="The unique numeric identifier of the API token to delete. Obtain this ID from the list of tokens associated with the authenticated user's account.")) -> dict[str, Any]:
+async def delete_user_token(token_id: str = Field(..., alias="tokenId", description="The unique numeric identifier of the API token to delete. Obtain this ID from the list of tokens associated with the authenticated user's account.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific API token belonging to the authenticated user. Once deleted, any integrations or clients using this token will lose access immediately."""
 
     _token_id = _parse_int(token_id)
@@ -5880,7 +6009,7 @@ async def delete_user_token(token_id: str = Field(..., alias="tokenId", descript
 async def delete_billing_subscription(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes the billing subscription for a specified organization on a given Git provider. This action cancels the organization's current billing plan and cannot be undone."""
 
     # Construct request model with validation
@@ -5916,7 +6045,7 @@ async def delete_billing_subscription(
 
 # Tags: integrations
 @mcp.tool()
-async def list_provider_integrations(limit: str | None = Field(None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any]:
+async def list_provider_integrations(limit: str | None = Field(None, description="Maximum number of provider integrations to return in a single response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of provider integrations configured on Codacy's platform. Use this to discover available third-party integrations such as version control, CI, or issue tracking providers."""
 
     _limit = _parse_int(limit)
@@ -5956,7 +6085,7 @@ async def list_provider_integrations(limit: str | None = Field(None, description
 
 # Tags: admin
 @mcp.tool()
-async def search_entities(search: str | None = Field(None, description="A search string used to filter results by matching against entity names or IDs such as organizations or repositories.")) -> dict[str, Any]:
+async def search_entities(search: str | None = Field(None, description="A search string used to filter results by matching against entity names or IDs such as organizations or repositories.")) -> dict[str, Any] | ToolResult:
     """Search across Codacy entities such as Organizations and Repositories by name or ID. Restricted to Codacy admins only."""
 
     # Construct request model with validation
@@ -5994,7 +6123,7 @@ async def search_entities(search: str | None = Field(None, description="A search
 
 # Tags: admin
 @mcp.tool()
-async def delete_dormant_accounts(body: str | None = Field(None, description="Raw CSV content exported from GitHub Enterprise identifying the dormant user accounts to be deleted.")) -> dict[str, Any]:
+async def delete_dormant_accounts(body: str | None = Field(None, description="Raw CSV content exported from GitHub Enterprise identifying the dormant user accounts to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes Codacy user accounts identified as dormant, based on a CSV file exported from GitHub Enterprise. Restricted to Codacy administrators only."""
 
     # Construct request model with validation
@@ -6033,7 +6162,7 @@ async def delete_dormant_accounts(body: str | None = Field(None, description="Ra
 
 # Tags: languages
 @mcp.tool()
-async def list_tool_supported_languages() -> dict[str, Any]:
+async def list_tool_supported_languages() -> dict[str, Any] | ToolResult:
     """Retrieves the list of programming or spoken languages supported by the currently available tools. Use this to determine valid language options before invoking language-specific tool operations."""
 
     # Extract parameters for API call
@@ -6060,7 +6189,7 @@ async def list_tool_supported_languages() -> dict[str, Any]:
 
 # Tags: tools
 @mcp.tool()
-async def list_tools(limit: str | None = Field(None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.")) -> dict[str, Any]:
+async def list_tools(limit: str | None = Field(None, description="Maximum number of tools to return in the response. Accepts values between 1 and 100.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of available tools. Use the limit parameter to control how many tools are returned in a single response."""
 
     _limit = _parse_int(limit)
@@ -6104,7 +6233,7 @@ async def list_tool_patterns(
     tool_uuid: str = Field(..., alias="toolUuid", description="The unique UUID identifying the tool whose patterns should be retrieved."),
     limit: str | None = Field(None, description="Maximum number of patterns to return in a single response. Accepts values between 1 and 100."),
     enabled: bool | None = Field(None, description="Filters patterns by their enabled status. Set to true to return only enabled patterns, or false to return only disabled patterns. Omit to return all patterns regardless of status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of patterns associated with a specific tool. Supports filtering by enabled status and limiting the number of results returned."""
 
     _limit = _parse_int(limit)
@@ -6152,7 +6281,7 @@ async def submit_pattern_feedback(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization on the specified Git provider whose context scopes this feedback."),
     reaction_feedback: bool = Field(..., alias="reactionFeedback", description="Boolean vote on the enriched pattern's relevance — true indicates the pattern is considered good or relevant, false indicates it is not."),
     feedback: str | None = Field(None, description="Optional free-text explanation describing why the enriched pattern is considered irrelevant or problematic, providing additional context for the negative feedback."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submits user feedback on an enriched tool pattern for a specific organization, indicating whether the pattern is considered relevant and optionally providing a written explanation."""
 
     # Construct request model with validation
@@ -6194,7 +6323,7 @@ async def submit_pattern_feedback(
 async def get_pattern(
     tool_uuid: str = Field(..., alias="toolUuid", description="The UUID uniquely identifying the tool whose pattern you want to retrieve."),
     pattern_id: str = Field(..., alias="patternId", description="The identifier of the specific pattern to retrieve, typically referencing a named rule or checker within the tool."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the full definition of a specific pattern associated with a given tool. Use this to inspect pattern rules, configuration, and metadata for a tool's code analysis or style enforcement pattern."""
 
     # Construct request model with validation
@@ -6230,7 +6359,7 @@ async def get_pattern(
 
 # Tags: tools
 @mcp.tool()
-async def list_duplication_tools() -> dict[str, Any]:
+async def list_duplication_tools() -> dict[str, Any] | ToolResult:
     """Retrieves the complete list of available duplication tools. Use this to discover which duplication tools are accessible for subsequent operations."""
 
     # Extract parameters for API call
@@ -6257,7 +6386,7 @@ async def list_duplication_tools() -> dict[str, Any]:
 
 # Tags: tools
 @mcp.tool()
-async def list_metrics_tools() -> dict[str, Any]:
+async def list_metrics_tools() -> dict[str, Any] | ToolResult:
     """Retrieves the complete list of available metrics tools. Use this to discover which metrics tools are accessible for monitoring, analysis, or reporting workflows."""
 
     # Extract parameters for API call
@@ -6288,7 +6417,7 @@ async def start_organization_metrics_collection(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     metrics: list[str] | None = Field(None, description="List of specific metric identifiers to start collecting. If omitted, collection is initiated for all missing metrics. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates data collection for any missing metrics within the specified organization. The organization must have metrics support enabled before calling this endpoint."""
 
     # Construct request model with validation
@@ -6330,7 +6459,7 @@ async def start_organization_metrics_collection(
 async def list_ready_metrics(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Accepted values include identifiers for GitHub, GitLab, and Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to scope the metrics retrieval to that specific organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of metrics that have completed data collection for a specified organization on a Git provider. Use this to determine which metrics are available and ready to query before requesting detailed metric data."""
 
     # Construct request model with validation
@@ -6373,7 +6502,7 @@ async def get_latest_metric_value(
     repositories: list[str] | None = Field(None, description="Optional list of repository identifiers to scope the metric value to specific repositories within the organization. Order is not significant."),
     segment_ids: list[int] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs used to filter the metric value by predefined organizational segments. Order is not significant."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric query by specific dimensional criteria. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current (latest) value of an aggregating metric for an organization, such as open issues. Note: this endpoint only supports aggregating metrics and does not work for accumulating metrics like fixed issues."""
 
     # Construct request model with validation
@@ -6423,7 +6552,7 @@ async def get_latest_grouped_metric_values(
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension filter values to narrow the metric results. Valid dimension values depend on the requested metric."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Direction in which the returned metric values are sorted, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped metric value entries to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the latest values for an aggregating metric grouped by a specified dimension such as organization, repository, or a metric-specific dimension like category or severity. Not compatible with accumulating metrics such as fixed issues."""
 
     # Construct request model with validation
@@ -6473,7 +6602,7 @@ async def get_metric_period_value(
     repositories: list[str] | None = Field(None, description="Optional list of repository names to scope the metric retrieval. When omitted, the metric is calculated across all repositories in the organization."),
     segment_ids: list[int] | None = Field(None, alias="segmentIds", description="Optional list of segment IDs to filter the metric data by predefined organizational segments."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric data by specific dimensional criteria."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the value of a specific organization metric for a given time period, identified by its start date. Aggregating metrics return the average value for the period, while accumulating metrics return the total historical sum."""
 
     # Construct request model with validation
@@ -6526,7 +6655,7 @@ async def get_grouped_metric_values_for_period(
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension filter values to narrow metric results to specific dimension members. Items should match valid dimension values for the requested metric."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Direction in which to sort the returned grouped values, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped value entries to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metric values for a specific time period, grouped by a chosen dimension such as organization, repository, or a metric-specific dimension. Aggregating metrics return averages while accumulating metrics return sums representing total historical change."""
 
     # Construct request model with validation
@@ -6580,7 +6709,7 @@ async def get_metric_time_range_values(
     limit: int | None = Field(None, description="Maximum number of results to return. When omitted, the backend applies a default limit."),
     period: Literal["day", "week", "month"] | None = Field(None, description="Time granularity for grouping metric values. When omitted, the backend selects a default granularity based on the requested time range."),
     time_range: str | None = Field(None, description="Time range in ISO 8601 interval format: 'YYYY-MM-DD/YYYY-MM-DD' (start date / end date)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves time-series values for a specific metric within an organization, grouped by period and optionally by repository, organization, or a metric-specific dimension. Supports filtering by repositories or segments and controlling time granularity via the period parameter."""
 
     # Call helper functions
@@ -6628,7 +6757,7 @@ async def get_metric_time_range_values(
 async def list_ready_enterprise_metrics(
     provider: str = Field(..., description="Identifier for the Git provider hosting the enterprise. Specifies which version control platform to target."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug (URL-friendly name) identifying the enterprise whose ready metrics are being retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of metrics that have completed data collection for each organization within a specified enterprise. Useful for determining which metrics are available and ready to query before fetching detailed analytics."""
 
     # Construct request model with validation
@@ -6669,7 +6798,7 @@ async def get_latest_enterprise_metric_values(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug name that uniquely identifies the enterprise."),
     metric_name: str = Field(..., alias="metricName", description="The name of the aggregating metric to retrieve latest values for. Use the readyMetricsForOrganization endpoint to discover all available metric names."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow the metric results. Each item specifies a dimension constraint to apply when retrieving metric values across organizations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recent value of a specified aggregating metric (e.g., open issues) for every organization within an enterprise. Note: this endpoint only supports aggregating metrics and does not work for accumulating metrics such as fixed issues."""
 
     # Construct request model with validation
@@ -6716,7 +6845,7 @@ async def list_enterprise_metric_latest_values_grouped(
     sort_direction: str | None = Field(None, alias="sortDirection", description="Direction in which the grouped results are sorted, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped result entries to return."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="List of dimension values used to filter the grouped results, restricting output to only the specified dimension entries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the latest values of a non-accumulating aggregating metric for all organizations in an enterprise, grouped by a specified dimension such as organization, category, or severity. Grouping by repository is not supported, and accumulating metrics (e.g., fixed issues) are excluded."""
 
     # Construct request model with validation
@@ -6763,7 +6892,7 @@ async def get_enterprise_metric_by_period(
     date: str = Field(..., description="The start date of the period to retrieve, in ISO 8601 date-time format."),
     period: Literal["day", "week", "month"] = Field(..., description="The granularity of the time period to aggregate metric values over. Must be one of: day, week, or month."),
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow results. Each item specifies a dimension and value to filter by; order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metric values for each organization within an enterprise for a specific time period, identified by its start date. Aggregating metrics return the average value, while accumulating metrics return the total historical sum."""
 
     # Construct request model with validation
@@ -6813,7 +6942,7 @@ async def get_enterprise_metric_grouped_by_period(
     dimensions_filter: list[_models.DimensionsFilter] | None = Field(None, alias="dimensionsFilter", description="Optional list of dimension filters to narrow results. Each item specifies a dimension and value to filter by, limiting the data returned to matching entries."),
     sort_direction: str | None = Field(None, alias="sortDirection", description="Controls the sort order of the returned values, either ascending or descending."),
     limit: int | None = Field(None, description="Maximum number of grouped result entries to return."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metric values grouped by a specified dimension (such as organization or a metric-specific dimension) for all organizations in an enterprise, scoped to a single time period identified by its start date. Aggregating metrics return averages while accumulating metrics return sums representing total historical change."""
 
     # Construct request model with validation
@@ -6865,7 +6994,7 @@ async def get_enterprise_metric_timeseries(
     sort_direction: str | None = Field(None, alias="sortDirection", description="Controls the sort order of returned results. Determines whether values are sorted in ascending or descending order."),
     limit: int | None = Field(None, description="Maximum number of results to return. Use to cap the size of the response payload."),
     period: Literal["day", "week", "month"] | None = Field(None, description="Time granularity for grouping returned data points. If omitted, the backend selects a default granularity based on the requested range."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves time-series values for a specific metric across all organizations in an enterprise, grouped by period and optionally by organization or a metric dimension. Aggregating metrics return averages while accumulating metrics return sums; time granularity is controlled via the period parameter."""
 
     # Construct request model with validation
@@ -6915,7 +7044,7 @@ async def list_repository_files(
     sort: str | None = Field(None, description="Field by which to sort the file list. Accepted values are filename, issues, grade, duplication, complexity, and coverage."),
     direction: str | None = Field(None, description="Order in which to return sorted results — ascending (asc) or descending (desc)."),
     limit: str | None = Field(None, description="Maximum number of files to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recent analysis results for all tracked files in a repository, equivalent to the Codacy Files page view. Ignored files are excluded from results."""
 
     _limit = _parse_int(limit)
@@ -6963,7 +7092,7 @@ async def list_ignored_files(
     branch: str | None = Field(None, description="The name of a branch enabled on Codacy to scope the ignored files results; defaults to the main branch configured in Codacy repository settings if omitted."),
     search: str | None = Field(None, description="A string used to filter results, returning only files whose relative path contains this value anywhere within it."),
     limit: str | None = Field(None, description="The maximum number of ignored files to return in a single response, between 1 and 100 inclusive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recently recorded list of ignored files for a repository on Codacy. When a Codacy configuration file is present, the ignored files list is read-only and reflects what was excluded during the last analysis."""
 
     _limit = _parse_int(limit)
@@ -7009,7 +7138,7 @@ async def get_file_analysis(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     file_id: str = Field(..., alias="fileId", description="The unique numeric identifier for a file tied to a specific commit, used to retrieve its analysis and coverage data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves analysis information and coverage metrics for a specific file in a repository. Returns quality insights and coverage data associated with the file at a particular commit."""
 
     _file_id = _parse_int(file_id)
@@ -7053,7 +7182,7 @@ async def list_file_clones(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     file_id: str = Field(..., alias="fileId", description="The unique numeric identifier for a file tied to a specific commit. This ID is commit-scoped and can be obtained from file listing endpoints."),
     limit: str | None = Field(None, description="Maximum number of duplicate code block results to return. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all duplicated code blocks (clones) detected within a specific file in a repository. Useful for identifying code duplication issues at the file level."""
 
     _file_id = _parse_int(file_id)
@@ -7101,7 +7230,7 @@ async def list_file_issues(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     file_id: str = Field(..., alias="fileId", description="The unique identifier for a file tied to a specific commit. This ID is commit-scoped and may differ across commits for the same file path."),
     limit: str | None = Field(None, description="Maximum number of issues to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of code quality issues found in a specific file within a repository. Results are scoped to the file identified by its commit-specific file ID."""
 
     _file_id = _parse_int(file_id)
@@ -7146,7 +7275,7 @@ async def list_file_issues(
 async def get_ai_risk_checklist(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the AI risk checklist for a specified organization on a Git provider, summarizing potential security, compliance, and quality risks identified by AI analysis."""
 
     # Construct request model with validation
@@ -7185,7 +7314,7 @@ async def get_ai_risk_checklist(
 async def list_coding_standards(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify which platform to query."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to scope the coding standards lookup."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all coding standards for a specified organization, including both active and draft coding standards. Useful for auditing or managing code quality rules across an organization."""
 
     # Construct request model with validation
@@ -7228,7 +7357,7 @@ async def create_coding_standard(
     languages: list[str] = Field(..., description="List of programming languages the new coding standard will cover. Order is not significant; each item should be a supported language name."),
     source_repository: str | None = Field(None, alias="sourceRepository", description="Name of an existing repository within the same organization to use as a template for tool and language settings when creating the new coding standard."),
     source_coding_standard: str | None = Field(None, alias="sourceCodingStandard", description="Numeric identifier of an existing coding standard to use as a template, carrying over its enabled repositories and default coding standard status to the new one."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new draft coding standard for an organization, optionally using an existing repository or coding standard as a template. The draft must be promoted to become effective; use promoteDraftCodingStandard to complete that step."""
 
     _source_coding_standard = _parse_int(source_coding_standard)
@@ -7277,7 +7406,7 @@ async def create_compliance_standard(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     name: str = Field(..., description="A human-readable display name for the compliance standard being created."),
     compliance_type: Literal["ai-risk"] = Field(..., alias="complianceType", description="The category of compliance standard to create. Currently supports AI risk compliance, which enforces policies around AI-generated code usage."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new compliance standard for the specified organization on a Git provider. Use this to establish compliance frameworks, such as AI risk policies, that govern code quality and usage rules across the organization."""
 
     # Construct request model with validation
@@ -7326,7 +7455,7 @@ async def create_coding_standard_from_preset(
     code_style: str = Field(..., alias="codeStyle", description="Preset level for code style rules, controlling how strictly formatting and stylistic inconsistencies are flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
     documentation: str = Field(..., description="Preset level for documentation rules, controlling how strictly missing or inadequate code documentation is flagged. Accepts values from 1 (least strict) to 4 (most strict)."),
     name: str | None = Field(None, description="A human-readable label for the new coding standard to help identify it within the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new coding standard for an organization by selecting preset severity levels across key code quality categories. Optionally sets the new standard as the organization's default."""
 
     _bug_risk = _parse_int(bug_risk)
@@ -7376,7 +7505,7 @@ async def get_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard to retrieve, as assigned by Codacy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific coding standard within an organization, including its configured rules and settings. Useful for inspecting or auditing code quality policies applied to repositories."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7418,7 +7547,7 @@ async def delete_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard to delete, as returned when the coding standard was created or listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a coding standard from the specified organization. This action is irreversible and removes all associated rule configurations."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7460,7 +7589,7 @@ async def duplicate_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard to duplicate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a copy of an existing coding standard within the specified organization, preserving all rules and configurations from the original. Useful for creating variations of a standard without modifying the source."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7502,7 +7631,7 @@ async def list_coding_standard_tools(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard whose tools should be listed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tools configured within a specific coding standard for an organization. Useful for auditing which static analysis tools are enabled and their associated rule configurations."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7545,7 +7674,7 @@ async def set_default_coding_standard(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard to set or unset as the default."),
     is_default: bool = Field(..., alias="isDefault", description="When true, designates this coding standard as the organization's default; when false, removes its default status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets or unsets a specific coding standard as the default for an organization, controlling which coding standard is automatically applied to new projects."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7601,7 +7730,7 @@ async def list_coding_standard_tool_patterns(
     sort: str | None = Field(None, description="The field by which to sort the returned patterns. Valid values are `category`, `recommended`, and `severity`."),
     direction: str | None = Field(None, description="The direction in which results are sorted — `asc` for ascending or `desc` for descending."),
     limit: str | None = Field(None, description="Maximum number of patterns to return per request. Must be between 1 and 100 inclusive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of code patterns configured for a specific tool within a coding standard, supporting filtering by language, category, severity, tags, and enabled/recommended status."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7655,7 +7784,7 @@ async def get_coding_standard_tool_patterns_overview(
     search: str | None = Field(None, description="A search string used to filter patterns by matching against pattern names or descriptions."),
     enabled: bool | None = Field(None, description="When set to true, returns only enabled patterns; when set to false, returns only disabled patterns. Omit to return patterns regardless of enabled state."),
     recommended: bool | None = Field(None, description="When set to true, returns only patterns marked as recommended; when set to false, returns only non-recommended patterns. Omit to return patterns regardless of recommended status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a summary overview of code patterns for a specific tool within a coding standard, showing counts and distribution across categories, severities, and statuses. Supports filtering by language, category, severity, tags, search term, enabled state, and recommended status."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7708,7 +7837,7 @@ async def bulk_update_coding_standard_tool_patterns(
     tags: str | None = Field(None, description="Comma-separated list of pattern tags to restrict which patterns are updated."),
     search: str | None = Field(None, description="Free-text string used to filter patterns by name or description before applying the update."),
     recommended: bool | None = Field(None, description="Restricts the update to patterns based on their recommended status; true targets only recommended patterns, false targets only non-recommended patterns."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable multiple code patterns for a specific tool within a coding standard. Use optional filters to target a subset of patterns by language, category, severity, tags, or search term, or omit all filters to apply the update to every pattern in the tool."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7757,7 +7886,7 @@ async def configure_coding_standard_tool(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The numeric identifier of the draft coding standard to configure. Only draft coding standards can be updated."),
     tool_uuid: str = Field(..., alias="toolUuid", description="The UUID uniquely identifying the tool to configure within the coding standard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Toggle a tool's enabled status and update its code patterns within a draft coding standard. Only the code patterns included in the request body are modified, with a maximum of 1000 code patterns configurable per call."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7800,7 +7929,7 @@ async def list_coding_standard_repositories(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the coding standard whose associated repositories should be listed."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100; defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of repositories currently using a specific coding standard within an organization. Useful for auditing which repositories are governed by a given set of coding rules."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7848,7 +7977,7 @@ async def update_coding_standard_repositories(
     coding_standard_id: str = Field(..., alias="codingStandardId", description="Unique numeric identifier of the coding standard to update."),
     link: list[str] = Field(..., description="List of repository names to associate with the coding standard. Order is not significant; each item should be the repository's name as it appears on the Git provider."),
     unlink: list[str] = Field(..., description="List of repository names to dissociate from the coding standard. Order is not significant; each item should be the repository's name as it appears on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Links or unlinks a set of repositories to a specified coding standard within an organization. If the coding standard is in draft state, changes take effect only upon promoting it."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -7893,7 +8022,7 @@ async def set_default_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy to designate as the default."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets a specified gate policy as the default for an organization, ensuring it is applied automatically when no other policy is explicitly assigned."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -7934,7 +8063,7 @@ async def set_default_gate_policy(
 async def set_default_gate_policy_to_codacy_builtin(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets the built-in Codacy gate policy as the default quality gate for the specified organization, replacing any previously configured default policy."""
 
     # Construct request model with validation
@@ -7974,7 +8103,7 @@ async def get_gate_policy(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider platform."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the details of a specific gate policy within an organization. Gate policies define quality and security criteria that must be met before code changes are accepted."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -8026,7 +8155,7 @@ async def update_gate_policy(
     coverage_threshold_with_decimals: float | None = Field(None, alias="coverageThresholdWithDecimals", description="The minimum required change in coverage percentage; the gate fails if coverage varies by less than this value. Accepts negative values to allow coverage decreases up to a specified amount, with a maximum value of 1.00 (representing 100%)."),
     diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum required diff coverage percentage; the gate fails if diff coverage falls below this value. Must be between 0 and 100 inclusive."),
     complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum allowed complexity value introduced by new code; the gate fails if this threshold is exceeded. Must be zero or greater."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing quality gate policy for an organization, allowing modification of thresholds, severity filters, and default status. Quality gate policies define the criteria that must be met for a pull request or commit to pass code quality checks."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -8080,7 +8209,7 @@ async def delete_gate_policy(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific gate policy from an organization on the specified Git provider. This action is irreversible and removes all associated policy configurations."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -8122,7 +8251,7 @@ async def list_gate_policies(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of gate policies to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all gate policies configured for a specified organization on a Git provider. Gate policies define quality or security gates that govern code merging and deployment workflows."""
 
     _limit = _parse_int(limit)
@@ -8176,7 +8305,7 @@ async def create_gate_policy(
     coverage_threshold_with_decimals: float | None = Field(None, alias="coverageThresholdWithDecimals", description="The minimum change in coverage percentage required to pass the quality gate; use a negative value to allow coverage to decrease by that amount (e.g., -0.02 allows up to a 2% drop). Must be at most 1.00."),
     diff_coverage_threshold: str | None = Field(None, alias="diffCoverageThreshold", description="The minimum diff coverage percentage required to pass the quality gate; must be between 0 and 100 inclusive."),
     complexity_threshold: str | None = Field(None, alias="complexityThreshold", description="The maximum cumulative complexity value allowed before the quality gate fails; must be zero or greater."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new quality gate policy for an organization on a Git provider, defining thresholds for issues, duplication, coverage, and complexity that must be met for a gate to pass."""
 
     _threshold = _parse_int(threshold)
@@ -8228,7 +8357,7 @@ async def create_gate_policy(
 async def sync_organization_name(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as gh for GitHub, gl for GitLab, or bb for Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider, used to locate the correct organization for synchronization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Synchronizes the organization's display name in Codacy with the current name from the specified Git provider, ensuring both systems remain consistent."""
 
     # Construct request model with validation
@@ -8267,7 +8396,7 @@ async def sync_organization_name(
 async def check_submodules_enabled(
     provider: str = Field(..., description="Short code identifying the Git provider for the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether the submodules option is currently enabled for a specified organization on a Git provider. Useful for verifying organization-level repository settings before performing submodule-dependent operations."""
 
     # Construct request model with validation
@@ -8308,7 +8437,7 @@ async def list_gate_policy_repositories(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization name as it appears on the Git provider."),
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy whose associated repositories should be listed."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all repositories that are following a specific gate policy within an organization. Useful for auditing which repositories are governed by a given quality gate configuration."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -8356,7 +8485,7 @@ async def update_gate_policy_repositories(
     gate_policy_id: str = Field(..., alias="gatePolicyId", description="The unique numeric identifier of the gate policy to which repositories will be linked or unlinked."),
     link: list[str] = Field(..., description="List of repository names to associate with the gate policy. Order is not significant; each item should be the repository's name as it appears on the Git provider."),
     unlink: list[str] = Field(..., description="List of repository names to disassociate from the gate policy. Order is not significant; each item should be the repository's name as it appears on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Links or unlinks a set of repositories to a specified gate policy within an organization. Allows simultaneous association and disassociation of repositories in a single request."""
 
     _gate_policy_id = _parse_int(gate_policy_id)
@@ -8401,7 +8530,7 @@ async def promote_coding_standard(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     coding_standard_id: str = Field(..., alias="codingStandardId", description="The unique numeric identifier of the draft coding standard to promote."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Promotes a draft coding standard to active/effective status for the specified organization, making it the default if it was marked as such. Returns the results of applying the promoted coding standard across the organization's repositories."""
 
     _coding_standard_id = _parse_int(coding_standard_id)
@@ -8443,7 +8572,7 @@ async def list_repository_api_tokens(
     provider: str = Field(..., description="The Git provider hosting the repository, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization as it appears on the Git provider platform."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all API tokens associated with a specific repository in a Codacy organization. These tokens can be used to authenticate API requests scoped to the repository."""
 
     # Construct request model with validation
@@ -8483,7 +8612,7 @@ async def create_repository_token(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new API token scoped to a specific repository, enabling authenticated access to that repository's resources via the Codacy."""
 
     # Construct request model with validation
@@ -8524,7 +8653,7 @@ async def delete_repository_token(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization or account name as it appears on the Git provider platform."),
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears under the organization on the Git provider platform."),
     token_id: str = Field(..., alias="tokenId", description="The numeric identifier of the repository API token to delete. Obtain this ID from the list repository tokens operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific API token associated with a repository by its unique ID. This revokes any access previously granted through that token."""
 
     _token_id = _parse_int(token_id)
@@ -8567,7 +8696,7 @@ async def list_coverage_reports(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     limit: str | None = Field(None, description="Maximum number of coverage reports to return, between 1 and 100 inclusive. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the most recent coverage reports and their statuses for a specified repository. Useful for monitoring code coverage trends and identifying the latest analysis results."""
 
     _limit = _parse_int(limit)
@@ -8614,7 +8743,7 @@ async def list_commit_coverage_reports(
     repository_name: str = Field(..., alias="repositoryName", description="The repository name within the specified organization on the Git provider."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The full commit UUID or SHA hash that uniquely identifies the commit whose coverage reports should be listed."),
     limit: str | None = Field(None, description="Maximum number of coverage reports to return in a single response. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all code coverage reports associated with a specific commit in a repository. Useful for reviewing coverage data uploaded from multiple sources or tools for a given commit."""
 
     _limit = _parse_int(limit)
@@ -8661,7 +8790,7 @@ async def get_commit_coverage_report(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The UUID or full SHA hash that uniquely identifies the commit whose coverage report is being retrieved."),
     report_uuid: str = Field(..., alias="reportUuid", description="The UUID that uniquely identifies the specific coverage report to retrieve within the commit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific coverage report and its contents for a given commit in a repository. Use this to inspect detailed coverage data associated with a particular report UUID."""
 
     # Construct request model with validation
@@ -8705,7 +8834,7 @@ async def get_file_content(
     start_line: str | None = Field(None, alias="startLine", description="The first line of the file to include in the response; when combined with endLine, returns only that line range."),
     end_line: str | None = Field(None, alias="endLine", description="The last line of the file to include in the response; must be greater than or equal to startLine."),
     commit_ref: str | None = Field(None, alias="commitRef", description="A commit reference (branch name, tag, or full commit hash) specifying which version of the file to retrieve; defaults to HEAD of the default branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the raw content of a specific file from a repository at a given commit reference, with optional line range filtering. Files exceeding 1MB will return a PayloadTooLarge error."""
 
     _start_line = _parse_int(start_line)
@@ -8752,7 +8881,7 @@ async def get_file_coverage(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     file_id: str = Field(..., alias="fileId", description="The unique numeric identifier for a file within a specific commit, used to scope coverage data to that file."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves code coverage information for a specific file at the head commit of a repository branch. Returns coverage metrics to help identify tested and untested code areas."""
 
     _file_id = _parse_int(file_id)
@@ -8796,7 +8925,7 @@ async def set_file_ignored_state(
     repository_name: str = Field(..., alias="repositoryName", description="The repository name as it appears under the organization on the Git provider."),
     ignored: bool = Field(..., description="Set to true to ignore the file (exclude it from analysis) or false to unignore it (re-include it in analysis)."),
     filepath: str = Field(..., description="The relative path to the file within the repository, starting from the repository root."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Ignore or unignore a specific file in a repository, controlling whether Codacy includes it in analysis. Use this to suppress analysis on generated, vendored, or otherwise irrelevant files."""
 
     # Construct request model with validation
@@ -8841,7 +8970,7 @@ async def ignore_security_item(
     srm_item_id: str = Field(..., alias="srmItemId", description="The unique UUID identifier of the security and risk management item to ignore."),
     reason: str | None = Field(None, description="Categorized reason for ignoring the item. Must be one of: AcceptedUse (intentional usage), FalsePositive (incorrect detection), NotExploitable (not actionable in context), TestCode (issue exists in test code), or ExternalCode (issue originates in third-party code)."),
     comment: str | None = Field(None, description="Free-text comment providing additional context or justification for why the security item is being ignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Marks a specific security and risk management (SRM) item as ignored for an organization, optionally providing a reason category and explanatory comment. Useful for suppressing known false positives, accepted risks, or non-applicable findings."""
 
     # Construct request model with validation
@@ -8884,7 +9013,7 @@ async def unignore_security_item(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
     srm_item_id: str = Field(..., alias="srmItemId", description="The unique UUID identifying the security and risk management item to be unignored."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restores a previously ignored security and risk management item to an active state within the specified organization. Only items that have been explicitly ignored can be unignored."""
 
     # Construct request model with validation
@@ -8924,7 +9053,7 @@ async def get_security_item(
     provider: str = Field(..., description="The Git provider hosting the organization, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider platform."),
     srm_item_id: str = Field(..., alias="srmItemId", description="The unique identifier of the SRM finding to retrieve, provided as a UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information for a single security and risk management (SRM) finding within an organization. Use this to inspect a specific SRM item by its unique identifier."""
 
     # Construct request model with validation
@@ -8974,7 +9103,7 @@ async def search_security_items(
     segments: list[int] | None = Field(None, description="List of segment IDs to filter security items by. Segments represent logical groupings within the organization. Order is not significant."),
     dast_target_urls: list[str] | None = Field(None, alias="dastTargetUrls", description="List of DAST target URLs to filter results to only items associated with those targets. Order is not significant."),
     search_text: str | None = Field(None, alias="searchText", description="Free-text search string to match against security item content, such as titles or descriptions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter security and risk management (SRM) items across repositories in an organization. Supports filtering by priority, status, category, scan type, and more to help identify and triage security issues."""
 
     _limit = _parse_int(limit)
@@ -9026,7 +9155,7 @@ async def get_security_dashboard_metrics(
     categories: list[str] | None = Field(None, description="List of security categories to filter issues by. Use the special value `_other_` to include issues that have no assigned security category."),
     scan_types: list[str] | None = Field(None, alias="scanTypes", description="List of scan types to restrict metrics to. Multiple scan types can be specified to combine results across different analysis methods."),
     segments: list[int] | None = Field(None, description="List of numeric segment IDs to filter the dashboard metrics by. Segments represent logical groupings of repositories or teams within the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves aggregated security and risk management metrics for an organization's dashboard, with optional filtering by repositories, priorities, categories, scan types, and segments."""
 
     # Construct request model with validation
@@ -9070,7 +9199,7 @@ async def search_repositories_with_security_findings(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     repositories: list[str] | None = Field(None, description="List of repository names to narrow results to specific repositories; order is not significant. If omitted, all repositories in the organization are considered."),
     segments: list[int] | None = Field(None, description="List of segment IDs to filter repositories by organizational segment; order is not significant. If omitted, all segments are included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Searches repositories within an organization for security findings, returning matching results with their associated security data. If no filters are applied, defaults to returning the 10 repositories with the highest number of findings."""
 
     # Construct request model with validation
@@ -9114,7 +9243,7 @@ async def search_security_findings_history(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the history results to. When omitted, results cover all repositories in the organization. Order is not significant."),
     segments: list[int] | None = Field(None, description="List of segment IDs to filter the history results by. Segments represent logical groupings within the organization. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the historical evolution of security findings over time for an organization, optionally filtered by specific repositories or segments. Useful for tracking security posture trends and identifying improvements or regressions."""
 
     # Construct request model with validation
@@ -9158,7 +9287,7 @@ async def search_security_category_finding(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     repositories: list[str] | None = Field(None, description="List of repository names to scope the results to; omit to include all repositories in the organization. Order is not significant."),
     segments: list[int] | None = Field(None, description="List of segment IDs to filter results by; omit to include all segments. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves security categories with their associated findings for an organization, optionally filtered by repositories or segments. If no filters are provided, returns the 10 categories with the highest finding counts."""
 
     # Construct request model with validation
@@ -9203,7 +9332,7 @@ async def upload_dast_report(
     tool_name: Literal["ZAP"] = Field(..., alias="toolName", description="The DAST tool that generated the report. Currently only ZAP (OWASP Zed Attack Proxy) is supported."),
     file_: str = Field(..., alias="file", description="The binary file containing the DAST scan results. For ZAP reports, ensure the `@generated` timestamp field is in English locale using the format `EEE, d MMM yyyy HH:mm:ss` (ZAP's default), otherwise the report will be rejected."),
     report_format: Literal["json"] = Field(..., alias="reportFormat", description="The format of the uploaded report file. Must match the structure expected for the specified tool."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a Dynamic Application Security Testing (DAST) scan report to Codacy for the specified organization and tool. The report is parsed and integrated into the organization's security findings dashboard."""
 
     # Construct request model with validation
@@ -9236,6 +9365,7 @@ async def upload_dast_report(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -9247,7 +9377,7 @@ async def list_dast_reports(
     provider: str = Field(..., description="The Git provider hosting the organization, used to identify the source control platform."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of DAST reports to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of uploaded DAST (Dynamic Application Security Testing) scan reports for an organization, including their current processing state. Results are sorted by submission date from latest to earliest."""
 
     _limit = _parse_int(limit)
@@ -9292,7 +9422,7 @@ async def list_security_managers(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of security managers to return in a single response. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of organization admins and security managers for a specified organization on a Git provider. Useful for auditing access control and identifying users with elevated security permissions."""
 
     _limit = _parse_int(limit)
@@ -9337,7 +9467,7 @@ async def assign_security_manager(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the desired provider (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     user_id: str = Field(..., alias="userId", description="The unique numeric identifier of the organization member to be assigned the Security Manager role. Must correspond to an existing member of the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Promotes an existing organization member to the Security Manager role within the specified Git provider organization. This grants the user elevated permissions to oversee and manage security-related settings and findings."""
 
     _user_id = _parse_int(user_id)
@@ -9382,7 +9512,7 @@ async def revoke_security_manager(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the Git provider."),
     user_id: str = Field(..., alias="userId", description="The unique numeric identifier of the organization member whose Security Manager role is being revoked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revokes the Security Manager role from a specified organization member, removing their elevated security permissions within the organization on the given Git provider."""
 
     _user_id = _parse_int(user_id)
@@ -9425,7 +9555,7 @@ async def list_repositories_with_security_issues(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per request. Must be between 1 and 100."),
     segments: str | None = Field(None, description="Narrows results to repositories belonging to the specified segments, provided as a comma-separated list of segment identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of repositories within an organization that have active security issues. Supports pagination and optional filtering by segment identifiers."""
 
     _limit = _parse_int(limit)
@@ -9470,7 +9600,7 @@ async def list_security_categories(
     provider: str = Field(..., description="The Git provider hosting the organization. Identifies which platform to query for security data."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider. Must match the exact organization identifier used on the platform."),
     limit: str | None = Field(None, description="Maximum number of security categories to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of security subcategories that have active security issues for the specified organization. Useful for identifying which vulnerability categories require attention across the organization's repositories."""
 
     _limit = _parse_int(limit)
@@ -9522,7 +9652,7 @@ async def search_sbom_dependencies(
     segments: list[int] | None = Field(None, description="List of segment IDs to restrict results to. Order is not significant; each item should be an integer segment identifier."),
     finding_severities: list[Literal["Critical", "High", "Medium", "Low"]] | None = Field(None, alias="findingSeverities", description="List of vulnerability severity levels to include in results. Order is not significant; valid values are `Critical`, `High`, `Medium`, and `Low`."),
     risk_categories: list[Literal["Forbidden", "Restricted", "Reciprocal", "Notice", "Permissive", "Unencumbered", "Unknown"]] | None = Field(None, alias="riskCategories", description="List of license risk category labels to filter dependencies by. Order is not significant; each item should be a valid license risk category string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter SBOM (Software Bill of Materials) dependencies used across an organization, returning vulnerability and license risk details for matched components. Supports filtering by severity, repository, segment, and text search against component identifiers."""
 
     _limit = _parse_int(limit)
@@ -9572,7 +9702,7 @@ async def search_dependency_repositories(
     dependency_full_name: str = Field(..., alias="dependencyFullName", description="The fully qualified name of the SBOM dependency to search for across repositories."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per page. Accepts values between 1 and 100."),
     repositories_filter: list[str] | None = Field(None, alias="repositoriesFilter", description="An optional list of repository names to restrict the search to. Order is not significant; each item should be a repository name string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for repositories within an organization that use a specific SBOM dependency, returning a paginated list of matches. Optionally filter results to a subset of repositories by name."""
 
     _limit = _parse_int(limit)
@@ -9621,7 +9751,7 @@ async def search_sbom_repositories(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of repositories to return per request. Accepts values between 1 and 100."),
     body: dict[str, Any] | None = Field(None, description="Optional request body to filter repositories by specific dependencies. Each item should be a dependency identifier in the format 'ecosystem/package-name'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and list repositories within an organization that contain SBOM (Software Bill of Materials) dependency information, optionally filtering by specific dependencies."""
 
     _limit = _parse_int(limit)
@@ -9670,7 +9800,7 @@ async def get_repository_sbom_download_url(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the repository."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a presigned URL for downloading the latest Software Bill of Materials (SBOM) for a specified repository. The URL provides temporary, authenticated access to the SBOM artifact."""
 
     # Construct request model with validation
@@ -9712,7 +9842,7 @@ async def upload_image_sbom(
     sbom: str = Field(..., description="The SBOM file to upload, provided as binary data in either SPDX or CycloneDX format."),
     environment: str | None = Field(None, description="The deployment environment associated with the Docker image (e.g., production, staging), used to contextualize the SBOM within a specific runtime environment."),
     image_ref: str | None = Field(None, description="Full Docker image reference in the format 'repositoryName/imageName:tag'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Uploads a Software Bill of Materials (SBOM) for a Docker image to the specified organization, enabling vulnerability tracking and dependency analysis. Accepts SBOM files in SPDX or CycloneDX format."""
 
     # Call helper functions
@@ -9748,6 +9878,7 @@ async def upload_image_sbom(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["sbom"],
         headers=_http_headers,
     )
 
@@ -9759,7 +9890,7 @@ async def delete_image_sboms(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
     image_name: str = Field(..., alias="imageName", description="The name of the container image whose SBOMs should be deleted. Must match the image name used when the SBOMs were originally uploaded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes all Software Bill of Materials (SBOMs) associated with a specific container image in the given organization. This action is irreversible and removes all SBOM records for the specified image."""
 
     # Construct request model with validation
@@ -9800,7 +9931,7 @@ async def delete_image_tag_sbom(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
     image_name: str = Field(..., alias="imageName", description="The name of the container image whose SBOM entry is being deleted."),
     tag: str = Field(..., description="The specific tag of the container image whose SBOM entry is being deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes the SBOM (Software Bill of Materials) associated with a specific image and tag combination within an organization. This action permanently removes the SBOM data for the given image/tag pair."""
 
     # Construct request model with validation
@@ -9840,7 +9971,7 @@ async def list_organization_images(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of Docker images to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of Docker images available for a specified organization on a Git provider. Supports pagination to control the number of results returned."""
 
     _limit = _parse_int(limit)
@@ -9886,7 +10017,7 @@ async def list_image_tags(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
     image_name: str = Field(..., alias="imageName", description="The name of the Docker image for which to list available tags."),
     limit: str | None = Field(None, description="Maximum number of image tags to return in a single response. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Docker image tags associated with a specific image in an organization's SBOM registry. Results are paginated and scoped to the specified Git provider and organization."""
 
     _limit = _parse_int(limit)
@@ -9932,7 +10063,7 @@ async def list_jira_tickets(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     element_type: Literal["issue", "finding", "file", "dependency"] = Field(..., alias="elementType", description="The category of Codacy element whose linked Jira tickets should be retrieved. Must be one of: issue, finding, file, or dependency."),
     element_id: str = Field(..., alias="elementId", description="The unique identifier of the specific Codacy element for which Jira tickets are being requested."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves Jira tickets linked to a specific Codacy element (such as an issue, finding, file, or dependency) within an organization. Useful for tracing code quality findings back to their associated Jira work items."""
 
     # Construct request model with validation
@@ -9983,7 +10114,7 @@ async def create_jira_ticket(
     description_heading: str | None = Field(None, description="Optional heading text to appear at the top of the Jira ticket description (rendered as a level-2 heading)"),
     description_body: str | None = Field(None, description="Main body text of the Jira ticket description. Use newlines to separate paragraphs."),
     description_bullet_points: list[Any] | None = Field(None, description="Optional list of bullet point strings to append after the body text"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Jira ticket linked to a specific Codacy organization, associating it with one or more code elements such as issues, findings, files, or dependencies."""
 
     # Call helper functions
@@ -10034,7 +10165,7 @@ async def unlink_jira_ticket(
     jira_ticket_identifier: str = Field(..., alias="jiraTicketIdentifier", description="The unique numeric identifier of the Jira ticket to unlink. This is the internal Jira ticket ID, not the human-readable issue key."),
     element_type: Literal["issue", "finding", "file", "dependency"] = Field(..., alias="elementType", description="The type of repository element from which the Jira ticket will be unlinked. Must be one of: issue, finding, file, or dependency."),
     element_id: str = Field(..., alias="elementId", description="The unique identifier of the specific repository element (of the type specified by elementType) from which the Jira ticket will be unlinked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the association between a Jira ticket and a specific repository element (such as an issue, finding, file, or dependency) within an organization. Use this to detach a previously linked Jira ticket from a code analysis element."""
 
     _jira_ticket_identifier = _parse_int(jira_ticket_identifier)
@@ -10078,7 +10209,7 @@ async def unlink_jira_ticket(
 async def get_jira_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Jira integration configuration for a specified organization on a Git provider. Useful for inspecting whether Jira is connected and reviewing its current settings."""
 
     # Construct request model with validation
@@ -10117,7 +10248,7 @@ async def get_jira_integration(
 async def delete_jira_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the Jira integration and all associated resources from the specified organization on a Git provider. This action is irreversible and will disconnect Jira from the organization."""
 
     # Construct request model with validation
@@ -10158,7 +10289,7 @@ async def list_jira_projects(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
     search: str | None = Field(None, description="Optional search string to filter returned Jira projects by name, returning only projects whose names contain the provided value."),
     limit: str | None = Field(None, description="Maximum number of Jira projects to return in a single response, between 1 and 100 inclusive. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the available Jira projects linked to a specific Git provider organization, enabling users to associate repositories with Jira for issue tracking. Supports filtering and pagination to narrow down results."""
 
     _limit = _parse_int(limit)
@@ -10204,7 +10335,7 @@ async def list_jira_issue_types(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     jira_project_id: str = Field(..., alias="jiraProjectId", description="The unique numeric identifier of the Jira project whose issue types should be retrieved."),
     limit: str | None = Field(None, description="Maximum number of issue types to return per request. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all available issue types (e.g., Bug, Story, Task) for a specific Jira project, enabling users to select valid types when creating or managing Jira issues linked to a Git organization."""
 
     _jira_project_id = _parse_int(jira_project_id)
@@ -10252,7 +10383,7 @@ async def list_jira_issue_type_fields(
     jira_project_id: str = Field(..., alias="jiraProjectId", description="The numeric identifier of the Jira project whose issue type fields are being queried."),
     jira_issue_type_id: str = Field(..., alias="jiraIssueTypeId", description="The identifier of the Jira issue type within the project for which available fields are returned."),
     limit: str | None = Field(None, description="Maximum number of fields to return per response. Accepts values between 1 and 100, defaulting to 100 when omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the available fields for a specific Jira issue type within a project, enabling dynamic form construction when creating or editing issues. Results are scoped to the organization identified by the Git provider and organization name."""
 
     _jira_project_id = _parse_int(jira_project_id)
@@ -10297,7 +10428,7 @@ async def list_jira_issue_type_fields(
 async def get_slack_integration(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization. Use the provider's abbreviated identifier."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the Slack integration configuration for a specified organization on a Git provider. Use this to check whether Slack notifications are enabled and review the current integration settings."""
 
     # Construct request model with validation
@@ -10338,7 +10469,7 @@ async def get_pull_request_diff(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique numeric identifier of the pull request within the repository."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the human-readable Git diff for a specific pull request, showing all file changes, additions, and deletions. Useful for reviewing code changes before merging."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -10381,7 +10512,7 @@ async def get_commit_diff(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     commit_uuid: str = Field(..., alias="commitUuid", description="The full SHA hash or UUID that uniquely identifies the commit whose diff should be retrieved."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the human-readable Git diff for a specific commit in a repository, showing all file changes introduced by that commit."""
 
     # Construct request model with validation
@@ -10423,7 +10554,7 @@ async def get_commit_diff_between(
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified Git provider organization."),
     base_commit_uuid: str = Field(..., alias="baseCommitUuid", description="The SHA or UUID of the base (earlier) commit to use as the starting point of the diff comparison."),
     head_commit_uuid: str = Field(..., alias="headCommitUuid", description="The SHA or UUID of the head (later) commit to use as the ending point of the diff comparison, representing the changes introduced since the base commit."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the human-readable Git diff between a base commit and a head commit in a specified repository, showing all changes introduced between the two points in history."""
 
     # Construct request model with validation
@@ -10462,7 +10593,7 @@ async def get_commit_diff_between(
 async def export_organization_security_items(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Each provider has a short code (e.g., GitHub, GitLab, Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact name of the organization as it appears on the specified Git provider. This is the organization's handle or slug, not a display name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generates and downloads a CSV report listing all security and risk management items for a specified organization on a Git provider. Useful for auditing, compliance tracking, and offline analysis of an organization's security posture."""
 
     # Construct request model with validation
@@ -10508,7 +10639,7 @@ async def export_security_items_csv(
     scan_types: list[str] | None = Field(None, alias="scanTypes", description="List of scan types to restrict results to. Order is not significant."),
     segments: list[int] | None = Field(None, description="List of numeric segment IDs to filter results by. Order is not significant."),
     search_text: str | None = Field(None, alias="searchText", description="Free-text string used to search within security item fields, such as title or description."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generates a filtered CSV export of security and risk management items for an organization. Supports filtering by repository, priority, status, category, scan type, segment, and free-text search."""
 
     # Construct request model with validation
@@ -10547,7 +10678,7 @@ async def export_security_items_csv(
 
 # Tags: analysis
 @mcp.tool()
-async def get_commit(commit_id: str = Field(..., alias="commitId", description="The unique numeric identifier of the commit to retrieve.")) -> dict[str, Any]:
+async def get_commit(commit_id: str = Field(..., alias="commitId", description="The unique numeric identifier of the commit to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific commit, including its metadata, changes, and associated data. Use this to inspect the full details of a known commit by its unique identifier."""
 
     _commit_id = _parse_int(commit_id)
@@ -10590,7 +10721,7 @@ async def check_repository_quickfix_suggestions(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="Name of the repository within the specified Git provider organization."),
     branch: str | None = Field(None, description="Name of a branch enabled on Codacy for this repository. Must be a branch tracked by Codacy, as returned by the listRepositoryBranches endpoint. Defaults to the main branch configured in Codacy repository settings if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Checks whether a repository has any available quick fix suggestions for issues on a specified branch. If no branch is provided, the repository's default branch is used."""
 
     # Construct request model with validation
@@ -10634,7 +10765,7 @@ async def get_issue_quickfixes_patch(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="Name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="Name of the repository within the specified organization on the Git provider."),
     branch: str | None = Field(None, description="Name of a branch enabled on Codacy for this repository. Defaults to the main branch configured in Codacy repository settings if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves quickfix suggestions for repository issues in patch format, allowing automated code corrections to be applied directly. If no branch is specified, the repository's default branch is used."""
 
     # Construct request model with validation
@@ -10678,7 +10809,7 @@ async def get_pull_request_issues_patch(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The name of the organization or account on the Git provider that owns the repository."),
     repository_name: str = Field(..., alias="repositoryName", description="The name of the repository within the specified organization on the Git provider."),
     pull_request_number: str = Field(..., alias="pullRequestNumber", description="The unique number identifying the pull request within the repository, as shown in the Git provider's interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves quickfix patches for issues found in a specific pull request, formatted as a unified diff patch. The patch can be applied directly to resolve detected issues in the pull request's code."""
 
     _pull_request_number = _parse_int(pull_request_number)
@@ -10721,7 +10852,7 @@ async def list_organization_audit_logs(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider."),
     from_: str | None = Field(None, alias="from", description="Start of the audit log time window as a Unix epoch timestamp in milliseconds. If omitted, defaults to the earliest available audit log entry."),
     to: str | None = Field(None, description="End of the audit log time window as a Unix epoch timestamp in milliseconds. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves audit logs for the specified organization within an optional time range. Requires Business plan and organization admin or manager role."""
 
     _from_ = _parse_int(from_)
@@ -10766,7 +10897,7 @@ async def list_organization_audit_logs(
 async def get_segment_sync_status(
     provider: str = Field(..., description="Identifier for the Git provider hosting the organization. Use the short code for the desired platform (e.g., GitHub, GitLab, or Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider. This must match the exact remote organization name used by the provider."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the current synchronization status of segments for a specified organization on a Git provider. Useful for monitoring whether segment data is up to date or still processing."""
 
     # Construct request model with validation
@@ -10807,7 +10938,7 @@ async def list_segment_keys(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The exact organization name as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of segment keys to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
     search: str | None = Field(None, description="Narrows results to segment keys whose names contain the provided string, enabling targeted lookups within large organizations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the available segment keys for a specified organization on a Git provider. Segment keys can be filtered by search term and support pagination via a configurable result limit."""
 
     _limit = _parse_int(limit)
@@ -10853,7 +10984,7 @@ async def list_segment_keys_with_ids(
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of segment key records to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Filters the returned segment keys to those matching the provided search string, useful for locating specific segments by name or partial name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves segment keys along with their associated IDs for a specified organization on a Git provider. Supports pagination and text-based filtering to narrow results."""
 
     _limit = _parse_int(limit)
@@ -10900,7 +11031,7 @@ async def list_segment_values(
     segment_key: str = Field(..., alias="segmentKey", description="The unique key identifying the segment whose values should be retrieved."),
     search: str | None = Field(None, description="Optional search string to filter returned segment values by name or identifier, returning only items that match the provided text."),
     limit: str | None = Field(None, description="Maximum number of segment values to return in a single response, accepting values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of values for a specific segment within an organization, identified by its segment key. Supports optional filtering by name and result count limiting."""
 
     _limit = _parse_int(limit)
@@ -10945,7 +11076,7 @@ async def list_dast_targets(
     provider: str = Field(..., description="The Git provider hosting the organization, identified by a short code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the specified Git provider."),
     limit: str | None = Field(None, description="Maximum number of DAST targets to return in a single response. Accepts values between 1 and 100."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all configured Dynamic Application Security Testing (DAST) targets for the specified organization. Returns a paginated list of targets that have been set up for security scanning."""
 
     _limit = _parse_int(limit)
@@ -10992,7 +11123,7 @@ async def create_dast_target(
     url: str = Field(..., description="The fully qualified URL of the application or API endpoint to be scanned. Must be a valid URI."),
     target_type: Literal["webapp", "openapi", "graphql"] | None = Field(None, alias="targetType", description="Specifies the type of DAST target to scan: 'webapp' for standard web applications, 'openapi' for REST APIs described by an OpenAPI specification, or 'graphql' for GraphQL APIs. Defaults to 'webapp' if not provided."),
     api_definition_url: str | None = Field(None, alias="apiDefinitionUrl", description="The URL pointing to the API definition file (e.g., an OpenAPI or GraphQL schema), required when the target type is 'openapi' or 'graphql'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Dynamic Application Security Testing (DAST) target for a specified organization, defining the URL and type of application to be scanned for vulnerabilities."""
 
     # Construct request model with validation
@@ -11035,7 +11166,7 @@ async def delete_dast_target(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     dast_target_id: str = Field(..., alias="dastTargetId", description="The unique numeric identifier of the DAST target to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a DAST (Dynamic Application Security Testing) target from the specified organization. This removes the target configuration and stops any associated security scans."""
 
     _dast_target_id = _parse_int(dast_target_id)
@@ -11077,7 +11208,7 @@ async def trigger_dast_analysis(
     provider: str = Field(..., description="Short code identifying the Git provider hosting the organization, such as GitHub, GitLab, or Bitbucket."),
     remote_organization_name: str = Field(..., alias="remoteOrganizationName", description="The organization's name as it appears on the Git provider platform."),
     dast_target_id: str = Field(..., alias="dastTargetId", description="Unique numeric identifier of the DAST target to be analyzed. Must reference an existing target configured under the organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enqueues a Dynamic Application Security Testing (DAST) analysis for a specified target within an organization. Use this to initiate a security scan against a previously configured DAST target."""
 
     _dast_target_id = _parse_int(dast_target_id)
@@ -11119,7 +11250,7 @@ async def list_enterprise_organizations(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug identifier for the enterprise whose organizations you want to retrieve."),
     provider: str = Field(..., description="The Git provider hosting the enterprise, specified as a short identifier code (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
     limit: str | None = Field(None, description="Maximum number of organizations to return in a single response. Accepts values between 1 and 100, defaulting to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the list of organizations belonging to a specified enterprise on a given Git provider. Supports pagination via a configurable result limit."""
 
     _limit = _parse_int(limit)
@@ -11163,7 +11294,7 @@ async def list_enterprise_organizations(
 async def list_enterprises(
     provider: str = Field(..., description="The Git provider to query for enterprises, identified by its short code (e.g., GitHub, GitLab, Bitbucket)."),
     limit: str | None = Field(None, description="Maximum number of enterprise records to return in a single response, between 1 and 100 inclusive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all enterprises associated with the authenticated user for a specified Git provider. Returns a paginated list of enterprise accounts the user has access to."""
 
     _limit = _parse_int(limit)
@@ -11207,7 +11338,7 @@ async def list_enterprises(
 async def get_enterprise(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug identifier for the enterprise, typically a lowercase hyphenated name used in URLs."),
     provider: str = Field(..., description="The short code identifying the git provider hosting the enterprise (e.g., gh for GitHub, gl for GitLab, bb for Bitbucket)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific enterprise account by its slug identifier and git provider. Use this to fetch enterprise-level configuration, metadata, or status."""
 
     # Construct request model with validation
@@ -11248,7 +11379,7 @@ async def list_enterprise_seats(
     enterprise_name: str = Field(..., alias="enterpriseName", description="The URL-friendly slug identifier of the enterprise whose seats are being listed."),
     limit: str | None = Field(None, description="Maximum number of seat records to return in a single response. Accepts values between 1 and 100."),
     search: str | None = Field(None, description="Optional search string used to filter the returned seats, matching against relevant seat or user identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of seats allocated within a specified enterprise on a given Git provider. Supports filtering by search term to narrow results."""
 
     _limit = _parse_int(limit)
@@ -11292,7 +11423,7 @@ async def list_enterprise_seats(
 async def export_enterprise_seats_csv(
     provider: str = Field(..., description="The Git provider hosting the enterprise, identified by a short slug (e.g., GitHub, GitLab, Bitbucket)."),
     enterprise_name: str = Field(..., alias="enterpriseName", description="The unique slug (URL-friendly identifier) of the enterprise whose seat data should be exported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Exports a CSV file containing seat allocation and usage data for a specified enterprise on a given Git provider. Useful for auditing license consumption and user activity across the enterprise."""
 
     # Construct request model with validation
@@ -11328,7 +11459,7 @@ async def export_enterprise_seats_csv(
 
 # Tags: billing
 @mcp.tool()
-async def list_payment_plans() -> dict[str, Any]:
+async def list_payment_plans() -> dict[str, Any] | ToolResult:
     """Retrieves all available payment plans offered in Codacy, allowing users to review pricing tiers and subscription options."""
 
     # Extract parameters for API call
@@ -11355,7 +11486,7 @@ async def list_payment_plans() -> dict[str, Any]:
 
 # Tags: security
 @mcp.tool()
-async def get_ossf_scorecard() -> dict[str, Any]:
+async def get_ossf_scorecard() -> dict[str, Any] | ToolResult:
     """Retrieves the OSSF (Open Source Security Foundation) Scorecard for a repository, providing security health metrics and risk assessments across key supply chain security practices."""
 
     # Extract parameters for API call

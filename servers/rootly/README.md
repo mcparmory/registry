@@ -1,16 +1,12 @@
-# Codacy MCP Server
-<!-- mcp-name: com.mcparmory/codacy -->
+# Rootly MCP Server
+<!-- mcp-name: com.mcparmory/rootly -->
 
-Base URL: https://app.codacy.com/api/v3
+Base URL: https://api.rootly.com
 | | |
 |---|---|
-| **Category** | Developer Tools |
-| **Tools** | 236 |
-| **Auth** | API Key |
-
-## API Info
-- **API License:** Codacy. All rights reserved — [https://www.codacy.com](https://www.codacy.com)
-- **Contact:** Codacy Team (code@codacy.com) — [https://www.codacy.com](https://www.codacy.com)
+| **Category** | Infrastructure |
+| **Tools** | 349 |
+| **Auth** | Bearer Token |
 
 ---
 
@@ -19,16 +15,16 @@ Base URL: https://app.codacy.com/api/v3
 ### Quick Start (recommended)
 
 ```bash
-API_KEY=YOUR_API_KEY \
-uvx mcparmory-codacy
+BEARER_TOKEN=YOUR_BEARER_TOKEN \
+uvx mcparmory-rootly
 ```
 
 ### With pip
 
 ```bash
-pip install mcparmory-codacy
-API_KEY=YOUR_API_KEY \
-mcparmory-codacy
+pip install mcparmory-rootly
+BEARER_TOKEN=YOUR_BEARER_TOKEN \
+mcparmory-rootly
 ```
 
 ### MCP Client Configuration
@@ -38,11 +34,11 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 ```json
 {
   "mcpServers": {
-    "codacy": {
+    "rootly": {
       "command": "uvx",
-      "args": ["mcparmory-codacy"],
+      "args": ["mcparmory-rootly"],
       "env": {
-        "API_KEY": "YOUR_API_KEY"
+        "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
   }
@@ -55,7 +51,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
-- `API_KEY` — API Key Authentication (api-token)
+- `BEARER_TOKEN` — Bearer token
 Do not commit credentials to version control.
 
 ---
@@ -73,13 +69,13 @@ python server.py
 
 Edit `.mcp.json` and replace `<SERVER_DIR>` with the absolute path to this directory, then add to your MCP client configuration.
 
-Example (if server is at `/home/user/mcp-servers/codacy`):
+Example (if server is at `/home/user/mcp-servers/rootly`):
 ```json
 {
   "mcpServers": {
-    "codacy": {
+    "rootly": {
       "command": "python",
-      "args": ["/home/user/mcp-servers/codacy/server.py"]
+      "args": ["/home/user/mcp-servers/rootly/server.py"]
     }
   }
 }
@@ -93,8 +89,8 @@ Example (if server is at `/home/user/mcp-servers/codacy`):
 
 ```bash
 docker run -p 8000:8000 \
-  -e API_KEY=YOUR_API_KEY \
-  ghcr.io/mcparmory/codacy:latest
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/rootly:latest
 ```
 
 ### Build from source
@@ -102,8 +98,8 @@ docker run -p 8000:8000 \
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
-docker build -t codacy .
-docker run -p 8000:8000 --env-file .env codacy
+docker build -t rootly .
+docker run -p 8000:8000 --env-file .env rootly
 ```
 
 **Before running**, make sure ports 8000 are free.### MCP client config (Docker)
@@ -112,7 +108,7 @@ For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
-    "codacy": {
+    "rootly": {
       "type": "sse",
       "url": "http://localhost:8000/sse"
     }

@@ -1,8 +1,8 @@
-# Codacy MCP Server
+# Rootly MCP Server
 #
 # Usage:
-#   1. Build: docker build -t mcparmory-codacy .
-#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-codacy
+#   1. Build: docker build -t mcparmory-rootly .
+#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-rootly
 #
 # The .env file should contain your API credentials.
 # See the generated .env file for required variables.
@@ -41,10 +41,10 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Codacy MCP Server" \
+LABEL org.opencontainers.image.title="Rootly MCP Server" \
       org.opencontainers.image.vendor="MCP Armory" \
       org.opencontainers.image.source="https://github.com/mcparmory/registry" \
-      io.modelcontextprotocol.server.name="com.mcparmory/codacy"
+      io.modelcontextprotocol.server.name="com.mcparmory/rootly"
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 

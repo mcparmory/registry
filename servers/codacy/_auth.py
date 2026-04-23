@@ -1,7 +1,7 @@
 """
 Authentication module for Codacy MCP server.
 
-Generated: 2026-04-14 18:18:14 UTC
+Generated: 2026-04-23 21:09:17 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -220,16 +220,16 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "create_api_token": [["ApiKeyAuth"]],
     "delete_user_token": [["ApiKeyAuth"]],
     "delete_billing_subscription": [["ApiKeyAuth"]],
-    "list_provider_integrations": [],
+    "list_provider_integrations": [["ApiKeyAuth"]],
     "search_entities": [["ApiKeyAuth"]],
     "delete_dormant_accounts": [["ApiKeyAuth"]],
-    "list_tool_supported_languages": [],
-    "list_tools": [],
-    "list_tool_patterns": [],
-    "submit_pattern_feedback": [],
-    "get_pattern": [],
-    "list_duplication_tools": [],
-    "list_metrics_tools": [],
+    "list_tool_supported_languages": [["ApiKeyAuth"]],
+    "list_tools": [["ApiKeyAuth"]],
+    "list_tool_patterns": [["ApiKeyAuth"]],
+    "submit_pattern_feedback": [["ApiKeyAuth"]],
+    "get_pattern": [["ApiKeyAuth"]],
+    "list_duplication_tools": [["ApiKeyAuth"]],
+    "list_metrics_tools": [["ApiKeyAuth"]],
     "start_organization_metrics_collection": [["ApiKeyAuth"]],
     "list_ready_metrics": [["ApiKeyAuth"]],
     "get_latest_metric_value": [["ApiKeyAuth"]],
