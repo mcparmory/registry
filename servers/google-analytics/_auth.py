@@ -1,7 +1,7 @@
 """
 Authentication module for Google Analytics MCP server.
 
-Generated: 2026-04-14 18:23:13 UTC
+Generated: 2026-04-23 21:20:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -68,8 +68,8 @@ class OAuth2Auth:
         Format: JSON with access_token, refresh_token, expires_at
 
     URLs:
-        Authorization URL: https://accounts.google.com/o/oauth2/auth
-        Token URL: https://accounts.google.com/o/oauth2/token
+        Authorization URL: https://accounts.google.com/o/oauth2/v2/auth
+        Token URL: https://oauth2.googleapis.com/token
 
     Available Scopes (configure via OAUTH2_SCOPES):
         - https://www.googleapis.com/auth/analytics
@@ -113,8 +113,8 @@ class OAuth2Auth:
         self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
-        self.token_url = "https://accounts.google.com/o/oauth2/token"
-        self.auth_url = "https://accounts.google.com/o/oauth2/auth"
+        self.token_url = "https://oauth2.googleapis.com/token"
+        self.auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
         self.refresh_url = None
 
         # Token storage (secure file-based, unique per scheme)

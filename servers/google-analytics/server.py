@@ -7,7 +7,7 @@ API Info:
 - Contact: Google (https://google.com)
 - Terms of Service: https://developers.google.com/terms/
 
-Generated: 2026-04-14 18:23:13 UTC
+Generated: 2026-04-23 21:20:34 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +42,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://analyticsdata.googleapis.com")
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +719,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +775,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +841,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +875,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -852,16 +965,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -875,6 +989,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -917,6 +1032,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -928,7 +1058,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1072,7 +1201,7 @@ mcp = FastMCP("Google Analytics", middleware=[_JsonCoercionMiddleware()])
 async def run_pivot_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. This property applies to all reports in the batch, though individual requests may omit or match this value."),
     requests: list[_models.RunPivotReportRequest] | None = Field(None, description="Array of individual pivot report requests to execute. Each request generates a separate pivot report response. Maximum of 5 requests allowed per batch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute multiple pivot reports in a single batch request for a Google Analytics property. All reports must belong to the same property, with support for up to 5 requests per batch."""
 
     # Construct request model with validation
@@ -1114,7 +1243,7 @@ async def run_pivot_reports_batch(
 async def run_reports_batch(
     property_: str = Field(..., alias="property", description="The Google Analytics property identifier whose events are tracked. Specified in the URL path. The property must be consistent across all batch requests."),
     requests: list[_models.RunReportRequest] | None = Field(None, description="Array of individual report requests to execute. Each request generates a separate report response. Order is preserved in the response. Maximum of 5 requests allowed per batch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute multiple analytics reports in a single batch request for a Google Analytics property. All reports must belong to the same property, with support for up to 5 requests per batch."""
 
     # Construct request model with validation
@@ -1182,7 +1311,7 @@ async def validate_report_compatibility(
     metric_filter_not_expression: _models.FilterExpression | None = Field(None, alias="metricFilterNotExpression", description="A NOT expression that inverts the logic of the metric filter."),
     dimensions: list[_models.Dimension] | None = Field(None, description="The list of dimension names to validate for compatibility. Must match the dimensions used in your runReport request."),
     metrics: list[_models.Metric] | None = Field(None, description="The list of metric names to validate for compatibility. Must match the metrics used in your runReport request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validates whether a set of dimensions and metrics can be used together in a Core report, and returns compatible or incompatible dimensions and metrics. Use this to identify which dimensions and metrics need to be removed to create a valid report."""
 
     # Construct request model with validation
@@ -1236,7 +1365,7 @@ async def validate_report_compatibility(
 
 # Tags: properties
 @mcp.tool()
-async def get_audience_export(name: str = Field(..., description="The resource identifier for the audience export in the format properties/{property}/audienceExports/{audience_export}, where property is your Google Analytics property ID and audience_export is the unique export identifier.")) -> dict[str, Any]:
+async def get_audience_export(name: str = Field(..., description="The resource identifier for the audience export in the format properties/{property}/audienceExports/{audience_export}, where property is your Google Analytics property ID and audience_export is the unique export identifier.")) -> dict[str, Any] | ToolResult:
     """Retrieves configuration metadata for a specific audience export, including its status and settings. Use this to inspect an audience export after creation or to monitor its progress."""
 
     # Construct request model with validation
@@ -1315,7 +1444,7 @@ async def generate_pivot_report(
     metrics: list[_models.Metric] | None = Field(None, description="The metrics to include in the report. At least one metric is required. All specified metrics must be used in a metric filter, order by clause, or metric expression."),
     pivots: list[_models.Pivot] | None = Field(None, description="Defines how dimensions are organized visually as rows or columns in the pivot report. All dimension names in pivots must be declared in the dimensions array. Each dimension can appear in only one pivot."),
     return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="If true, returns the current quota status for this Google Analytics property, including usage and limits."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Generate a customized pivot report of Google Analytics event data with advanced dimensional analysis. Pivot reports allow dimensions to be organized in rows or columns, with support for multiple pivots to further segment and analyze your data."""
 
     _end_offset = _parse_int(end_offset)
@@ -1400,7 +1529,7 @@ async def get_realtime_report(
     minute_ranges: list[_models.MinuteRange] | None = Field(None, alias="minuteRanges", description="Time ranges in minutes to retrieve data from. If unspecified, defaults to the last 30 minutes. Multiple ranges can be requested; overlapping minutes appear in results for each range."),
     order_bys: list[_models.OrderBy] | None = Field(None, alias="orderBys", description="Specifies the sort order for report rows. Can sort by dimension values or metric values in ascending or descending order."),
     return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Whether to include the current quota status for this property in the response. Useful for monitoring API quota consumption."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a customized report of real-time event data for a Google Analytics property, showing events and usage from the present moment up to 30 minutes ago (60 minutes for GA360). Data appears in reports within seconds of being sent to Google Analytics."""
 
     # Construct request model with validation
@@ -1490,7 +1619,7 @@ async def run_report(
     offset: str | None = Field(None, description="The row count of the start row. The first row is counted as row 0. When paging, the first request does not specify offset; or equivalently, sets offset to 0; the first request returns the first `limit` of rows. The second request sets offset to the `limit` of the first request; the second request returns the second `limit` of rows. To learn more about this pagination parameter, see [Pagination](https://developers.google.com/analytics/devguides/reporting/data/v1/basics#pagination)."),
     order_bys: list[_models.OrderBy] | None = Field(None, alias="orderBys", description="Specifies how rows are ordered in the response. Requests including both comparisons and multiple date ranges will have order bys applied on the comparisons."),
     return_property_quota: bool | None = Field(None, alias="returnPropertyQuota", description="Toggles whether to return the current state of this Google Analytics property's quota. Quota is returned in [PropertyQuota](#PropertyQuota)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Returns a customized report of your Google Analytics event data. Reports contain statistics derived from data collected by the Google Analytics tracking code. The data returned from the API is as a table with columns for the requested dimensions and metrics. Metrics are individual measurements of user activity on your property, such as active users or event count. Dimensions break down metrics across some common criteria, such as country or event name. For a guide to constructing requests & understanding responses, see [Creating a Report](https://developers.google.com/analytics/devguides/reporting/data/v1/basics)."""
 
     _end_offset = _parse_int(end_offset)
@@ -1551,7 +1680,7 @@ async def list_audience_exports(
     parent: str = Field(..., description="The property for which to list audience exports. Format: properties/{property}"),
     page_size: int | None = Field(None, alias="pageSize", description="Maximum number of audience exports to return per page. The service may return fewer than specified. Higher values are coerced to the maximum allowed."),
     page_token: str | None = Field(None, alias="pageToken", description="Page token from a previous ListAudienceExports call to retrieve the next page of results. When paginating, all other parameters must match the original request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Lists all audience exports for a property, allowing you to find and reuse existing exports rather than creating duplicates. The same audience can have multiple exports representing user snapshots from different dates."""
 
     # Construct request model with validation
@@ -1594,7 +1723,7 @@ async def create_audience_export(
     parent: str = Field(..., description="The parent property resource where this audience export will be created. Format: properties/{property}"),
     audience: str | None = Field(None, description="The audience resource to export. This identifies which audience's users will be included in the export. Format: properties/{property}/audiences/{audience}"),
     dimensions: list[_models.V1betaAudienceDimension] | None = Field(None, description="The dimensions to include in the audience export response. Specifies which user attributes or characteristics will be returned in the exported data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a snapshot of users currently in an audience and initiates an asynchronous export process. Use QueryAudienceExport to retrieve the exported audience data after creation."""
 
     # Construct request model with validation
@@ -1637,7 +1766,7 @@ async def query_audience_export(
     name: str = Field(..., description="The resource name of the audience export to query. Format: properties/{property}/audienceExports/{audience_export}"),
     limit: str | None = Field(None, description="Maximum number of rows to return per request. Defaults to 10,000 if unspecified. The API returns a maximum of 250,000 rows regardless of the requested limit. Must be a positive integer."),
     offset: str | None = Field(None, description="The zero-indexed row number to start from for pagination. Omit or set to 0 for the first request. For subsequent requests, set to the limit value from the previous response to retrieve the next batch of rows."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves user data from a previously created audience export. Users must first be exported via CreateAudienceExport before they can be queried using this method."""
 
     # Construct request model with validation
