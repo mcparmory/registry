@@ -1,7 +1,7 @@
 """
 Mixpanel MCP Server - Validators
 
-Generated: 2026-04-14 18:26:14 UTC
+Generated: 2026-04-23 21:28:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

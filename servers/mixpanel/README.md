@@ -1,4 +1,5 @@
 # Mixpanel MCP Server
+<!-- mcp-name: com.mcparmory/mixpanel -->
 
 Base URL: https://mixpanel.com/api/query
 | | |
@@ -19,6 +20,7 @@ Base URL: https://mixpanel.com/api/query
 ```bash
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+SERVER_REGIONANDDOMAIN=YOUR_SERVER_REGIONANDDOMAIN \
 uvx mcparmory-mixpanel
 ```
 
@@ -28,6 +30,7 @@ uvx mcparmory-mixpanel
 pip install mcparmory-mixpanel
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+SERVER_REGIONANDDOMAIN=YOUR_SERVER_REGIONANDDOMAIN \
 mcparmory-mixpanel
 ```
 
@@ -43,7 +46,8 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "args": ["mcparmory-mixpanel"],
       "env": {
         "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
+        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD",
+        "SERVER_REGIONANDDOMAIN": "YOUR_SERVER_REGIONANDDOMAIN"
       }
     }
   }
@@ -58,6 +62,11 @@ Set the following environment variables (via MCP client `env` config, shell expo
 
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
+- `SERVER_REGIONANDDOMAIN` — The server location to be used:
+  * `mixpanel` - The default (US) servers used for most projects
+  * `eu.mixpanel` - EU servers if you are enrolled in EU Data Residency
+  * `in.mixpanel` - India servers if you are enrolled in India Data Residency
+ (default: `mixpanel`)
 Do not commit credentials to version control.
 
 ---
@@ -91,6 +100,18 @@ Example (if server is at `/home/user/mcp-servers/mixpanel`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
+  -e BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+  -e SERVER_REGIONANDDOMAIN=YOUR_SERVER_REGIONANDDOMAIN \
+  ghcr.io/mcparmory/mixpanel:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -98,7 +119,9 @@ docker build -t mixpanel .
 docker run -p 8000:8000 --env-file .env mixpanel
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

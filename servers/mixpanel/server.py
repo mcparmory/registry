@@ -5,7 +5,7 @@ Mixpanel MCP Server
 API Info:
 - API License: MIT (https://opensource.org/licenses/MIT)
 
-Generated: 2026-04-14 18:26:14 UTC
+Generated: 2026-04-23 21:28:50 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -475,12 +477,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -502,7 +529,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -544,18 +575,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -627,7 +727,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -675,6 +783,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -737,7 +849,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -763,10 +883,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -831,16 +949,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -854,6 +973,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -896,6 +1016,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -907,7 +1042,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1051,7 +1185,7 @@ mcp = FastMCP("Mixpanel", middleware=[_JsonCoercionMiddleware()])
 async def get_insights_report(
     project_id: int = Field(..., description="The Mixpanel project ID associated with your account."),
     bookmark_id: int = Field(..., description="The unique identifier of your Insights report, found in the Mixpanel URL path after 'report-' in the editor-card-id parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve data from a saved Insights report in your Mixpanel project. Subject to a rate limit of 60 queries per hour with a maximum of 5 concurrent queries."""
 
     # Construct request model with validation
@@ -1099,7 +1233,7 @@ async def get_funnel_data(
     on: str | None = Field(None, description="A property expression to segment funnel results by. When specified, results are grouped by the values of this property."),
     where: str | None = Field(None, description="An expression to filter which events are included in the funnel analysis. Only events matching this filter are considered."),
     limit: int | None = Field(None, description="The maximum number of top property values to return when segmenting. Defaults to 255 if not specified; maximum allowed is 10,000. This parameter has no effect if the 'on' parameter is not used."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve funnel conversion data for a specified date range and funnel. Results can be segmented by user properties and filtered by event criteria. Subject to a rate limit of 60 queries per hour with a maximum of 5 concurrent queries."""
 
     # Construct request model with validation
@@ -1137,7 +1271,7 @@ async def get_funnel_data(
 
 # Tags: Funnels
 @mcp.tool()
-async def list_saved_funnels(project_id: int = Field(..., description="The Mixpanel project ID associated with the funnels you want to retrieve.")) -> dict[str, Any]:
+async def list_saved_funnels(project_id: int = Field(..., description="The Mixpanel project ID associated with the funnels you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of all saved funnels in your Mixpanel project, including their names and unique funnel identifiers."""
 
     # Construct request model with validation
@@ -1186,7 +1320,7 @@ async def get_retention_report(
     unbounded_retention: bool | None = Field(None, description="When enabled, retention values accumulate from right to left, so each interval includes users retained on that day and all subsequent days. Defaults to false for standard interval-by-interval counting."),
     on: str | None = Field(None, description="Optional property expression to segment the returning event by (e.g., properties[\"plan_type\"]). Only applies when segmenting retention results."),
     limit: int | None = Field(None, description="Maximum number of segmentation values to return in results. Only used when the 'on' parameter is specified for property-based segmentation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a retention analysis report for a Mixpanel project, measuring how users return to your product over time. Supports both first-time user retention (birth) and recurring user retention (compounded) with optional event and property filtering."""
 
     # Construct request model with validation
@@ -1234,7 +1368,7 @@ async def get_retention_frequency_report(
     where: str | None = Field(None, description="A filter expression to narrow the returning events analyzed. Supports property-based conditions and logical operators as documented in segmentation expressions."),
     on: str | None = Field(None, description="A property expression to segment results by. When specified, the report breaks down metrics by distinct values of this property. Supports nested properties as documented in segmentation expressions."),
     limit: int | None = Field(None, description="Maximum number of segmentation values to return when segmenting by the 'on' property. Has no effect if 'on' is not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a frequency report analyzing user retention and addiction patterns over a specified date range. Returns the distribution of returning user actions segmented by time unit and optional properties."""
 
     # Construct request model with validation
@@ -1281,7 +1415,7 @@ async def get_segmented_event_data(
     where: str | None = Field(None, description="Optional filter expression to narrow events by property values. See segmentation expressions documentation for syntax."),
     limit: int | None = Field(None, description="Maximum number of top property values to return (defaults to 60, maximum 10,000). Only applies when segmenting with the 'on' parameter."),
     format_: Literal["csv"] | None = Field(None, alias="format", description="Optional output format. Set to 'csv' for comma-separated values; omit for default JSON format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve event data segmented and filtered by properties from your Mixpanel project. Results can be broken down by a specific property dimension and filtered by event criteria."""
 
     # Construct request model with validation
@@ -1326,7 +1460,7 @@ async def get_event_segmentation_by_numeric_buckets(
     to_date: str = Field(..., description="The end date for the query range in YYYY-MM-DD format (inclusive)."),
     on: str = Field(..., description="A numeric property expression to segment the event data into buckets. The property must contain numeric values."),
     where: str | None = Field(None, description="An optional property expression to filter which events are included in the results. Only events matching this filter will be segmented."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve event data segmented into numeric buckets based on a numeric property value. Results are filtered by the specified date range and optional event properties."""
 
     # Construct request model with validation
@@ -1371,7 +1505,7 @@ async def get_event_sum_by_time(
     to_date: str = Field(..., description="The end date for the query in YYYY-MM-DD format (inclusive)."),
     on: str = Field(..., description="A numeric expression to sum for each time unit. Non-numeric expression results are treated as 0.0. Use Mixpanel expression syntax to reference event properties and perform calculations."),
     where: str | None = Field(None, description="Optional filter expression to narrow results to specific events. Use Mixpanel expression syntax to define conditions on event properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the sum of a numeric expression for a specified event aggregated over time. Results are broken down by unit time periods within the requested date range."""
 
     # Construct request model with validation
@@ -1416,7 +1550,7 @@ async def get_event_average(
     to_date: str = Field(..., description="The end date for the query range in YYYY-MM-DD format (inclusive)."),
     on: str = Field(..., description="A numeric expression to average per unit time. Non-numeric expression results are treated as 0.0. Refer to the expressions documentation for valid syntax."),
     where: str | None = Field(None, description="Optional filter expression to narrow events by specific criteria. Refer to the expressions documentation for valid syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Calculate the average value of a numeric expression across events within a specified date range. Results are aggregated per unit time for trend analysis."""
 
     # Construct request model with validation
@@ -1459,7 +1593,7 @@ async def get_activity_stream_for_users(
     distinct_ids: str = Field(..., description="A JSON array (as a string) of distinct user IDs for which to return activity feeds. Each ID should be a valid distinct_id from your Mixpanel project."),
     from_date: str = Field(..., description="The start date for the activity query in YYYY-MM-DD format (inclusive)."),
     to_date: str = Field(..., description="The end date for the activity query in YYYY-MM-DD format (inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the activity feed for specified users within a date range. Subject to a rate limit of 60 queries per hour with a maximum of 5 concurrent queries."""
 
     # Construct request model with validation
@@ -1497,7 +1631,7 @@ async def get_activity_stream_for_users(
 
 # Tags: Cohorts
 @mcp.tool()
-async def list_cohorts(project_id: int = Field(..., description="The numeric identifier for your Mixpanel project.")) -> dict[str, Any]:
+async def list_cohorts(project_id: int = Field(..., description="The numeric identifier for your Mixpanel project.")) -> dict[str, Any] | ToolResult:
     """Retrieve all saved cohorts in a Mixpanel project, including metadata such as name, ID, user count, description, creation date, and visibility settings. Use the /engage endpoint with filter_by_cohort to retrieve the actual users within a cohort."""
 
     # Construct request model with validation
@@ -1544,7 +1678,7 @@ async def query_profiles(
     as_of_timestamp: int | None = Field(None, description="A Unix timestamp specifying the point-in-time snapshot for profile data. Required when exporting more than 1,000 profiles with behavior filters to avoid caching errors."),
     filter_by_cohort: str | None = Field(None, description="A JSON object with an `id` key containing a cohort ID to filter profiles by cohort membership. Mutually exclusive with behavior-based filtering."),
     include_all_users: bool | None = Field(None, description="When using cohort filtering, set to `true` (default) to include all distinct IDs even without profiles, or `false` to return only IDs with existing profiles."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query user or group profiles from a Mixpanel project with optional filtering, property selection, and cohort-based retrieval to retrieve detailed profile data."""
 
     # Construct request model with validation
@@ -1594,7 +1728,7 @@ async def get_event_aggregates(
     from_date: str = Field(..., description="The start date for the query range in YYYY-MM-DD format (inclusive)."),
     to_date: str = Field(..., description="The end date for the query range in YYYY-MM-DD format (inclusive)."),
     format_: Literal["json", "csv"] | None = Field(None, alias="format", description="The response format: 'json' (default) or 'csv'. Subject to rate limits of 60 queries per hour and 5 concurrent queries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated event data (counts, unique users, or averages) for specified events over a time period. Results can be broken down by minute, hour, day, week, or month granularity."""
 
     # Construct request model with validation
@@ -1636,7 +1770,7 @@ async def list_top_events(
     project_id: int = Field(..., description="The Mixpanel project ID to query events for."),
     type_: Literal["general", "unique", "average"] = Field(..., alias="type", description="The type of event analysis to perform: 'general' for event frequency, 'unique' for unique user counts, or 'average' for average event values."),
     limit: int | None = Field(None, description="Maximum number of events to return in the results. Defaults to 100 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve today's top events ranked by frequency, including event counts and normalized percent change compared to yesterday."""
 
     # Construct request model with validation
@@ -1678,7 +1812,7 @@ async def list_top_event_names(
     project_id: int = Field(..., description="The Mixpanel project ID that identifies which project's event data to query."),
     type_: Literal["general", "unique", "average"] = Field(..., alias="type", description="The type of event analysis to perform: 'general' for event frequency, 'unique' for distinct user counts, or 'average' for per-user averages."),
     limit: int | None = Field(None, description="Maximum number of top events to return in the results, up to 255. Defaults to 255 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most frequently occurring events from the past 31 days, analyzed by the specified metric type. Useful for understanding user behavior patterns and identifying key interactions in your product."""
 
     # Construct request model with validation
@@ -1727,7 +1861,7 @@ async def get_event_property_aggregates(
     values: list[str] | None = Field(None, description="Optional filter to analyze only specific property values. Provide as a JSON array of strings (e.g., [\"value1\", \"value2\"]). If omitted, all values are included."),
     format_: Literal["json", "csv"] | None = Field(None, alias="format", description="The response format: 'json' (default) or 'csv'."),
     limit: int | None = Field(None, description="Maximum number of property values to return in results. Defaults to 255 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated metrics for a specific event property over a time period, supporting analysis types like total counts, unique values, or averages at various time granularities (minute through month)."""
 
     # Construct request model with validation
@@ -1769,7 +1903,7 @@ async def list_top_event_properties(
     project_id: int = Field(..., description="The Mixpanel project ID that contains the event you want to analyze."),
     event: str = Field(..., description="The name of the event to retrieve properties for. Provide a single event name, not multiple events."),
     limit: int | None = Field(None, description="The maximum number of top properties to return in the results. Defaults to 10 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most frequently used property names for a specified event in your Mixpanel project. Useful for understanding which properties are most relevant to an event's analysis."""
 
     # Construct request model with validation
@@ -1812,7 +1946,7 @@ async def list_event_property_top_values(
     event: str = Field(..., description="The name of the event to analyze. Provide a single event name (not multiple events)."),
     name: str = Field(..., description="The property name within the event whose top values you want to retrieve."),
     limit: int | None = Field(None, description="The maximum number of top values to return in the response. Defaults to 255 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the most frequently occurring values for a specific event property in Mixpanel. Useful for understanding the distribution and cardinality of property values within an event."""
 
     # Construct request model with validation
@@ -1854,7 +1988,7 @@ async def execute_jql_script(
     project_id: int = Field(..., description="The numeric identifier for the Mixpanel project where the script will execute."),
     script: str = Field(..., description="A JavaScript function that processes events using the Mixpanel JQL API. The function receives a params object and must return aggregated event data. Typically groups events by specified dimensions and applies reducers (e.g., count, sum, average)."),
     params: str | None = Field(None, description="A JSON object containing custom variables and configuration values made available to the script as the global params variable. Allows parameterization of script logic without modifying the script itself."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a custom JQL script against a Mixpanel project to query and aggregate event data. The script receives optional parameters and returns results based on the defined aggregation logic."""
 
     # Construct request model with validation
