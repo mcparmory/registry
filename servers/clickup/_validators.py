@@ -1,7 +1,7 @@
 """
 Clickup MCP Server - Validators
 
-Generated: 2026-04-14 18:17:58 UTC
+Generated: 2026-04-23 21:08:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

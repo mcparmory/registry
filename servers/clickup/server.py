@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ClickUp MCP Server
-Generated: 2026-04-14 18:17:58 UTC
+Generated: 2026-04-23 21:08:30 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -36,6 +37,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.clickup.com/api")
@@ -467,12 +469,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -494,7 +521,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -536,18 +567,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -619,7 +714,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -667,6 +770,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -729,7 +836,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -755,10 +870,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -862,16 +975,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -885,6 +999,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -927,6 +1042,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -938,18 +1068,26 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
+    'OAuth2',
     'Authorization_Token',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["OAuth2"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: OAuth2")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for OAuth2 not configured: {error_msg}")
+    _auth_handlers["OAuth2"] = None
 try:
     _auth_handlers["Authorization_Token"] = _auth.APIKeyAuth(env_var="API_KEY", location="header", param_name="Authorization")
     logging.info("Authentication configured: Authorization_Token")
@@ -1084,7 +1222,7 @@ async def upload_task_attachment(
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default system-generated task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when referencing a task by its custom task ID. Must be provided alongside custom_task_ids=true."),
     attachment: list[Any] | None = Field(None, description="The file content to upload as a multipart/form-data attachment. Each item represents a part of the multipart payload for the file being attached."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a local file to a task as an attachment using multipart/form-data. Note that cloud-hosted files are not supported; only locally accessible files can be attached."""
 
     # Construct request model with validation
@@ -1127,7 +1265,7 @@ async def upload_task_attachment(
 
 # Tags: Authorization
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the profile and account details of the currently authenticated ClickUp user. Useful for confirming identity, retrieving user ID, and accessing account-level information."""
 
     # Extract parameters for API call
@@ -1154,7 +1292,7 @@ async def get_current_user() -> dict[str, Any]:
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspaces() -> dict[str, Any]:
+async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieves all workspaces accessible to the currently authenticated user. Use this to discover available workspaces before performing workspace-specific operations."""
 
     # Extract parameters for API call
@@ -1186,7 +1324,7 @@ async def create_checklist(
     name: str = Field(..., description="The display name for the new checklist."),
     custom_task_ids: bool | None = Field(None, description="Set to true if referencing the task by its custom task ID instead of the default system-generated task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs; must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new named checklist to a specified task, allowing you to track subtasks or steps within that task."""
 
     # Construct request model with validation
@@ -1232,7 +1370,7 @@ async def update_checklist(
     checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist to update."),
     name: str | None = Field(None, description="The new display name for the checklist."),
     position: int | None = Field(None, description="The zero-based display order of the checklist among all checklists on the task, where 0 places it at the top."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rename a checklist or change its display order relative to other checklists on a task. Provide a new name, a new position, or both."""
 
     # Construct request model with validation
@@ -1271,7 +1409,7 @@ async def update_checklist(
 
 # Tags: Task Checklists
 @mcp.tool()
-async def delete_checklist(checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist to delete.")) -> dict[str, Any]:
+async def delete_checklist(checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a checklist from a task. This action is irreversible and removes the checklist along with all its items."""
 
     # Construct request model with validation
@@ -1311,7 +1449,7 @@ async def create_checklist_item(
     checklist_id: str = Field(..., description="The unique identifier of the checklist to which the new item will be added."),
     name: str | None = Field(None, description="The display name or label for the checklist item."),
     assignee: int | None = Field(None, description="The numeric user ID of the team member to assign this checklist item to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new line item to an existing task checklist. Optionally assign the item to a specific user by their ID."""
 
     # Construct request model with validation
@@ -1357,7 +1495,7 @@ async def update_checklist_item(
     assignee: str | None = Field(None, description="The user ID of the team member to assign to this checklist item."),
     resolved: bool | None = Field(None, description="Whether the checklist item is marked as completed; set to true to resolve it or false to reopen it."),
     parent: str | None = Field(None, description="The checklist item ID of the parent item under which this item should be nested, enabling hierarchical checklist structures."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an individual item within a task checklist, allowing you to rename it, reassign it, mark it as resolved or unresolved, or nest it under another checklist item as a child."""
 
     # Construct request model with validation
@@ -1399,7 +1537,7 @@ async def update_checklist_item(
 async def delete_checklist_item(
     checklist_id: str = Field(..., description="The unique identifier (UUID) of the checklist from which the item will be deleted."),
     checklist_item_id: str = Field(..., description="The unique identifier (UUID) of the specific checklist item to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specific line item from a task checklist. This action cannot be undone and will delete the item and its associated data."""
 
     # Construct request model with validation
@@ -1439,7 +1577,7 @@ async def list_task_comments(
     task_id: str = Field(..., description="The unique identifier of the task whose comments you want to retrieve."),
     custom_task_ids: bool | None = Field(None, description="Set to `true` if referencing the task by its custom task ID instead of the default ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID (team ID) required when `custom_task_ids` is set to `true` to correctly resolve the custom task ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comments for a specific task, returned in reverse chronological order (newest to oldest). By default returns the 25 most recent comments; use the `start` and `start_id` parameters together with the last comment of the current response to paginate through older comments."""
 
     # Construct request model with validation
@@ -1486,7 +1624,7 @@ async def add_task_comment(
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true."),
     assignee: int | None = Field(None, description="The user ID of the individual to assign to this comment."),
     group_assignee: str | None = Field(None, description="The ID of the group to assign to this comment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new comment to a specified task, with options to assign the comment to a user or group and notify all relevant parties."""
 
     # Construct request model with validation
@@ -1532,7 +1670,7 @@ async def list_chat_view_comments(
     view_id: str = Field(..., description="The unique identifier of the Chat view whose comments you want to retrieve."),
     start: int | None = Field(None, description="The timestamp of a Chat view comment to paginate from, expressed as Unix time in milliseconds. Use the date of the oldest comment from the previous response to retrieve the next page of comments."),
     start_id: str | None = Field(None, description="The unique identifier of a Chat view comment to paginate from. Use the ID of the oldest comment from the previous response alongside the `start` parameter to retrieve the next page of comments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comments from a Chat view, returning the most recent 25 comments by default. Use the date and ID of the oldest comment from a previous response to paginate and retrieve the next 25 comments."""
 
     # Construct request model with validation
@@ -1575,7 +1713,7 @@ async def create_chat_view_comment(
     view_id: str = Field(..., description="The unique identifier of the Chat view to which the comment will be added."),
     comment_text: str = Field(..., description="The text content of the comment to post on the Chat view."),
     notify_all: bool = Field(..., description="When set to true, the creator of the comment is also notified upon posting. Assignees and watchers on the view are always notified regardless of this setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a new comment to a specified Chat view. Optionally notifies the comment creator in addition to the assignees and watchers who are always notified."""
 
     # Construct request model with validation
@@ -1618,7 +1756,7 @@ async def list_comments(
     list_id: float = Field(..., description="The unique identifier of the List whose comments you want to retrieve."),
     start: int | None = Field(None, description="The timestamp of the oldest comment from the previous page, used to paginate to the next set of 25 comments. Provide as Unix time in milliseconds."),
     start_id: str | None = Field(None, description="The unique comment ID of the oldest comment from the previous page, used alongside the start timestamp to paginate to the next set of 25 comments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comments added to a specific List, returning the most recent 25 by default. Use the oldest comment's date and ID as pagination cursors to fetch earlier comments in batches of 25."""
 
     # Construct request model with validation
@@ -1662,7 +1800,7 @@ async def add_list_comment(
     comment_text: str = Field(..., description="The text content of the comment to be posted on the List."),
     assignee: int = Field(..., description="The user ID of the individual to assign to this comment."),
     notify_all: bool = Field(..., description="When set to true, the creator of the comment will also receive a notification. Assignees and watchers on the List are always notified regardless of this setting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a comment to a specified List, optionally notifying the comment creator in addition to the standard assignees and watchers who are always notified."""
 
     # Construct request model with validation
@@ -1707,7 +1845,7 @@ async def update_comment(
     assignee: int = Field(..., description="The user ID of the individual to assign the comment to."),
     resolved: bool = Field(..., description="Set to true to mark the comment as resolved, or false to mark it as unresolved."),
     group_assignee: int | None = Field(None, description="The group ID to assign the comment to, used when assigning to a team or group rather than an individual."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing task comment by modifying its text, assigning it to a user or group, or marking it as resolved. All core fields must be provided in the request."""
 
     # Construct request model with validation
@@ -1746,7 +1884,7 @@ async def update_comment(
 
 # Tags: Comments
 @mcp.tool()
-async def delete_comment(comment_id: float = Field(..., description="The unique numeric identifier of the comment to delete.")) -> dict[str, Any]:
+async def delete_comment(comment_id: float = Field(..., description="The unique numeric identifier of the comment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific task comment by its unique identifier. This action is irreversible and removes the comment from the task."""
 
     # Construct request model with validation
@@ -1782,7 +1920,7 @@ async def delete_comment(comment_id: float = Field(..., description="The unique 
 
 # Tags: Comments
 @mcp.tool()
-async def list_comment_replies(comment_id: float = Field(..., description="The unique identifier of the parent comment whose threaded replies should be retrieved.")) -> dict[str, Any]:
+async def list_comment_replies(comment_id: float = Field(..., description="The unique identifier of the parent comment whose threaded replies should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all threaded reply comments nested under a specified parent comment. The parent comment itself is excluded from the returned results."""
 
     # Construct request model with validation
@@ -1824,7 +1962,7 @@ async def reply_to_comment(
     notify_all: bool = Field(..., description="When true, the original comment creator is also notified of this reply. Assignees and task watchers are always notified regardless of this setting."),
     assignee: int | None = Field(None, description="The user ID of the individual to assign this comment to."),
     group_assignee: str | None = Field(None, description="The identifier of the group to assign this comment to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a threaded reply to an existing comment on a task. Supports assigning the reply to a user or group and controlling notification behavior."""
 
     # Construct request model with validation
@@ -1866,7 +2004,7 @@ async def reply_to_comment(
 async def list_custom_fields(
     list_id: float = Field(..., description="The unique numeric identifier of the List whose Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type format for the request, indicating the content format expected by the API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Custom Fields accessible to the authenticated user within a specific List. Use this to discover available field definitions before reading or writing custom field data."""
 
     # Construct request model with validation
@@ -1906,7 +2044,7 @@ async def list_custom_fields(
 async def list_folder_custom_fields(
     folder_id: float = Field(..., description="The unique numeric identifier of the folder whose custom fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the data being sent to the server."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Custom Fields created at the Folder level for the specified folder. Note that Custom Fields created at the List level within the folder are not included in the results."""
 
     # Construct request model with validation
@@ -1946,7 +2084,7 @@ async def list_folder_custom_fields(
 async def list_space_custom_fields(
     space_id: float = Field(..., description="The unique identifier of the Space whose Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the data being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Custom Fields created at the Space level for a specific Space. Note that Custom Fields created at the Folder or List level are not included in the results."""
 
     # Construct request model with validation
@@ -1986,7 +2124,7 @@ async def list_space_custom_fields(
 async def list_workspace_custom_fields(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Workspace-level Custom Fields you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format of the request body sent to the API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Custom Fields created at the Workspace level for a specific Workspace. Note that Custom Fields created at the Space, Folder, or List level are not included in the results."""
 
     # Construct request model with validation
@@ -2029,7 +2167,7 @@ async def set_task_custom_field_value(
     custom_task_ids: bool | None = Field(None, description="Set to true if you are referencing the task by its Custom Task ID instead of the standard task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when referencing a task by its Custom Task ID. Must be provided alongside custom_task_ids=true."),
     body: _models.SetCustomFieldValueBodyV0 | _models.SetCustomFieldValueBodyV1 | _models.SetCustomFieldValueBodyV2 | _models.SetCustomFieldValueBodyV3 | _models.SetCustomFieldValueBodyV4 | _models.SetCustomFieldValueBodyV5 | _models.SetCustomFieldValueBodyV6 | _models.SetCustomFieldValueBodyV7 | _models.SetCustomFieldValueBodyV8 | _models.SetCustomFieldValueBodyV9 | _models.SetCustomFieldValueBodyV10 | _models.SetCustomFieldValueBodyV11 | _models.SetCustomFieldValueBodyV12 | _models.SetCustomFieldValueBodyV13 | _models.SetCustomFieldValueBodyV14 | _models.SetCustomFieldValueBodyV15 | None = Field(None, description="The request body containing the value to set for the Custom Field. The shape of the value varies by field type — supported types include URLs, UUIDs, email addresses, phone numbers, dates (millisecond timestamps), text, numbers, currency, user lists, label lists, dropdowns, progress, file lists, location objects, and booleans."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Set or update the value of a specific Custom Field on a task. Requires the task ID and the UUID of the Custom Field to update."""
 
     # Construct request model with validation
@@ -2077,7 +2215,7 @@ async def clear_task_custom_field_value(
     field_id: str = Field(..., description="The UUID of the Custom Field whose value should be removed from the task."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID (team_id) required when using custom task IDs; must be paired with custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Clears the stored value of a specific Custom Field on a task without deleting the Custom Field definition or its available options."""
 
     # Construct request model with validation
@@ -2122,7 +2260,7 @@ async def add_task_dependency(
     team_id: float | None = Field(None, description="The Workspace ID required when `custom_task_ids` is true, used to resolve custom task IDs within the correct Workspace scope."),
     depends_on: str | None = Field(None, description="The ID of the task that the specified task (`task_id`) is waiting on — i.e., the task that must be completed before `task_id` can proceed."),
     dependency_of: str | None = Field(None, description="The ID of the task that the specified task (`task_id`) is blocking — i.e., the task that cannot proceed until `task_id` is completed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a dependency relationship between two tasks, setting one task as waiting on or blocking another. Use `depends_on` to specify a task this task is waiting on, or `dependency_of` to specify a task this task is blocking."""
 
     # Construct request model with validation
@@ -2170,7 +2308,7 @@ async def delete_task_dependency(
     dependency_of: str = Field(..., description="The ID of the task that depends on the primary task — i.e., the downstream task to be unlinked."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference tasks by their custom task IDs instead of their system-generated IDs. Requires the team_id parameter to also be provided."),
     team_id: float | None = Field(None, description="The Workspace ID (team) required when using custom task IDs. Must be provided alongside custom_task_ids=true to correctly resolve custom task references."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a dependency relationship between two tasks, unlinking them so that one no longer depends on the other. Both the target task and the related dependent or prerequisite task must be specified."""
 
     # Construct request model with validation
@@ -2214,7 +2352,7 @@ async def link_task(
     links_to: str = Field(..., description="The ID of the task to link to (the target task)."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference tasks by their custom task IDs instead of their default system IDs. Requires team_id to also be provided when enabled."),
     team_id: float | None = Field(None, description="The Workspace ID (team) required when custom_task_ids is set to true, used to resolve custom task IDs within the correct workspace scope."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a directional link between two tasks, equivalent to using the Task Links feature in the task's right-hand sidebar. Only task-to-task links are supported; general or cross-object links are not."""
 
     # Construct request model with validation
@@ -2258,7 +2396,7 @@ async def delete_task_link(
     links_to: str = Field(..., description="The unique identifier of the target task that is currently linked to the source task."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference tasks by their custom task IDs instead of their default system-generated IDs. Requires the team_id parameter to also be provided."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true to correctly resolve tasks within the specified Workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes the dependency or relationship link between two tasks. Both task IDs must be provided to identify the specific link to delete."""
 
     # Construct request model with validation
@@ -2300,7 +2438,7 @@ async def delete_task_link(
 async def list_folders(
     space_id: float = Field(..., description="The unique identifier of the Space whose Folders you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, returns only archived Folders; when false or omitted, returns only active Folders."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all Folders within a specified Space. Optionally include archived Folders in the results."""
 
     # Construct request model with validation
@@ -2342,7 +2480,7 @@ async def list_folders(
 async def create_folder(
     space_id: float = Field(..., description="The unique identifier of the Space in which the new folder will be created."),
     name: str = Field(..., description="The display name for the new folder, used to identify it within the Space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder within a specified Space to organize lists and tasks. Folders help structure your workspace hierarchy beneath a Space."""
 
     # Construct request model with validation
@@ -2381,7 +2519,7 @@ async def create_folder(
 
 # Tags: Folders
 @mcp.tool()
-async def get_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to retrieve.")) -> dict[str, Any]:
+async def get_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a folder and the Lists contained within it. Use this to inspect the structure and contents of a specific folder."""
 
     # Construct request model with validation
@@ -2420,7 +2558,7 @@ async def get_folder(folder_id: float = Field(..., description="The unique numer
 async def rename_folder(
     folder_id: float = Field(..., description="The unique numeric identifier of the folder to rename."),
     name: str = Field(..., description="The new name to assign to the folder."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Renames an existing folder by updating its display name. The folder's contents and structure remain unchanged."""
 
     # Construct request model with validation
@@ -2459,7 +2597,7 @@ async def rename_folder(
 
 # Tags: Folders
 @mcp.tool()
-async def delete_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to be deleted.")) -> dict[str, Any]:
+async def delete_folder(folder_id: float = Field(..., description="The unique numeric identifier of the folder to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder from your Workspace. This action cannot be undone, so ensure the correct folder ID is specified before proceeding."""
 
     # Construct request model with validation
@@ -2498,7 +2636,7 @@ async def delete_folder(folder_id: float = Field(..., description="The unique nu
 async def list_goals(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Goals you want to retrieve."),
     include_completed: bool | None = Field(None, description="When set to true, completed Goals are included in the response alongside active ones; omitting this parameter or setting it to false returns only active Goals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Goals available in a specified Workspace, with an option to include completed Goals in the results."""
 
     # Construct request model with validation
@@ -2545,7 +2683,7 @@ async def create_goal(
     multiple_owners: bool = Field(..., description="Set to true to allow multiple users to own this Goal simultaneously, or false to restrict to a single owner."),
     owners: list[int] = Field(..., description="List of user IDs assigned as owners of the Goal. Order is not significant; each item should be a valid integer user ID."),
     color: str = Field(..., description="A color used to visually identify the Goal in the UI, specified as a hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Goal within a specified Workspace, allowing you to define objectives with ownership, due dates, and visual categorization."""
 
     # Construct request model with validation
@@ -2584,7 +2722,7 @@ async def create_goal(
 
 # Tags: Goals
 @mcp.tool()
-async def get_goal(goal_id: str = Field(..., description="The unique UUID identifier of the goal to retrieve.")) -> dict[str, Any]:
+async def get_goal(goal_id: str = Field(..., description="The unique UUID identifier of the goal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific goal, including its associated targets and current progress. Use this to inspect a goal's configuration and status by its unique identifier."""
 
     # Construct request model with validation
@@ -2628,7 +2766,7 @@ async def update_goal(
     rem_owners: list[int] = Field(..., description="List of user IDs to remove as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
     add_owners: list[int] = Field(..., description="List of user IDs to add as owners of the Goal. Order is not significant; each item should be a valid user ID integer."),
     color: str = Field(..., description="The color to assign to the Goal, used for visual categorization in the UI. Provide a valid hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Goal's properties, including its name, due date, description, color, and ownership. Use this to rename a Goal, adjust its deadline, modify its description, or add and remove assigned owners."""
 
     # Construct request model with validation
@@ -2670,7 +2808,7 @@ async def update_goal(
 async def delete_goal(
     goal_id: str = Field(..., description="The unique identifier (UUID) of the Goal to be deleted."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, used to indicate the format of the data being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a specified Goal from your Workspace. This action is irreversible and will delete all associated goal data."""
 
     # Construct request model with validation
@@ -2717,7 +2855,7 @@ async def create_key_result(
     unit: str = Field(..., description="The unit label associated with the key result value (e.g., a currency code or custom unit name), applicable when the type is `number` or `currency`."),
     task_ids: list[str] = Field(..., description="An array of task IDs to link with this key result, allowing progress to be tracked automatically based on task completion. Order is not significant."),
     list_ids: list[str] = Field(..., description="An array of List IDs to link with this key result, allowing progress to be tracked automatically based on list task completion. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new key result (target) within a specified goal to define measurable outcomes. Supports multiple target types including numeric, currency, boolean, percentage, and automatic tracking."""
 
     # Construct request model with validation
@@ -2760,7 +2898,7 @@ async def update_key_result(
     key_result_id: str = Field(..., description="The unique identifier of the key result to update."),
     steps_current: int = Field(..., description="The current number of steps completed toward the key result target. Should reflect the latest progress value."),
     note: str = Field(..., description="A note or comment describing the current status, blockers, or context for this progress update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the progress and notes for an existing key result. Use this to record current step completion and add contextual notes to track advancement toward a goal."""
 
     # Construct request model with validation
@@ -2799,7 +2937,7 @@ async def update_key_result(
 
 # Tags: Goals
 @mcp.tool()
-async def delete_key_result(key_result_id: str = Field(..., description="The unique identifier (UUID) of the key result to delete.")) -> dict[str, Any]:
+async def delete_key_result(key_result_id: str = Field(..., description="The unique identifier (UUID) of the key result to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a key result (target) from a Goal. This action is irreversible and removes the specified key result and its associated data."""
 
     # Construct request model with validation
@@ -2844,7 +2982,7 @@ async def invite_workspace_guest(
     can_create_views: bool | None = Field(None, description="Whether the guest is allowed to create new views."),
     can_see_points_estimated: bool | None = Field(None, description="Whether the guest can view point estimates on tasks."),
     custom_role_id: int | None = Field(None, description="The ID of a custom role to assign to the guest upon invitation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invites a guest user to a Workspace by email on an Enterprise Plan. After inviting, grant the guest access to specific Folders, Lists, or Tasks using the corresponding add-guest endpoints."""
 
     # Construct request model with validation
@@ -2886,7 +3024,7 @@ async def invite_workspace_guest(
 async def get_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) containing the guest."),
     guest_id: float = Field(..., description="The unique identifier of the guest user to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific guest user within a Workspace. Available exclusively on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -2931,7 +3069,7 @@ async def update_workspace_guest(
     can_see_time_estimated: bool | None = Field(None, description="Whether the guest is allowed to view time estimations on tasks."),
     can_create_views: bool | None = Field(None, description="Whether the guest is allowed to create new views within the Workspace."),
     custom_role_id: int | None = Field(None, description="The ID of a custom role to assign to the guest, controlling their permission level within the Workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update permission settings and role assignment for a guest on a Workspace. This endpoint is only available on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -2973,7 +3111,7 @@ async def update_workspace_guest(
 async def remove_workspace_guest(
     team_id: float = Field(..., description="The unique identifier of the Workspace from which the guest will be removed."),
     guest_id: float = Field(..., description="The unique identifier of the guest whose Workspace access will be revoked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revokes a guest's access to the specified Workspace, removing all associated permissions. This endpoint is only available on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3014,7 +3152,7 @@ async def add_guest_to_task(
     guest_id: float = Field(..., description="The unique numeric identifier of the guest user to add to the task."),
     permission_level: str = Field(..., description="The access level granted to the guest on this task. Accepted values are: read (view only), comment, edit, or create (full access)."),
     include_shared: bool | None = Field(None, description="Whether to include details of items shared with the guest in the response. Set to false to exclude shared item details; defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Share a task with a guest user by granting them a specific permission level. This endpoint is only available to Workspaces on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3062,7 +3200,7 @@ async def remove_task_guest(
     include_shared: bool | None = Field(None, description="Controls whether the response includes details of other items shared with the guest. Set to false to exclude shared item details; defaults to true."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the standard ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true to correctly resolve the task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a guest's access to a specific task, removing their ability to view or interact with it. This endpoint is only available on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3106,7 +3244,7 @@ async def add_guest_to_list(
     guest_id: float = Field(..., description="The unique identifier of the guest user to add to the List."),
     permission_level: str = Field(..., description="The access level granted to the guest on this List. Accepted values are: read (view only), comment, edit, or create (full access)."),
     include_shared: bool | None = Field(None, description="Whether to include details of items already shared with the guest. Set to false to exclude shared item details; defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Share a List with a guest user by granting them a specific permission level. This endpoint is exclusively available to Workspaces on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3152,7 +3290,7 @@ async def remove_list_guest(
     list_id: float = Field(..., description="The unique identifier of the List from which the guest's access will be revoked."),
     guest_id: float = Field(..., description="The unique identifier of the guest whose access to the List will be removed."),
     include_shared: bool | None = Field(None, description="Controls whether the response includes details of items shared with the guest. Set to false to exclude shared item details; defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revokes a guest's access to a specific List, removing their ability to view or interact with it. This endpoint is exclusively available to Workspaces on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3196,7 +3334,7 @@ async def add_guest_to_folder(
     guest_id: float = Field(..., description="The unique identifier of the guest user to whom folder access will be granted."),
     permission_level: str = Field(..., description="The access level granted to the guest for this folder. Accepted values are: read (view only), comment, edit, or create (full access)."),
     include_shared: bool | None = Field(None, description="Whether to include details of items already shared with the guest in the response. Set to false to exclude shared item details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Share a folder with a guest user by granting them a specific permission level. This endpoint is only available on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3242,7 +3380,7 @@ async def remove_folder_guest(
     folder_id: float = Field(..., description="The unique numeric identifier of the Folder from which the guest's access will be revoked."),
     guest_id: float = Field(..., description="The unique numeric identifier of the guest whose access to the Folder will be removed."),
     include_shared: bool | None = Field(None, description="When set to false, the response excludes details of items shared with the guest; defaults to true to include shared item details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revoke a guest's access to a specific Folder, removing their ability to view or interact with its contents. This endpoint is only available on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -3284,7 +3422,7 @@ async def remove_folder_guest(
 async def list_folder_lists(
     folder_id: float = Field(..., description="The unique identifier of the Folder whose Lists you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, includes archived Lists in the response alongside active ones. Defaults to false, returning only active Lists."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all Lists contained within a specified Folder. Optionally include archived Lists in the results."""
 
     # Construct request model with validation
@@ -3332,7 +3470,7 @@ async def create_list(
     priority: int | None = Field(None, description="The priority level for the List, represented as an integer (e.g., 1 = urgent, 2 = high, 3 = normal, 4 = low)."),
     assignee: int | None = Field(None, description="The user ID of the member to assign as the owner of this List."),
     status: str | None = Field(None, description="The color status of the List, which represents a visual label rather than task-level statuses defined within the List."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new List inside a specified Folder, allowing you to organize tasks with optional metadata such as due dates, priority, assignee, and a color status."""
 
     # Construct request model with validation
@@ -3405,7 +3543,7 @@ async def create_folder_from_template(
     remap_start_date: bool | None = Field(None, description="When true, recalculates and remaps task start dates relative to the provided project start or due date."),
     skip_weekends: bool | None = Field(None, description="When true, excludes Saturday and Sunday when calculating remapped task dates."),
     archived: Literal[1, 2] | None = Field(None, description="Controls whether archived tasks are included: 1 includes archived tasks, 2 includes only archived tasks, and null excludes archived tasks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Folder within a Space using a predefined Folder template, optionally importing nested assets such as lists, tasks, subtasks, custom fields, and more. Supports both synchronous and asynchronous creation via the `return_immediately` parameter."""
 
     # Construct request model with validation
@@ -3448,7 +3586,7 @@ async def create_folder_from_template(
 async def list_folderless_lists(
     space_id: float = Field(..., description="The unique identifier of the Space whose folderless Lists you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, includes archived Lists in the response alongside active ones."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Lists within a Space that are not organized inside a Folder. Optionally includes archived Lists in the results."""
 
     # Construct request model with validation
@@ -3496,7 +3634,7 @@ async def create_folderless_list(
     priority: int | None = Field(None, description="The priority level for the List, represented as an integer (e.g., 1 = Urgent, 2 = High, 3 = Normal, 4 = Low)."),
     assignee: int | None = Field(None, description="The user ID of the member to assign as the owner of this List."),
     status: str | None = Field(None, description="Sets the color of the List, which is referred to as its status. This is distinct from the task-level statuses available within the List."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new List directly within a Space, without placing it inside a Folder. Use this when you want a top-level List organization within the Space."""
 
     # Construct request model with validation
@@ -3535,7 +3673,7 @@ async def create_folderless_list(
 
 # Tags: Lists
 @mcp.tool()
-async def get_list(list_id: float = Field(..., description="The unique numeric identifier of the List to retrieve. To locate this ID, right-click the List in your Sidebar, select Copy link, and extract the last segment of the pasted URL.")) -> dict[str, Any]:
+async def get_list(list_id: float = Field(..., description="The unique numeric identifier of the List to retrieve. To locate this ID, right-click the List in your Sidebar, select Copy link, and extract the last segment of the pasted URL.")) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific List, including its settings, members, and configuration. Use this to inspect or reference a List's properties by its unique ID."""
 
     # Construct request model with validation
@@ -3580,7 +3718,7 @@ async def update_list(
     status: str | None = Field(None, description="The color applied to the List, referred to as its status. This controls the List's color indicator, not the task statuses within the List."),
     unset_status: bool | None = Field(None, description="When set to true, removes the currently applied color from the List. Defaults to false, which preserves the existing color."),
     due: str | None = Field(None, description="Due date in ISO 8601 format. Include time (e.g. '2024-06-15T14:30:00') to set due_date_time=true, or date only (e.g. '2024-06-15') for due_date_time=false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a List's properties including its name, description, priority, assignee, due date, and color. Use this to rename a List or modify any of its metadata fields."""
 
     # Call helper functions
@@ -3625,7 +3763,7 @@ async def update_list(
 async def delete_list(
     list_id: float = Field(..., description="The unique numeric identifier of the List to be deleted."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, used to indicate the format of the data being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified List from your Workspace. This action is irreversible and removes the List along with its associated data."""
 
     # Construct request model with validation
@@ -3665,7 +3803,7 @@ async def delete_list(
 async def add_task_to_list(
     list_id: float = Field(..., description="The unique numeric identifier of the list to which the task will be added."),
     task_id: str = Field(..., description="The unique string identifier of the task to add to the specified list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an existing task to an additional list, enabling the task to appear in multiple lists simultaneously. Requires the Tasks in Multiple Lists ClickApp to be enabled in the workspace."""
 
     # Construct request model with validation
@@ -3704,7 +3842,7 @@ async def add_task_to_list(
 async def remove_task_from_list(
     list_id: float = Field(..., description="The unique numeric identifier of the List from which the task should be removed. Must not be the task's home List."),
     task_id: str = Field(..., description="The unique string identifier of the task to remove from the specified List."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a task from an additional (non-home) List it has been added to. Requires the Tasks in Multiple Lists ClickApp to be enabled; a task cannot be removed from its original home List."""
 
     # Construct request model with validation
@@ -3740,7 +3878,7 @@ async def remove_task_from_list(
 
 # Tags: Members
 @mcp.tool()
-async def list_task_members(task_id: str = Field(..., description="The unique identifier of the task whose explicit members you want to retrieve.")) -> dict[str, Any]:
+async def list_task_members(task_id: str = Field(..., description="The unique identifier of the task whose explicit members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves Workspace members who have been explicitly granted direct access to a specific task. Note: this does not include members with access via a Team, List, Folder, or Space."""
 
     # Construct request model with validation
@@ -3776,7 +3914,7 @@ async def list_task_members(task_id: str = Field(..., description="The unique id
 
 # Tags: Members
 @mcp.tool()
-async def list_list_members(list_id: float = Field(..., description="The unique numeric identifier of the List whose explicit members you want to retrieve.")) -> dict[str, Any]:
+async def list_list_members(list_id: float = Field(..., description="The unique numeric identifier of the List whose explicit members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves Workspace members who have been explicitly granted access to a specific List. Note: this does not include members with inherited access via a Team, Folder, or Space."""
 
     # Construct request model with validation
@@ -3815,7 +3953,7 @@ async def list_list_members(list_id: float = Field(..., description="The unique 
 async def list_custom_roles(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Custom Roles you want to retrieve."),
     include_members: bool | None = Field(None, description="When set to true, the response will include the list of members assigned to each Custom Role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Custom Roles available in the specified Workspace, allowing you to review role definitions and optionally include their member assignments."""
 
     # Construct request model with validation
@@ -3854,7 +3992,7 @@ async def list_custom_roles(
 
 # Tags: Shared Hierarchy
 @mcp.tool()
-async def list_shared_hierarchy(team_id: float = Field(..., description="The unique identifier of the workspace whose shared content you want to retrieve.")) -> dict[str, Any]:
+async def list_shared_hierarchy(team_id: float = Field(..., description="The unique identifier of the workspace whose shared content you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks, Lists, and Folders that have been shared with the authenticated user within a specified workspace. Useful for discovering shared content accessible to the current user."""
 
     # Construct request model with validation
@@ -3893,7 +4031,7 @@ async def list_shared_hierarchy(team_id: float = Field(..., description="The uni
 async def list_spaces(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Spaces you want to retrieve."),
     archived: bool | None = Field(None, description="When set to true, returns only archived Spaces; when false or omitted, returns only active Spaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Spaces available within a specified Workspace. Member details are only accessible for private Spaces the authenticated user belongs to."""
 
     # Construct request model with validation
@@ -3948,7 +4086,7 @@ async def create_space(
     start_date: bool = Field(..., description="Whether start dates are enabled for tasks in this Space."),
     remap_due_dates: bool = Field(..., description="Whether due dates are automatically remapped for dependent tasks when a parent task's due date changes."),
     remap_closed_due_date: bool = Field(..., description="Whether due dates on closed tasks are remapped when rescheduling dependent tasks in this Space."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Space within a specified Workspace, allowing configuration of its name, assignee settings, and feature toggles such as due dates, time tracking, tags, and dependencies."""
 
     # Construct request model with validation
@@ -3998,7 +4136,7 @@ async def create_space(
 
 # Tags: Spaces
 @mcp.tool()
-async def get_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to retrieve.")) -> dict[str, Any]:
+async def get_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves details for a specific Space within a Workspace, including its settings and configuration."""
 
     # Construct request model with validation
@@ -4053,7 +4191,7 @@ async def update_space(
     start_date: bool = Field(..., description="Whether tasks in this Space support a start date field in addition to a due date."),
     remap_due_dates: bool = Field(..., description="Whether due dates on dependent tasks are automatically remapped when a predecessor task's due date changes."),
     remap_closed_due_date: bool = Field(..., description="Whether due dates on closed dependent tasks are also remapped when a predecessor task's due date changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Space's settings including its name, color, privacy, and enabled ClickApps such as due dates, time tracking, tags, and custom fields."""
 
     # Construct request model with validation
@@ -4103,7 +4241,7 @@ async def update_space(
 
 # Tags: Spaces
 @mcp.tool()
-async def delete_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to be deleted.")) -> dict[str, Any]:
+async def delete_space(space_id: float = Field(..., description="The unique numeric identifier of the Space to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a Space from your Workspace. This action is irreversible and removes the Space along with its associated data."""
 
     # Construct request model with validation
@@ -4142,7 +4280,7 @@ async def delete_space(space_id: float = Field(..., description="The unique nume
 async def list_space_tags(
     space_id: float = Field(..., description="The unique identifier of the Space whose tags you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type format for the request, indicating the content should be sent as JSON."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all task tags available in a specified Space. Use this to discover tags that can be applied to tasks within the Space."""
 
     # Construct request model with validation
@@ -4184,7 +4322,7 @@ async def create_space_tag(
     name: str = Field(..., description="The display name of the tag as it will appear throughout the Space."),
     tag_fg: str = Field(..., description="The foreground (text) color of the tag, specified as a hex color code."),
     tag_bg: str = Field(..., description="The background color of the tag, specified as a hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new tag in the specified Space, allowing tasks within that Space to be categorized and labeled with custom colors."""
 
     # Construct request model with validation
@@ -4229,7 +4367,7 @@ async def update_space_tag(
     name: str = Field(..., description="The new display name to assign to the tag."),
     fg_color: str = Field(..., description="The foreground (text) color for the tag, typically provided as a hex color code."),
     bg_color: str = Field(..., description="The background color for the tag, typically provided as a hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the name and color properties of an existing tag within a specified space. Use this to rename a tag or change its foreground and background display colors."""
 
     # Construct request model with validation
@@ -4274,7 +4412,7 @@ async def delete_space_tag(
     name: str = Field(..., description="The display name of the tag being deleted, used to identify the tag in the request body."),
     tag_fg: str = Field(..., description="The foreground (text) color of the tag, specified as a hex color code."),
     tag_bg: str = Field(..., description="The background color of the tag, specified as a hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently removes a task tag from a specified Space. The tag will no longer be available for tasks within that Space."""
 
     # Construct request model with validation
@@ -4319,7 +4457,7 @@ async def add_tag_to_task(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must indicate JSON format."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default system-generated task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true to correctly resolve the task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an existing tag to a specified task, associating it for organization and filtering purposes. Supports referencing tasks by custom task ID when the appropriate parameters are provided."""
 
     # Construct request model with validation
@@ -4365,7 +4503,7 @@ async def remove_task_tag(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, indicating the format of the payload being sent."),
     custom_task_ids: bool | None = Field(None, description="Set to true if referencing the task by its custom task ID instead of the default ClickUp task ID. Must be used in conjunction with the team_id parameter."),
     team_id: float | None = Field(None, description="The Workspace ID (team) required when custom_task_ids is set to true. Used to resolve the correct task when referencing by custom task ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific tag from a task without deleting the tag from the Space. The tag remains available for use on other tasks within the Space."""
 
     # Construct request model with validation
@@ -4430,7 +4568,7 @@ async def list_tasks(
     custom_fields: list[str] | None = Field(None, description="Array of Custom Field filter objects for filtering tasks across multiple Custom Fields simultaneously. Each object must specify a field_id, an operator, and a value. Use custom_field instead when filtering on a single Custom Field."),
     custom_field: list[str] | None = Field(None, description="Array representing a single Custom Field filter, used when filtering tasks by exactly one Custom Field or Custom Relationship. Use custom_fields when filtering across multiple Custom Fields at once."),
     custom_items: list[float] | None = Field(None, description="Array of custom task type identifiers to filter by. Use 0 for standard tasks, 1 for Milestones, or any other workspace-defined custom task type ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve up to 100 tasks per page from a specified List, returning only tasks whose home List matches the given list_id by default. Use filtering, sorting, and pagination parameters to narrow results by status, assignee, tags, dates, custom fields, and more."""
 
     # Construct request model with validation
@@ -4491,7 +4629,7 @@ async def create_task(
     check_required_custom_fields: bool | None = Field(None, description="When true, enforces validation of any required Custom Fields on the task; by default required Custom Fields are ignored during API task creation."),
     custom_fields: list[_models.CreateTaskBodyCustomFieldsItemV0 | _models.CreateTaskBodyCustomFieldsItemV1 | _models.CreateTaskBodyCustomFieldsItemV2 | _models.CreateTaskBodyCustomFieldsItemV3 | _models.CreateTaskBodyCustomFieldsItemV4 | _models.CreateTaskBodyCustomFieldsItemV5 | _models.CreateTaskBodyCustomFieldsItemV6 | _models.CreateTaskBodyCustomFieldsItemV7 | _models.CreateTaskBodyCustomFieldsItemV8 | _models.CreateTaskBodyCustomFieldsItemV9 | _models.CreateTaskBodyCustomFieldsItemV10 | _models.CreateTaskBodyCustomFieldsItemV11 | _models.CreateTaskBodyCustomFieldsItemV12 | _models.CreateTaskBodyCustomFieldsItemV13 | _models.CreateTaskBodyCustomFieldsItemV14] | None = Field(None, description="List of Custom Field objects to populate on the new task, each specifying a field ID and its value. Object and array type fields can be cleared by passing a null value."),
     custom_item_id: float | None = Field(None, description="The custom task type ID to apply to this task. Omit or pass null to create a standard task; retrieve available custom type IDs using the Get Custom Task Types endpoint."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new task in the specified list, supporting full configuration including assignees, scheduling, custom fields, subtask relationships, and sprint points."""
 
     # Construct request model with validation
@@ -4537,7 +4675,7 @@ async def get_task(
     include_subtasks: bool | None = Field(None, description="Set to true to include all subtasks nested under the task in the response. Defaults to false."),
     include_markdown_description: bool | None = Field(None, description="Set to true to return the task description formatted in Markdown instead of plain text."),
     custom_fields: list[str] | None = Field(None, description="Filter or include tasks matching specific Custom Field values using a JSON array of field conditions. Each condition specifies a field_id, a comparison operator, and a value. Supports Custom Relationships."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific task, including its fields, assignees, status, and attachments. Docs attached to the task are not returned."""
 
     # Construct request model with validation
@@ -4597,7 +4735,7 @@ async def update_task(
     group_assignees_add: list[str] | None = Field(None, alias="group_assigneesAdd", description="List of group (team) IDs to add as group assignees to the task. Order is not significant."),
     group_assignees_rem: list[str] | None = Field(None, alias="group_assigneesRem", description="List of group (team) IDs to remove from the task's group assignees. Order is not significant."),
     archived: bool | None = Field(None, description="Set to true to archive the task, or false to unarchive it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update one or more fields on an existing task by its task ID. Supports updating metadata, assignments, dates, status, priority, and more."""
 
     # Construct request model with validation
@@ -4644,7 +4782,7 @@ async def delete_task(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to indicate JSON-formatted content."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task using its custom task ID rather than the default system-generated task ID."),
     team_id: float | None = Field(None, description="The Workspace ID (team ID) required when using custom task IDs. Must be provided alongside custom_task_ids=true to correctly resolve the task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a task from your Workspace by its task ID. This action is irreversible and removes the task and its associated data."""
 
     # Construct request model with validation
@@ -4711,7 +4849,7 @@ async def list_tasks_by_team(
     custom_fields_field_ids: list[str] | None = Field(None, description="List of Custom Field IDs to filter by (one per filter entry)."),
     custom_fields_operators: list[str] | None = Field(None, description="List of operators for each Custom Field filter (e.g. '=', '<', '>', '!='). Must match length of custom_fields_field_ids."),
     custom_fields_values: list[str] | None = Field(None, description="List of values for each Custom Field filter. Must match length of custom_fields_field_ids."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve tasks from a Workspace that match specified filter criteria such as status, assignee, due date, tags, and location (Space, Folder, or List). Results are paginated at 100 tasks per page and limited to tasks the authenticated user can access."""
 
     # Call helper functions
@@ -4756,7 +4894,7 @@ async def list_tasks_by_team(
 async def merge_tasks(
     task_id: str = Field(..., description="The unique ID of the target task that all source tasks will be merged into. Must be a valid internal task ID; Custom Task IDs are not supported."),
     source_task_ids: list[str] = Field(..., description="An array of IDs representing the source tasks to merge into the target task. Order is not significant; all listed tasks will be merged. Custom Task IDs are not supported."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merges one or more source tasks into a specified target task, consolidating their content and history. Source tasks are provided in the request body, and Custom Task IDs are not supported."""
 
     # Construct request model with validation
@@ -4800,7 +4938,7 @@ async def get_task_time_in_status(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, used to indicate the format of the request body sent to the API."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID (team_id) required when using custom task IDs. Must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves how long a task has spent in each status, providing a breakdown of time per status stage. Requires the Total Time in Status ClickApp to be enabled by a Workspace owner or admin."""
 
     # Construct request model with validation
@@ -4845,7 +4983,7 @@ async def get_bulk_tasks_time_in_status(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload sent to the API."),
     custom_task_ids: bool | None = Field(None, description="Set to true if referencing tasks by their custom task IDs instead of default system IDs."),
     team_id: float | None = Field(None, description="The Workspace ID required when custom_task_ids is set to true; must be provided alongside that parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves how long two or more tasks have spent in each status. Requires the Total Time in Status ClickApp to be enabled by a Workspace owner or admin."""
 
     # Construct request model with validation
@@ -4888,7 +5026,7 @@ async def list_task_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose task templates you want to retrieve."),
     page: int = Field(..., description="The zero-based page number for paginating through task template results, where 0 returns the first page."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type format for the request body, which must be set to indicate JSON content."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of task templates available in the specified Workspace, which can be used to standardize task creation across teams."""
 
     # Construct request model with validation
@@ -4932,7 +5070,7 @@ async def list_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose List templates you want to retrieve."),
     page: int = Field(..., description="Zero-indexed page number for paginating through template results; start at 0 for the first page."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="MIME type for the request body, indicating the format of the data being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all List templates available in a Workspace, returning their IDs and metadata. Use the returned template IDs (prefixed with `t-`) to create Lists from templates in a Folder or Space."""
 
     # Construct request model with validation
@@ -4976,7 +5114,7 @@ async def list_folder_templates(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose Folder templates you want to retrieve."),
     page: int = Field(..., description="Zero-indexed page number for paginating through Folder template results; start at 0 for the first page."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body sent to the API."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all Folder templates available in a Workspace, including their template IDs. Use the returned template IDs (prefixed with `t-`) with the Create Folder From Template endpoint to instantiate new Folders."""
 
     # Construct request model with validation
@@ -5020,7 +5158,7 @@ async def create_task_from_template(
     list_id: float = Field(..., description="The unique numeric identifier of the list where the new task will be created."),
     template_id: str = Field(..., description="The unique string identifier of the task template to use when creating the task."),
     name: str = Field(..., description="The display name to assign to the newly created task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new task in a specified list using a pre-defined task template from your workspace. Publicly shared templates must be added to your workspace library before they can be used via the API."""
 
     # Construct request model with validation
@@ -5093,7 +5231,7 @@ async def create_list_from_template_in_folder(
     remap_start_date: bool | None = Field(None, description="Whether to remap task start dates relative to the new project start date provided in 'start_date'."),
     skip_weekends: bool | None = Field(None, description="Whether to skip weekend days (Saturday and Sunday) when calculating remapped task dates."),
     archived: Literal[1, 2] | None = Field(None, description="Controls inclusion of archived tasks from the template: 1 includes archived tasks, 2 excludes them. Omit to use the default behavior."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new List inside a specified Folder using an existing List template, optionally controlling which task properties (assignees, due dates, custom fields, etc.) are imported from the template. By default the request returns immediately with the future List ID, though the List and its nested objects may still be generating in the background."""
 
     # Construct request model with validation
@@ -5167,7 +5305,7 @@ async def create_list_from_template(
     remap_start_date: bool | None = Field(None, description="Whether to remap task start dates relative to the new project start date."),
     skip_weekends: bool | None = Field(None, description="Whether to skip weekend days when calculating remapped task dates."),
     archived: Literal[1, 2] | None = Field(None, description="Controls inclusion of archived tasks: use 1 to include archived tasks, 2 to include only archived tasks, or omit for no archived tasks."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new List within a Space using an existing List template, importing selected task properties such as assignees, due dates, custom fields, and more. Supports both synchronous and asynchronous creation via the `return_immediately` parameter."""
 
     # Construct request model with validation
@@ -5207,7 +5345,7 @@ async def create_list_from_template(
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace_seats(team_id: str = Field(..., description="The unique identifier of the Workspace whose seat information you want to retrieve.")) -> dict[str, Any]:
+async def get_workspace_seats(team_id: str = Field(..., description="The unique identifier of the Workspace whose seat information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves seat usage information for a Workspace, including the number of used, total, and available seats for both members and guests."""
 
     # Construct request model with validation
@@ -5243,7 +5381,7 @@ async def get_workspace_seats(team_id: str = Field(..., description="The unique 
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace_plan(team_id: str = Field(..., description="The unique identifier of the Workspace whose plan information you want to retrieve.")) -> dict[str, Any]:
+async def get_workspace_plan(team_id: str = Field(..., description="The unique identifier of the Workspace whose plan information you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current subscription plan details for the specified Workspace, including plan tier and associated features."""
 
     # Construct request model with validation
@@ -5284,7 +5422,7 @@ async def create_user_group(
     name: str = Field(..., description="The display name for the new User Group, used to identify it within the Workspace."),
     members: list[int] = Field(..., description="A list of user objects to include as members of the new User Group; order is not significant and each item should represent a user to be added."),
     handle: str | None = Field(None, description="An optional short identifier or alias for the User Group, typically used as a reference handle within the Workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a User Group within a Workspace to organize and manage users collectively. Note that adding a guest with view-only permissions automatically converts them to a paid guest, which may incur prorated charges if additional seats are needed."""
 
     # Construct request model with validation
@@ -5323,7 +5461,7 @@ async def create_user_group(
 
 # Tags: Custom Task Types
 @mcp.tool()
-async def list_custom_task_types(team_id: float = Field(..., description="The unique identifier of the Workspace whose custom task types you want to retrieve.")) -> dict[str, Any]:
+async def list_custom_task_types(team_id: float = Field(..., description="The unique identifier of the Workspace whose custom task types you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom task types defined in a Workspace, allowing you to see available task type options for organizing and categorizing work."""
 
     # Construct request model with validation
@@ -5365,7 +5503,7 @@ async def update_user_group(
     rem: list[int] = Field(..., description="List of user IDs to remove from the User Group. Each item should be a valid user ID string."),
     name: str | None = Field(None, description="The new display name for the User Group."),
     handle: str | None = Field(None, description="The new handle (short identifier or alias) for the User Group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates a User Group's name, handle, or membership within a Workspace. Note that adding a guest with view-only permissions automatically converts them to a paid guest, which may incur prorated billing charges."""
 
     # Construct request model with validation
@@ -5405,7 +5543,7 @@ async def update_user_group(
 
 # Tags: User Groups
 @mcp.tool()
-async def delete_user_group(group_id: str = Field(..., description="The unique identifier of the user group to delete from the Workspace.")) -> dict[str, Any]:
+async def delete_user_group(group_id: str = Field(..., description="The unique identifier of the user group to delete from the Workspace.")) -> dict[str, Any] | ToolResult:
     """Permanently removes a user group from the Workspace. Note that in the API, 'group_id' refers to a user group, while 'team_id' refers to the Workspace."""
 
     # Construct request model with validation
@@ -5444,7 +5582,7 @@ async def delete_user_group(group_id: str = Field(..., description="The unique i
 async def list_user_groups(
     team_id: float = Field(..., description="The unique ID of the Workspace whose User Groups you want to retrieve."),
     group_ids: list[str] | None = Field(None, description="An optional list of User Group IDs to filter results to specific groups; omit to return all User Groups in the Workspace. Each item should be a valid User Group ID string. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves User Groups within a specified Workspace, optionally filtered to one or more specific groups. Note: in the API, 'team_id' refers to the Workspace ID and 'group_id' refers to a User Group ID."""
 
     # Construct request model with validation
@@ -5487,7 +5625,7 @@ async def get_task_tracked_time(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format of the data being sent."),
     custom_task_ids: bool | None = Field(None, description="Set to true if referencing the task by its custom task ID instead of the default ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs; must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tracked time entries associated with a specific task. Note: This is a legacy endpoint; the Time Tracking API is recommended for managing time entries."""
 
     # Construct request model with validation
@@ -5534,7 +5672,7 @@ async def track_task_time(
     time_: int = Field(..., alias="time", description="The total duration of the time entry in milliseconds."),
     custom_task_ids: bool | None = Field(None, description="Set to true if referencing the task by its custom task ID rather than the default system-generated ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Records a time entry against a specific task using the legacy time tracking endpoint. For new integrations, the dedicated Time Tracking API endpoints are recommended instead."""
 
     # Construct request model with validation
@@ -5584,7 +5722,7 @@ async def update_time_entry_legacy(
     time_: int = Field(..., alias="time", description="The total duration of the tracked time interval in milliseconds."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of its default system ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when using custom task IDs. Must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing tracked time interval on a task by modifying its start time, end time, or duration. Note: This is a legacy endpoint; the Time Tracking API is recommended for managing time entries."""
 
     # Construct request model with validation
@@ -5632,7 +5770,7 @@ async def delete_tracked_time_interval(
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The MIME type of the request body, indicating the format of the data being sent."),
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the task by its custom task ID instead of the default ClickUp task ID."),
     team_id: float | None = Field(None, description="The Workspace ID required when referencing a task by its custom task ID; must be provided alongside custom_task_ids=true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes a specific tracked time interval from a task using its interval ID. Note: This is a legacy endpoint; the Time Tracking API is recommended for managing time entries."""
 
     # Construct request model with validation
@@ -5689,7 +5827,7 @@ async def list_time_entries(
     custom_task_ids: bool | None = Field(None, description="Set to true to reference the target task using its custom task ID instead of its standard ClickUp task ID. Must be used together with the team_id parameter."),
     team_id2: float | None = Field(None, alias="team_id", description="The workspace ID required when custom_task_ids is set to true, used to resolve the custom task ID to the correct task within the workspace."),
     is_billable: bool | None = Field(None, description="Filters results by billing status: set to true to return only billable time entries, or false to return only non-billable time entries. Omit to return all entries regardless of billing status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time entries for a workspace filtered by a date range, location, assignee, and billing status. Defaults to the last 30 days for the authenticated user; only one location filter (space, folder, list, or task) may be applied at a time."""
 
     # Construct request model with validation
@@ -5741,7 +5879,7 @@ async def create_time_entry(
     billable: bool | None = Field(None, description="Marks the time entry as billable when set to true."),
     assignee: int | None = Field(None, description="The user ID to assign the time entry to. Workspace owners and admins may specify any user ID; members may only specify their own user ID."),
     tid: str | None = Field(None, description="The ID of the task to associate with this time entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a time entry for a user in the specified workspace, supporting both completed entries (with start and stop/duration) and actively running timers. A negative duration indicates a timer is currently running for that user."""
 
     # Construct request model with validation
@@ -5791,7 +5929,7 @@ async def get_time_entry(
     include_location_names: bool | None = Field(None, description="When true, includes the human-readable names of the List, Folder, and Space alongside their respective IDs in the response."),
     include_approval_history: bool | None = Field(None, description="When true, includes the full approval history for the time entry, showing past approval state changes."),
     include_approval_details: bool | None = Field(None, description="When true, includes detailed information about the current approval state and approver for the time entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a single time entry by its ID within a workspace. Note that a time entry with a negative duration indicates the timer is currently running for that user."""
 
     # Construct request model with validation
@@ -5843,7 +5981,7 @@ async def update_time_entry(
     end: int | None = Field(None, description="The end time of the time entry as a Unix timestamp in milliseconds. Must be provided together with the start parameter."),
     billable: bool | None = Field(None, description="Indicates whether the time entry should be marked as billable."),
     duration: int | None = Field(None, description="The duration of the time entry in milliseconds. Use this to set a fixed duration rather than deriving it from start and end times."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the details of an existing time entry in a workspace, including its description, tags, start/end times, duration, and billable status."""
 
     # Construct request model with validation
@@ -5889,7 +6027,7 @@ async def delete_time_entry(
     team_id: float = Field(..., description="The unique identifier of the Workspace from which the time entries will be deleted."),
     timer_id: float = Field(..., description="The unique identifier of the time entry to delete. To delete multiple entries at once, provide a comma-separated list of timer IDs."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, indicating the format in which the data is being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes one or more time entries from a specified Workspace. Multiple time entries can be removed in a single request by providing a comma-separated list of timer IDs."""
 
     # Construct request model with validation
@@ -5930,7 +6068,7 @@ async def get_time_entry_history(
     team_id: float = Field(..., description="The unique numeric ID of the workspace containing the time entry."),
     timer_id: str = Field(..., description="The unique ID of the time entry whose history you want to retrieve. Can be obtained from the Get Time Entries Within a Date Range endpoint."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, indicating the format of the data being sent."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the change history for a specific time entry, showing a chronological list of modifications made to it."""
 
     # Construct request model with validation
@@ -5971,7 +6109,7 @@ async def get_running_time_entry(
     team_id: float = Field(..., description="The unique identifier of the workspace in which to look up the running time entry."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format in which data is being sent to the API."),
     assignee: float | None = Field(None, description="The user ID of a specific team member whose running time entry should be retrieved; defaults to the authenticated user if omitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the currently active (running) time entry for the authenticated user in the specified workspace. A time entry with a negative duration indicates the timer is actively tracking time."""
 
     # Construct request model with validation
@@ -6014,7 +6152,7 @@ async def get_running_time_entry(
 async def list_time_entry_tags(
     team_id: float = Field(..., description="The unique identifier of the Workspace whose time entry tags you want to retrieve."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request payload, indicating the format in which data is being sent to the server."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all labels (tags) that have been applied to time entries within a specified Workspace. Useful for auditing or filtering time entry categorization across a team."""
 
     # Construct request model with validation
@@ -6055,7 +6193,7 @@ async def add_tags_to_time_entries(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entries."),
     time_entry_ids: list[str] = Field(..., description="List of time entry IDs to which the tags will be applied. Order is not significant; each ID should be a valid time entry identifier within the workspace."),
     tags: list[_models.AddtagsfromtimeentriesBodyTagsItem] = Field(..., description="List of tag names to attach to the specified time entries. Order is not significant; each item should be a tag name string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more tags to a set of time entries in a workspace. Useful for bulk-labeling time entries for categorization or reporting purposes."""
 
     # Construct request model with validation
@@ -6100,7 +6238,7 @@ async def rename_time_entry_tag(
     new_name: str = Field(..., description="The new name to assign to the tag, replacing the current name across all associated time entries."),
     tag_bg: str = Field(..., description="The background color for the tag, specified as a hex color code."),
     tag_fg: str = Field(..., description="The foreground (text) color for the tag, specified as a hex color code."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rename an existing time entry tag within a workspace, updating its display name and color styling. All time entries using the old tag name will reflect the updated tag."""
 
     # Construct request model with validation
@@ -6143,7 +6281,7 @@ async def remove_tags_from_time_entries(
     team_id: float = Field(..., description="The unique identifier of the workspace containing the time entries."),
     time_entry_ids: list[str] = Field(..., description="List of time entry IDs from which the specified tags will be removed. Order is not significant."),
     tags: list[_models.RemovetagsfromtimeentriesBodyTagsItem] = Field(..., description="List of tag objects to remove from the specified time entries. Order is not significant; each item should represent a valid tag associated with the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more tags from specified time entries in a workspace. This disassociates the labels from the time entries without deleting the tags from the workspace."""
 
     # Construct request model with validation
@@ -6189,7 +6327,7 @@ async def start_time_entry(
     tags: list[_models.StartatimeEntryBodyTagsItem] | None = Field(None, description="A list of time tracking label objects to associate with this entry; available to Business Plan users and above. Order is not significant."),
     tid: str | None = Field(None, description="The ID of the task to associate with this time entry."),
     billable: bool | None = Field(None, description="Indicates whether the time being tracked should be marked as billable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts a running timer for the authenticated user within the specified workspace. Optionally associates the entry with a task, tags, and billable status."""
 
     # Construct request model with validation
@@ -6234,7 +6372,7 @@ async def start_time_entry(
 async def stop_time_entry(
     team_id: float = Field(..., description="The unique identifier of the workspace in which to stop the active time entry."),
     content_type: Literal["application/json"] = Field(..., alias="Content-Type", description="The media type of the request body, which must be set to indicate JSON formatting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Stops the currently running timer for the authenticated user in the specified workspace. Only one active timer can be running at a time, and this operation halts it immediately."""
 
     # Construct request model with validation
@@ -6276,7 +6414,7 @@ async def invite_workspace_member(
     email: str = Field(..., description="The email address of the person to invite to the Workspace."),
     admin: bool = Field(..., description="Set to true to grant the invited user admin-level permissions in the Workspace, or false for standard member permissions."),
     custom_role_id: int | None = Field(None, description="The ID of a custom role to assign to the invited user upon joining, if your Workspace has custom roles configured. Omit to use the default member role."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Invites a user to join a Workspace as a full member via email. This endpoint is exclusive to Enterprise Plan Workspaces; use the Invite Guest endpoint to add guest-level users instead."""
 
     # Construct request model with validation
@@ -6319,7 +6457,7 @@ async def get_workspace_user(
     team_id: float = Field(..., description="The unique numeric ID of the Workspace (also referred to as a team) containing the user."),
     user_id: float = Field(..., description="The unique numeric ID of the user to retrieve within the specified Workspace."),
     include_shared: bool | None = Field(None, description="When set to false, excludes details of items shared with the user as a guest; defaults to true to include all shared item details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed profile and role information for a specific user within a Workspace. Available exclusively on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -6364,7 +6502,7 @@ async def update_workspace_user(
     username: str = Field(..., description="The new display name to assign to the user within the Workspace."),
     admin: bool = Field(..., description="Whether the user should be granted admin-level privileges in the Workspace. Set to true to grant admin access, false to revoke it."),
     custom_role_id: int = Field(..., description="The identifier of the custom role to assign to the user, as defined in the Workspace's Enterprise role configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a workspace user's display name, admin status, and custom role assignment. This endpoint is exclusively available to Workspaces on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -6406,7 +6544,7 @@ async def update_workspace_user(
 async def remove_workspace_user(
     team_id: float = Field(..., description="The unique identifier of the Workspace (team) from which the user will be removed."),
     user_id: float = Field(..., description="The unique identifier of the user to be deactivated and removed from the Workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deactivates and removes a user from the specified Workspace, revoking their access. This endpoint is exclusively available to Workspaces on the Enterprise Plan."""
 
     # Construct request model with validation
@@ -6442,7 +6580,7 @@ async def remove_workspace_user(
 
 # Tags: Views
 @mcp.tool()
-async def list_workspace_views(team_id: float = Field(..., description="The unique identifier of the Workspace whose Everything-level views you want to retrieve.")) -> dict[str, Any]:
+async def list_workspace_views(team_id: float = Field(..., description="The unique identifier of the Workspace whose Everything-level views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available at the Everything level of a Workspace, providing a top-level overview of all views across the entire Workspace."""
 
     # Construct request model with validation
@@ -6508,7 +6646,7 @@ async def create_workspace_view(
     me_checklists: bool = Field(..., description="When true, the view is filtered to show only checklists assigned to or created by the current user."),
     divide_field: None = Field(None, alias="divideField", description="The field used to divide tasks within groups. Set to null to disable division."),
     divide_dir: None = Field(None, alias="divideDir", description="The sort direction for divided groups. Set to null to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view at the Everything (Workspace) level, supporting view types such as List, Board, Calendar, Table, Timeline, Workload, Activity, Map, Chat, or Gantt. Configure grouping, sorting, filtering, and display settings for the view."""
 
     # Construct request model with validation
@@ -6554,7 +6692,7 @@ async def create_workspace_view(
 
 # Tags: Views
 @mcp.tool()
-async def list_space_views(space_id: float = Field(..., description="The unique identifier of the Space whose views you want to retrieve.")) -> dict[str, Any]:
+async def list_space_views(space_id: float = Field(..., description="The unique identifier of the Space whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all task and page views available within a specific Space. Useful for discovering how work is organized and displayed within a Space."""
 
     # Construct request model with validation
@@ -6620,7 +6758,7 @@ async def create_space_view(
     me_checklists: bool = Field(..., description="When true, the view is filtered to show only tasks that have checklist items assigned to the currently authenticated user."),
     divide_field: None = Field(None, alias="divideField", description="The field used to divide tasks within groups. Set to null to disable division."),
     divide_dir: None = Field(None, alias="divideDir", description="Sort direction for divided groups. Set to null to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view (List, Board, Calendar, Table, Timeline, Workload, Activity, Map, Chat, or Gantt) within a specified Space, with full control over grouping, sorting, filtering, and display settings."""
 
     # Construct request model with validation
@@ -6666,7 +6804,7 @@ async def create_space_view(
 
 # Tags: Views
 @mcp.tool()
-async def list_folder_views(folder_id: float = Field(..., description="The unique identifier of the Folder whose views you want to retrieve.")) -> dict[str, Any]:
+async def list_folder_views(folder_id: float = Field(..., description="The unique identifier of the Folder whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available within a specific Folder. Use this to discover the views configured for organizing and displaying folder content."""
 
     # Construct request model with validation
@@ -6732,7 +6870,7 @@ async def create_folder_view(
     me_checklists: bool = Field(..., description="When true, the view is filtered to show only tasks with checklists belonging to the currently authenticated user."),
     divide_field: None = Field(None, alias="divideField", description="The field used to divide tasks within the view. Set to null to disable division."),
     divide_dir: None = Field(None, alias="divideDir", description="Sort direction for the divide field. Set to null to disable divide sorting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view (List, Board, Calendar, Table, Timeline, Workload, Activity, Map, Chat, or Gantt) inside a specified Folder, with full control over grouping, sorting, filtering, and display settings."""
 
     # Construct request model with validation
@@ -6778,7 +6916,7 @@ async def create_folder_view(
 
 # Tags: Views
 @mcp.tool()
-async def list_views(list_id: float = Field(..., description="The unique identifier of the List whose views you want to retrieve.")) -> dict[str, Any]:
+async def list_views(list_id: float = Field(..., description="The unique identifier of the List whose views you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all task and page views available for a specified List. Returns standard views and required views as separate response groups."""
 
     # Construct request model with validation
@@ -6844,7 +6982,7 @@ async def create_list_view(
     me_checklists: bool = Field(..., description="When true, the view is filtered to show only tasks that have checklist items assigned to the current user."),
     divide_field: None = Field(None, alias="divideField", description="The field used to divide tasks within the view. Set to null to disable division."),
     divide_dir: None = Field(None, alias="divideDir", description="The sort direction for the divide field. Set to null to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new view (List, Board, Calendar, Table, Timeline, Workload, Activity, Map, Chat, or Gantt) within a specified List, configuring grouping, sorting, filtering, and display options."""
 
     # Construct request model with validation
@@ -6890,7 +7028,7 @@ async def create_list_view(
 
 # Tags: Views
 @mcp.tool()
-async def get_view(view_id: str = Field(..., description="The unique identifier of the view to retrieve. Corresponds to a specific task or page view within the workspace.")) -> dict[str, Any]:
+async def get_view(view_id: str = Field(..., description="The unique identifier of the view to retrieve. Corresponds to a specific task or page view within the workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata and configuration details for a specific task or page view by its unique identifier. The fields returned vary depending on the view type."""
 
     # Construct request model with validation
@@ -6958,7 +7096,7 @@ async def update_view(
     me_checklists: bool = Field(..., description="When true, the view filters to show only tasks that have checklist items assigned to the currently authenticated user."),
     divide_field: None = Field(None, alias="divideField", description="The field used to divide tasks within the view. Set to null to disable division."),
     divide_dir: None = Field(None, alias="divideDir", description="The sort direction for the divide field. Set to null to disable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing view by renaming it or modifying its grouping, sorting, filters, columns, and display settings. Supports all view types within a Workspace, Space, Folder, or List."""
 
     # Construct request model with validation
@@ -7005,7 +7143,7 @@ async def update_view(
 
 # Tags: Views
 @mcp.tool()
-async def delete_view(view_id: str = Field(..., description="The unique identifier of the view to be deleted.")) -> dict[str, Any]:
+async def delete_view(view_id: str = Field(..., description="The unique identifier of the view to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specified view by its unique identifier. This action is irreversible and removes the view and its configuration from the system."""
 
     # Construct request model with validation
@@ -7044,7 +7182,7 @@ async def delete_view(view_id: str = Field(..., description="The unique identifi
 async def list_view_tasks(
     view_id: str = Field(..., description="The unique identifier of the view whose tasks you want to retrieve."),
     page: int = Field(..., description="The zero-based page number to retrieve for paginated results, where 0 returns the first page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all visible tasks within a specific ClickUp view, returned in paginated results."""
 
     # Construct request model with validation
@@ -7083,7 +7221,7 @@ async def list_view_tasks(
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks(team_id: float = Field(..., description="The unique identifier of the Workspace whose webhooks you want to retrieve.")) -> dict[str, Any]:
+async def list_webhooks(team_id: float = Field(..., description="The unique identifier of the Workspace whose webhooks you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all webhooks created via the API for a specified Workspace. Only webhooks created by the authenticated user are returned."""
 
     # Construct request model with validation
@@ -7119,7 +7257,7 @@ async def list_webhooks(team_id: float = Field(..., description="The unique iden
 
 # Tags: Webhooks
 @mcp.tool()
-async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier (UUID) of the webhook to delete.")) -> dict[str, Any]:
+async def delete_webhook(webhook_id: str = Field(..., description="The unique identifier (UUID) of the webhook to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook, stopping all event monitoring and location tracking associated with it. This action cannot be undone."""
 
     # Construct request model with validation

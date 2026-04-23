@@ -2,7 +2,7 @@
 #
 # Usage:
 #   1. Build: docker build -t mcparmory-clickup .
-#   2. Run:   docker run -p 8000:8000 --env-file .env mcparmory-clickup
+#   2. Run:   docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env mcparmory-clickup
 #
 # The .env file should contain your API credentials.
 # See the generated .env file for required variables.
@@ -42,9 +42,9 @@ RUN groupadd --gid 1000 mcp && \
 WORKDIR /app
 
 LABEL org.opencontainers.image.title="ClickUp MCP Server" \
-      org.opencontainers.image.vendor="MCP Blacksmith" \
-      org.opencontainers.image.source="https://mcpblacksmith.com"
-
+      org.opencontainers.image.vendor="MCP Armory" \
+      org.opencontainers.image.source="https://github.com/mcparmory/registry" \
+      io.modelcontextprotocol.server.name="com.mcparmory/clickup"
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -52,10 +52,14 @@ COPY --chown=mcp:mcp server.py .
 COPY --chown=mcp:mcp _validators.py .
 COPY --chown=mcp:mcp _model[s].py ./
 COPY --chown=mcp:mcp _aut[h].py ./
+# Token storage directory (mount as volume for persistence across container restarts)
+RUN mkdir -p /app/tokens && chown mcp:mcp /app/tokens
 
 USER mcp
 
 EXPOSE 8000
+# OAuth callback port (must match callback port in .env)
+EXPOSE 9400
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
