@@ -1,7 +1,7 @@
 """
 Google Search Console MCP Server - Validators
 
-Generated: 2026-04-14 18:23:52 UTC
+Generated: 2026-04-23 21:22:18 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
