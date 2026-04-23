@@ -30,9 +30,9 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 <!-- SERVERS:BEGIN -->
 ## Servers
 
-🧠 **AI & Machine Learning** &ensp; [ElevenLabs](servers/elevenlabs) · [Linkup](servers/linkup) · [Parallel API](servers/parallel) · [Perplexity AI API](servers/perplexity) · [Ragie](servers/ragie) · [Replicate](servers/replicate)
+🧠 **AI & Machine Learning** &ensp; [ElevenLabs](servers/elevenlabs) · [Linkup](servers/linkup) · [Parallel](servers/parallel) · [Perplexity AI](servers/perplexity) · [Ragie](servers/ragie) · [Replicate](servers/replicate)
 
-📊 **Analytics** &ensp; [Ahrefs API](servers/ahrefs) · [Datadog](servers/datadog) · [Google Analytics](servers/google-analytics) · [Google Search Console](servers/google-search-console) · [Linkly](servers/linkly) · [Mixpanel](servers/mixpanel) · [PostHog API](servers/posthog)
+📊 **Analytics** &ensp; [Ahrefs](servers/ahrefs) · [Datadog](servers/datadog) · [Google Analytics](servers/google-analytics) · [Google Search Console](servers/google-search-console) · [Linkly](servers/linkly) · [Mixpanel](servers/mixpanel) · [PostHog](servers/posthog)
 
 ⛓️ **Blockchain & Crypto** &ensp; [Alchemy NFT](servers/alchemy-nft)
 
@@ -40,13 +40,13 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 💬 **Communication** &ensp; [Atlassian Confluence](servers/atlassian-confluence) · [Google Gmail](servers/google-gmail) · [MailerSend](servers/mailersend) · [Mailtrap](servers/mailtrap) · [Postmark](servers/postmark) · [Resend](servers/resend)
 
-🗄️ **Data & Databases** &ensp; [Enigma](servers/enigma) · [Pinecone Control Plane API](servers/pinecone)
+🗄️ **Data & Databases** &ensp; [Enigma](servers/enigma) · [Pinecone Control Plane](servers/pinecone)
 
-🛠️ **Developer Tools** &ensp; [AgentQL](servers/agentql) · [Apify](servers/apify) · [Bitbucket](servers/bitbucket) · [Bright Data](servers/brightdata) · [Browserbase](servers/browserbase) · [BuiltWith](servers/builtwith) · [Canvas](servers/canvas) · [CircleCI](servers/circleci) · [Codacy](servers/codacy) · [Contentful Management](servers/contentful-management) · [ConvertAPI](servers/convertapi) · [E2B](servers/e2b) · [Firecrawl](servers/firecrawl) · [GitHub](servers/github) · [GitLab](servers/gitlab) · [LaunchDarkly](servers/launchdarkly) · [Postman](servers/postman) · [Scrapingant API](servers/scrapingant) · [Semrush AppCenter](servers/semrush-appcenter)
+🛠️ **Developer Tools** &ensp; [AgentQL](servers/agentql) · [Apify](servers/apify) · [Bitbucket](servers/bitbucket) · [Bright Data](servers/brightdata) · [Browserbase](servers/browserbase) · [BuiltWith](servers/builtwith) · [Canvas](servers/canvas) · [CircleCI](servers/circleci) · [Codacy](servers/codacy) · [Contentful Management](servers/contentful-management) · [ConvertAPI](servers/convertapi) · [E2B](servers/e2b) · [Firecrawl](servers/firecrawl) · [GitHub](servers/github) · [GitLab](servers/gitlab) · [LaunchDarkly](servers/launchdarkly) · [Postman](servers/postman) · [Scrapingant](servers/scrapingant) · [Semrush AppCenter](servers/semrush-appcenter)
 
-📄 **Documents & Printing** &ensp; [PDF.co API](servers/pdfco)
+📄 **Documents & Printing** &ensp; [PDF.co](servers/pdfco)
 
-💰 **Finance** &ensp; [Alpha Vantage](servers/alpha-vantage) · [Polygon API](servers/polygon) · [Ramp Developer API](servers/ramp)
+💰 **Finance** &ensp; [Alpha Vantage](servers/alpha-vantage) · [Polygon](servers/polygon) · [Ramp](servers/ramp)
 
 👥 **HR & Recruiting** &ensp; [BambooHR](servers/bamboohr)
 
@@ -58,11 +58,11 @@ MCP servers that connect AI agents to real-world APIs. Each server is a standalo
 
 📣 **Marketing** &ensp; [Customer.io Journeys Track](servers/customerio-journeys-track) · [Klaviyo](servers/klaviyo)
 
-🎬 **Media & Entertainment** &ensp; [Canva](servers/canva) · [Perigon API](servers/perigon)
+🎬 **Media & Entertainment** &ensp; [Canva](servers/canva) · [Perigon](servers/perigon)
 
 ✅ **Productivity** &ensp; [Airtable](servers/airtable) · [Asana](servers/asana) · [Atlassian Jira](servers/atlassian-jira) · [ClickUp](servers/clickup) · [Figma](servers/figma) · [Google Sheets](servers/google-sheets) · [Miro](servers/miro) · [Notion](servers/notion) · [Outline](servers/outline)
 
-🔍 **Search** &ensp; [Algolia Search](servers/algolia-search) · [Google Search API](servers/google-search)
+🔍 **Search** &ensp; [Algolia Search](servers/algolia-search) · [Google Search](servers/google-search)
 
 📦 **Storage** &ensp; [Box](servers/box) · [Files.com](servers/files-com) · [Google Drive](servers/google-drive)
 
