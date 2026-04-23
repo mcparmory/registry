@@ -1,11 +1,12 @@
 # BambooHR MCP Server
+<!-- mcp-name: com.mcparmory/bamboohr -->
 
 Base URL: https://companySubDomain.bamboohr.com
 | | |
 |---|---|
 | **Category** | HR & Recruiting |
 | **Tools** | 147 |
-| **Auth** | OAuth2, HTTP Basic, Bearer Token, API Key |
+| **Auth** | HTTP Basic, OAuth2 |
 
 ---
 
@@ -19,8 +20,7 @@ OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-API_KEY=YOUR_API_KEY \
+SERVER_COMPANYDOMAIN=YOUR_SERVER_COMPANYDOMAIN \
 uvx mcparmory-bamboohr
 ```
 
@@ -33,8 +33,7 @@ OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
 BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
-BEARER_TOKEN=YOUR_BEARER_TOKEN \
-API_KEY=YOUR_API_KEY \
+SERVER_COMPANYDOMAIN=YOUR_SERVER_COMPANYDOMAIN \
 mcparmory-bamboohr
 ```
 
@@ -54,8 +53,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
         "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
         "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
         "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD",
-        "BEARER_TOKEN": "YOUR_BEARER_TOKEN",
-        "API_KEY": "YOUR_API_KEY"
+        "SERVER_COMPANYDOMAIN": "YOUR_SERVER_COMPANYDOMAIN"
       }
     }
   }
@@ -75,8 +73,7 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `BASIC_AUTH_USERNAME` — Username
 - `BASIC_AUTH_PASSWORD` — Password
-- `BEARER_TOKEN` — Bearer token
-- `API_KEY` — API Key Authentication (X-API7-REGISTRATION-KEY)
+- `SERVER_COMPANYDOMAIN` — Company domain (default: `companySubDomain`)
 Do not commit credentials to version control.
 
 ### OAuth2
@@ -124,6 +121,21 @@ Example (if server is at `/home/user/mcp-servers/bamboohr`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
+  -e BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+  -e SERVER_COMPANYDOMAIN=YOUR_SERVER_COMPANYDOMAIN \
+  ghcr.io/mcparmory/bamboohr:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -135,6 +147,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env bam
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {

@@ -1,7 +1,7 @@
 """
 Bamboohr MCP Server - Validators
 
-Generated: 2026-04-14 18:15:45 UTC
+Generated: 2026-04-23 21:01:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

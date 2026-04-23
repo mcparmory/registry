@@ -1,7 +1,7 @@
 """
 Authentication module for BambooHR MCP server.
 
-Generated: 2026-04-14 18:15:45 UTC
+Generated: 2026-04-23 21:01:58 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "OAuth2Auth",
     "BasicAuth",
-    "BearerTokenAuth",
-    "APIKeyAuth",
     "OPERATION_AUTH_MAP",
 ]
 
@@ -71,116 +69,21 @@ class OAuth2Auth:
         Format: JSON with access_token, refresh_token, expires_at
 
     URLs:
-        Authorization URL: /authorize.php
-        Token URL: /token.php
+        Authorization URL: https://{companyDomain}.bamboohr.com/authorize.php
+        Token URL: https://{companyDomain}.bamboohr.com/token.php
 
     Available Scopes (configure via OAUTH2_SCOPES):
-        - access_level
-        - benchmarking:compensation
-        - background_checks
-        - background_checks.write
-        - benefit
-        - benefit.write
-        - company_file
-        - company_file.write
-        - company:info
-        - company:details
-        - company:administration
-        - company:administration.write
-        - data_cleaner
-        - payroll
-        - payroll.write
-        - payroll:legal_entities
-        - payroll:retirements
-        - payroll:pay_schedules
-        - payroll:pay_periods
-        - payroll:pay_stubs
-        - payroll:payrolls
-        - employee:assets
-        - employee:assets.write
-        - employee:emergency_contacts
-        - employee:emergency_contacts.write
-        - employee:vaccination
-        - employee:vaccination.write
-        - employee:custom_fields
-        - employee:custom_fields.write
-        - employee:custom_fields_encrypted
-        - employee:custom_fields_encrypted.write
-        - employee:demographic
-        - employee:demographic.write
-        - employee:dependent
-        - employee:dependent.write
-        - employee:dependent:ssn
-        - employee:dependent:ssn.write
-        - employee:education
-        - employee:education.write
-        - employee:contact
-        - employee:contact.write
-        - employee:identification
-        - employee:identification.write
-        - employee:job
-        - employee:job.write
-        - employee:management
-        - employee:management.write
-        - employee:photo
-        - employee:photo.write
+        - openid
+        - offline_access
         - employee
         - employee.write
-        - employee:name
-        - employee:name.write
-        - employee_directory
-        - employee:file
-        - employee:file.write
+        - employee:job
         - employee:compensation
-        - employee:compensation.write
-        - employee:providers
-        - employee:providers.write
-        - employee:providers:payroll
-        - employee:providers:payroll.write
-        - sensitive_employee:protected_info
-        - sensitive_employee:protected_info.write
-        - sensitive_employee:address
-        - sensitive_employee:address.write
-        - sensitive_employee:creditcards
-        - sensitive_employee:creditcards.write
-        - employee:payroll.write
-        - field
-        - field.write
-        - goal
-        - goal.write
-        - job_organization
-        - job_organization.write
-        - job_opening
-        - job_opening.write
-        - application
-        - application.write
-        - offline_access
-        - openid
-        - report
-        - tasks
-        - tasks.write
+        - employee:contact
         - time_off
-        - time_off.write
         - time_tracking
-        - time_tracking.write
-        - time_tracking:breaks
-        - time_tracking:breaks.write
-        - scheduling:schedules
-        - scheduling:schedules.write
-        - scheduling:shifts
-        - scheduling:shifts.write
-        - training
-        - training.write
+        - report
         - user
-        - user:management
-        - user:management.write
-        - webhooks
-        - webhooks.write
-        - error_management
-        - public.integration
-        - public.user
-        - gridlets
-        - mcp
     """
 
     def __init__(self):
@@ -220,8 +123,8 @@ class OAuth2Auth:
         self.redirect_uri = f"http://localhost:{self.callback_port}/callback"
 
         # OAuth2 token URL (required for all flows that fetch tokens)
-        self.token_url = "/token.php"
-        self.auth_url = "/authorize.php"
+        self.token_url = "https://{companyDomain}.bamboohr.com/token.php"
+        self.auth_url = "https://{companyDomain}.bamboohr.com/authorize.php"
         self.refresh_url = None
 
         # Token storage (secure file-based, unique per scheme)
@@ -601,118 +504,6 @@ class BasicAuth:
             'Authorization': f'Basic {encoded_credentials}',
         }
 
-class BearerTokenAuth:
-    """
-    Bearer token authentication for BambooHR API.
-
-    Configuration:
-        Provide the raw token in the environment variable.
-        The authorization scheme prefix is automatically inserted.
-    """
-
-    def __init__(self, env_var: str = "BEARER_TOKEN", token_format: str = "Bearer"):
-        """Initialize bearer token authentication from environment variable.
-
-        Args:
-            env_var: Environment variable name containing the bearer token.
-            token_format: Authorization scheme prefix (e.g., 'Bearer').
-        """
-        self.token_format = token_format
-        self.token = os.getenv(env_var, "").strip()
-
-        # Check for empty token
-        if not self.token:
-            raise ValueError(
-                f"{env_var} environment variable not set. "
-                "Leave empty in .env to disable Bearer Token auth."
-            )
-
-        # Detect common placeholder patterns
-        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "sk_test_placeholder"]
-        token_lower = self.token.lower()
-
-        if any(p in token_lower for p in placeholders):
-            raise ValueError(
-                f"Bearer token appears to be a placeholder ({self.token[:20]}...). "
-                "Please set a real token or leave empty to disable Bearer Token auth."
-            )
-
-    def get_auth_headers(self) -> dict[str, str]:
-        """Get authentication headers for API requests."""
-        return {
-            'Authorization': f'{self.token_format} {self.token}'
-        }
-
-class APIKeyAuth:
-    """
-    API Key authentication for BambooHR API.
-
-    Supports header, query parameter, cookie, and path-based API key injection.
-    Configure location and parameter name via constructor arguments.
-    """
-
-    def __init__(self, env_var: str = "API_KEY", location: str = "header",
-                 param_name: str = "Authorization", prefix: str = ""):
-        """Initialize API key authentication from environment variable.
-
-        Args:
-            env_var: Environment variable name containing the API key.
-            location: Where to inject the key - 'header', 'query', 'cookie', or 'path'.
-            param_name: Name of the header, query parameter, cookie, or path placeholder.
-            prefix: Optional prefix before the key value (e.g., 'Bearer').
-        """
-        self.location = location
-        self.param_name = param_name
-        self.prefix = prefix
-        self.api_key = os.getenv(env_var, "").strip()
-
-        # Check for empty API key
-        if not self.api_key:
-            raise ValueError(
-                f"{env_var} environment variable not set. "
-                "Leave empty in .env to disable API Key auth."
-            )
-
-        # Detect common placeholder patterns
-        placeholders = ["placeholder", "your-", "example", "change-me", "todo", "bot placeholder"]
-        api_key_lower = self.api_key.lower()
-
-        if any(p in api_key_lower for p in placeholders):
-            raise ValueError(
-                f"API key appears to be a placeholder ({self.api_key[:20]}...). "
-                "Please set a real API key or leave empty to disable API Key auth."
-            )
-
-    def get_auth_headers(self) -> dict[str, str]:
-        """Get authentication headers for API requests."""
-        if self.location != "header":
-            return {}
-        if self.param_name == "Authorization":
-            # Use explicit prefix if set; otherwise send the key raw (no Bearer assumption —
-            # apiKey schemes that happen to use the Authorization header don't imply Bearer)
-            prefix = self.prefix + " " if self.prefix else ""
-            return {"Authorization": f"{prefix}{self.api_key}"}
-        value = f"{self.prefix} {self.api_key}" if self.prefix else self.api_key
-        return {self.param_name: value}
-
-    def get_auth_params(self) -> dict[str, str]:
-        """Get authentication query parameters."""
-        if self.location != "query":
-            return {}
-        return {self.param_name: self.api_key}
-
-    def get_auth_cookies(self) -> dict[str, str]:
-        """Get authentication cookies."""
-        if self.location != "cookie":
-            return {}
-        return {self.param_name: self.api_key}
-
-    def get_auth_path_params(self) -> dict[str, str]:
-        """Get authentication path parameters for URL template substitution."""
-        if self.location != "path":
-            return {}
-        return {self.param_name: self.api_key}
-
 
 # ============================================================================
 # Operation Auth Requirements Map
@@ -780,7 +571,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "list_benefit_deduction_types": [["oauth"], ["basic"]],
     "get_company_profile": [["oauth"], ["basic"]],
     "list_enabled_integrations": [["oauth"], ["basic"]],
-    "list_employees": [["oauth"]],
+    "list_employees": [["oauth"], ["basic"]],
     "create_employee": [["oauth"], ["basic"]],
     "update_employee_table_row": [["oauth"], ["basic"]],
     "delete_employee_table_row": [["oauth"], ["basic"]],
@@ -815,7 +606,7 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "delete_time_tracking_record": [["oauth"], ["basic"]],
     "list_country_states": [["oauth"], ["basic"]],
     "list_countries": [["oauth"], ["basic"]],
-    "list_timezones": [],
+    "list_timezones": [["basic"], ["oauth"]],
     "list_employee_fields": [["oauth"], ["basic"]],
     "list_users": [["oauth"], ["basic"]],
     "get_employee": [["oauth"], ["basic"]],
