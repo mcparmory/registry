@@ -7,7 +7,7 @@ API Info:
 - Contact: Canva Developer Community (https://community.canva.dev/)
 - Terms of Service: https://www.canva.com/trust/legal/
 
-Generated: 2026-04-14 18:17:01 UTC
+Generated: 2026-04-23 21:05:52 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +42,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.canva.com/rest")
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +719,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +775,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +841,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +875,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -890,16 +1003,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -913,6 +1027,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -955,6 +1070,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -966,7 +1096,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -974,7 +1103,6 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'oauthAuthCode',
-    'basicAuth',
 ]
 
 # Initialize authentication handlers at server startup
@@ -987,14 +1115,6 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for oauthAuthCode not configured: {error_msg}")
     _auth_handlers["oauthAuthCode"] = None
-try:
-    _auth_handlers["basicAuth"] = _auth.BasicAuth(env_var_username="BASIC_AUTH_USERNAME", env_var_password="BASIC_AUTH_PASSWORD")
-    logging.info("Authentication configured: basicAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for basicAuth not configured: {error_msg}")
-    _auth_handlers["basicAuth"] = None
 
 # Warn only if NO auth handlers were successfully configured
 if all(handler is None for handler in _auth_handlers.values()):
@@ -1116,7 +1236,7 @@ mcp = FastMCP("Canva", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: asset
 @mcp.tool()
-async def get_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to retrieve. Must be alphanumeric with hyphens and underscores allowed.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to retrieve. Must be alphanumeric with hyphens and underscores allowed.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific asset by its unique identifier. Use this operation to fetch asset information such as properties, status, and configuration details."""
 
     # Construct request model with validation
@@ -1156,7 +1276,7 @@ async def update_asset(
     asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to update. Must be alphanumeric with hyphens and underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     name: str | None = Field(None, description="The new name for the asset as displayed in the Canva UI. Leave undefined or empty to skip updating the name.", max_length=50),
     tags: list[str] | None = Field(None, description="Replacement tags for the asset. All existing tags are replaced when provided. Leave undefined to skip updating tags.", max_length=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an asset's name and tags by asset ID. Tags are replaced entirely when provided, allowing you to manage asset metadata in the Canva UI."""
 
     # Construct request model with validation
@@ -1195,7 +1315,7 @@ async def update_asset(
 
 # Tags: asset
 @mcp.tool()
-async def delete_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def delete_asset(asset_id: str = Field(..., alias="assetId", description="The unique identifier of the asset to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Delete an asset by its ID, moving it to trash. This mirrors the Canva UI behavior and does not remove the asset from designs that already use it."""
 
     # Construct request model with validation
@@ -1234,7 +1354,7 @@ async def delete_asset(asset_id: str = Field(..., alias="assetId", description="
 async def upload_asset(
     asset_upload_metadata: _models.CreateAssetUploadJobHeaderAssetUploadMetadata = Field(..., alias="Asset-Upload-Metadata", description="Metadata describing the asset being uploaded, including asset name, type, and other identifying information."),
     body: str = Field(..., description="The raw binary file content to upload as an asset. The file must be in a supported format as documented in the Assets API overview."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to upload an asset file to the user's content library. Use the returned job ID to poll for completion status and retrieve the uploaded asset details."""
 
     # Construct request model with validation
@@ -1277,7 +1397,7 @@ async def upload_asset(
 
 # Tags: asset
 @mcp.tool()
-async def get_asset_upload_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_asset_upload_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and result of an asset upload job. Use this to poll for completion after creating an upload job, as the operation is asynchronous and may require multiple requests until a success or failed status is returned."""
 
     # Construct request model with validation
@@ -1316,7 +1436,7 @@ async def get_asset_upload_job(job_id: str = Field(..., alias="jobId", descripti
 async def initiate_url_asset_upload(
     name: str = Field(..., description="A descriptive name for the asset being uploaded. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     url: str = Field(..., description="The publicly accessible URL of the file to import. The URL must be reachable from the internet and support direct file access. Must be between 8 and 2048 characters.", min_length=8, max_length=2048),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts an asynchronous job to upload an asset from a publicly accessible URL to the user's content library. Supported file types are documented in the Assets API overview, with video assets limited to 100MB maximum file size."""
 
     # Construct request model with validation
@@ -1354,7 +1474,7 @@ async def initiate_url_asset_upload(
 
 # Tags: asset
 @mcp.tool()
-async def get_asset_upload_job_from_url(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_asset_upload_job_from_url(job_id: str = Field(..., alias="jobId", description="The unique identifier of the asset upload job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the status and result of an asset upload job created via URL. Poll this endpoint until the job reaches a terminal state (success or failed)."""
 
     # Construct request model with validation
@@ -1394,7 +1514,7 @@ async def autofill_design(
     brand_template_id: str = Field(..., description="The ID of the brand template to use for autofilling. Brand template IDs were migrated to a new format in September 2025; old IDs remain supported for 6 months."),
     data: dict[str, _models.DatasetValue] = Field(..., description="Data object containing field names mapped to their values. Supports images (via asset_id), text strings, and chart data with typed rows and cells."),
     title: str | None = Field(None, description="Optional title for the autofilled design. If not provided, the design will use the brand template's title.", min_length=1, max_length=255),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts an asynchronous job to autofill a Canva design using a brand template and input data. Requires membership in a Canva Enterprise organization."""
 
     # Construct request model with validation
@@ -1432,7 +1552,7 @@ async def autofill_design(
 
 # Tags: autofill
 @mcp.tool()
-async def get_autofill_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design autofill job to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_autofill_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design autofill job to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieve the result of a design autofill job. Poll this endpoint until the job reaches a `success` or `failed` status to get the final result."""
 
     # Construct request model with validation
@@ -1474,7 +1594,7 @@ async def list_brand_templates(
     ownership: Literal["any", "owned", "shared"] | None = Field(None, description="Filter brand templates based on the user's ownership relationship to them."),
     sort_by: Literal["relevance", "modified_descending", "modified_ascending", "title_descending", "title_ascending"] | None = Field(None, description="Sort the returned brand templates by relevance, modification date, or title in ascending or descending order."),
     dataset: Literal["any", "non_empty"] | None = Field(None, description="Filter brand templates based on whether they have dataset definitions configured for use with Autofill APIs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of brand templates that the user has access to within their Canva Enterprise organization. Supports searching, filtering by ownership and dataset definitions, and sorting options."""
 
     _limit = _parse_int(limit)
@@ -1514,7 +1634,7 @@ async def list_brand_templates(
 
 # Tags: brand_template
 @mcp.tool()
-async def get_brand_template(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier for the brand template. Must be 1-50 characters long and contain only alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_brand_template(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier for the brand template. Must be 1-50 characters long and contain only alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for a brand template. Note: Brand template IDs were migrated to a new format in September 2025; old IDs remain valid for 6 months. Requires the user to be a member of a Canva Enterprise organization."""
 
     # Construct request model with validation
@@ -1550,7 +1670,7 @@ async def get_brand_template(brand_template_id: str = Field(..., alias="brandTem
 
 # Tags: brand_template
 @mcp.tool()
-async def get_brand_template_dataset(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier of the brand template. Brand template IDs were migrated to a new format in September 2025; old IDs remain valid for 6 months.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_brand_template_dataset(brand_template_id: str = Field(..., alias="brandTemplateId", description="The unique identifier of the brand template. Brand template IDs were migrated to a new format in September 2025; old IDs remain valid for 6 months.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the dataset definition for a brand template, including any autofill data fields and their accepted types (images, text, or charts). Use this to understand what data can be populated when creating a design autofill job."""
 
     # Construct request model with validation
@@ -1590,7 +1710,7 @@ async def list_comment_replies(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread for which to retrieve replies.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     limit: int | None = Field(None, description="The maximum number of replies to return in the response. Defaults to 50 if not specified.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all replies for a specific comment or suggestion thread on a design. This preview API allows you to access threaded discussions within design comments."""
 
     # Construct request model with validation
@@ -1633,7 +1753,7 @@ async def create_comment_reply(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread to reply to. This ID is returned when a thread is created or can be obtained from existing replies in the thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     message_plaintext: str = Field(..., description="The reply message in plaintext format. You can mention users by including their User ID and Team ID using the format [user_id:team_id].", min_length=1, max_length=2048),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a reply to a comment or suggestion thread on a design. Each thread supports a maximum of 100 replies, and you can mention users by including their User ID and Team ID in the message."""
 
     # Construct request model with validation
@@ -1675,7 +1795,7 @@ async def create_comment_reply(
 async def get_comment_thread(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a comment or suggestion thread on a design. Use this to fetch details about a specific comment thread; for replies within a thread, use the get_reply operation instead."""
 
     # Construct request model with validation
@@ -1715,7 +1835,7 @@ async def get_comment_reply(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the comment thread.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     thread_id: str = Field(..., alias="threadId", description="The unique identifier of the comment thread containing the reply.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     reply_id: str = Field(..., alias="replyId", description="The unique identifier of the specific reply to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific reply to a comment or suggestion thread on a design. This API is currently in preview and may have unannounced breaking changes."""
 
     # Construct request model with validation
@@ -1755,7 +1875,7 @@ async def create_comment(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design where the comment will be created.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     message_plaintext: str = Field(..., description="The comment message in plaintext. You can mention users by including their User ID and Team ID in the format [user_id:team_id]. If assigning the comment to a user, you must mention them in this message.", min_length=1, max_length=2048),
     assignee_id: str | None = Field(None, description="Optionally assign the comment to a Canva user by their User ID. The assigned user must be mentioned in the message_plaintext parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new comment thread on a design. Comments enable collaboration and feedback within Canva designs, with optional user assignment and mentions."""
 
     # Construct request model with validation
@@ -1799,7 +1919,7 @@ async def list_designs(
     ownership: Literal["any", "owned", "shared"] | None = Field(None, description="Filter designs based on ownership status. Use 'owned' for designs created by the user, 'shared' for designs shared with the user, or 'any' to include both."),
     sort_by: Literal["relevance", "modified_descending", "modified_ascending", "title_descending", "title_ascending"] | None = Field(None, description="Sort the returned designs by relevance to search query, modification date, or title in ascending or descending order."),
     limit: str | None = Field(None, description="Maximum number of designs to return in the response. Useful for pagination and controlling response size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve metadata for all designs in a Canva user's projects. Supports filtering by search terms, ownership status, and sorting options to help users find and organize their designs."""
 
     _limit = _parse_int(limit)
@@ -1843,7 +1963,7 @@ async def create_design(
     design_type: Annotated[_models.PresetDesignTypeInput | _models.CustomDesignTypeInput, Field(discriminator="type_")] | None = Field(None, description="The preset design type to use for the new design. Either specify a design_type or provide custom height and width dimensions."),
     asset_id: str | None = Field(None, description="The ID of an image asset from the user's projects to insert into the created design. Currently supports image assets only."),
     title: str | None = Field(None, description="The name of the design. Must be between 1 and 255 characters.", min_length=1, max_length=255),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new Canva design using either a preset design type or custom dimensions. Optionally add an image asset to the design. Note: Blank designs are automatically deleted after 7 days if not edited."""
 
     # Construct request model with validation
@@ -1881,7 +2001,7 @@ async def create_design(
 
 # Tags: design
 @mcp.tool()
-async def get_design(design_id: str = Field(..., alias="designId", description="The unique identifier for the design to retrieve. Must be alphanumeric with hyphens and underscores allowed, between 1 and 50 characters in length.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_design(design_id: str = Field(..., alias="designId", description="The unique identifier for the design to retrieve. Must be alphanumeric with hyphens and underscores allowed, between 1 and 50 characters in length.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves comprehensive metadata for a specific design, including owner information, editing and viewing URLs, and thumbnail details."""
 
     # Construct request model with validation
@@ -1921,7 +2041,7 @@ async def list_design_pages(
     design_id: str = Field(..., alias="designId", description="The unique identifier of the design containing the pages to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     offset: str | None = Field(None, description="The page index to start retrieving from. Pages use one-based numbering, where the first page has index 1."),
     limit: str | None = Field(None, description="The maximum number of pages to return in this request, starting from the offset index."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves metadata for pages in a design, including page-specific thumbnails. Use offset and limit parameters to paginate through pages. Note: Some design types (such as Canva docs) do not have pages."""
 
     _offset = _parse_int(offset)
@@ -1963,7 +2083,7 @@ async def list_design_pages(
 
 # Tags: design
 @mcp.tool()
-async def list_design_export_formats(design_id: str = Field(..., alias="designId", description="The unique identifier of the design whose export formats you want to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def list_design_export_formats(design_id: str = Field(..., alias="designId", description="The unique identifier of the design whose export formats you want to retrieve.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the available file formats for exporting a design. The returned formats depend on the design type and page types within the design, showing only formats supported by all pages."""
 
     # Construct request model with validation
@@ -2002,7 +2122,7 @@ async def list_design_export_formats(design_id: str = Field(..., alias="designId
 async def import_design(
     import_metadata: _models.CreateDesignImportJobHeaderImportMetadata = Field(..., alias="Import-Metadata", description="Metadata describing the design being imported, including details about the source file and import configuration. Provided as an HTTP header parameter."),
     body: str = Field(..., description="The binary file content to import as a design. The file must be in a supported format for design imports."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to import an external file as a new design in Canva. Supported file types include various design formats; use the Get design import job API to check job status and retrieve results."""
 
     # Construct request model with validation
@@ -2045,7 +2165,7 @@ async def import_design(
 
 # Tags: design_import
 @mcp.tool()
-async def get_design_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_design_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of a design import job. Use this to poll for completion after creating an import job, as the operation is asynchronous and may require multiple requests until a success or failed status is returned."""
 
     # Construct request model with validation
@@ -2085,7 +2205,7 @@ async def import_design_from_url(
     title: str = Field(..., description="The title for the imported design. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     url: str = Field(..., description="The publicly accessible URL of the file to import. The URL must be reachable from the internet and support direct file access.", min_length=1, max_length=2048),
     mime_type: str | None = Field(None, description="The MIME type of the file being imported. If omitted, Canva will automatically detect the file type. Useful for improving import speed when the file type is known.", min_length=1, max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Starts an asynchronous job to import an external file from a URL as a new design in Canva. Supports multiple file types and allows optional MIME type specification for faster processing."""
 
     # Construct request model with validation
@@ -2123,7 +2243,7 @@ async def import_design_from_url(
 
 # Tags: design_import
 @mcp.tool()
-async def get_url_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the URL import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_url_import_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the URL import job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of a URL import job. Use this to poll for completion of an asynchronous import operation, which will return a `success` or `failed` status once processing is complete."""
 
     # Construct request model with validation
@@ -2162,7 +2282,7 @@ async def get_url_import_job(job_id: str = Field(..., alias="jobId", description
 async def start_design_export(
     design_id: str = Field(..., description="The unique identifier of the design to export."),
     format_: Annotated[_models.PdfExportFormat | _models.JpgExportFormat | _models.PngExportFormat | _models.PptxExportFormat | _models.GifExportFormat | _models.Mp4ExportFormat, Field(discriminator="type_")] = Field(..., alias="format", description="The desired export file format and associated configuration options."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to export a design file in the specified format (PDF, JPG, PNG, GIF, PPTX, or MP4). Download URLs are provided upon completion and remain valid for 24 hours."""
 
     # Construct request model with validation
@@ -2200,7 +2320,7 @@ async def start_design_export(
 
 # Tags: export
 @mcp.tool()
-async def get_design_export_job(export_id: str = Field(..., alias="exportId", description="The unique identifier of the export job to retrieve status and results for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_design_export_job(export_id: str = Field(..., alias="exportId", description="The unique identifier of the export job to retrieve status and results for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and results of a design export job. When successful, returns download URLs for each page of the exported design (valid for 24 hours). You may need to poll this endpoint until the job reaches a terminal status (success or failed)."""
 
     # Construct request model with validation
@@ -2236,7 +2356,7 @@ async def get_design_export_job(export_id: str = Field(..., alias="exportId", de
 
 # Tags: folder
 @mcp.tool()
-async def get_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to retrieve. Must be 1-50 characters containing alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to retrieve. Must be 1-50 characters containing alphanumeric characters, hyphens, or underscores.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the name and metadata details of a specific folder by its folder ID."""
 
     # Construct request model with validation
@@ -2275,7 +2395,7 @@ async def get_folder(folder_id: str = Field(..., alias="folderId", description="
 async def rename_folder(
     folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to rename.", pattern="^[a-zA-Z0-9_-]{1,50}$"),
     name: str = Field(..., description="The new name for the folder as it will appear in the Canva UI. Must be between 1 and 255 characters.", min_length=1, max_length=255),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Rename a folder in Canva by updating its name. The folder is identified by its unique folder ID."""
 
     # Construct request model with validation
@@ -2314,7 +2434,7 @@ async def rename_folder(
 
 # Tags: folder
 @mcp.tool()
-async def delete_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def delete_folder(folder_id: str = Field(..., alias="folderId", description="The unique identifier of the folder to delete.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a folder by moving its contents to Trash. Content owned by the folder owner goes to Trash, while content owned by other users is moved to the top level of their projects."""
 
     # Construct request model with validation
@@ -2356,7 +2476,7 @@ async def list_folder_items(
     item_types: list[Literal["design", "folder", "image"]] | None = Field(None, description="Filter results to only include specified item types. Provide a comma-separated list to filter for multiple types. Available types are: design, folder, and image."),
     sort_by: Literal["created_ascending", "created_descending", "modified_ascending", "modified_descending", "title_ascending", "title_descending"] | None = Field(None, description="Sort the returned items by creation date, modification date, or title in ascending or descending order. Defaults to most recently modified first."),
     pin_status: Literal["any", "pinned"] | None = Field(None, description="Filter items by their pinned status. Use 'pinned' to show only pinned items, or 'any' to show all items regardless of pin status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all items contained in a folder, including nested folders, designs (such as presentations and documents), and image assets. Use optional filters to narrow results by item type, sort order, or pinned status."""
 
     _limit = _parse_int(limit)
@@ -2403,7 +2523,7 @@ async def list_folder_items(
 async def move_item(
     to_folder_id: str = Field(..., description="The ID of the destination folder. Use the special ID `root` to move the item to the top level of the user's projects.", min_length=1, max_length=50),
     item_id: str = Field(..., description="The ID of the item to move. Video assets are not supported.", min_length=1, max_length=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves an item (design, folder, or asset) to a different folder. Note: If the item exists in multiple folders, use the Canva UI to move it instead."""
 
     # Construct request model with validation
@@ -2444,7 +2564,7 @@ async def move_item(
 async def create_folder(
     name: str = Field(..., description="The name for the new folder. Must be between 1 and 255 characters.", min_length=1, max_length=255),
     parent_folder_id: str = Field(..., description="The ID of the parent folder where this folder will be created. Use `root` for top-level projects, `uploads` for the Uploads folder, or provide a specific folder ID.", min_length=1, max_length=50),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new folder in a user's Canva workspace at the specified location (top-level projects, Uploads folder, or within another folder). Returns the folder ID and metadata upon successful creation."""
 
     # Construct request model with validation
@@ -2482,7 +2602,7 @@ async def create_folder(
 
 # Tags: oidc
 @mcp.tool()
-async def get_current_user_info() -> dict[str, Any]:
+async def get_current_user_info() -> dict[str, Any] | ToolResult:
     """Retrieves the current authenticated user's identity claims and profile information. Returns the same user attributes that were included in the ID token during authorization."""
 
     # Extract parameters for API call
@@ -2512,7 +2632,7 @@ async def get_current_user_info() -> dict[str, Any]:
 async def start_design_resize_job(
     design_id: str = Field(..., description="The unique identifier of the design to be resized."),
     design_type: Annotated[_models.PresetDesignTypeInput | _models.CustomDesignTypeInput, Field(discriminator="type_")] = Field(..., description="The target design type for the resized design. Can be either a preset design type or a custom design with specified height and width dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous job to create a resized copy of a design. The resized design is added to the user's root folder and can be sized using either a preset design type or custom dimensions."""
 
     # Construct request model with validation
@@ -2550,7 +2670,7 @@ async def start_design_resize_job(
 
 # Tags: resize
 @mcp.tool()
-async def get_resize_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design resize job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any]:
+async def get_resize_job(job_id: str = Field(..., alias="jobId", description="The unique identifier of the design resize job to retrieve status for.", pattern="^[a-zA-Z0-9_-]{1,50}$")) -> dict[str, Any] | ToolResult:
     """Retrieves the status and result of an asynchronous design resize job. Use this to poll for job completion after initiating a resize operation, which will include the resized design metadata upon success."""
 
     # Construct request model with validation
@@ -2586,7 +2706,7 @@ async def get_resize_job(job_id: str = Field(..., alias="jobId", description="Th
 
 # Tags: user
 @mcp.tool()
-async def get_current_user() -> dict[str, Any]:
+async def get_current_user() -> dict[str, Any] | ToolResult:
     """Retrieves the current authenticated user's ID and team ID based on the provided access token."""
 
     # Extract parameters for API call
@@ -2613,7 +2733,7 @@ async def get_current_user() -> dict[str, Any]:
 
 # Tags: user
 @mcp.tool()
-async def list_user_capabilities() -> dict[str, Any]:
+async def list_user_capabilities() -> dict[str, Any] | ToolResult:
     """Retrieves the list of API capabilities available for the authenticated user account. This shows which features and operations the user's access token is authorized to use."""
 
     # Extract parameters for API call
@@ -2640,7 +2760,7 @@ async def list_user_capabilities() -> dict[str, Any]:
 
 # Tags: user
 @mcp.tool()
-async def get_user_profile() -> dict[str, Any]:
+async def get_user_profile() -> dict[str, Any] | ToolResult:
     """Retrieve the profile information for the authenticated user associated with the provided access token. Currently returns the user's display name, with additional profile data expected in future releases."""
 
     # Extract parameters for API call

@@ -1,11 +1,12 @@
 # Canva MCP Server
+<!-- mcp-name: com.mcparmory/canva -->
 
 Base URL: https://api.canva.com/rest
 | | |
 |---|---|
 | **Category** | Media & Entertainment |
 | **Tools** | 40 |
-| **Auth** | OAuth2, HTTP Basic |
+| **Auth** | OAuth2 |
 
 ## API Info
 - **API License:** ©2023 All Rights Reserved
@@ -22,8 +23,6 @@ Base URL: https://api.canva.com/rest
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
 uvx mcparmory-canva
 ```
 
@@ -34,8 +33,6 @@ pip install mcparmory-canva
 OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
 OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
 OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
-BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
-BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
 mcparmory-canva
 ```
 
@@ -52,9 +49,7 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "env": {
         "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
         "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
-        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
-        "BASIC_AUTH_USERNAME": "YOUR_BASIC_AUTH_USERNAME",
-        "BASIC_AUTH_PASSWORD": "YOUR_BASIC_AUTH_PASSWORD"
+        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES"
       }
     }
   }
@@ -72,8 +67,6 @@ Set the following environment variables (via MCP client `env` config, shell expo
 - `OAUTH2_CLIENT_ID` — OAuth2 client ID
 - `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
 - `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
-- `BASIC_AUTH_USERNAME` — Username
-- `BASIC_AUTH_PASSWORD` — Password
 Do not commit credentials to version control.
 
 ### OAuth2
@@ -121,6 +114,18 @@ Example (if server is at `/home/user/mcp-servers/canva`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  ghcr.io/mcparmory/canva:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -132,6 +137,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env can
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {
