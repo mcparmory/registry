@@ -1,7 +1,7 @@
 """
 Linkly MCP Server - Validators
 
-Generated: 2026-04-14 18:25:25 UTC
+Generated: 2026-04-23 21:26:33 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 

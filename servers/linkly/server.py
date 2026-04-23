@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Linkly MCP Server
-Generated: 2026-04-14 18:25:25 UTC
+Generated: 2026-04-23 21:26:33 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.linklyhq.com")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,87 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            _file_values = _value if isinstance(_value, (list, tuple)) else [_value]
+                            for _file_item in _file_values:
+                                if _file_item is None:
+                                    continue
+                                if isinstance(_file_item, str):
+                                    _file_content = _file_item.encode("utf-8")
+                                elif isinstance(_file_item, (bytes, bytearray)):
+                                    _file_content = bytes(_file_item)
+                                else:
+                                    raise ValueError(
+                                        f"Unsupported multipart file field '{_key}': "
+                                        "expected str, bytes, or list of str/bytes, got "
+                                        f"{type(_file_item).__name__}"
+                                    )
+                                _multipart_parts.append(
+                                    (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                                )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +718,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +774,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +840,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +874,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -822,16 +940,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -845,6 +964,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -887,6 +1007,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -898,7 +1033,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1042,7 +1176,7 @@ mcp = FastMCP("Linkly", middleware=[_JsonCoercionMiddleware()])
 async def add_domain_to_workspace(
     workspace_id: int = Field(..., description="The unique identifier of the workspace where the domain will be added."),
     name: str | None = Field(None, description="The name of the custom domain to add to your workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new custom domain to your workspace. Ensure DNS CNAME record configuration is completed before adding the domain."""
 
     # Construct request model with validation
@@ -1080,7 +1214,7 @@ async def add_domain_to_workspace(
 
 # Tags: Links
 @mcp.tool()
-async def get_link(id_: int = Field(..., alias="id", description="The unique identifier of the link to retrieve (e.g., 24).")) -> dict[str, Any]:
+async def get_link(id_: int = Field(..., alias="id", description="The unique identifier of the link to retrieve (e.g., 24).")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific link by its unique identifier."""
 
     # Construct request model with validation
@@ -1142,7 +1276,7 @@ async def create_or_update_link(
     tiktok_pixel_id: str | None = Field(None, description="TikTok Pixel ID for conversion tracking and audience building on TikTok."),
     url: str | None = Field(None, description="Destination URL to redirect to. Required when creating a new link; must be a valid URI."),
     workspace_id: int | None = Field(None, description="Workspace ID"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new shortened link or update an existing one. Provide `url` and `workspace_id` to create; provide `id` and fields to update. Supports custom slugs, UTM parameters, tracking pixels, Open Graph metadata, and conditional redirect rules."""
 
     # Construct request model with validation
@@ -1183,7 +1317,7 @@ async def create_or_update_link(
 async def get_link_analytics(
     id_: str = Field(..., alias="id", description="The unique identifier of the link to retrieve. Use the link ID provided when the link was created."),
     workspace_id: str | None = Field(None, description="Workspace ID. Optional when using OAuth2 Bearer token."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific link, including click statistics, UTM parameters, and configuration settings."""
 
     # Construct request model with validation
@@ -1220,7 +1354,7 @@ async def get_link_analytics(
 
 # Tags: Webhooks
 @mcp.tool()
-async def list_webhooks_for_link(link_id: int = Field(..., description="The unique identifier of the link whose webhooks you want to retrieve. Must be a positive integer.")) -> dict[str, Any]:
+async def list_webhooks_for_link(link_id: int = Field(..., description="The unique identifier of the link whose webhooks you want to retrieve. Must be a positive integer.")) -> dict[str, Any] | ToolResult:
     """Retrieve all webhook subscriptions configured for a specific link. Returns a list of webhooks that are actively monitoring events for the given link."""
 
     # Construct request model with validation
@@ -1269,7 +1403,7 @@ async def get_clicks_analytics(
     pivot: Literal["link_id"] | None = Field(None, description="Transform the response into a matrix format where dates appear as rows and links as columns. When set to 'link_id', CSV/TSV responses include header rows with link name, full URL, and ID."),
     timezone_: str | None = Field(None, alias="timezone", description="The timezone to apply for date and time calculations (e.g., America/New_York). Affects how dates are bucketed and displayed."),
     frequency: Literal["day", "hour"] | None = Field(None, description="The time granularity for aggregating data points: 'day' (default) for daily buckets or 'hour' for hourly buckets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve click analytics for a workspace with flexible filtering and aggregation options. Returns time-series data suitable for charting, with support for multiple output formats and pivot transformations."""
 
     # Construct request model with validation
@@ -1313,7 +1447,7 @@ async def get_click_counters_by_dimension(
     end: str | None = Field(None, description="The end date for filtering analytics data, specified in YYYY-MM-DD format. If omitted, defaults to the current date."),
     country: str | None = Field(None, description="Filter results to a specific country using its ISO 3166-1 alpha-2 country code (e.g., 'US', 'GB', 'DE'). If omitted, all countries are included."),
     format_: Literal["json", "csv", "tsv"] | None = Field(None, alias="format", description="The response format for the analytics data. Choose from JSON (default, structured format), CSV (comma-separated values), or TSV (tab-separated values)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated click analytics grouped by a specified dimension (such as country, platform, or browser). Returns click counts for each unique value within the selected dimension, with optional filtering by date range, country, and response format."""
 
     # Construct request model with validation
@@ -1350,7 +1484,7 @@ async def get_click_counters_by_dimension(
 
 # Tags: Domains
 @mcp.tool()
-async def list_domains(workspace_id: str = Field(..., description="The unique identifier of the workspace whose domains you want to list.")) -> dict[str, Any]:
+async def list_domains(workspace_id: str = Field(..., description="The unique identifier of the workspace whose domains you want to list.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom domains configured for a workspace. These domains can be used as targets when creating short links."""
 
     # Construct request model with validation
@@ -1389,7 +1523,7 @@ async def list_domains(workspace_id: str = Field(..., description="The unique id
 async def add_domain_to_workspace_by_id(
     workspace_id: str = Field(..., description="The unique identifier of the workspace where the domain will be added."),
     name: str = Field(..., description="The fully qualified domain name to add (e.g., links.example.com). Ensure the corresponding CNAME record is configured in your DNS provider before adding."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a custom domain to a workspace. The domain must have a CNAME record configured in DNS before being added."""
 
     # Construct request model with validation
@@ -1431,7 +1565,7 @@ async def add_domain_to_workspace_by_id(
 async def delete_domain(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the domain to be deleted."),
     domain_id: str = Field(..., description="The unique identifier of the domain to be removed from the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom domain from your workspace. Once deleted, any links using this domain will no longer be functional."""
 
     # Construct request model with validation
@@ -1471,7 +1605,7 @@ async def update_domain_favicon(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the domain. Typically a numeric ID."),
     id_: str = Field(..., alias="id", description="The unique identifier of the domain whose favicon should be updated. Typically a numeric ID."),
     favicon_url: str | None = Field(None, description="A valid URI pointing to the favicon image file. Common formats include .ico, .png, and .svg. If omitted, the favicon will not be updated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the favicon URL for a custom domain within a workspace. The favicon will be displayed in browser tabs and bookmarks for the domain."""
 
     # Construct request model with validation
@@ -1542,7 +1676,7 @@ async def create_or_update_link_batch(
     forward_params: bool | None = Field(None, description="When enabled, query parameters from the shortened link are automatically forwarded to the destination URL."),
     head_tags: str | None = Field(None, description="Custom HTML tags to inject into the head section of the destination page."),
     ga4_tag_id: str | None = Field(None, description="Google Analytics 4 measurement ID for tracking events and conversions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new link or update an existing one in a workspace. Include an 'id' field to update an existing link, or omit it to create a new one. Supports batch operations by accepting an array of links."""
 
     # Construct request model with validation
@@ -1584,7 +1718,7 @@ async def create_or_update_link_batch(
 async def delete_links(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the links to delete."),
     ids: list[int] | None = Field(None, description="Array of link IDs to delete. If not provided, no links will be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete one or more links from a workspace by their IDs. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1627,7 +1761,7 @@ async def export_links(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the links to export."),
     format_: Literal["json", "csv"] | None = Field(None, alias="format", description="The output format for the exported links. Choose between JSON (default) or CSV."),
     search: str | None = Field(None, description="Optional search query to filter which links are included in the export. Only links matching the query will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export all links in a workspace in JSON or CSV format, with optional filtering by search query."""
 
     # Construct request model with validation
@@ -1667,7 +1801,7 @@ async def export_links(
 async def delete_link(
     workspace_id: str = Field(..., description="The unique identifier of the workspace containing the link to delete."),
     id_: int = Field(..., alias="id", description="The unique identifier of the link to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently delete a specific link from a workspace by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1710,7 +1844,7 @@ async def list_links(
     page_size: int | None = Field(None, description="The maximum number of links to return per page. Defaults to 1000 if not specified."),
     sort_by: str | None = Field(None, description="The field name to sort results by. Common sortable fields include creation date, click count, and link name."),
     sort_dir: str | None = Field(None, description="The sort direction for results: ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all links in a workspace with support for searching, sorting, and filtering. Results include click statistics and link metadata for each entry."""
 
     # Construct request model with validation
@@ -1747,7 +1881,7 @@ async def list_links(
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspaces() -> dict[str, Any]:
+async def list_workspaces() -> dict[str, Any] | ToolResult:
     """Retrieve all workspaces accessible to the authenticated user. Use this operation to discover available workspace IDs for use in other API calls."""
 
     # Extract parameters for API call
@@ -1777,7 +1911,7 @@ async def list_workspaces() -> dict[str, Any]:
 async def delete_webhook_from_link(
     link_id: int = Field(..., description="The unique identifier of the link from which to remove the webhook subscription."),
     hook_id: str = Field(..., description="The webhook URL to unsubscribe, provided in URL-encoded format (e.g., https%3A%2F%2Fhooks.example.com%2Fabc123)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a webhook subscription from a link by unsubscribing the specified webhook URL. This operation permanently deletes the webhook subscription relationship."""
 
     # Construct request model with validation
