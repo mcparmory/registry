@@ -1,11 +1,12 @@
 # Airtable MCP Server
+<!-- mcp-name: com.mcparmory/airtable -->
 
 Base URL: https://api.airtable.com
 | | |
 |---|---|
 | **Category** | Productivity |
 | **Tools** | 12 |
-| **Auth** | OAuth2, Bearer Token |
+| **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
 - **Terms of Service:** [https://www.airtable.com/tos](https://www.airtable.com/tos)
@@ -115,6 +116,19 @@ Example (if server is at `/home/user/mcp-servers/airtable`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/airtable:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -126,6 +140,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env air
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {

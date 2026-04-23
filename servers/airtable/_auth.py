@@ -1,7 +1,7 @@
 """
 Authentication module for Airtable MCP server.
 
-Generated: 2026-04-14 18:13:17 UTC
+Generated: 2026-04-23 20:56:31 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -531,6 +531,6 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "replace_record": [["oauth2"], ["bearerAuth"]],
     "update_record": [["oauth2"], ["bearerAuth"]],
     "delete_record": [["oauth2"], ["bearerAuth"]],
-    "sync_table_data": [["bearerAuth"]],
+    "sync_table_data": [["bearerAuth"], ["oauth2"]],
     "upload_attachment": [["oauth2"], ["bearerAuth"]]
 }
