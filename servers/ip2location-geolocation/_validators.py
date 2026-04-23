@@ -1,7 +1,7 @@
 """
 Ip2location.io Ip Geolocation MCP Server - Validators
 
-Generated: 2026-04-14 18:24:27 UTC
+Generated: 2026-04-23 21:24:00 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
