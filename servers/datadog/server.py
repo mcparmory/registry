@@ -5,7 +5,7 @@ Datadog MCP Server
 API Info:
 - Contact: Datadog Support <support@datadoghq.com> (https://www.datadoghq.com/support/)
 
-Generated: 2026-04-14 18:19:43 UTC
+Generated: 2026-04-23 21:11:53 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -40,6 +41,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 # Server variables (from OpenAPI spec, overridable via SERVER_* env vars)
@@ -49,13 +51,13 @@ _SERVER_VARS = {
 }
 BASE_URL = os.getenv("BASE_URL", "https://{subdomain}.{site}".format_map(collections.defaultdict(str, _SERVER_VARS)))
 OPERATION_URL_MAP: dict[str, str] = {
-    "publish_event": os.getenv("SERVER_URL_PUBLISH_EVENT", "https://event-management-intake.datadoghq.com"),
-    "send_logs": os.getenv("SERVER_URL_SEND_LOGS", "https://http-intake.logs.datadoghq.com"),
-    "create_page": os.getenv("SERVER_URL_CREATE_PAGE", "https://navy.oncall.datadoghq.com"),
-    "acknowledge_page": os.getenv("SERVER_URL_ACKNOWLEDGE_PAGE", "https://navy.oncall.datadoghq.com"),
-    "escalate_page": os.getenv("SERVER_URL_ESCALATE_PAGE", "https://navy.oncall.datadoghq.com"),
-    "resolve_page": os.getenv("SERVER_URL_RESOLVE_PAGE", "https://navy.oncall.datadoghq.com"),
-    "send_server_event": os.getenv("SERVER_URL_SEND_SERVER_EVENT", "https://browser-intake-datadoghq.com"),
+    "publish_event": os.getenv("SERVER_URL_PUBLISH_EVENT", "https://event-management-intake.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "send_logs": os.getenv("SERVER_URL_SEND_LOGS", "https://http-intake.logs.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "create_page": os.getenv("SERVER_URL_CREATE_PAGE", "https://navy.oncall.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "acknowledge_page": os.getenv("SERVER_URL_ACKNOWLEDGE_PAGE", "https://navy.oncall.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "escalate_page": os.getenv("SERVER_URL_ESCALATE_PAGE", "https://navy.oncall.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "resolve_page": os.getenv("SERVER_URL_RESOLVE_PAGE", "https://navy.oncall.datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
+    "send_server_event": os.getenv("SERVER_URL_SEND_SERVER_EVENT", "https://browser-intake-datadoghq.com".format_map(collections.defaultdict(str, _SERVER_VARS))),
 }
 SERVER_NAME = "Datadog"
 SERVER_VERSION = "1.0.0"
@@ -485,12 +487,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -512,7 +539,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
     # Per-operation URL override (OAS 3.0 path/operation-level servers)
@@ -558,18 +589,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -641,7 +736,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -689,6 +792,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -751,7 +858,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -777,10 +892,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -1078,16 +1191,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -1101,6 +1215,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -1143,6 +1258,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -1154,7 +1284,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1162,7 +1291,6 @@ async def _execute_tool_request(
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
     'AuthZ',
-    'bearerAuth',
     'apiKeyAuth',
     'appKeyAuth',
 ]
@@ -1177,14 +1305,6 @@ except ValueError as e:
     error_msg = str(e).split("Leave empty")[0].strip()
     logging.warning(f"Credentials for AuthZ not configured: {error_msg}")
     _auth_handlers["AuthZ"] = None
-try:
-    _auth_handlers["bearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
-    logging.info("Authentication configured: bearerAuth")
-except ValueError as e:
-    # Extract credential names from error message (first sentence before "Leave empty")
-    error_msg = str(e).split("Leave empty")[0].strip()
-    logging.warning(f"Credentials for bearerAuth not configured: {error_msg}")
-    _auth_handlers["bearerAuth"] = None
 try:
     _auth_handlers["apiKeyAuth"] = _auth.APIKeyAuth(env_var="API_KEY_AUTH", location="header", param_name="DD-API-KEY")
     logging.info("Authentication configured: apiKeyAuth")
@@ -1322,7 +1442,7 @@ mcp = FastMCP("Datadog", middleware=[_JsonCoercionMiddleware()])
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def list_agent_versions() -> dict[str, Any]:
+async def list_agent_versions() -> dict[str, Any] | ToolResult:
     """Retrieve all available Datadog Agent versions that can be deployed to your fleet. Use these versions when creating deployments or configuring automated Agent upgrade schedules."""
 
     # Extract parameters for API call
@@ -1353,7 +1473,7 @@ async def list_agents(
     page_number: str | None = Field(None, description="Zero-indexed page number for pagination. Use this to navigate through result sets."),
     page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 100 inclusive."),
     tags: str | None = Field(None, description="Filter agents by one or more tags. Provide as a comma-separated list of tag values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all Datadog Agents with optional filtering by tags. Results can be sorted and paginated using page number and size parameters."""
 
     _page_number = _parse_int(page_number)
@@ -1394,7 +1514,7 @@ async def list_agents(
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def get_agent_info(agent_key: str = Field(..., description="The unique identifier for the Datadog Agent you want to retrieve information about.")) -> dict[str, Any]:
+async def get_agent_info(agent_key: str = Field(..., description="The unique identifier for the Datadog Agent you want to retrieve information about.")) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive information about a specific Datadog Agent, including agent metadata, configured integrations organized by status, detected integrations, and configuration files."""
 
     # Construct request model with validation
@@ -1433,7 +1553,7 @@ async def get_agent_info(agent_key: str = Field(..., description="The unique ide
 async def list_deployments(
     page_size: str | None = Field(None, description="Number of deployments to return per page. Maximum of 100 deployments per request."),
     page_offset: str | None = Field(None, description="Zero-based index of the first deployment to return. Use with page_size to paginate through results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all fleet deployments. Use pagination parameters to navigate through results efficiently."""
 
     _page_size = _parse_int(page_size)
@@ -1478,7 +1598,7 @@ async def deploy_fleet_configuration(
     type_: Literal["deployment"] = Field(..., alias="type", description="The type of deployment resource being created."),
     filter_query: str | None = Field(None, description="Datadog query to filter and select target hosts for the deployment. Use standard Datadog query syntax to match hosts by attributes like environment, service, or custom tags."),
     config_operations: list[_models.FleetDeploymentOperation] | None = Field(None, description="Ordered list of configuration file operations to perform on the target hosts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deploy configuration changes to a fleet of hosts matching a filter query. Supports merge-patch operations to update configuration files and delete operations to remove them, with multiple operations executed sequentially on each target host."""
 
     # Construct request model with validation
@@ -1523,7 +1643,7 @@ async def start_agent_upgrade(
     target_packages: list[_models.FleetDeploymentPackage] = Field(..., description="List of packages and their target versions to deploy. Each entry specifies a package name and the version to upgrade to."),
     type_: Literal["deployment"] = Field(..., alias="type", description="The resource type for this deployment operation."),
     filter_query: str | None = Field(None, description="Datadog query to identify target hosts for the upgrade. Uses standard Datadog query syntax to filter by tags, attributes, and expressions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an immediate upgrade of the Datadog Agent to a specified version on hosts matching your filter criteria. The deployment is created and automatically begins rolling out to target hosts."""
 
     # Construct request model with validation
@@ -1568,7 +1688,7 @@ async def get_deployment(
     deployment_id: str = Field(..., description="The unique identifier of the deployment to retrieve."),
     limit: str | None = Field(None, description="Maximum number of hosts to return per page. Default is 50, maximum is 100."),
     page: str | None = Field(None, description="Page index for pagination (zero-based). Use this to retrieve subsequent pages of hosts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific fleet deployment, including metadata, target hosts, current status, and per-host execution details with package versions."""
 
     _limit = _parse_int(limit)
@@ -1610,7 +1730,7 @@ async def get_deployment(
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def cancel_deployment(deployment_id: str = Field(..., description="The unique identifier of the deployment to cancel.")) -> dict[str, Any]:
+async def cancel_deployment(deployment_id: str = Field(..., description="The unique identifier of the deployment to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel an active fleet deployment and stop all pending operations on hosts. Already-applied configuration changes and package upgrades are not rolled back."""
 
     # Construct request model with validation
@@ -1646,7 +1766,7 @@ async def cancel_deployment(deployment_id: str = Field(..., description="The uni
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def list_schedules() -> dict[str, Any]:
+async def list_schedules() -> dict[str, Any] | ToolResult:
     """Retrieve all fleet deployment schedules. Schedules automate package upgrades by defining maintenance windows and recurrence rules, with each schedule automatically generating deployments based on its configuration."""
 
     # Extract parameters for API call
@@ -1683,7 +1803,7 @@ async def create_fleet_upgrade_schedule(
     type_: Literal["schedule"] = Field(..., alias="type", description="The type of schedule resource."),
     status: Literal["active", "inactive"] | None = Field(None, description="Status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not."),
     version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an automated schedule for deploying Datadog Agent upgrades to a fleet of hosts. The schedule defines target hosts via query filter, maintenance windows, and version strategy to automatically trigger deployments on a recurring basis."""
 
     _maintenance_window_duration = _parse_int(maintenance_window_duration)
@@ -1730,7 +1850,7 @@ async def create_fleet_upgrade_schedule(
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def get_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any]:
+async def get_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific deployment schedule by its unique identifier. Returns schedule metadata, filter criteria, recurrence rules, version strategy, and current status."""
 
     # Construct request model with validation
@@ -1775,7 +1895,7 @@ async def update_schedule(
     type_: Literal["schedule"] = Field(..., alias="type", description="The resource type identifier for this schedule."),
     status: Literal["active", "inactive"] | None = Field(None, description="The operational status of the schedule. Active schedules create deployments according to their recurrence rule; inactive schedules do not."),
     version_to_latest: str | None = Field(None, description="Number of major versions behind the latest to target for upgrades. Use 0 to always upgrade to the latest version, or 1-2 to target older major versions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a fleet deployment schedule by modifying specific attributes such as recurrence days, maintenance window timing, or deployment strategy. Only provided fields are updated; omitted fields remain unchanged."""
 
     _maintenance_window_duration = _parse_int(maintenance_window_duration)
@@ -1823,7 +1943,7 @@ async def update_schedule(
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def delete_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to delete.")) -> dict[str, Any]:
+async def delete_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a fleet schedule. The schedule will no longer create deployments, though any previously created deployments remain unaffected. This action cannot be undone."""
 
     # Construct request model with validation
@@ -1859,7 +1979,7 @@ async def delete_schedule(id_: str = Field(..., alias="id", description="The uni
 
 # Tags: Fleet Automation
 @mcp.tool()
-async def trigger_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to trigger.")) -> dict[str, Any]:
+async def trigger_schedule(id_: str = Field(..., alias="id", description="The unique identifier of the schedule to trigger.")) -> dict[str, Any] | ToolResult:
     """Manually trigger a schedule to immediately create and start a deployment without waiting for the next scheduled maintenance window. Useful for testing schedules, emergency updates, or ad-hoc deployments using the schedule's configuration."""
 
     # Construct request model with validation
@@ -1895,7 +2015,7 @@ async def trigger_schedule(id_: str = Field(..., alias="id", description="The un
 
 # Tags: Actions Datastores
 @mcp.tool()
-async def list_datastores() -> dict[str, Any]:
+async def list_datastores() -> dict[str, Any] | ToolResult:
     """Retrieves all datastores available in the organization. Use this to discover and manage data storage resources."""
 
     # Extract parameters for API call
@@ -1929,7 +2049,7 @@ async def create_datastore(
     description: str | None = Field(None, description="A human-readable description explaining the purpose and contents of the datastore."),
     org_access: Literal["contributor", "viewer", "manager"] | None = Field(None, description="The organization access level that determines permissions for other users to interact with this datastore."),
     primary_key_generation_strategy: Literal["none", "uuid"] | None = Field(None, description="Strategy for generating primary keys when new items are added. Set to 'uuid' for automatic UUID generation, or 'none' to require manual key assignment for each new item."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new datastore with a specified primary key column and optional organization access level. The datastore can be configured to automatically generate primary keys using UUIDs or require manual key assignment."""
 
     # Construct request model with validation
@@ -1970,7 +2090,7 @@ async def create_datastore(
 
 # Tags: Actions Datastores
 @mcp.tool()
-async def get_datastore(datastore_id: str = Field(..., description="The unique identifier of the datastore to retrieve.")) -> dict[str, Any]:
+async def get_datastore(datastore_id: str = Field(..., description="The unique identifier of the datastore to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific datastore by its unique identifier. Use this operation to fetch detailed information about a datastore for inspection or configuration purposes."""
 
     # Construct request model with validation
@@ -2010,7 +2130,7 @@ async def update_datastore(
     datastore_id: str = Field(..., description="The unique identifier of the datastore to update."),
     type_: Literal["datastores"] = Field(..., alias="type", description="The resource type identifier for datastores."),
     description: str | None = Field(None, description="A human-readable description of the datastore's purpose or contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing datastore's attributes such as description. Requires the datastore ID and resource type to identify and modify the target datastore."""
 
     # Construct request model with validation
@@ -2052,7 +2172,7 @@ async def update_datastore(
 
 # Tags: Actions Datastores
 @mcp.tool()
-async def delete_datastore(datastore_id: str = Field(..., description="The unique identifier of the datastore to delete.")) -> dict[str, Any]:
+async def delete_datastore(datastore_id: str = Field(..., description="The unique identifier of the datastore to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a datastore and all associated data by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -2093,7 +2213,7 @@ async def list_datastore_items(
     item_key: str | None = Field(None, description="Primary key value to retrieve a specific item. Cannot be used together with the filter parameter. Maximum length is 256 characters.", max_length=256),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of items to return per page for pagination. Accepts values between 1 and 100 items per page."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Number of items to skip from the beginning of the result set for pagination offset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve items from a datastore with optional filtering by key or query parameters, supporting server-side pagination for large datasets. Specify either an item key or filter query, but not both."""
 
     _page_limit = _parse_int(page_limit)
@@ -2140,7 +2260,7 @@ async def update_datastore_item(
     item_key: str = Field(..., description="The primary key that uniquely identifies the item to update within the datastore. Maximum 256 characters.", max_length=256),
     type_: Literal["items"] = Field(..., alias="type", description="The resource type identifier for datastore items."),
     ops_set: dict[str, Any] | None = Field(None, description="Key-value pairs to set on the datastore item. Existing fields not included in this operation remain unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially updates an item in a datastore using its primary key. Supports setting key-value pairs on the specified item."""
 
     # Construct request model with validation
@@ -2189,7 +2309,7 @@ async def delete_datastore_item(
     datastore_id: str = Field(..., description="The unique identifier of the datastore containing the item to delete."),
     item_key: str = Field(..., description="The primary key value that uniquely identifies the item to delete within the datastore. Must not exceed 256 characters.", max_length=256),
     type_: Literal["items"] = Field(..., alias="type", description="The resource type designation for datastore items."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes an item from a datastore by its primary key. The item is permanently deleted and cannot be recovered."""
 
     # Construct request model with validation
@@ -2236,7 +2356,7 @@ async def bulk_write_datastore_items(
     values: list[dict[str, Any]] = Field(..., description="An array of items to write to the datastore, where each item is a set of key-value pairs. Maximum 100 items per request.", max_length=100),
     type_: Literal["items"] = Field(..., alias="type", description="The resource type identifier for datastore items."),
     conflict_mode: Literal["fail_on_conflict", "overwrite_on_conflict"] | None = Field(None, description="Specifies how to handle conflicts when an item key already exists in the datastore."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates or replaces multiple items in a datastore in a single batch operation. Supports up to 100 items per request with configurable conflict handling for existing keys."""
 
     # Construct request model with validation
@@ -2282,7 +2402,7 @@ async def delete_datastore_items(
     datastore_id: str = Field(..., description="The unique identifier of the datastore from which items will be deleted."),
     type_: Literal["items"] = Field(..., alias="type", description="The resource type for the items being deleted."),
     item_keys: list[str] | None = Field(None, description="Array of primary keys identifying the items to delete. Order is not significant. Maximum 100 keys per request.", max_length=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Deletes multiple items from a datastore by their primary keys in a single batch operation. Supports up to 100 items per request."""
 
     # Construct request model with validation
@@ -2327,7 +2447,7 @@ async def delete_datastore_items(
 async def list_app_key_registrations(
     page_size: str | None = Field(None, alias="pagesize", description="Number of app key registrations to return per page. Controls the batch size of results in the response."),
     page_number: str | None = Field(None, alias="pagenumber", description="Page number to retrieve in the paginated result set. Use with page[size] to navigate through results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of app key registrations. Use pagination parameters to control the number of results and navigate through pages."""
 
     _page_size = _parse_int(page_size)
@@ -2368,7 +2488,7 @@ async def list_app_key_registrations(
 
 # Tags: Action Connection
 @mcp.tool()
-async def get_app_key_registration(app_key_id: str = Field(..., description="The unique identifier of the app key registration to retrieve.")) -> dict[str, Any]:
+async def get_app_key_registration(app_key_id: str = Field(..., description="The unique identifier of the app key registration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of an existing app key registration by its ID. Use this to view configuration and status information for a registered application key."""
 
     # Construct request model with validation
@@ -2408,7 +2528,7 @@ async def create_action_connection(
     integration: _models.AwsIntegration | _models.AnthropicIntegration | _models.AsanaIntegration | _models.AzureIntegration | _models.CircleCiIntegration | _models.ClickupIntegration | _models.CloudflareIntegration | _models.ConfigCatIntegration | _models.DatadogIntegration | _models.FastlyIntegration | _models.FreshserviceIntegration | _models.GcpIntegration | _models.GeminiIntegration | _models.GitlabIntegration | _models.GreyNoiseIntegration | _models.HttpIntegration | _models.LaunchDarklyIntegration | _models.NotionIntegration | _models.OktaIntegration | _models.OpenAiIntegration | _models.ServiceNowIntegration | _models.SplitIntegration | _models.StatsigIntegration | _models.VirusTotalIntegration = Field(..., description="The integration configuration object that defines the external service connection details and authentication credentials."),
     name: str = Field(..., description="A human-readable name for this action connection to identify it in your Datadog workspace."),
     type_: Literal["action_connection"] = Field(..., alias="type", description="The type classification for this connection resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Action Connection to integrate external services with Datadog actions. Requires a registered application key for authentication."""
 
     # Construct request model with validation
@@ -2449,7 +2569,7 @@ async def create_action_connection(
 
 # Tags: Action Connection
 @mcp.tool()
-async def get_action_connection(connection_id: str = Field(..., description="The unique identifier of the action connection to retrieve.")) -> dict[str, Any]:
+async def get_action_connection(connection_id: str = Field(..., description="The unique identifier of the action connection to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of an existing Action Connection by its ID. Requires a registered application key for authentication."""
 
     # Construct request model with validation
@@ -2489,7 +2609,7 @@ async def update_action_connection(
     connection_id: str = Field(..., description="The unique identifier of the action connection to update."),
     type_: Literal["action_connection"] = Field(..., alias="type", description="The type classification for this action connection resource."),
     integration: _models.AwsIntegrationUpdate | _models.AnthropicIntegrationUpdate | _models.AsanaIntegrationUpdate | _models.AzureIntegrationUpdate | _models.CircleCiIntegrationUpdate | _models.ClickupIntegrationUpdate | _models.CloudflareIntegrationUpdate | _models.ConfigCatIntegrationUpdate | _models.DatadogIntegrationUpdate | _models.FastlyIntegrationUpdate | _models.FreshserviceIntegrationUpdate | _models.GcpIntegrationUpdate | _models.GeminiIntegrationUpdate | _models.GitlabIntegrationUpdate | _models.GreyNoiseIntegrationUpdate | _models.HttpIntegrationUpdate | _models.LaunchDarklyIntegrationUpdate | _models.NotionIntegrationUpdate | _models.OktaIntegrationUpdate | _models.OpenAiIntegrationUpdate | _models.ServiceNowIntegrationUpdate | _models.SplitIntegrationUpdate | _models.StatsigIntegrationUpdate | _models.VirusTotalIntegrationUpdate | None = Field(None, description="The integration configuration object defining the updated connection settings and parameters."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Action Connection with new integration settings or configuration. Requires a registered application key for authentication."""
 
     # Construct request model with validation
@@ -2531,7 +2651,7 @@ async def update_action_connection(
 
 # Tags: Action Connection
 @mcp.tool()
-async def delete_action_connection(connection_id: str = Field(..., description="The unique identifier of the action connection to delete.")) -> dict[str, Any]:
+async def delete_action_connection(connection_id: str = Field(..., description="The unique identifier of the action connection to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing Action Connection by its ID. Requires a registered application key with appropriate permissions."""
 
     # Construct request model with validation
@@ -2567,7 +2687,7 @@ async def delete_action_connection(connection_id: str = Field(..., description="
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def list_aws_scan_options() -> dict[str, Any]:
+async def list_aws_scan_options() -> dict[str, Any] | ToolResult:
     """Retrieves the scan options and configurations available for AWS accounts in agentless scanning. Use this to understand what scanning capabilities and settings are available for your AWS environment."""
 
     # Extract parameters for API call
@@ -2601,7 +2721,7 @@ async def enable_aws_scan_options(
     vuln_host_os: bool = Field(..., description="Enable scanning for vulnerabilities in host operating systems and instances."),
     id_: str = Field(..., alias="id", description="The AWS account ID to configure scanning options for."),
     type_: Literal["aws_scan_options"] = Field(..., alias="type", description="The resource type identifier for AWS scan configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable agentless scanning options for an AWS account by specifying which scan types to activate, including Lambda functions, sensitive data, container vulnerabilities, and host vulnerabilities."""
 
     # Construct request model with validation
@@ -2642,7 +2762,7 @@ async def enable_aws_scan_options(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def get_aws_scan_options(account_id: str = Field(..., description="The AWS account ID to retrieve scan options for.")) -> dict[str, Any]:
+async def get_aws_scan_options(account_id: str = Field(..., description="The AWS account ID to retrieve scan options for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the agentless scanning configuration options for an activated AWS account. This returns the scan settings and capabilities available for the specified account."""
 
     # Construct request model with validation
@@ -2686,7 +2806,7 @@ async def configure_aws_scan_options(
     sensitive_data: bool | None = Field(None, description="Enable or disable scanning for sensitive data."),
     vuln_containers_os: bool | None = Field(None, description="Enable or disable scanning for vulnerabilities in container images and registries."),
     vuln_host_os: bool | None = Field(None, description="Enable or disable scanning for vulnerabilities in host operating systems."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure agentless scanning options for an AWS account, including Lambda functions, sensitive data detection, and vulnerability scanning for containers and hosts."""
 
     # Construct request model with validation
@@ -2728,7 +2848,7 @@ async def configure_aws_scan_options(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def delete_aws_scan_options(account_id: str = Field(..., description="The AWS account identifier to remove agentless scan options from.")) -> dict[str, Any]:
+async def delete_aws_scan_options(account_id: str = Field(..., description="The AWS account identifier to remove agentless scan options from.")) -> dict[str, Any] | ToolResult:
     """Remove agentless scanning configuration for a specified AWS account. This disables agentless scanning capabilities for that account."""
 
     # Construct request model with validation
@@ -2764,7 +2884,7 @@ async def delete_aws_scan_options(account_id: str = Field(..., description="The 
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def list_azure_scan_options() -> dict[str, Any]:
+async def list_azure_scan_options() -> dict[str, Any] | ToolResult:
     """Retrieves the scan options configured for Azure accounts in agentless scanning. Use this to discover available scanning configurations and settings for your Azure environment."""
 
     # Extract parameters for API call
@@ -2796,7 +2916,7 @@ async def enable_azure_agentless_scanning(
     type_: Literal["azure_scan_options"] = Field(..., alias="type", description="The resource type identifier for Azure scan configuration."),
     vuln_containers_os: bool | None = Field(None, description="Enable vulnerability scanning for container images within the Azure subscription."),
     vuln_host_os: bool | None = Field(None, description="Enable vulnerability scanning for host operating systems within the Azure subscription."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable agentless scanning options for an Azure subscription, allowing vulnerability scans on containers and/or hosts without requiring agent installation."""
 
     # Construct request model with validation
@@ -2837,7 +2957,7 @@ async def enable_azure_agentless_scanning(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def get_azure_scan_options_subscription(subscription_id: str = Field(..., description="The Azure subscription ID in UUID format that identifies the subscription for which to retrieve scan options.")) -> dict[str, Any]:
+async def get_azure_scan_options_subscription(subscription_id: str = Field(..., description="The Azure subscription ID in UUID format that identifies the subscription for which to retrieve scan options.")) -> dict[str, Any] | ToolResult:
     """Retrieves the agentless scanning configuration options available for an activated Azure subscription. Use this to discover what scan settings and capabilities are enabled for a specific subscription."""
 
     # Construct request model with validation
@@ -2879,7 +2999,7 @@ async def configure_azure_scan_options(
     type_: Literal["azure_scan_options"] = Field(..., alias="type", description="The resource type identifier for Azure scan options configuration."),
     vuln_containers_os: bool | None = Field(None, description="Enable or disable vulnerability scanning for containers."),
     vuln_host_os: bool | None = Field(None, description="Enable or disable vulnerability scanning for hosts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure agentless scanning options for an Azure subscription, including vulnerability scanning for containers and hosts."""
 
     # Construct request model with validation
@@ -2921,7 +3041,7 @@ async def configure_azure_scan_options(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def delete_azure_scan_options(subscription_id: str = Field(..., description="The unique identifier for the Azure subscription from which to delete scan options.")) -> dict[str, Any]:
+async def delete_azure_scan_options(subscription_id: str = Field(..., description="The unique identifier for the Azure subscription from which to delete scan options.")) -> dict[str, Any] | ToolResult:
     """Remove agentless scanning configuration for a specified Azure subscription. This disables automated vulnerability scanning for the subscription."""
 
     # Construct request model with validation
@@ -2957,7 +3077,7 @@ async def delete_azure_scan_options(subscription_id: str = Field(..., descriptio
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def list_gcp_scan_options() -> dict[str, Any]:
+async def list_gcp_scan_options() -> dict[str, Any] | ToolResult:
     """Retrieves the scan options configured for all GCP projects in your agentless scanning setup. Use this to view available scanning configurations across your GCP environment."""
 
     # Extract parameters for API call
@@ -2989,7 +3109,7 @@ async def enable_gcp_agentless_scanning(
     type_: Literal["gcp_scan_options"] = Field(..., alias="type", description="The resource type identifier for GCP scan options configuration."),
     vuln_containers_os: bool | None = Field(None, description="Enable vulnerability scanning for container images within the GCP project."),
     vuln_host_os: bool | None = Field(None, description="Enable vulnerability scanning for host operating systems within the GCP project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable agentless scanning options for a GCP project, allowing vulnerability detection in containers and/or hosts without requiring agent installation."""
 
     # Construct request model with validation
@@ -3030,7 +3150,7 @@ async def enable_gcp_agentless_scanning(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def get_gcp_scan_options(project_id: str = Field(..., description="The GCP project ID that identifies the cloud project for which to fetch agentless scan options.")) -> dict[str, Any]:
+async def get_gcp_scan_options(project_id: str = Field(..., description="The GCP project ID that identifies the cloud project for which to fetch agentless scan options.")) -> dict[str, Any] | ToolResult:
     """Retrieve the agentless scanning configuration options for an activated GCP project. This returns the scan settings and capabilities available for the specified project."""
 
     # Construct request model with validation
@@ -3072,7 +3192,7 @@ async def update_gcp_scan_options(
     type_: Literal["gcp_scan_options"] = Field(..., alias="type", description="The resource type identifier for GCP scan options configuration."),
     vuln_containers_os: bool | None = Field(None, description="Enable or disable vulnerability scanning for container images."),
     vuln_host_os: bool | None = Field(None, description="Enable or disable vulnerability scanning for host operating systems."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update agentless scanning configuration for a GCP project, including vulnerability scanning preferences for containers and hosts."""
 
     # Construct request model with validation
@@ -3114,7 +3234,7 @@ async def update_gcp_scan_options(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def delete_gcp_scan_options(project_id: str = Field(..., description="The GCP project identifier to remove scanning options from.")) -> dict[str, Any]:
+async def delete_gcp_scan_options(project_id: str = Field(..., description="The GCP project identifier to remove scanning options from.")) -> dict[str, Any] | ToolResult:
     """Remove agentless scanning configuration for a GCP project. This disables automated vulnerability scanning for the specified project."""
 
     # Construct request model with validation
@@ -3150,7 +3270,7 @@ async def delete_gcp_scan_options(project_id: str = Field(..., description="The 
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def list_aws_ondemand_tasks() -> dict[str, Any]:
+async def list_aws_ondemand_tasks() -> dict[str, Any] | ToolResult:
     """Retrieves the most recent 1000 AWS on-demand scanning tasks. Use this to view the history and status of on-demand vulnerability scans initiated on your AWS infrastructure."""
 
     # Extract parameters for API call
@@ -3180,7 +3300,7 @@ async def list_aws_ondemand_tasks() -> dict[str, Any]:
 async def scan_aws_resource(
     arn: str = Field(..., description="The ARN of the AWS resource to scan. Supported resource types include EC2 instances, Lambda functions, AMIs, ECR repositories, RDS databases, and S3 buckets."),
     type_: Literal["aws_resource"] = Field(..., alias="type", description="The type classification for this on-demand scan task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger an on-demand agentless scan of an AWS resource with high priority. Agentless scanning must be activated for the AWS account containing the resource."""
 
     # Construct request model with validation
@@ -3221,7 +3341,7 @@ async def scan_aws_resource(
 
 # Tags: Agentless Scanning
 @mcp.tool()
-async def get_aws_ondemand_task(task_id: str = Field(..., description="The unique identifier (UUID) of the AWS on-demand task to retrieve.")) -> dict[str, Any]:
+async def get_aws_ondemand_task(task_id: str = Field(..., description="The unique identifier (UUID) of the AWS on-demand task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details and status of a specific AWS on-demand scanning task. Use this to check the progress and results of a previously initiated on-demand scan."""
 
     # Construct request model with validation
@@ -3257,7 +3377,7 @@ async def get_aws_ondemand_task(task_id: str = Field(..., description="The uniqu
 
 # Tags: Spans Metrics
 @mcp.tool()
-async def list_span_metrics() -> dict[str, Any]:
+async def list_span_metrics() -> dict[str, Any] | ToolResult:
     """Retrieve all configured span-based metrics with their complete definitions. Use this to discover available metrics for APM monitoring and analysis."""
 
     # Extract parameters for API call
@@ -3291,7 +3411,7 @@ async def create_spans_metric(
     include_percentiles: bool | None = Field(None, description="When using distribution aggregation, enable this to include percentile calculations (p50, p75, p90, p95, p99) in the metric output."),
     path: str | None = Field(None, description="The span attribute path to aggregate on when using distribution aggregation. Specify the attribute using dot notation or @ prefix for standard span fields."),
     group_by: list[_models.SpansMetricGroupBy] | None = Field(None, description="Rules for grouping the aggregated metric results by span attributes. Each rule specifies which attributes to group by and how to organize the output."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a span-based metric to aggregate data from your ingested spans. The metric can count span occurrences or calculate distributions across specified span attributes."""
 
     # Construct request model with validation
@@ -3335,7 +3455,7 @@ async def create_spans_metric(
 
 # Tags: Spans Metrics
 @mcp.tool()
-async def get_span_metric(metric_id: str = Field(..., description="The unique identifier of the span-based metric to retrieve.")) -> dict[str, Any]:
+async def get_span_metric(metric_id: str = Field(..., description="The unique identifier of the span-based metric to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific span-based metric configuration from your organization. Use this to view the details and settings of a metric used to track APM span data."""
 
     # Construct request model with validation
@@ -3376,7 +3496,7 @@ async def update_spans_metric(
     type_: Literal["spans_metrics"] = Field(..., alias="type", description="The resource type identifier. Must be set to spans_metrics."),
     include_percentiles: bool | None = Field(None, description="Include or exclude percentile aggregations for distribution metrics. Only applicable when the metric uses distribution aggregation."),
     group_by: list[_models.SpansMetricGroupBy] | None = Field(None, description="Rules for grouping the metric data. Specify as an array of grouping criteria."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a span-based metric configuration for your organization. Returns the updated span-based metric object."""
 
     # Construct request model with validation
@@ -3419,7 +3539,7 @@ async def update_spans_metric(
 
 # Tags: Spans Metrics
 @mcp.tool()
-async def delete_span_metric(metric_id: str = Field(..., description="The unique identifier of the span-based metric to delete.")) -> dict[str, Any]:
+async def delete_span_metric(metric_id: str = Field(..., description="The unique identifier of the span-based metric to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a span-based metric from your organization. This operation permanently removes the specified metric and its associated configuration."""
 
     # Construct request model with validation
@@ -3455,7 +3575,7 @@ async def delete_span_metric(metric_id: str = Field(..., description="The unique
 
 # Tags: APM Retention Filters
 @mcp.tool()
-async def list_apm_retention_filters() -> dict[str, Any]:
+async def list_apm_retention_filters() -> dict[str, Any] | ToolResult:
     """Retrieve all APM retention filters configured in your organization. Retention filters control which APM data is retained based on specified criteria."""
 
     # Extract parameters for API call
@@ -3490,7 +3610,7 @@ async def create_retention_filter(
     rate: float = Field(..., description="Sample rate for spans matching the query, between 0 and 1. A value of 1.0 retains all matching spans."),
     type_: Literal["apm_retention_filter"] = Field(..., alias="type", description="The resource type identifier for this retention filter."),
     trace_rate: float | None = Field(None, description="Sample rate for entire traces containing spans that match the query, between 0 and 1. A value of 1.0 retains all traces with matching spans."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a retention filter to index spans in your organization. Retention filters allow you to sample spans based on search queries, controlling which spans are retained for analysis."""
 
     # Construct request model with validation
@@ -3534,7 +3654,7 @@ async def create_retention_filter(
 
 # Tags: APM Retention Filters
 @mcp.tool()
-async def reorder_retention_filters(data: list[_models.RetentionFilterWithoutAttributes] = Field(..., description="An ordered list of retention filter objects that defines the new execution sequence. The position of each filter in the array determines its execution priority.")) -> dict[str, Any]:
+async def reorder_retention_filters(data: list[_models.RetentionFilterWithoutAttributes] = Field(..., description="An ordered list of retention filter objects that defines the new execution sequence. The position of each filter in the array determines its execution priority.")) -> dict[str, Any] | ToolResult:
     """Update the execution order of APM retention filters. The order determines the sequence in which filters are applied during data retention processing."""
 
     # Construct request model with validation
@@ -3572,7 +3692,7 @@ async def reorder_retention_filters(data: list[_models.RetentionFilterWithoutAtt
 
 # Tags: APM Retention Filters
 @mcp.tool()
-async def get_retention_filter_apm(filter_id: str = Field(..., description="The unique identifier of the APM retention filter to retrieve.")) -> dict[str, Any]:
+async def get_retention_filter_apm(filter_id: str = Field(..., description="The unique identifier of the APM retention filter to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific APM retention filter by its ID. Use this to view the configuration and settings of an existing retention filter."""
 
     # Construct request model with validation
@@ -3618,7 +3738,7 @@ async def update_retention_filter_apm(
     id_: str = Field(..., alias="id", description="The unique identifier of the retention filter resource."),
     type_: Literal["apm_retention_filter"] = Field(..., alias="type", description="The resource type identifier for this retention filter object."),
     trace_rate: float | None = Field(None, description="Optional sampling rate for entire traces containing spans that match the filter, where 1.0 retains all traces with matching spans."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an APM retention filter configuration for your organization. Note that default filters (spans-errors-sampling-processor and spans-appsec-sampling-processor types) cannot be renamed or removed."""
 
     # Construct request model with validation
@@ -3663,7 +3783,7 @@ async def update_retention_filter_apm(
 
 # Tags: APM Retention Filters
 @mcp.tool()
-async def delete_retention_filter_apm(filter_id: str = Field(..., description="The unique identifier of the retention filter to delete.")) -> dict[str, Any]:
+async def delete_retention_filter_apm(filter_id: str = Field(..., description="The unique identifier of the retention filter to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific retention filter from your organization. Note that default filters with types spans-errors-sampling-processor and spans-appsec-sampling-processor cannot be deleted."""
 
     # Construct request model with validation
@@ -3699,7 +3819,7 @@ async def delete_retention_filter_apm(filter_id: str = Field(..., description="T
 
 # Tags: APM
 @mcp.tool()
-async def list_services(filter_env: str = Field(..., alias="filterenv", description="Environment identifier to filter services. Specify a particular environment name or use `*` to include services from all environments.")) -> dict[str, Any]:
+async def list_services(filter_env: str = Field(..., alias="filterenv", description="Environment identifier to filter services. Specify a particular environment name or use `*` to include services from all environments.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of APM services, optionally filtered by environment. Use `*` as the environment filter to return services across all environments."""
 
     # Construct request model with validation
@@ -3746,7 +3866,7 @@ async def list_apps(
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter apps by one or more tags. Multiple tags can be specified to narrow results."),
     filter_favorite: bool | None = Field(None, alias="filterfavorite", description="Filter apps by whether they are marked as favorites (true for favorited apps only)."),
     filter_self_service: bool | None = Field(None, alias="filterself_service", description="Filter apps by whether they are enabled for self-service access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all apps with optional filtering by creator, name, deployment status, tags, favorites, and self-service availability. Only basic app information (ID, name, description) is returned."""
 
     _limit = _parse_int(limit)
@@ -3794,7 +3914,7 @@ async def create_app(
     queries: list[_models.Query] | None = Field(None, description="An array of queries including external actions and state variables that the app depends on. Order reflects dependency resolution."),
     root_instance_name: str | None = Field(None, alias="rootInstanceName", description="The name of the root component serving as the app's container. Must reference a grid component that contains all other components."),
     tags: list[str] | None = Field(None, description="A list of tags for organizing and filtering apps by metadata such as service or team ownership."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new app in the app builder and receive the app ID. Requires a registered application key with appropriate permissions."""
 
     # Construct request model with validation
@@ -3835,7 +3955,7 @@ async def create_app(
 
 # Tags: App Builder
 @mcp.tool()
-async def delete_apps() -> dict[str, Any]:
+async def delete_apps() -> dict[str, Any] | ToolResult:
     """Delete multiple apps in a single request by providing a list of app IDs. Requires a registered application key or appropriate Actions API permissions."""
 
     # Extract parameters for API call
@@ -3862,7 +3982,7 @@ async def delete_apps() -> dict[str, Any]:
 
 # Tags: App Builder
 @mcp.tool()
-async def get_app(app_id: str = Field(..., description="The unique identifier of the app to retrieve, formatted as a UUID.")) -> dict[str, Any]:
+async def get_app(app_id: str = Field(..., description="The unique identifier of the app to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete definition and configuration of an app by its ID. Requires a registered application key or appropriate Actions API permissions."""
 
     # Construct request model with validation
@@ -3906,7 +4026,7 @@ async def update_app(
     queries: list[_models.Query] | None = Field(None, description="The new array of queries including external actions and state variables used by the app. When provided, all existing queries are replaced with these new queries."),
     root_instance_name: str | None = Field(None, alias="rootInstanceName", description="The name of the root component, which must be a grid component that serves as the container for all other components in the app."),
     tags: list[str] | None = Field(None, description="A list of tags for organizing and filtering the app. When provided, any existing tags not included in this request are removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing app by modifying its configuration, components, queries, or metadata. This operation creates a new version of the app and requires a registered application key or appropriate API permissions."""
 
     # Construct request model with validation
@@ -3948,7 +4068,7 @@ async def update_app(
 
 # Tags: App Builder
 @mcp.tool()
-async def delete_app(app_id: str = Field(..., description="The unique identifier of the app to delete.")) -> dict[str, Any]:
+async def delete_app(app_id: str = Field(..., description="The unique identifier of the app to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an app by its ID. Requires a registered application key or appropriate Actions API permissions."""
 
     # Construct request model with validation
@@ -3984,7 +4104,7 @@ async def delete_app(app_id: str = Field(..., description="The unique identifier
 
 # Tags: App Builder
 @mcp.tool()
-async def publish_app(app_id: str = Field(..., description="The unique identifier of the app to publish.")) -> dict[str, Any]:
+async def publish_app(app_id: str = Field(..., description="The unique identifier of the app to publish.")) -> dict[str, Any] | ToolResult:
     """Publish an app to make it accessible to other users. After publishing, configure a Restriction Policy to control which users can access the app."""
 
     # Construct request model with validation
@@ -4020,7 +4140,7 @@ async def publish_app(app_id: str = Field(..., description="The unique identifie
 
 # Tags: App Builder
 @mcp.tool()
-async def unpublish_app(app_id: str = Field(..., description="The unique identifier of the app to unpublish.")) -> dict[str, Any]:
+async def unpublish_app(app_id: str = Field(..., description="The unique identifier of the app to unpublish.")) -> dict[str, Any] | ToolResult:
     """Remove the live version of an app, making it unavailable to end users while preserving the ability to update and republish it later. Unpublishing creates a new deployment instance with no associated app version."""
 
     # Construct request model with validation
@@ -4061,7 +4181,7 @@ async def list_application_keys(
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
     filter_created_at__start: str | None = Field(None, alias="filtercreated_atstart", description="Filter to include only application keys created on or after this date. Use ISO 8601 format with timezone."),
     filter_created_at__end: str | None = Field(None, alias="filtercreated_atend", description="Filter to include only application keys created on or before this date. Use ISO 8601 format with timezone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all application keys for your organization with optional filtering by creation date and pagination support."""
 
     _page_size = _parse_int(page_size)
@@ -4102,7 +4222,7 @@ async def list_application_keys(
 
 # Tags: Key Management
 @mcp.tool()
-async def get_application_key(app_key_id: str = Field(..., description="The unique identifier of the application key to retrieve.")) -> dict[str, Any]:
+async def get_application_key(app_key_id: str = Field(..., description="The unique identifier of the application key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific application key for your organization by its ID. Use this to access details about an existing application key."""
 
     # Construct request model with validation
@@ -4143,7 +4263,7 @@ async def update_application_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the application key resource."),
     type_: Literal["application_keys"] = Field(..., alias="type", description="The resource type identifier for application keys."),
     scopes: list[str] | None = Field(None, description="List of permission scopes to grant to the application key. Scopes define what resources and actions the key can access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an application key's configuration, including its assigned scopes and permissions. Changes take effect immediately."""
 
     # Construct request model with validation
@@ -4185,7 +4305,7 @@ async def update_application_key(
 
 # Tags: Key Management
 @mcp.tool()
-async def delete_application_key(app_key_id: str = Field(..., description="The unique identifier of the application key to delete.")) -> dict[str, Any]:
+async def delete_application_key(app_key_id: str = Field(..., description="The unique identifier of the application key to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an application key by its ID. This action cannot be undone and will invalidate any authentication using this key."""
 
     # Construct request model with validation
@@ -4226,7 +4346,7 @@ async def list_audit_logs(
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering audit log events. Specify in ISO 8601 format."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of audit log events to return in a single response. Useful for controlling response size and pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of audit log events matching your search criteria. Use this endpoint to monitor your organization's latest audit activity with optional filtering by query, time range, and result limit."""
 
     _page_limit = _parse_int(page_limit)
@@ -4270,7 +4390,7 @@ async def search_audit_logs(
     from_: str | None = Field(None, alias="from", description="Start of the time range for audit events. Accepts relative expressions (e.g., now-15m), absolute timestamps in milliseconds, or date formats."),
     to: str | None = Field(None, description="End of the time range for audit events. Accepts relative expressions (e.g., now), absolute timestamps in milliseconds, or date formats."),
     limit: str | None = Field(None, description="Maximum number of audit events to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter audit log events using complex query criteria with paginated results. Use this endpoint to retrieve audit events within a specified time range with customizable result limits."""
 
     _limit = _parse_int(limit)
@@ -4316,7 +4436,7 @@ async def list_cases(
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve. Use this to navigate through paginated results."),
     sort_field: Literal["created_at", "priority", "status"] | None = Field(None, alias="sortfield", description="Field to sort results by. Choose from creation date, priority level, or case status."),
     sort_asc: bool | None = Field(None, alias="sortasc", description="Sort order direction. Set to true for ascending order, false for descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of cases with optional sorting. Use pagination parameters to navigate through results and sorting options to organize cases by creation date, priority, or status."""
 
     _page_size = _parse_int(page_size)
@@ -4367,7 +4487,7 @@ async def create_case(
     status_name: str | None = Field(None, description="Initial status of the case. Must correspond to a valid status defined for the case's type."),
     assignee_data: dict[str, Any] | None = Field(None, alias="assigneeData", description="User to assign ownership or responsibility for the case."),
     project_data: dict[str, Any] | None = Field(None, alias="projectData", description="Project to associate the case with for organizational grouping."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new case with specified type, title, and optional metadata. Cases are used to track and manage investigations or issues within a project."""
 
     # Construct request model with validation
@@ -4410,7 +4530,7 @@ async def create_case(
 
 # Tags: Case Management
 @mcp.tool()
-async def list_projects() -> dict[str, Any]:
+async def list_projects() -> dict[str, Any] | ToolResult:
     """Retrieve all available projects. Returns a complete list of projects accessible to the authenticated user."""
 
     # Extract parameters for API call
@@ -4443,7 +4563,7 @@ async def create_project(
     type_: Literal["project"] = Field(..., alias="type", description="Resource type identifier for this project."),
     enabled_custom_case_types: list[str] | None = Field(None, description="List of custom case type IDs to enable for this project. The order of IDs in the array is not significant."),
     team_uuid: str | None = Field(None, description="UUID of the team to associate with this project. If not provided, the project will not be assigned to a team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new project to organize and manage cases. Projects serve as containers for case types and team collaboration."""
 
     # Construct request model with validation
@@ -4484,7 +4604,7 @@ async def create_project(
 
 # Tags: Case Management
 @mcp.tool()
-async def get_project(project_id: str = Field(..., description="The unique identifier (UUID) of the project to retrieve.")) -> dict[str, Any]:
+async def get_project(project_id: str = Field(..., description="The unique identifier (UUID) of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific project using its unique identifier. Returns comprehensive project metadata and configuration."""
 
     # Construct request model with validation
@@ -4534,7 +4654,7 @@ async def update_project(
     integration_service_now: dict[str, Any] | None = Field(None, description="Settings for integrating ServiceNow with this project, including authentication and synchronization rules."),
     notification: dict[str, Any] | None = Field(None, description="Configuration for project notifications, including channels, triggers, and recipient settings."),
     team_uuid: str | None = Field(None, description="UUID of the team to associate with this project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update project configuration including board columns, case types, automation rules, integrations, and notification settings."""
 
     # Construct request model with validation
@@ -4578,7 +4698,7 @@ async def update_project(
 
 # Tags: Case Management
 @mcp.tool()
-async def delete_project(project_id: str = Field(..., description="The unique identifier (UUID) of the project to delete.")) -> dict[str, Any]:
+async def delete_project(project_id: str = Field(..., description="The unique identifier (UUID) of the project to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a project by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -4617,7 +4737,7 @@ async def delete_project(project_id: str = Field(..., description="The unique id
 async def delete_notification_rule(
     project_id: str = Field(..., description="The unique identifier (UUID) of the project containing the notification rule to delete."),
     notification_rule_id: str = Field(..., description="The unique identifier (UUID) of the notification rule to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a notification rule from a project by its ID. This operation permanently removes the specified notification rule and its associated configurations."""
 
     # Construct request model with validation
@@ -4653,7 +4773,7 @@ async def delete_notification_rule(
 
 # Tags: Case Management Type
 @mcp.tool()
-async def list_case_types() -> dict[str, Any]:
+async def list_case_types() -> dict[str, Any] | ToolResult:
     """Retrieve all available case types in the system. Use this to populate case type selections or understand the case taxonomy."""
 
     # Extract parameters for API call
@@ -4685,7 +4805,7 @@ async def create_case_type(
     type_: Literal["case_type"] = Field(..., alias="type", description="The resource type identifier for this case type."),
     description: str | None = Field(None, description="A detailed description of the case type's purpose and usage."),
     emoji: str | None = Field(None, description="An emoji icon to visually represent this case type in the user interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new case type to categorize and organize cases within your system. Case types help structure case management workflows and reporting."""
 
     # Construct request model with validation
@@ -4726,7 +4846,7 @@ async def create_case_type(
 
 # Tags: Case Management Attribute
 @mcp.tool()
-async def list_custom_attributes() -> dict[str, Any]:
+async def list_custom_attributes() -> dict[str, Any] | ToolResult:
     """Retrieve all custom attributes available for case types. This returns the complete set of custom attribute definitions that can be applied to cases."""
 
     # Extract parameters for API call
@@ -4753,7 +4873,7 @@ async def list_custom_attributes() -> dict[str, Any]:
 
 # Tags: Case Management Type
 @mcp.tool()
-async def delete_case_type(case_type_id: str = Field(..., description="The unique identifier (UUID) of the case type to delete.")) -> dict[str, Any]:
+async def delete_case_type(case_type_id: str = Field(..., description="The unique identifier (UUID) of the case type to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a case type by its UUID. This action cannot be undone and will remove the case type from the system."""
 
     # Construct request model with validation
@@ -4789,7 +4909,7 @@ async def delete_case_type(case_type_id: str = Field(..., description="The uniqu
 
 # Tags: Case Management Attribute
 @mcp.tool()
-async def list_custom_attributes_by_case_type(case_type_id: str = Field(..., description="The unique identifier (UUID) of the case type for which to retrieve custom attribute configurations.")) -> dict[str, Any]:
+async def list_custom_attributes_by_case_type(case_type_id: str = Field(..., description="The unique identifier (UUID) of the case type for which to retrieve custom attribute configurations.")) -> dict[str, Any] | ToolResult:
     """Retrieve all custom attribute configurations for a specific case type. Returns the complete set of custom attributes defined for the given case type."""
 
     # Construct request model with validation
@@ -4833,7 +4953,7 @@ async def create_case_type_custom_attribute(
     attributes_type: Literal["URL", "TEXT", "NUMBER", "SELECT"] = Field(..., alias="attributesType", description="The data type of the custom attribute, determining how values are stored and validated."),
     data_type: Literal["custom_attribute"] = Field(..., alias="dataType", description="The JSON:API resource type identifier for custom attribute configurations."),
     description: str | None = Field(None, description="A detailed explanation of the custom attribute's purpose and usage guidelines."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a custom attribute configuration for a specific case type. Custom attributes extend case records with user-defined fields such as text, numbers, URLs, or dropdown selections."""
 
     # Construct request model with validation
@@ -4878,7 +4998,7 @@ async def create_case_type_custom_attribute(
 async def delete_custom_attribute(
     case_type_id: str = Field(..., description="The unique identifier (UUID) of the case type containing the custom attribute to delete."),
     custom_attribute_id: str = Field(..., description="The unique identifier (UUID) of the custom attribute configuration to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom attribute configuration from a specific case type. This permanently deletes the attribute definition and its associated settings."""
 
     # Construct request model with validation
@@ -4914,7 +5034,7 @@ async def delete_custom_attribute(
 
 # Tags: Case Management
 @mcp.tool()
-async def get_case(case_id: str = Field(..., description="The unique identifier for the case, either as a UUID or case key.")) -> dict[str, Any]:
+async def get_case(case_id: str = Field(..., description="The unique identifier for the case, either as a UUID or case key.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific case using its UUID or key identifier. Returns all case metadata and current status."""
 
     # Construct request model with validation
@@ -4953,7 +5073,7 @@ async def get_case(case_id: str = Field(..., description="The unique identifier 
 async def archive_case(
     case_id: str = Field(..., description="The unique identifier of the case to archive, provided as either a UUID or case key."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be set to 'case' to specify the target resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Archive a case to remove it from active workflow while preserving its data for historical reference. Archived cases can be retrieved but are excluded from standard case listings."""
 
     # Construct request model with validation
@@ -4996,7 +5116,7 @@ async def assign_case(
     case_id: str = Field(..., description="The unique identifier (UUID or key) of the case to assign."),
     assignee_id: str = Field(..., description="The UUID of the user to assign the case to."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign a case to a specific user. The case will be associated with the assignee and marked as assigned in the system."""
 
     # Construct request model with validation
@@ -5042,7 +5162,7 @@ async def update_case_attributes(
     case_id: str = Field(..., description="The unique identifier of the case to update, provided as either a UUID or case key."),
     attributes: dict[str, list[str]] = Field(..., description="An object containing the case attributes to update. Each key-value pair represents an attribute name and its new value."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation, which specifies that the target is a case object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update one or more attributes for a specific case. Attributes are custom fields that store additional case metadata and can be modified independently."""
 
     # Construct request model with validation
@@ -5088,7 +5208,7 @@ async def add_case_comment(
     case_id: str = Field(..., description="The unique identifier of the case, either as a UUID or case key."),
     comment: str = Field(..., description="The text content of the comment to be added to the case."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a comment to a case. Comments are attached to the case record and visible to all users with access to that case."""
 
     # Construct request model with validation
@@ -5133,7 +5253,7 @@ async def add_case_comment(
 async def remove_case_comment(
     case_id: str = Field(..., description="The unique identifier (UUID or key) of the case containing the comment to delete."),
     cell_id: str = Field(..., description="The unique identifier (UUID) of the timeline cell containing the comment to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a comment from a case's timeline. This permanently deletes the specified comment associated with the given case."""
 
     # Construct request model with validation
@@ -5176,7 +5296,7 @@ async def update_case_custom_attribute(
     attributes_type: Literal["URL", "TEXT", "NUMBER", "SELECT"] = Field(..., alias="attributesType", description="The data type of the custom attribute, which determines the format and validation rules for the value."),
     data_type: Literal["case"] = Field(..., alias="dataType", description="The resource type identifier for the case object."),
     value: str | _models.CustomAttributeMultiStringValue | float | _models.CustomAttributeMultiNumberValue = Field(..., description="The value to assign to the custom attribute. The format depends on the attribute type and is_multi setting: provide a single value or an array of values accordingly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a custom attribute value for a specific case. Custom attributes can store various data types including text, numbers, URLs, and select options."""
 
     # Construct request model with validation
@@ -5221,7 +5341,7 @@ async def update_case_custom_attribute(
 async def remove_case_custom_attribute(
     case_id: str = Field(..., description="The unique identifier of the case, either as a UUID or case key."),
     custom_attribute_key: str = Field(..., description="The key identifying which custom attribute to delete from the case."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a custom attribute from a case by its key. This operation permanently deletes the specified custom attribute associated with the case."""
 
     # Construct request model with validation
@@ -5261,7 +5381,7 @@ async def update_case_description(
     case_id: str = Field(..., description="The unique identifier of the case to update, either as a UUID or case key."),
     description: str = Field(..., description="The new description text for the case. This replaces the existing description."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the description text for a specific case. This allows you to modify case details and notes after creation."""
 
     # Construct request model with validation
@@ -5307,7 +5427,7 @@ async def update_case_priority(
     case_id: str = Field(..., description="The unique identifier of the case to update, either as a UUID or case key."),
     priority: Literal["NOT_DEFINED", "P1", "P2", "P3", "P4", "P5"] = Field(..., description="The priority level to assign to the case. P1 is the highest priority, P5 is the lowest, and NOT_DEFINED indicates no priority is set."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation, which must be set to 'case'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the priority level of a case. Priority levels range from NOT_DEFINED to P1 (highest) through P5 (lowest)."""
 
     # Construct request model with validation
@@ -5353,7 +5473,7 @@ async def link_incident_to_case(
     case_id: str = Field(..., description="The unique identifier (UUID or key) of the case to which the incident will be linked."),
     id_: str = Field(..., alias="id", description="The unique identifier of the incident to be linked to the case."),
     type_: Literal["incidents"] = Field(..., alias="type", description="The resource type identifier for the incident being linked."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associate an incident with a case to establish a relationship between the two resources. This enables tracking of related incidents within a case context."""
 
     # Construct request model with validation
@@ -5399,7 +5519,7 @@ async def create_and_link_jira_issue(
     project_id: str = Field(..., description="The Jira project ID where the new issue will be created."),
     type_: Literal["issues"] = Field(..., alias="type", description="The resource type identifier for Jira issues."),
     fields: dict[str, Any] | None = Field(None, description="Optional custom Jira fields to include when creating the issue. Provide as a JSON object with field keys and their values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Jira issue and link it to a case, establishing a connection between the case management system and Jira project tracking."""
 
     # Construct request model with validation
@@ -5445,7 +5565,7 @@ async def link_jira_issue(
     case_id: str = Field(..., description="The unique identifier or key of the case to link the Jira issue to."),
     jira_issue_url: str = Field(..., description="The full URL of the Jira issue to link to the case."),
     type_: Literal["issues"] = Field(..., alias="type", description="The resource type identifier for the Jira issue."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Link an existing Jira issue to a case to establish a relationship between the two systems. This enables tracking and cross-referencing between case management and Jira issue tracking."""
 
     # Construct request model with validation
@@ -5487,7 +5607,7 @@ async def link_jira_issue(
 
 # Tags: Case Management
 @mcp.tool()
-async def remove_jira_issue_link(case_id: str = Field(..., description="The unique identifier of the case, provided as either a UUID or case key.")) -> dict[str, Any]:
+async def remove_jira_issue_link(case_id: str = Field(..., description="The unique identifier of the case, provided as either a UUID or case key.")) -> dict[str, Any] | ToolResult:
     """Remove the link between a Jira issue and a case. This operation disconnects an associated Jira issue from the specified case."""
 
     # Construct request model with validation
@@ -5526,7 +5646,7 @@ async def remove_jira_issue_link(case_id: str = Field(..., description="The uniq
 async def create_case_notebook(
     case_id: str = Field(..., description="The unique identifier (UUID or key) of the case to which the notebook will be linked."),
     type_: Literal["notebook"] = Field(..., alias="type", description="The resource type identifier for the notebook being created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new investigation notebook and link it to a case. The notebook serves as a dedicated space for documenting investigation findings and notes related to the case."""
 
     # Construct request model with validation
@@ -5569,7 +5689,7 @@ async def assign_case_to_project(
     case_id: str = Field(..., description="The unique identifier of the case to be reassigned, provided as either a UUID or case key."),
     id_: str = Field(..., alias="id", description="The unique identifier of the project to assign the case to."),
     type_: Literal["project"] = Field(..., alias="type", description="The resource type identifier for the project relationship."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign or reassign a case to a different project. Updates the project relationship for the specified case."""
 
     # Construct request model with validation
@@ -5613,7 +5733,7 @@ async def create_servicenow_ticket(
     instance_name: str = Field(..., description="The name of the ServiceNow instance where the ticket will be created."),
     type_: Literal["tickets"] = Field(..., alias="type", description="The resource type for the ServiceNow ticket being created."),
     assignment_group: str | None = Field(None, description="The ServiceNow assignment group that will be responsible for the ticket. If not specified, the ticket will be created without an initial assignment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new ServiceNow incident ticket and link it to an existing case. The ticket will be created in the specified ServiceNow instance and optionally assigned to a group."""
 
     # Construct request model with validation
@@ -5659,7 +5779,7 @@ async def update_case_status(
     case_id: str = Field(..., description="The unique identifier of the case to update, provided as a UUID or case key."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier, which must be 'case' for this operation."),
     status_name: str | None = Field(None, description="The new status to assign to the case. Must be a valid status defined for this case type."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the status of a case to a valid status type for that case. The new status must be one of the predefined statuses available for the case's type."""
 
     # Construct request model with validation
@@ -5705,7 +5825,7 @@ async def update_case_title(
     case_id: str = Field(..., description="The unique identifier of the case to update, either as a UUID or case key."),
     title: str = Field(..., description="The new title for the case."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the title of an existing case. Provide the case identifier and the new title to modify."""
 
     # Construct request model with validation
@@ -5750,7 +5870,7 @@ async def update_case_title(
 async def unarchive_case(
     case_id: str = Field(..., description="The unique identifier of the case to unarchive, provided as either a UUID or case key."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type being unarchived, which must be 'case' for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Restore an archived case to active status. This operation reverses a previous archive action, making the case accessible for normal operations."""
 
     # Construct request model with validation
@@ -5792,7 +5912,7 @@ async def unarchive_case(
 async def unassign_case(
     case_id: str = Field(..., description="The unique identifier of the case to unassign, provided as a UUID or case key."),
     type_: Literal["case"] = Field(..., alias="type", description="The resource type identifier for the case object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove the current assignment from a case, making it available for reassignment. This operation clears the case's assigned user or team."""
 
     # Construct request model with validation
@@ -5840,7 +5960,7 @@ async def list_catalog_entities(
     filter_relation__type: Literal["RelationTypeOwns", "RelationTypeOwnedBy", "RelationTypeDependsOn", "RelationTypeDependencyOf", "RelationTypePartsOf", "RelationTypeHasPart", "RelationTypeOtherOwns", "RelationTypeOtherOwnedBy", "RelationTypeImplementedBy", "RelationTypeImplements"] | None = Field(None, alias="filterrelationtype", description="Filter results by the type of relationship between entities."),
     filter_exclude_snapshot: str | None = Field(None, alias="filterexclude_snapshot", description="Exclude snapshotted entities from the results when enabled."),
     include_discovered: bool | None = Field(None, alias="includeDiscovered", description="When enabled, includes discovered services from APM and USM monitoring that do not have formal entity definitions in the catalog."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of entities from the Software Catalog with optional filtering by reference, kind, owner, and relationships. Optionally includes discovered services from APM and USM that lack formal entity definitions."""
 
     _page_offset = _parse_int(page_offset)
@@ -5889,7 +6009,7 @@ async def upsert_catalog_entity(
     extensions: dict[str, Any] | None = Field(None, description="Custom extensions for client-side metadata. This free-form field allows you to attach additional context without affecting Datadog features."),
     integrations: _models.EntityV3Integrations | None = Field(None, description="Integration configurations associated with the entity."),
     spec: _models.EntityV3ServiceSpec | None = Field(None, description="Entity-specific configuration and properties that define its behavior and characteristics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update an entity in the Software Catalog. Use this operation to add new entities or modify existing ones with their complete configuration."""
 
     # Construct request model with validation
@@ -5927,7 +6047,7 @@ async def upsert_catalog_entity(
 
 # Tags: Software Catalog
 @mcp.tool()
-async def preview_catalog_entities() -> dict[str, Any]:
+async def preview_catalog_entities() -> dict[str, Any] | ToolResult:
     """Generate a preview of catalog entities to visualize how they will appear or be processed. This operation allows you to validate entity configurations before committing them to the catalog."""
 
     # Extract parameters for API call
@@ -5954,7 +6074,7 @@ async def preview_catalog_entities() -> dict[str, Any]:
 
 # Tags: Software Catalog
 @mcp.tool()
-async def delete_catalog_entity(entity_id: str = Field(..., description="The unique identifier of the entity to delete, specified as either a UUID or an entity reference string.")) -> dict[str, Any]:
+async def delete_catalog_entity(entity_id: str = Field(..., description="The unique identifier of the entity to delete, specified as either a UUID or an entity reference string.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a single entity from the Software Catalog. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5993,7 +6113,7 @@ async def delete_catalog_entity(entity_id: str = Field(..., description="The uni
 async def list_catalog_kinds(
     page_offset: str | None = Field(None, alias="pageoffset", description="The starting position for the returned page of results. Use this to implement pagination by specifying where in the full result set to begin."),
     page_limit: str | None = Field(None, alias="pagelimit", description="The maximum number of entity kinds to return in a single response. Adjust this value to balance between response size and number of requests needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of entity kinds available in the Software Catalog. Use pagination parameters to control the number of results and starting position."""
 
     _page_offset = _parse_int(page_offset)
@@ -6034,7 +6154,7 @@ async def list_catalog_kinds(
 
 # Tags: Software Catalog
 @mcp.tool()
-async def upsert_catalog_kind(body: _models.KindObj | str = Field(..., description="Request payload containing the kind configuration to create or update. Should include all required fields for the kind definition.")) -> dict[str, Any]:
+async def upsert_catalog_kind(body: _models.KindObj | str = Field(..., description="Request payload containing the kind configuration to create or update. Should include all required fields for the kind definition.")) -> dict[str, Any] | ToolResult:
     """Create a new kind or update an existing kind in the Software Catalog. Use this operation to define or modify catalog kind configurations."""
 
     # Construct request model with validation
@@ -6073,7 +6193,7 @@ async def upsert_catalog_kind(body: _models.KindObj | str = Field(..., descripti
 
 # Tags: Software Catalog
 @mcp.tool()
-async def delete_kind(kind_id: str = Field(..., description="The unique identifier of the entity kind to delete.")) -> dict[str, Any]:
+async def delete_kind(kind_id: str = Field(..., description="The unique identifier of the entity kind to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a single entity kind from the Software Catalog. This operation permanently removes the specified kind and cannot be undone."""
 
     # Construct request model with validation
@@ -6116,7 +6236,7 @@ async def list_catalog_relations(
     filter_from_ref: str | None = Field(None, alias="filterfrom_ref", description="Filter results to only relations where the source entity matches the specified reference. Use the format entity-type:entity-name."),
     filter_to_ref: str | None = Field(None, alias="filterto_ref", description="Filter results to only relations where the target entity matches the specified reference. Use the format entity-type:entity-name."),
     include_discovered: bool | None = Field(None, alias="includeDiscovered", description="When enabled, includes relationships that were automatically discovered by APM and USM monitoring tools, in addition to manually defined relations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of entity relations from the Software Catalog, with optional filtering by relation type, source entity, or target entity. Optionally includes relationships discovered through APM and USM integrations."""
 
     _page_offset = _parse_int(page_offset)
@@ -6170,7 +6290,7 @@ async def create_change_request(
     project_id: str | None = Field(None, description="UUID of the project to associate with this change request."),
     requested_teams: list[str] | None = Field(None, description="List of team handles to request approval decisions from. Teams are processed in the order provided."),
     start_date: str | None = Field(None, description="Planned start date and time for the change implementation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new change request to manage and track planned changes in your system. Specify the change details, risk level, timeline, and teams requiring approval."""
 
     # Construct request model with validation
@@ -6211,7 +6331,7 @@ async def create_change_request(
 
 # Tags: Change Management
 @mcp.tool()
-async def get_change_request(change_request_id: str = Field(..., description="The unique identifier of the change request to retrieve.")) -> dict[str, Any]:
+async def get_change_request(change_request_id: str = Field(..., description="The unique identifier of the change request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete details of a specific change request using its unique identifier. This operation provides access to all change request information including status, timeline, and associated metadata."""
 
     # Construct request model with validation
@@ -6257,7 +6377,7 @@ async def update_change_request(
     end_date: str | None = Field(None, description="The planned completion date and time for the change request in ISO 8601 format."),
     start_date: str | None = Field(None, description="The planned start date and time for the change request in ISO 8601 format."),
     included: list[_models.ChangeRequestDecisionCreateItem] | None = Field(None, description="Optional array of related resources to include in the change request update, such as associated tasks or approvals."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update properties of an existing change request, including its plan, risk level, type, and scheduled dates. Use this to modify change request details after creation."""
 
     # Construct request model with validation
@@ -6308,7 +6428,7 @@ async def create_change_request_branch(
     branch_name: str = Field(..., description="The name for the new branch to be created in the repository."),
     repo_id: str = Field(..., description="The repository identifier in owner/repository format (e.g., DataDog/dd-source)."),
     type_: Literal["change_request_branch"] = Field(..., alias="type", description="The resource type identifier for this change request branch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new branch in a repository associated with a change request. This branch will be used to track and manage changes for the specified change request."""
 
     # Construct request model with validation
@@ -6356,7 +6476,7 @@ async def update_change_request_decision(
     data: list[_models.ChangeRequestDecisionRelationshipData] = Field(..., description="Array of decision relationship data objects that define the decision details and associations. Order is significant and represents the decision hierarchy or sequence."),
     type_: Literal["change_request"] = Field(..., alias="type", description="The resource type identifier for this change request update operation."),
     included: list[_models.ChangeRequestDecisionCreateItem] | None = Field(None, description="Optional array of related resources to include in the response, such as associated change request metadata or decision history records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a decision on a change request to approve, decline, or modify its status. This operation allows you to record and manage decision outcomes throughout the change request lifecycle."""
 
     # Construct request model with validation
@@ -6404,7 +6524,7 @@ async def update_change_request_decision(
 async def remove_change_request_decision(
     change_request_id: str = Field(..., description="The unique identifier of the change request containing the decision to be removed."),
     decision_id: str = Field(..., description="The unique identifier of the decision to be removed from the change request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a decision from a change request. This operation permanently deletes the specified decision record associated with the change request."""
 
     # Construct request model with validation
@@ -6440,7 +6560,7 @@ async def remove_change_request_decision(
 
 # Tags: CI Visibility Pipelines
 @mcp.tool()
-async def send_pipeline_event() -> dict[str, Any]:
+async def send_pipeline_event() -> dict[str, Any] | ToolResult:
     """Send one or more pipeline events to Datadog to track CI/CD pipeline executions. Events can be submitted with timestamps up to 18 hours in the past, with a maximum duration of 1 year between start and end times."""
 
     # Extract parameters for API call
@@ -6472,7 +6592,7 @@ async def aggregate_pipeline_events(
     from_: str | None = Field(None, alias="from", description="Start time for the aggregation window. Accepts ISO 8601 dates, math expressions (e.g., now-15m), or millisecond timestamps."),
     to: str | None = Field(None, description="End time for the aggregation window. Accepts ISO 8601 dates, math expressions (e.g., now), or millisecond timestamps."),
     group_by: list[_models.CiAppPipelinesGroupBy] | None = Field(None, description="Grouping rules for bucketing aggregated data. Specify dimensions to group results by (e.g., branch, status, environment)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aggregate CI pipeline events into time-based buckets with computed metrics and timeseries data. Use this to analyze pipeline performance and trends over a specified time range."""
 
     # Construct request model with validation
@@ -6516,7 +6636,7 @@ async def list_pipeline_events(
     filter_from: str | None = Field(None, alias="filterfrom", description="Earliest timestamp to include in results. Events before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="Latest timestamp to include in results. Events after this time are excluded."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response page. Useful for controlling response size and implementing pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve CI Visibility pipeline events matching a search query with pagination support. Use this endpoint to view your latest pipeline events filtered by provider, pipeline name, and time range."""
 
     _page_limit = _parse_int(page_limit)
@@ -6560,7 +6680,7 @@ async def search_pipeline_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds."),
     to: str | None = Field(None, description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds."),
     limit: str | None = Field(None, description="Maximum number of events to return in a single response. Use pagination to retrieve additional results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search CI Visibility pipeline events using a search query to filter and retrieve matching events. Results are paginated to handle large datasets efficiently."""
 
     _limit = _parse_int(limit)
@@ -6606,7 +6726,7 @@ async def retrieve_test_optimization_settings(
     service_name: str = Field(..., description="The name of the service for which to retrieve Test Optimization settings.", min_length=1),
     type_: Literal["test_optimization_get_service_settings_request"] = Field(..., alias="type", description="JSON:API resource type identifier for this request. This value is required and must be set to the specified constant."),
     env: str | None = Field(None, description="The environment name for which to retrieve settings. Defaults to 'none' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Test Optimization settings for a specific service. Requires the repository identifier, service name, and optionally an environment name to fetch the corresponding configuration."""
 
     # Construct request model with validation
@@ -6658,7 +6778,7 @@ async def configure_test_optimization_settings(
     failed_test_replay_enabled: bool | None = Field(None, description="Enable or disable replay of failed tests for debugging and analysis."),
     pr_comments_enabled: bool | None = Field(None, description="Enable or disable automated comments on pull requests with test optimization insights."),
     test_impact_analysis_enabled: bool | None = Field(None, description="Enable or disable test impact analysis to identify which tests are affected by code changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure Test Optimization settings for a service within a specific repository and environment. Only provided fields are updated; omitted fields remain unchanged."""
 
     # Construct request model with validation
@@ -6704,7 +6824,7 @@ async def delete_test_optimization_settings(
     service_name: str = Field(..., description="The name of the service for which to delete Test Optimization settings.", min_length=1),
     type_: Literal["test_optimization_delete_service_settings_request"] = Field(..., alias="type", description="The JSON:API resource type identifier for this delete request."),
     env: str | None = Field(None, description="The environment name where the service is deployed. Defaults to `none` if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove Test Optimization settings for a specific service. Deletes configuration associated with the given repository, service name, and environment."""
 
     # Construct request model with validation
@@ -6750,7 +6870,7 @@ async def aggregate_test_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts ISO 8601 dates, relative expressions (e.g., now-15m), or millisecond timestamps."),
     to: str | None = Field(None, description="End of the time range for events. Accepts ISO 8601 dates, relative expressions (e.g., now), or millisecond timestamps."),
     group_by: list[_models.CiAppTestsGroupBy] | None = Field(None, description="Rules for grouping aggregated results by dimensions (e.g., test suite, branch, status). Order determines grouping hierarchy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aggregate CI Visibility test events into time-based buckets with computed metrics and timeseries data. Use this to analyze test performance trends and patterns across your CI pipeline."""
 
     # Construct request model with validation
@@ -6794,7 +6914,7 @@ async def list_test_events(
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering test events. Specify in ISO 8601 format."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of test events to return per page. Defaults to 10 if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve CI Visibility test events matching a search query with pagination support. Use this endpoint to view your latest test events filtered by name, suite, timestamp, and other criteria."""
 
     _page_limit = _parse_int(page_limit)
@@ -6838,7 +6958,7 @@ async def search_test_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts relative times (e.g., now-15m), math expressions, or absolute timestamps in milliseconds."),
     to: str | None = Field(None, description="End of the time range for events. Accepts relative times, math expressions, or absolute timestamps in milliseconds."),
     limit: str | None = Field(None, description="Maximum number of events to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search CI Visibility test events using a search query to filter results. Results are paginated and can be used to build complex event filtering."""
 
     _limit = _parse_int(limit)
@@ -6879,7 +6999,7 @@ async def search_test_events(
 
 # Tags: Cloud Authentication
 @mcp.tool()
-async def get_aws_persona_mapping(persona_mapping_id: str = Field(..., description="The unique identifier of the AWS persona mapping to retrieve.")) -> dict[str, Any]:
+async def get_aws_persona_mapping(persona_mapping_id: str = Field(..., description="The unique identifier of the AWS persona mapping to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AWS cloud authentication persona mapping by ID. This returns the configuration that associates an AWS IAM principal with a Datadog user."""
 
     # Construct request model with validation
@@ -6923,7 +7043,7 @@ async def create_custom_framework(
     type_: Literal["custom_framework"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'custom_framework' for this operation."),
     description: str | None = Field(None, description="A detailed description of the framework's purpose, scope, and intended use."),
     icon_url: str | None = Field(None, description="URL pointing to an icon or logo image representing the framework visually."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new custom security framework with specified requirements, metadata, and branding. This framework can be used to define and track custom security compliance standards."""
 
     # Construct request model with validation
@@ -6967,7 +7087,7 @@ async def create_custom_framework(
 async def get_custom_framework(
     handle: str = Field(..., description="The unique identifier for the custom framework. This handle is used to reference the framework across API operations."),
     version: str = Field(..., description="The specific version of the custom framework to retrieve. Versions allow you to manage multiple iterations of the same framework."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific version of a custom security framework by its handle. Use this to access framework details, rules, and configurations for a particular version."""
 
     # Construct request model with validation
@@ -7013,7 +7133,7 @@ async def update_custom_framework(
     type_: Literal["custom_framework"] = Field(..., alias="type", description="The resource type identifier for this object."),
     description: str | None = Field(None, description="A detailed description of the framework's purpose, scope, and usage guidelines."),
     icon_url: str | None = Field(None, description="URL pointing to an icon or logo image representing the framework visually."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing custom security framework with new metadata, requirements, and configuration. Specify the framework by its handle and version."""
 
     # Construct request model with validation
@@ -7058,7 +7178,7 @@ async def update_custom_framework(
 async def delete_custom_framework(
     handle: str = Field(..., description="The unique identifier for the custom framework to delete."),
     version: str = Field(..., description="The specific version of the framework to delete. Versions are typically semantic (e.g., 1.0.0) or numeric identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific version of a custom security framework. This operation permanently removes the framework configuration and cannot be undone."""
 
     # Construct request model with validation
@@ -7097,7 +7217,7 @@ async def delete_custom_framework(
 async def list_resource_evaluation_filters(
     cloud_provider: str | None = Field(None, description="Filter results by cloud provider (e.g., aws, gcp, azure). When specified, enables account_id filtering for that provider."),
     account_id: str | None = Field(None, description="Filter results by cloud provider account ID. Only valid when cloud_provider parameter is specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve available resource evaluation filters for cloud security management, optionally filtered by cloud provider and account ID."""
 
     # Construct request model with validation
@@ -7139,7 +7259,7 @@ async def update_resource_filters(
     cloud_provider: dict[str, dict[str, list[str]]] = Field(..., description="A mapping of cloud provider names to their respective account/resource IDs and associated tag filters for resource evaluation."),
     type_: Literal["csm_resource_filter"] = Field(..., alias="type", description="The request type identifier for cloud security management resource filters."),
     uuid_: str | None = Field(None, alias="uuid", description="The unique identifier of the resource filter to update."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update cloud security management resource filters to control which cloud resources are evaluated based on provider-specific account IDs and tag filters."""
 
     # Construct request model with validation
@@ -7184,7 +7304,7 @@ async def get_branch_coverage_summary(
     branch: str = Field(..., description="The name of the branch to retrieve coverage data for.", min_length=1),
     repository_id: str = Field(..., description="The unique identifier of the repository in the format of version control provider and organization/repository name.", min_length=1),
     type_: Literal["ci_app_coverage_branch_summary_request"] = Field(..., alias="type", description="The JSON:API type identifier for this request. This value specifies the resource type being requested."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated code coverage statistics for a specific branch, including overall metrics and breakdowns by service and code owner."""
 
     # Construct request model with validation
@@ -7229,7 +7349,7 @@ async def get_commit_coverage_summary(
     commit_sha: str = Field(..., description="The commit SHA as a 40-character hexadecimal string (SHA-1 hash).", pattern="^[a-fA-F0-9]{40}$"),
     repository_id: str = Field(..., description="The repository identifier (e.g., GitHub organization/repository name).", min_length=1),
     type_: Literal["ci_app_coverage_commit_summary_request"] = Field(..., alias="type", description="JSON:API type identifier for the commit coverage summary request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated code coverage statistics for a specific commit, including overall metrics and breakdowns by service and code owner."""
 
     # Construct request model with validation
@@ -7274,7 +7394,7 @@ async def list_container_images(
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter container images by one or more tags. Provide tags as a comma-separated list in key:value format."),
     group_by: str | None = Field(None, description="Group results by one or more tag keys. Provide tag keys as a comma-separated list to organize the returned container images."),
     page_size: str | None = Field(None, alias="pagesize", description="Maximum number of container images to return per request. Useful for pagination control."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all container images for your organization with optional filtering and grouping. Use the security scanned assets endpoint to enrich results with security scan data."""
 
     _page_size = _parse_int(page_size)
@@ -7318,7 +7438,7 @@ async def list_containers(
     filter_tags: str | None = Field(None, alias="filtertags", description="Filter containers by one or more tags using comma-separated key:value pairs to narrow results to specific environments, services, or other attributes."),
     group_by: str | None = Field(None, description="Group results by one or more tag keys in comma-separated format to organize containers hierarchically by the specified attributes."),
     page_size: str | None = Field(None, alias="pagesize", description="Maximum number of containers to return per page. Supports pagination for large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all containers in your organization with optional filtering by tags and grouping capabilities. Results are paginated with a configurable page size."""
 
     _page_size = _parse_int(page_size)
@@ -7358,7 +7478,7 @@ async def list_containers(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_allocation_rules() -> dict[str, Any]:
+async def list_allocation_rules() -> dict[str, Any] | ToolResult:
     """Retrieve all custom allocation rules configured for your organization. Use this to view existing cost allocation rules and their configurations."""
 
     # Extract parameters for API call
@@ -7401,7 +7521,7 @@ async def create_allocation_rule(
     evaluate_grouped_by_filters: list[_models.ArbitraryCostUpsertRequestDataAttributesStrategyEvaluateGroupedByFiltersItems] | None = Field(None, description="Array of filter conditions to group costs during evaluation. Filters are applied before allocation to narrow the cost scope."),
     evaluate_grouped_by_tag_keys: list[str] | None = Field(None, description="Array of tag keys to group costs by during evaluation. Used with PROPORTIONAL_TIMESERIES and EVEN_TIMESERIES methods to segment allocation calculations."),
     granularity: str | None = Field(None, description="Time granularity for cost allocation calculations. Determines whether costs are allocated daily, monthly, or at another interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new custom cost allocation rule that distributes costs across resources using proportional, even, timeseries, or percentage-based strategies with flexible filtering options."""
 
     _order_id = _parse_int(order_id)
@@ -7447,7 +7567,7 @@ async def create_allocation_rule(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def reorder_allocation_rules(data: list[_models.ReorderRuleResourceData] = Field(..., description="Array of allocation rule objects in the desired execution order. Must include all rule IDs currently in the system. Rules are executed sequentially from first to last position in this array.")) -> dict[str, Any]:
+async def reorder_allocation_rules(data: list[_models.ReorderRuleResourceData] = Field(..., description="Array of allocation rule objects in the desired execution order. Must include all rule IDs currently in the system. Rules are executed sequentially from first to last position in this array.")) -> dict[str, Any] | ToolResult:
     """Reorder custom allocation rules to change their execution priority. Rules execute in the order specified, with earlier positions having higher priority."""
 
     # Construct request model with validation
@@ -7485,7 +7605,7 @@ async def reorder_allocation_rules(data: list[_models.ReorderRuleResourceData] =
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def retrieve_allocation_rule(rule_id: str = Field(..., description="The unique identifier of the custom allocation rule to retrieve.")) -> dict[str, Any]:
+async def retrieve_allocation_rule(rule_id: str = Field(..., description="The unique identifier of the custom allocation rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom allocation rule by its unique identifier. Use this to fetch details about an existing allocation rule for review or modification."""
 
     _rule_id = _parse_int(rule_id)
@@ -7540,7 +7660,7 @@ async def update_allocation_rule(
     evaluate_grouped_by_filters: list[_models.ArbitraryCostUpsertRequestDataAttributesStrategyEvaluateGroupedByFiltersItems] | None = Field(None, description="Array of filter conditions to group costs during evaluation. Filters are applied before allocation calculations."),
     evaluate_grouped_by_tag_keys: list[str] | None = Field(None, description="Array of tag keys to group costs by during evaluation. Used to segment costs before applying the allocation strategy."),
     granularity: str | None = Field(None, description="Time granularity for cost allocation calculations. Determines whether costs are allocated daily, monthly, or at another interval."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing custom cost allocation rule with new filters, allocation strategy, and configuration. Supports multiple allocation methods including proportional, even, percentage-based, and usage metric strategies."""
 
     _rule_id = _parse_int(rule_id)
@@ -7588,7 +7708,7 @@ async def update_allocation_rule(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def delete_allocation_rule(rule_id: str = Field(..., description="The unique identifier of the custom allocation rule to delete.")) -> dict[str, Any]:
+async def delete_allocation_rule(rule_id: str = Field(..., description="The unique identifier of the custom allocation rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a custom allocation rule by its unique identifier. This operation permanently removes the specified allocation rule from the system."""
 
     _rule_id = _parse_int(rule_id)
@@ -7626,7 +7746,7 @@ async def delete_allocation_rule(rule_id: str = Field(..., description="The uniq
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_aws_cur_configs() -> dict[str, Any]:
+async def list_aws_cur_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all AWS Cost and Usage Report (CUR) configurations for Cloud Cost Management. This operation lists the configured AWS CUR data sources used for cost analysis and reporting."""
 
     # Extract parameters for API call
@@ -7664,7 +7784,7 @@ async def create_aws_cur_config(
     included_accounts: list[str] | None = Field(None, description="List of AWS account IDs to include in billing data collection. Only used when automatically including new accounts is disabled."),
     bucket_region: str | None = Field(None, description="The AWS region where the S3 bucket is located."),
     months: str | None = Field(None, description="Number of months of historical billing data to retrieve. Maximum of 36 months."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a Cloud Cost Management configuration for AWS Cost and Usage Reports (CUR). This sets up billing data collection from a specified S3 bucket and configures which AWS accounts to include in the dataset."""
 
     _months = _parse_int(months)
@@ -7710,7 +7830,7 @@ async def create_aws_cur_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def get_aws_cur_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose CUR configuration should be retrieved.")) -> dict[str, Any]:
+async def get_aws_cur_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose CUR configuration should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve the AWS Cost and Usage Report (CUR) configuration for a specific cloud account. This returns the current CUR setup details needed for cost analysis."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -7755,7 +7875,7 @@ async def update_aws_cur_config(
     include_new_accounts: bool | None = Field(None, description="Whether to automatically include new member accounts in the billing dataset by default."),
     included_accounts: list[str] | None = Field(None, description="List of AWS account IDs to include in the billing dataset. Used only when automatic inclusion of new accounts is disabled."),
     is_enabled: bool | None = Field(None, description="Whether the Cloud Cost Management account is active and processing billing data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the AWS CUR configuration for a cloud account, including its active status and AWS account filtering settings."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -7800,7 +7920,7 @@ async def update_aws_cur_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def delete_aws_cur_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose AWS CUR configuration should be deleted.")) -> dict[str, Any]:
+async def delete_aws_cur_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose AWS CUR configuration should be deleted.")) -> dict[str, Any] | ToolResult:
     """Delete and archive a Cloud Cost Management AWS CUR (Cost and Usage Report) configuration for the specified cloud account."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -7838,7 +7958,7 @@ async def delete_aws_cur_config(cloud_account_id: str = Field(..., description="
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_azure_cost_configs() -> dict[str, Any]:
+async def list_azure_cost_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all Azure Cloud Cost Management configurations. Returns a list of configured Azure cost tracking settings."""
 
     # Extract parameters for API call
@@ -7878,7 +7998,7 @@ async def create_azure_cost_config(
     client_id: str = Field(..., description="The client ID (application ID) of the Azure service principal or application used to authenticate and access billing data."),
     scope: str = Field(..., description="The Azure subscription scope in the format /subscriptions/{subscription-id}, defining which subscription's costs are managed."),
     type_: Literal["azure_uc_config_post_request"] = Field(..., alias="type", description="The request type identifier for Azure unified cost configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure Azure cloud cost management by linking an Azure subscription with billing export details. This enables Datadog to ingest and analyze actual and amortized cost data from your Azure environment."""
 
     # Construct request model with validation
@@ -7923,7 +8043,7 @@ async def create_azure_cost_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def get_azure_uc_config(cloud_account_id: str = Field(..., description="The unique identifier of the Azure cloud account whose UC configuration you want to retrieve.")) -> dict[str, Any]:
+async def get_azure_uc_config(cloud_account_id: str = Field(..., description="The unique identifier of the Azure cloud account whose UC configuration you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the Azure Unified Consumption (UC) configuration for a specific cloud account. This returns the cost management settings and parameters associated with the Azure account."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -7965,7 +8085,7 @@ async def toggle_azure_cost_config(
     cloud_account_id: str = Field(..., description="The unique identifier of the Azure cloud account whose cost configuration should be updated."),
     is_enabled: bool = Field(..., description="Set to true to enable cost tracking for this Azure account, or false to disable it."),
     type_: Literal["azure_uc_config_patch_request"] = Field(..., alias="type", description="Specifies the type of Azure configuration patch request being submitted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable an Azure Cloud Cost Management configuration. Use this operation to activate or archive cost tracking for a specific Azure cloud account."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -8009,7 +8129,7 @@ async def toggle_azure_cost_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def delete_azure_uc_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose Azure Unified Cost configuration should be deleted.")) -> dict[str, Any]:
+async def delete_azure_uc_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose Azure Unified Cost configuration should be deleted.")) -> dict[str, Any] | ToolResult:
     """Delete a Cloud Cost Management Azure Unified Cost configuration for the specified cloud account. This operation archives the Azure cost management settings associated with the account."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -8052,7 +8172,7 @@ async def upsert_budget(
     metrics_query: str | None = Field(None, description="A cost query that defines which costs are tracked against this budget. Use the cost query syntax to filter by service, resource, or other dimensions."),
     org_id: str | None = Field(None, description="The organization ID that owns this budget."),
     total_amount: float | None = Field(None, description="The total budget amount across all entries. This is the sum of all individual monthly budget entry amounts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new budget or update an existing one to track costs against specified metrics. Use this operation to define budget thresholds and monitor spending across your organization."""
 
     _org_id = _parse_int(org_id)
@@ -8092,7 +8212,7 @@ async def upsert_budget(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def get_budget(budget_id: str = Field(..., description="The unique identifier of the budget to retrieve.")) -> dict[str, Any]:
+async def get_budget(budget_id: str = Field(..., description="The unique identifier of the budget to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific budget by its ID. Use this to view budget details, limits, and current status."""
 
     # Construct request model with validation
@@ -8128,7 +8248,7 @@ async def get_budget(budget_id: str = Field(..., description="The unique identif
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def delete_budget(budget_id: str = Field(..., description="The unique identifier of the budget to delete.")) -> dict[str, Any]:
+async def delete_budget(budget_id: str = Field(..., description="The unique identifier of the budget to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a budget by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -8164,7 +8284,7 @@ async def delete_budget(budget_id: str = Field(..., description="The unique iden
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_budgets() -> dict[str, Any]:
+async def list_budgets() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all budgets in the cost management system. Use this operation to view budget configurations and their current status."""
 
     # Extract parameters for API call
@@ -8195,7 +8315,7 @@ async def list_custom_costs_files(
     page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve for pagination, starting from 1."),
     page_size: str | None = Field(None, alias="pagesize", description="The number of Custom Costs files to return per page."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter the Custom Costs files by their current status (e.g., pending, completed, failed)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of Custom Costs files with optional filtering by status. Use pagination parameters to control the number of results returned."""
 
     _page_number = _parse_int(page_number)
@@ -8236,7 +8356,7 @@ async def list_custom_costs_files(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def upload_custom_costs(body: list[_models.CustomCostsFileLineItem] = Field(..., description="Array of custom cost entries to upload. Each entry represents a cost record with associated metadata. Order is preserved as submitted.")) -> dict[str, Any]:
+async def upload_custom_costs(body: list[_models.CustomCostsFileLineItem] = Field(..., description="Array of custom cost entries to upload. Each entry represents a cost record with associated metadata. Order is preserved as submitted.")) -> dict[str, Any] | ToolResult:
     """Upload a Custom Costs file to configure custom cost data for your account. The file should contain an array of cost entries in the expected format."""
 
     # Construct request model with validation
@@ -8275,7 +8395,7 @@ async def upload_custom_costs(body: list[_models.CustomCostsFileLineItem] = Fiel
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def fetch_custom_costs_file(file_id: str = Field(..., description="The unique identifier of the Custom Costs file to retrieve.")) -> dict[str, Any]:
+async def fetch_custom_costs_file(file_id: str = Field(..., description="The unique identifier of the Custom Costs file to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Custom Costs file by its unique identifier. Use this operation to access previously uploaded or generated cost data files."""
 
     # Construct request model with validation
@@ -8311,7 +8431,7 @@ async def fetch_custom_costs_file(file_id: str = Field(..., description="The uni
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def delete_custom_costs_file(file_id: str = Field(..., description="The unique identifier of the Custom Costs file to delete.")) -> dict[str, Any]:
+async def delete_custom_costs_file(file_id: str = Field(..., description="The unique identifier of the Custom Costs file to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Custom Costs file by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -8347,7 +8467,7 @@ async def delete_custom_costs_file(file_id: str = Field(..., description="The un
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_gcp_usage_cost_configs() -> dict[str, Any]:
+async def list_gcp_usage_cost_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all configured Google Cloud Usage Cost configurations. This lists the cost tracking setups for GCP resources."""
 
     # Extract parameters for API call
@@ -8382,7 +8502,7 @@ async def create_gcp_usage_cost_config(
     service_account: str = Field(..., description="The email address of the Google Cloud service account with permissions to access billing and export data."),
     type_: Literal["gcp_uc_config_post_request"] = Field(..., alias="type", description="The configuration type identifier for this Google Cloud usage cost setup request."),
     export_prefix: str | None = Field(None, description="Optional prefix for organizing exported usage cost report files within the storage bucket."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a Cloud Cost Management configuration for Google Cloud Platform usage cost tracking. This sets up the necessary integration between your GCP billing account and Datadog's cost analysis platform."""
 
     # Construct request model with validation
@@ -8423,7 +8543,7 @@ async def create_gcp_usage_cost_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def get_gcp_usage_cost_config(cloud_account_id: str = Field(..., description="The unique identifier of the Google Cloud account for which to retrieve the usage cost configuration.")) -> dict[str, Any]:
+async def get_gcp_usage_cost_config(cloud_account_id: str = Field(..., description="The unique identifier of the Google Cloud account for which to retrieve the usage cost configuration.")) -> dict[str, Any] | ToolResult:
     """Retrieve the Google Cloud Usage Cost configuration for a specific cloud account. This returns the current cost tracking settings and parameters for GCP usage analysis."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -8465,7 +8585,7 @@ async def toggle_gcp_usage_cost_config(
     cloud_account_id: str = Field(..., description="The unique identifier of the cloud account to update."),
     is_enabled: bool = Field(..., description="Enable or disable cost management for this cloud account. When enabled, the system will actively track and manage GCP usage costs."),
     type_: Literal["gcp_uc_config_patch_request"] = Field(..., alias="type", description="Specifies this request as a Google Cloud Usage Cost configuration patch operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable or disable Google Cloud Usage Cost tracking for a specific cloud account. This controls whether cost data collection and management is active for the associated GCP account."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -8509,7 +8629,7 @@ async def toggle_gcp_usage_cost_config(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def archive_gcp_usage_cost_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose GCP usage cost configuration should be archived.")) -> dict[str, Any]:
+async def archive_gcp_usage_cost_config(cloud_account_id: str = Field(..., description="The unique identifier of the cloud account whose GCP usage cost configuration should be archived.")) -> dict[str, Any] | ToolResult:
     """Archive a Google Cloud Platform usage cost configuration for a specific cloud account. This operation removes the cost tracking setup from Cloud Cost Management."""
 
     _cloud_account_id = _parse_int(cloud_account_id)
@@ -8547,7 +8667,7 @@ async def archive_gcp_usage_cost_config(cloud_account_id: str = Field(..., descr
 
 # Tags: Usage Metering
 @mcp.tool()
-async def list_active_billing_dimensions() -> dict[str, Any]:
+async def list_active_billing_dimensions() -> dict[str, Any] | ToolResult:
     """Retrieve the active billing dimensions available for cost attribution and analysis. Cost data for a given month becomes available no later than the 19th of the following month."""
 
     # Extract parameters for API call
@@ -8582,7 +8702,7 @@ async def list_monthly_cost_attribution(
     tag_breakdown_keys: str | None = Field(None, description="Comma-separated list of tag keys to group costs by. If not provided, costs will not be broken down by tags."),
     next_record_id: str | None = Field(None, description="Pagination cursor from a previous response. Use this to retrieve the next page of results when the previous response indicates more data is available."),
     include_descendants: bool | None = Field(None, description="Whether to include costs from child organizations in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve monthly cost attribution by tag across multi-org and single root-org accounts. Cost data becomes available no later than the 19th of the following month. This endpoint supports pagination and is only accessible for parent-level organizations."""
 
     # Construct request model with validation
@@ -8624,7 +8744,7 @@ async def list_csm_agents(
     page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets when combined with size parameter."),
     size: str | None = Field(None, description="Number of agents to return per page. Controls the maximum items in a single response."),
     order_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results. Specify ascending or descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all CSM Agents currently running across your hosts and containers. Use pagination parameters to control result size and navigation."""
 
     _page = _parse_int(page)
@@ -8665,7 +8785,7 @@ async def list_csm_agents(
 
 # Tags: CSM Coverage Analysis
 @mcp.tool()
-async def analyze_cloud_accounts_coverage() -> dict[str, Any]:
+async def analyze_cloud_accounts_coverage() -> dict[str, Any] | ToolResult:
     """Retrieve the CSM coverage analysis for your cloud accounts, which measures security scanning coverage based on the number of accounts being scanned for security issues."""
 
     # Extract parameters for API call
@@ -8692,7 +8812,7 @@ async def analyze_cloud_accounts_coverage() -> dict[str, Any]:
 
 # Tags: CSM Coverage Analysis
 @mcp.tool()
-async def analyze_csm_hosts_and_containers_coverage() -> dict[str, Any]:
+async def analyze_csm_hosts_and_containers_coverage() -> dict[str, Any] | ToolResult:
     """Retrieve the Cloud Security Management (CSM) coverage analysis for your hosts and containers, calculated based on the number of agents running with CSM features enabled."""
 
     # Extract parameters for API call
@@ -8719,7 +8839,7 @@ async def analyze_csm_hosts_and_containers_coverage() -> dict[str, Any]:
 
 # Tags: CSM Coverage Analysis
 @mcp.tool()
-async def analyze_serverless_csm_coverage() -> dict[str, Any]:
+async def analyze_serverless_csm_coverage() -> dict[str, Any] | ToolResult:
     """Retrieve the Cloud Service Management (CSM) coverage analysis for your serverless resources, calculated based on the number of agents running with CSM features enabled."""
 
     # Extract parameters for API call
@@ -8750,7 +8870,7 @@ async def list_serverless_agents(
     page: str | None = Field(None, description="Zero-based page index for pagination. Use this to navigate through result sets."),
     size: str | None = Field(None, description="Number of agents to return per page. Controls the batch size of results in each response."),
     order_direction: Literal["asc", "desc"] | None = Field(None, description="Sort direction for the results. Use ascending to sort from lowest to highest, or descending for highest to lowest."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all CSM Serverless Agents currently running across your hosts and containers."""
 
     _page = _parse_int(page)
@@ -8796,7 +8916,7 @@ async def list_application_keys_current_user(
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve."),
     filter_created_at__start: str | None = Field(None, alias="filtercreated_atstart", description="Filter to include only application keys created on or after this date. Use ISO 8601 format with timezone."),
     filter_created_at__end: str | None = Field(None, alias="filtercreated_atend", description="Filter to include only application keys created on or before this date. Use ISO 8601 format with timezone."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all application keys owned by the current user with optional pagination and date filtering."""
 
     _page_size = _parse_int(page_size)
@@ -8841,7 +8961,7 @@ async def create_application_key(
     name: str = Field(..., description="A descriptive name for the application key to identify its purpose or associated application."),
     type_: Literal["application_keys"] = Field(..., alias="type", description="The resource type identifier for application keys."),
     scopes: list[str] | None = Field(None, description="Array of permission scopes to grant this application key. Scopes control which API operations the key can perform. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new application key for the current user with specified permissions. Application keys enable programmatic access to the API with granular scope-based access control."""
 
     # Construct request model with validation
@@ -8882,7 +9002,7 @@ async def create_application_key(
 
 # Tags: Key Management
 @mcp.tool()
-async def get_application_key_current_user(app_key_id: str = Field(..., description="The unique identifier of the application key to retrieve.")) -> dict[str, Any]:
+async def get_application_key_current_user(app_key_id: str = Field(..., description="The unique identifier of the application key to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific application key owned by the current user. Note that the key field is not returned for organizations in One-Time Read mode."""
 
     # Construct request model with validation
@@ -8923,7 +9043,7 @@ async def update_application_key_current_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the application key resource."),
     type_: Literal["application_keys"] = Field(..., alias="type", description="The resource type identifier for application keys."),
     scopes: list[str] | None = Field(None, description="List of scopes to grant to the application key. Scopes define the permissions and access levels for the key."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an application key owned by the current user, including modifying its scopes. The key value is not returned for organizations in One-Time Read mode."""
 
     # Construct request model with validation
@@ -8965,7 +9085,7 @@ async def update_application_key_current_user(
 
 # Tags: Key Management
 @mcp.tool()
-async def delete_application_key_current_user(app_key_id: str = Field(..., description="The unique identifier of the application key to delete.")) -> dict[str, Any]:
+async def delete_application_key_current_user(app_key_id: str = Field(..., description="The unique identifier of the application key to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an application key owned by the current user. This operation permanently removes the specified application key and invalidates any authentication using that key."""
 
     # Construct request model with validation
@@ -9001,7 +9121,7 @@ async def delete_application_key_current_user(app_key_id: str = Field(..., descr
 
 # Tags: Dashboard Lists
 @mcp.tool()
-async def list_dashboard_list_items(dashboard_list_id: str = Field(..., description="The unique identifier of the dashboard list from which to retrieve dashboard items.")) -> dict[str, Any]:
+async def list_dashboard_list_items(dashboard_list_id: str = Field(..., description="The unique identifier of the dashboard list from which to retrieve dashboard items.")) -> dict[str, Any] | ToolResult:
     """Retrieve all dashboards contained within a specific dashboard list. Returns the dashboard definitions associated with the given dashboard list ID."""
 
     _dashboard_list_id = _parse_int(dashboard_list_id)
@@ -9042,7 +9162,7 @@ async def list_dashboard_list_items(dashboard_list_id: str = Field(..., descript
 async def add_dashboards_to_list(
     dashboard_list_id: str = Field(..., description="The unique identifier of the dashboard list to add dashboards to."),
     dashboards: list[_models.DashboardListItemRequest] | None = Field(None, description="Array of dashboard identifiers to add to the list. Order is preserved as provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more dashboards to an existing dashboard list. The dashboards will be appended to the list."""
 
     _dashboard_list_id = _parse_int(dashboard_list_id)
@@ -9086,7 +9206,7 @@ async def add_dashboards_to_list(
 async def update_dashboard_list_dashboards(
     dashboard_list_id: str = Field(..., description="The unique identifier of the dashboard list to update."),
     dashboards: list[_models.DashboardListItemRequest] | None = Field(None, description="An ordered array of dashboard objects to set as the new contents of the dashboard list. Each item represents a dashboard to include in the list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the dashboards contained in a dashboard list. Replaces the current set of dashboards with the provided list."""
 
     _dashboard_list_id = _parse_int(dashboard_list_id)
@@ -9130,7 +9250,7 @@ async def update_dashboard_list_dashboards(
 async def remove_dashboards_from_list(
     dashboard_list_id: str = Field(..., description="The unique identifier of the dashboard list from which dashboards will be removed."),
     dashboards: list[_models.DashboardListItemRequest] | None = Field(None, description="Array of dashboard identifiers to remove from the dashboard list. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more dashboards from an existing dashboard list. Specify the dashboard list and the dashboards to be deleted."""
 
     _dashboard_list_id = _parse_int(dashboard_list_id)
@@ -9171,7 +9291,7 @@ async def remove_dashboards_from_list(
 
 # Tags: Datasets
 @mcp.tool()
-async def list_datasets() -> dict[str, Any]:
+async def list_datasets() -> dict[str, Any] | ToolResult:
     """Retrieve all datasets that have been configured for your organization. This operation returns the complete list of available datasets."""
 
     # Extract parameters for API call
@@ -9203,7 +9323,7 @@ async def create_dataset(
     principals: list[str] = Field(..., description="List of access principals that control who can access this dataset. Each principal is formatted as `principal_type:id`, where principal_type is either 'team' or 'role', followed by the unique identifier."),
     product_filters: list[_models.FiltersPerProduct] = Field(..., description="List of product-specific filters to apply to the dataset. Filters are applied in the order specified."),
     type_: Literal["dataset"] = Field(..., alias="type", description="The resource type identifier for this object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new dataset with specified access principals and product-specific filters. The dataset will be configured according to the provided parameters."""
 
     # Construct request model with validation
@@ -9244,7 +9364,7 @@ async def create_dataset(
 
 # Tags: Datasets
 @mcp.tool()
-async def get_dataset(dataset_id: str = Field(..., description="The unique identifier of the dataset to retrieve.")) -> dict[str, Any]:
+async def get_dataset(dataset_id: str = Field(..., description="The unique identifier of the dataset to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific dataset by its unique identifier. Use this operation to fetch detailed information about a dataset you have access to."""
 
     # Construct request model with validation
@@ -9286,7 +9406,7 @@ async def update_dataset(
     principals: list[str] = Field(..., description="List of access principals that control who can access this dataset. Each principal is formatted as `principal_type:id` where principal_type is either 'team' or 'role'."),
     product_filters: list[_models.FiltersPerProduct] = Field(..., description="List of product-specific filters to apply to this dataset. Filters are applied in the order specified."),
     type_: Literal["dataset"] = Field(..., alias="type", description="The resource type identifier for this object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing dataset with new metadata, access principals, and product-specific filters. All fields must be provided to replace the current dataset configuration."""
 
     # Construct request model with validation
@@ -9328,7 +9448,7 @@ async def update_dataset(
 
 # Tags: Datasets
 @mcp.tool()
-async def delete_dataset(dataset_id: str = Field(..., description="The unique identifier of the dataset to delete.")) -> dict[str, Any]:
+async def delete_dataset(dataset_id: str = Field(..., description="The unique identifier of the dataset to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a dataset and all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -9368,7 +9488,7 @@ async def list_deletion_requests(
     product: str | None = Field(None, description="Filter results to show deletion requests for a specific product."),
     status: str | None = Field(None, description="Filter results to show deletion requests with a specific status."),
     page_size: str | None = Field(None, description="Number of results to return per page. Must be between 1 and 50."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of data deletion requests with optional filtering by product and status. Use this to monitor and manage pending or completed data deletion operations."""
 
     _page_size = _parse_int(page_size)
@@ -9408,7 +9528,7 @@ async def list_deletion_requests(
 
 # Tags: Data Deletion
 @mcp.tool()
-async def cancel_deletion_request(id_: str = Field(..., alias="id", description="The unique identifier of the deletion request to cancel.")) -> dict[str, Any]:
+async def cancel_deletion_request(id_: str = Field(..., alias="id", description="The unique identifier of the deletion request to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancels a pending data deletion request by its ID. This prevents the scheduled deletion from proceeding."""
 
     # Construct request model with validation
@@ -9444,7 +9564,7 @@ async def cancel_deletion_request(id_: str = Field(..., alias="id", description=
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def list_deployment_gates(page_size: str | None = Field(None, alias="pagesize", description="Number of results to return per page. Valid range is 1 to 1000 results.")) -> dict[str, Any]:
+async def list_deployment_gates(page_size: str | None = Field(None, alias="pagesize", description="Number of results to return per page. Valid range is 1 to 1000 results.")) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all deployment gates configured for your organization. Use pagination parameters to navigate through results."""
 
     _page_size = _parse_int(page_size)
@@ -9489,7 +9609,7 @@ async def create_deployment_gate(
     service: str = Field(..., description="The service name that this deployment gate will protect or control."),
     type_: Literal["deployment_gate"] = Field(..., alias="type", description="The resource type identifier for this deployment gate."),
     dry_run: bool | None = Field(None, description="Run the deployment gate in dry-run mode to validate configuration without applying it to the environment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a deployment gate to control and validate deployments for a specific service in a given environment. Optionally run in dry-run mode to test the gate without applying it."""
 
     # Construct request model with validation
@@ -9530,7 +9650,7 @@ async def create_deployment_gate(
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def list_deployment_gate_rules(gate_id: str = Field(..., description="The unique identifier of the deployment gate for which to retrieve rules.")) -> dict[str, Any]:
+async def list_deployment_gate_rules(gate_id: str = Field(..., description="The unique identifier of the deployment gate for which to retrieve rules.")) -> dict[str, Any] | ToolResult:
     """Retrieve all rules configured for a specific deployment gate. Rules define the conditions and criteria that must be satisfied before deployment can proceed."""
 
     # Construct request model with validation
@@ -9573,7 +9693,7 @@ async def create_deployment_rule(
     attributes_type: str = Field(..., alias="attributesType", description="The category of deployment rule that determines its behavior and required options."),
     data_type: Literal["deployment_rule"] = Field(..., alias="dataType", description="The resource type identifier for this API object."),
     dry_run: bool | None = Field(None, description="Whether to run this rule in dry-run mode for testing without enforcing the rule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new deployment rule for an existing deployment gate. The rule can detect faulty deployments or monitor deployment metrics based on the specified type and options."""
 
     # Construct request model with validation
@@ -9618,7 +9738,7 @@ async def create_deployment_rule(
 async def get_deployment_rule(
     gate_id: str = Field(..., description="The unique identifier of the deployment gate that contains the rule."),
     id_: str = Field(..., alias="id", description="The unique identifier of the deployment rule to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment rule associated with a deployment gate. Use this to inspect rule configurations and settings."""
 
     # Construct request model with validation
@@ -9661,7 +9781,7 @@ async def update_deployment_rule(
     name: str = Field(..., description="The display name for the deployment rule."),
     options: _models.DeploymentRuleOptionsFaultyDeploymentDetection | _models.DeploymentRuleOptionsMonitor = Field(..., description="Configuration options for the deployment rule, specifying either faulty deployment detection parameters or monitoring settings."),
     type_: Literal["deployment_rule"] = Field(..., alias="type", description="The resource type identifier for this deployment rule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing deployment rule within a deployment gate. Allows modification of rule configuration including name, type, dry-run mode, and deployment detection or monitoring options."""
 
     # Construct request model with validation
@@ -9706,7 +9826,7 @@ async def update_deployment_rule(
 async def delete_deployment_rule(
     gate_id: str = Field(..., description="The unique identifier of the deployment gate that contains the rule to be deleted."),
     id_: str = Field(..., alias="id", description="The unique identifier of the deployment rule to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a specific deployment rule from a deployment gate. This removes the rule and its associated configurations."""
 
     # Construct request model with validation
@@ -9742,7 +9862,7 @@ async def delete_deployment_rule(
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def get_deployment_gate(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate to retrieve.")) -> dict[str, Any]:
+async def get_deployment_gate(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific deployment gate by its ID. Use this to fetch details about a deployment gate configuration."""
 
     # Construct request model with validation
@@ -9783,7 +9903,7 @@ async def update_deployment_gate(
     data_id: str = Field(..., alias="dataId", description="The unique identifier of the deployment gate resource being updated."),
     dry_run: bool = Field(..., description="When enabled, validates the update without persisting changes to the deployment gate."),
     type_: Literal["deployment_gate"] = Field(..., alias="type", description="The resource type identifier for this deployment gate."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing deployment gate configuration. Supports dry-run mode to validate changes before applying them."""
 
     # Construct request model with validation
@@ -9825,7 +9945,7 @@ async def update_deployment_gate(
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def delete_deployment_gate(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate to delete.")) -> dict[str, Any]:
+async def delete_deployment_gate(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a deployment gate and all associated rules. This operation permanently removes the gate from the deployment pipeline."""
 
     # Construct request model with validation
@@ -9866,7 +9986,7 @@ async def evaluate_deployment_gates(
     service: str = Field(..., description="The name of the service being deployed."),
     type_: Literal["deployment_gates_evaluation_request"] = Field(..., alias="type", description="The JSON:API resource type for this deployment gate evaluation request."),
     primary_tag: str | None = Field(None, description="Optional tag to scope APM Faulty Deployment Detection rules, typically used to filter by region or other deployment attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger an asynchronous evaluation of deployment gates for a service in a specific environment. Returns an evaluation ID that can be polled to retrieve the results."""
 
     # Construct request model with validation
@@ -9907,7 +10027,7 @@ async def evaluate_deployment_gates(
 
 # Tags: Deployment Gates
 @mcp.tool()
-async def get_deployment_gate_evaluation(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate evaluation, returned when the evaluation was triggered.")) -> dict[str, Any]:
+async def get_deployment_gate_evaluation(id_: str = Field(..., alias="id", description="The unique identifier of the deployment gate evaluation, returned when the evaluation was triggered.")) -> dict[str, Any] | ToolResult:
     """Retrieves the evaluation result of a deployment gate by its evaluation ID. Poll this endpoint to check the gate status, which transitions from `in_progress` to either `pass` or `fail`."""
 
     # Construct request model with validation
@@ -9952,7 +10072,7 @@ async def record_deployment(
     custom_tags: list[str] | None = Field(None, description="User-defined tags to categorize the deployment. Tags must follow the key:value pattern, with a maximum of 100 tags per event."),
     env: str | None = Field(None, description="The target environment where the service was deployed (e.g., staging, production)."),
     team: str | None = Field(None, description="The team responsible for the deployed service. If omitted, the team is automatically populated from the Service Catalog based on the service name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record a deployment event to track DORA metrics including deployment frequency, change lead time, change failure rate, and recovery time."""
 
     _finished_at = _parse_int(finished_at)
@@ -9998,7 +10118,7 @@ async def record_deployment(
 
 # Tags: DORA Metrics
 @mcp.tool()
-async def delete_deployment(deployment_id: str = Field(..., description="The unique identifier of the deployment event to delete.")) -> dict[str, Any]:
+async def delete_deployment(deployment_id: str = Field(..., description="The unique identifier of the deployment event to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a deployment event from DORA metrics. This removes the deployment record and associated data."""
 
     # Construct request model with validation
@@ -10038,7 +10158,7 @@ async def list_deployments_event(
     from_: str | None = Field(None, alias="from", description="Start of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format."),
     limit: str | None = Field(None, description="Maximum number of deployment events to return in the response. Cannot exceed 1000 results per request."),
     to: str | None = Field(None, description="End of the time range for filtering deployment events (inclusive). Timestamps should be in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of deployment events within an optional time range. Use the from and to parameters to filter events by timestamp, and limit to control the maximum number of results returned."""
 
     _limit = _parse_int(limit)
@@ -10078,7 +10198,7 @@ async def list_deployments_event(
 
 # Tags: DORA Metrics
 @mcp.tool()
-async def get_deployment_event(deployment_id: str = Field(..., description="The unique identifier of the deployment event to retrieve.")) -> dict[str, Any]:
+async def get_deployment_event(deployment_id: str = Field(..., description="The unique identifier of the deployment event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details of a specific deployment event by its ID. Use this to fetch deployment information for monitoring, auditing, or integration purposes."""
 
     # Construct request model with validation
@@ -10121,7 +10241,7 @@ async def mark_deployment_failure(
     change_failure: bool | None = Field(None, description="Whether this deployment resulted in a change failure. Set to true to mark as failed, false to restore to stable status."),
     remediation_id: str | None = Field(None, alias="remediationId", description="The unique identifier of the remediation deployment that fixed the failure. Required when linking a remediation to a failed deployment."),
     remediation_type: Literal["rollback", "rollforward"] | None = Field(None, alias="remediationType", description="The type of remediation action taken to resolve the failure. Required when linking a remediation deployment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a deployment as a change failure or restore it to stable status. Optionally link a remediation deployment to enable failed deployment recovery time calculation."""
 
     # Construct request model with validation
@@ -10174,7 +10294,7 @@ async def report_incident(
     services: list[str] | None = Field(None, description="List of service names impacted by the incident. Use service names registered in the Service Catalog when available. Required if team is not provided."),
     severity: str | None = Field(None, description="The severity level of the incident (e.g., High, Medium, Low)."),
     team: str | None = Field(None, description="The name of the team responsible for the impacted services. Use team handles registered in Datadog when available. Required if services is not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Report an incident event associated with a deployment for DORA Metrics tracking. This enables correlation between failed deployments and real-world incidents, including their severity and impact."""
 
     _started_at = _parse_int(started_at)
@@ -10220,7 +10340,7 @@ async def report_incident(
 
 # Tags: DORA Metrics
 @mcp.tool()
-async def delete_incident_event(failure_id: str = Field(..., description="The unique identifier of the incident event to delete.")) -> dict[str, Any]:
+async def delete_incident_event(failure_id: str = Field(..., description="The unique identifier of the incident event to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an incident event from the system. This operation permanently removes the incident record identified by the provided ID."""
 
     # Construct request model with validation
@@ -10259,7 +10379,7 @@ async def delete_incident_event(failure_id: str = Field(..., description="The un
 async def list_incident_failures(
     limit: str | None = Field(None, description="Maximum number of incident failure events to return in the response."),
     time_range: str | None = Field(None, description="Time range as ISO 8601 timestamps in format 'from/to' (e.g., '2024-01-01T00:00:00Z/2024-01-31T23:59:59Z')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of incident failure events from DORA metrics. Use this to analyze deployment and incident patterns."""
 
     # Call helper functions
@@ -10302,7 +10422,7 @@ async def list_incident_failures(
 
 # Tags: DORA Metrics
 @mcp.tool()
-async def get_incident_failure(failure_id: str = Field(..., description="The unique identifier of the incident event to retrieve.")) -> dict[str, Any]:
+async def get_incident_failure(failure_id: str = Field(..., description="The unique identifier of the incident event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific incident event by its ID. Use this to access incident information including failure metrics and related metadata."""
 
     # Construct request model with validation
@@ -10342,7 +10462,7 @@ async def list_downtimes(
     current_only: bool | None = Field(None, description="Filter to return only downtimes that are currently active at the time of the request."),
     page_offset: str | None = Field(None, alias="pageoffset", description="The starting position for pagination, allowing you to retrieve results from a specific offset in the dataset."),
     page_limit: str | None = Field(None, alias="pagelimit", description="The maximum number of downtimes to include in a single response page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all scheduled downtimes, with options to filter for currently active downtimes and paginate through results."""
 
     _page_offset = _parse_int(page_offset)
@@ -10393,7 +10513,7 @@ async def schedule_downtime(
     notify_end_states: list[Literal["alert", "no data", "warn"]] | None = Field(None, description="Monitor states that will trigger notifications when the downtime ends. Valid states include alert and warn conditions."),
     notify_end_types: list[Literal["canceled", "expired"]] | None = Field(None, description="Actions that trigger monitor notifications at downtime end. Includes events like cancellation or expiration."),
     schedule: _models.DowntimeScheduleRecurrencesCreateRequest | _models.DowntimeScheduleOneTimeCreateUpdateRequest | None = Field(None, description="Recurrence schedule for the downtime. Defines when the downtime repeats (daily, weekly, monthly, etc.)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule a downtime period to mute monitor notifications for specified scopes. Supports one-time and recurring schedules with customizable notification behavior."""
 
     # Construct request model with validation
@@ -10434,7 +10554,7 @@ async def schedule_downtime(
 
 # Tags: Downtimes
 @mcp.tool()
-async def get_downtime(downtime_id: str = Field(..., description="The unique identifier of the downtime record to retrieve.")) -> dict[str, Any]:
+async def get_downtime(downtime_id: str = Field(..., description="The unique identifier of the downtime record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific downtime event by its unique identifier."""
 
     # Construct request model with validation
@@ -10482,7 +10602,7 @@ async def update_downtime(
     notify_end_types: list[Literal["canceled", "expired"]] | None = Field(None, description="Actions that trigger monitor notifications when downtime ends. Valid actions include canceled and expired events."),
     schedule: _models.DowntimeScheduleRecurrencesUpdateRequest | _models.DowntimeScheduleOneTimeCreateUpdateRequest | None = Field(None, description="Recurrence schedule for the downtime. Defines when the downtime repeats or occurs."),
     scope: str | None = Field(None, description="The scope defining which monitors or resources the downtime applies to. Use common search syntax with tags and logical operators."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing downtime configuration by ID. Modify scheduling, scope, notifications, and other downtime settings."""
 
     # Construct request model with validation
@@ -10524,7 +10644,7 @@ async def update_downtime(
 
 # Tags: Downtimes
 @mcp.tool()
-async def cancel_downtime(downtime_id: str = Field(..., description="The unique identifier of the downtime to cancel.")) -> dict[str, Any]:
+async def cancel_downtime(downtime_id: str = Field(..., description="The unique identifier of the downtime to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel an active downtime. Canceled downtimes remain searchable for approximately two days before permanent removal."""
 
     # Construct request model with validation
@@ -10568,7 +10688,7 @@ async def search_issues(
     order_by: Literal["TOTAL_COUNT", "FIRST_SEEN", "IMPACTED_SESSIONS", "PRIORITY"] | None = Field(None, description="Attribute to sort the search results by. Defaults to relevance if not specified."),
     persona: Literal["ALL", "BROWSER", "MOBILE", "BACKEND"] | None = Field(None, description="Persona filter for the search. Specify either persona(s) or track(s), but not both. Filters issues by the type of application or service."),
     track: Literal["trace", "logs", "rum"] | None = Field(None, description="Track of the events to query. Specify either track(s) or persona(s), but not both. Determines which event stream to search."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for error tracking issues within your organization using event search syntax. Returns up to 100 matching issues sorted by your specified criteria."""
 
     _from_ = _parse_int(from_)
@@ -10612,7 +10732,7 @@ async def search_issues(
 
 # Tags: Error Tracking
 @mcp.tool()
-async def get_issue(issue_id: str = Field(..., description="The unique identifier of the error tracking issue to retrieve.")) -> dict[str, Any]:
+async def get_issue(issue_id: str = Field(..., description="The unique identifier of the error tracking issue to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete details of a specific error tracking issue, including all attributes and relationships."""
 
     # Construct request model with validation
@@ -10652,7 +10772,7 @@ async def assign_issue(
     issue_id: str = Field(..., description="The unique identifier of the issue to be reassigned."),
     id_: str = Field(..., alias="id", description="The unique identifier of the user to assign to the issue."),
     type_: Literal["assignee"] = Field(..., alias="type", description="The type of object being assigned. Must be set to 'assignee'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign an issue to a user. Updates the assignee of an issue identified by its issue ID."""
 
     # Construct request model with validation
@@ -10691,7 +10811,7 @@ async def assign_issue(
 
 # Tags: Error Tracking
 @mcp.tool()
-async def unassign_issue(issue_id: str = Field(..., description="The unique identifier of the issue from which to remove the assignee.")) -> dict[str, Any]:
+async def unassign_issue(issue_id: str = Field(..., description="The unique identifier of the issue from which to remove the assignee.")) -> dict[str, Any] | ToolResult:
     """Remove the assignee from an issue, leaving it unassigned. This operation clears the current assignee for the specified issue."""
 
     # Construct request model with validation
@@ -10732,7 +10852,7 @@ async def update_issue_state(
     state: Literal["OPEN", "ACKNOWLEDGED", "RESOLVED", "IGNORED", "EXCLUDED"] = Field(..., description="The new state for the issue. Choose from predefined states to track issue lifecycle."),
     id_: str = Field(..., alias="id", description="The issue identifier (must match the issue_id parameter)."),
     type_: Literal["error_tracking_issue"] = Field(..., alias="type", description="The resource type identifier for this object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an issue's state to track its lifecycle (e.g., OPEN, RESOLVED, IGNORED). Use this to manage issue status within your error tracking system."""
 
     # Construct request model with validation
@@ -10779,7 +10899,7 @@ async def list_events(
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or after this value will be included."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp for requested events in milliseconds (Unix epoch). Events with timestamps at or before this value will be included."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of events matching a search query. Use this endpoint to view your latest events with optional filtering by time range and search criteria."""
 
     _page_limit = _parse_int(page_limit)
@@ -10830,7 +10950,7 @@ async def publish_event(
     message: str | None = Field(None, description="Free-form text providing additional context about the event. For structured attributes, use the category-specific attributes field instead. Limited to 4000 characters.", min_length=1, max_length=4000),
     tags: list[str] | None = Field(None, description="A list of tags to associate with the event for organization and filtering. Maximum of 100 tags allowed.", min_length=1, max_length=100),
     timestamp: str | None = Field(None, description="The ISO 8601 formatted timestamp indicating when the event occurred. Defaults to the time the event is received. Must not be older than 18 hours."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Publish an event to track changes or alerts in your system. Only events with 'change' or 'alert' categories are currently in General Availability."""
 
     # Construct request model with validation
@@ -10876,7 +10996,7 @@ async def search_events(
     to: str | None = Field(None, description="The end time for the search range. Accepts date math expressions (e.g., now) or millisecond timestamps."),
     time_offset: str | None = Field(None, alias="timeOffset", description="An optional time offset to apply to the query in seconds, useful for timezone adjustments or relative time shifts."),
     limit: str | None = Field(None, description="The maximum number of events to return in the response. Results are paginated."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter events within a specified time range with pagination support. Use this endpoint to build complex event queries and retrieve matching results."""
 
     _time_offset = _parse_int(time_offset)
@@ -10919,7 +11039,7 @@ async def search_events(
 
 # Tags: Events
 @mcp.tool()
-async def get_event(event_id: str = Field(..., description="The unique identifier (UID) of the event to retrieve.")) -> dict[str, Any]:
+async def get_event(event_id: str = Field(..., description="The unique identifier (UID) of the event to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete details of a specific event using its unique identifier. Returns all event information including metadata, timing, and associated data."""
 
     # Construct request model with validation
@@ -10960,7 +11080,7 @@ async def list_feature_flags(
     is_archived: bool | None = Field(None, description="Filter to show only active or archived feature flags."),
     limit: int | None = Field(None, description="Maximum number of feature flags to return per request. Must be between 1 and 1000.", ge=1, le=1000),
     offset: int | None = Field(None, description="Number of feature flags to skip before returning results, used for pagination.", ge=0),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of feature flags for your organization with optional filtering by key and archived status."""
 
     # Construct request model with validation
@@ -11007,7 +11127,7 @@ async def create_feature_flag(
     type_: Literal["feature-flags"] = Field(..., alias="type", description="The resource type identifier for this API request. Must be set to 'feature-flags'."),
     default_variant_key: str | None = Field(None, description="The key of the variant to use as the default when no targeting rules match."),
     json_schema: str | None = Field(None, description="A JSON schema that defines the structure and validation rules for variant values when value_type is set to JSON."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new feature flag with configurable variants and value types. The feature flag can be used to control feature rollouts and A/B testing across your application."""
 
     # Construct request model with validation
@@ -11052,7 +11172,7 @@ async def list_environments(
     key: str | None = Field(None, description="Filter environments by their key using partial string matching."),
     limit: int | None = Field(None, description="Maximum number of environment results to return in a single response.", ge=1, le=1000),
     offset: int | None = Field(None, description="Number of results to skip for pagination, useful for retrieving subsequent pages.", ge=0),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of environments for the organization. Supports filtering by environment key using partial matching."""
 
     # Construct request model with validation
@@ -11096,7 +11216,7 @@ async def create_feature_flag_environment(
     type_: Literal["environments"] = Field(..., alias="type", description="The resource type identifier for this API resource."),
     is_production: bool | None = Field(None, description="Whether this environment represents a production deployment where feature flag changes may require additional oversight."),
     require_feature_flag_approval: bool | None = Field(None, description="Whether feature flag modifications in this environment must be approved before taking effect, adding a governance layer to changes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new environment for organizing and managing feature flags. Environments allow you to control feature flag behavior across different deployment stages with optional approval workflows."""
 
     # Construct request model with validation
@@ -11137,7 +11257,7 @@ async def create_feature_flag_environment(
 
 # Tags: Feature Flags
 @mcp.tool()
-async def get_feature_flag_environment(environment_id: str = Field(..., description="The unique identifier of the feature flag environment to retrieve.")) -> dict[str, Any]:
+async def get_feature_flag_environment(environment_id: str = Field(..., description="The unique identifier of the feature flag environment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific feature flag environment. Returns configuration and status details for the requested environment."""
 
     # Construct request model with validation
@@ -11179,7 +11299,7 @@ async def update_environment(
     is_production: bool | None = Field(None, description="Designates whether this environment represents a production deployment."),
     queries: list[str] | None = Field(None, description="List of query strings that define the scope or targeting rules for this environment. Order may be significant for evaluation.", min_length=1),
     require_feature_flag_approval: bool | None = Field(None, description="Requires approval workflows for any feature flag modifications in this environment when enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an environment's configuration including its name, description, production status, and approval requirements. Changes apply to all feature flags scoped to this environment."""
 
     # Construct request model with validation
@@ -11221,7 +11341,7 @@ async def update_environment(
 
 # Tags: Feature Flags
 @mcp.tool()
-async def delete_environment(environment_id: str = Field(..., description="The unique identifier of the environment to delete.")) -> dict[str, Any]:
+async def delete_environment(environment_id: str = Field(..., description="The unique identifier of the environment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a feature flag environment. This action cannot be undone and will remove all associated configurations."""
 
     # Construct request model with validation
@@ -11257,7 +11377,7 @@ async def delete_environment(environment_id: str = Field(..., description="The u
 
 # Tags: Feature Flags
 @mcp.tool()
-async def get_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to retrieve.")) -> dict[str, Any]:
+async def get_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific feature flag, including its variants and current status across environments."""
 
     # Construct request model with validation
@@ -11298,7 +11418,7 @@ async def update_feature_flag(
     type_: Literal["feature-flags"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'feature-flags' for this operation."),
     description: str | None = Field(None, description="A human-readable description explaining the purpose and behavior of the feature flag."),
     json_schema: str | None = Field(None, description="A JSON schema that defines the structure and validation rules for the feature flag's value when the value type is JSON."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a feature flag's metadata including name and description. This operation modifies only the flag's configuration details and does not affect targeting rules or traffic allocations."""
 
     # Construct request model with validation
@@ -11340,7 +11460,7 @@ async def update_feature_flag(
 
 # Tags: Feature Flags
 @mcp.tool()
-async def archive_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to archive.")) -> dict[str, Any]:
+async def archive_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to archive.")) -> dict[str, Any] | ToolResult:
     """Archive a feature flag to hide it from the main list while keeping it accessible for future reference. Archived flags can be unarchived at any time."""
 
     # Construct request model with validation
@@ -11379,7 +11499,7 @@ async def archive_feature_flag(feature_flag_id: str = Field(..., description="Th
 async def disable_feature_flag(
     feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to disable."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the feature flag should be disabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Disable a feature flag in a specific environment. This prevents the feature flag from being evaluated in that environment."""
 
     # Construct request model with validation
@@ -11418,7 +11538,7 @@ async def disable_feature_flag(
 async def enable_feature_flag(
     feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to enable."),
     environment_id: str = Field(..., description="The unique identifier of the environment where the feature flag should be enabled."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Enable a feature flag in a specific environment to make it active and available for that environment."""
 
     # Construct request model with validation
@@ -11454,7 +11574,7 @@ async def enable_feature_flag(
 
 # Tags: Feature Flags
 @mcp.tool()
-async def restore_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to restore.")) -> dict[str, Any]:
+async def restore_feature_flag(feature_flag_id: str = Field(..., description="The unique identifier of the feature flag to restore.")) -> dict[str, Any] | ToolResult:
     """Restore a previously archived feature flag, making it visible and available in the main feature flag list again."""
 
     # Construct request model with validation
@@ -11490,7 +11610,7 @@ async def restore_feature_flag(feature_flag_id: str = Field(..., description="Th
 
 # Tags: High Availability MultiRegion
 @mcp.tool()
-async def get_hamr_connection() -> dict[str, Any]:
+async def get_hamr_connection() -> dict[str, Any] | ToolResult:
     """Retrieve the High Availability Multi-Region (HAMR) organization connection details for the authenticated organization, including target organization, datacenter, status, and primary/secondary role."""
 
     # Extract parameters for API call
@@ -11526,7 +11646,7 @@ async def configure_hamr_connection(
     target_org_uuid: str = Field(..., description="The unique identifier (UUID) of the target organization in the HAMR relationship."),
     id_: str = Field(..., alias="id", description="The unique identifier (UUID) of the authenticated organization establishing this HAMR connection. Must match the organization making the request."),
     type_: Literal["hamr_org_connections"] = Field(..., alias="type", description="The resource type identifier for this HAMR organization connection object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure or update a High Availability Multi-Region (HAMR) organization connection, establishing failover relationships between primary and secondary organizations across datacenters."""
 
     # Construct request model with validation
@@ -11570,7 +11690,7 @@ async def configure_hamr_connection(
 async def list_incidents(
     page_size: str | None = Field(None, alias="pagesize", description="Number of incidents to return per page. Maximum allowed value is 100."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Starting position for the returned page of incidents, useful for pagination through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all incidents for your organization with pagination support. Use page size and offset parameters to control which incidents are returned."""
 
     _page_size = _parse_int(page_size)
@@ -11621,7 +11741,7 @@ async def create_incident(
     initial_cells: list[_models.IncidentTimelineCellMarkdownCreateAttributes] | None = Field(None, description="Array of initial timeline cells to add at the beginning of the incident timeline, in the order provided."),
     is_test: bool | None = Field(None, description="Flag indicating whether this is a test incident for validation or training purposes."),
     notification_handles: list[_models.IncidentNotificationHandle] | None = Field(None, description="List of notification handles to notify at incident creation, including users, channels, and workflows. Each handle specifies a display name and target identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new incident to track and manage an operational event. Specify whether customers were impacted and provide relevant details for incident tracking and notification."""
 
     # Construct request model with validation
@@ -11662,7 +11782,7 @@ async def create_incident(
 
 # Tags: Incidents
 @mcp.tool()
-async def list_incident_handles() -> dict[str, Any]:
+async def list_incident_handles() -> dict[str, Any] | ToolResult:
     """Retrieve a list of global incident handles that are available for use across the system."""
 
     # Extract parameters for API call
@@ -11689,7 +11809,7 @@ async def list_incident_handles() -> dict[str, Any]:
 
 # Tags: Incidents
 @mcp.tool()
-async def list_notification_templates(filter_incident_type: str | None = Field(None, alias="filterincident-type", description="Filter templates by a specific incident type using its UUID identifier.")) -> dict[str, Any]:
+async def list_notification_templates(filter_incident_type: str | None = Field(None, alias="filterincident-type", description="Filter templates by a specific incident type using its UUID identifier.")) -> dict[str, Any] | ToolResult:
     """Retrieves all incident notification templates, with optional filtering by incident type. Use this to discover available templates for configuring incident notifications."""
 
     # Construct request model with validation
@@ -11730,7 +11850,7 @@ async def list_notification_templates(filter_incident_type: str | None = Field(N
 
 # Tags: Incidents
 @mcp.tool()
-async def get_notification_template(id_: str = Field(..., alias="id", description="The unique identifier of the notification template to retrieve.")) -> dict[str, Any]:
+async def get_notification_template(id_: str = Field(..., alias="id", description="The unique identifier of the notification template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific incident notification template by its unique identifier. Use this to fetch template details for viewing or validation purposes."""
 
     # Construct request model with validation
@@ -11766,7 +11886,7 @@ async def get_notification_template(id_: str = Field(..., alias="id", descriptio
 
 # Tags: Incidents
 @mcp.tool()
-async def delete_notification_template(id_: str = Field(..., alias="id", description="The unique identifier of the notification template to delete.")) -> dict[str, Any]:
+async def delete_notification_template(id_: str = Field(..., alias="id", description="The unique identifier of the notification template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a notification template by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -11802,7 +11922,7 @@ async def delete_notification_template(id_: str = Field(..., alias="id", descrip
 
 # Tags: Incidents
 @mcp.tool()
-async def list_postmortem_templates() -> dict[str, Any]:
+async def list_postmortem_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available postmortem templates used for incident post-incident reviews and documentation. These templates standardize the structure and content of postmortem reports across your organization."""
 
     # Extract parameters for API call
@@ -11829,7 +11949,7 @@ async def list_postmortem_templates() -> dict[str, Any]:
 
 # Tags: Incidents
 @mcp.tool()
-async def get_postmortem_template(template_id: str = Field(..., description="The unique identifier of the postmortem template to retrieve.")) -> dict[str, Any]:
+async def get_postmortem_template(template_id: str = Field(..., description="The unique identifier of the postmortem template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details and configuration of a specific postmortem template by its ID. Use this to view template structure, fields, and settings before creating incidents or generating postmortems."""
 
     # Construct request model with validation
@@ -11865,7 +11985,7 @@ async def get_postmortem_template(template_id: str = Field(..., description="The
 
 # Tags: Incidents
 @mcp.tool()
-async def delete_postmortem_template(template_id: str = Field(..., description="The unique identifier of the postmortem template to delete.")) -> dict[str, Any]:
+async def delete_postmortem_template(template_id: str = Field(..., description="The unique identifier of the postmortem template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a postmortem template by its ID. This action cannot be undone and will remove the template from the system."""
 
     # Construct request model with validation
@@ -11901,7 +12021,7 @@ async def delete_postmortem_template(template_id: str = Field(..., description="
 
 # Tags: Incidents
 @mcp.tool()
-async def list_incident_types(include_deleted: bool | None = Field(None, description="Whether to include incident types that have been deleted in the response.")) -> dict[str, Any]:
+async def list_incident_types(include_deleted: bool | None = Field(None, description="Whether to include incident types that have been deleted in the response.")) -> dict[str, Any] | ToolResult:
     """Retrieve all available incident types configured in the system. Optionally include incident types that have been marked as deleted."""
 
     # Construct request model with validation
@@ -11939,7 +12059,7 @@ async def list_incident_types(include_deleted: bool | None = Field(None, descrip
 
 # Tags: Incidents
 @mcp.tool()
-async def get_incident_type(incident_type_id: str = Field(..., description="The unique identifier (UUID) of the incident type to retrieve.")) -> dict[str, Any]:
+async def get_incident_type(incident_type_id: str = Field(..., description="The unique identifier (UUID) of the incident type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed configuration information for a specific incident type by its unique identifier. Use this to access incident type properties and settings."""
 
     # Construct request model with validation
@@ -11984,7 +12104,7 @@ async def import_incident(
     incident_type_uuid: str | None = Field(None, description="Unique identifier for the incident type. If omitted, the default incident type is applied."),
     resolved: str | None = Field(None, description="Timestamp indicating when the incident was resolved. Only applicable when the state field is set to 'resolved'."),
     visibility: Literal["organization", "private"] | None = Field(None, description="Access level for the incident, controlling who can view it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Import an incident from an external system with historical metadata. This operation creates incidents with custom timestamps for detection, declaration, and resolution without triggering integrations or notification rules."""
 
     # Construct request model with validation
@@ -12030,7 +12150,7 @@ async def search_incidents(
     page_offset: str | None = Field(None, alias="pageoffset", description="Starting position for the returned page of results. Use this to navigate through paginated results."),
     facet_filters: list[dict[str, Any]] | None = Field(None, description="List of facet filters. Each dict has 'facet' (string) and 'values' (list of strings). Multiple values within a facet are OR'd together."),
     combine_operator: str | None = Field(None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for incidents matching a query with pagination support. Returns a paginated list of incidents that match your search criteria."""
 
     # Call helper functions
@@ -12077,7 +12197,7 @@ async def search_incidents(
 
 # Tags: Incidents
 @mcp.tool()
-async def get_incident(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident to retrieve.")) -> dict[str, Any]:
+async def get_incident(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the complete details of a specific incident by its unique identifier. Returns incident information including status, timeline, and associated metadata."""
 
     # Construct request model with validation
@@ -12128,7 +12248,7 @@ async def update_incident(
     title: str | None = Field(None, description="The incident title summarizing what occurred."),
     commander_user_data: dict[str, Any] | None = Field(None, alias="commander_userData", description="Relationship object linking a user as the incident commander."),
     postmortem_data: dict[str, Any] | None = Field(None, alias="postmortemData", description="Relationship object linking the incident postmortem document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update an existing incident with new details such as impact timeline, scope, title, and notification recipients. Only provided attributes are updated."""
 
     # Construct request model with validation
@@ -12175,7 +12295,7 @@ async def update_incident(
 
 # Tags: Incidents
 @mcp.tool()
-async def delete_incident(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident to delete.")) -> dict[str, Any]:
+async def delete_incident(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an incident from your organization. This action cannot be undone."""
 
     # Construct request model with validation
@@ -12214,7 +12334,7 @@ async def delete_incident(incident_id: str = Field(..., description="The unique 
 async def list_incident_attachments(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve attachments."),
     filter_attachment_type: str | None = Field(None, alias="filterattachment_type", description="Filter attachments by their type. Use postmortem for incident analysis documents or link for external references."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all attachments associated with a specific incident, with optional filtering by attachment type. Attachments can include postmortems and external links."""
 
     # Construct request model with validation
@@ -12259,7 +12379,7 @@ async def attach_incident_document(
     document_url: str | None = Field(None, alias="documentUrl", description="The URL pointing to the attachment resource, such as a postmortem document or external reference."),
     title: str | None = Field(None, description="A descriptive title for the attachment to help identify its purpose within the incident."),
     attachment_type: Literal["postmortem", "link"] | None = Field(None, description="The category of the attachment, indicating whether it is a postmortem document or an external link."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach a document or link to an incident. Supports postmortem documents and external links for incident tracking and documentation."""
 
     # Construct request model with validation
@@ -12307,7 +12427,7 @@ async def create_postmortem_attachment(
     type_: Literal["incident_attachments"] = Field(..., alias="type", description="The resource type classification for this incident attachment."),
     content: str | None = Field(None, description="The postmortem content in markdown format. May include notebook cell formatting for frontend-created postmortems."),
     title: str | None = Field(None, description="A descriptive title for the postmortem attachment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a postmortem attachment for an incident. Supports markdown content from Confluence or Google Docs, with optional notebook cell formatting for frontend integration."""
 
     # Construct request model with validation
@@ -12355,7 +12475,7 @@ async def update_incident_attachment(
     type_: Literal["incident_attachments"] = Field(..., alias="type", description="The resource type identifier for incident attachments."),
     document_url: str | None = Field(None, alias="documentUrl", description="The updated URL pointing to the attachment resource or document."),
     title: str | None = Field(None, description="The updated display title or name for the attachment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an attachment associated with an incident, including its URL, title, or other metadata. This allows you to modify attachment details after the initial creation."""
 
     # Construct request model with validation
@@ -12400,7 +12520,7 @@ async def update_incident_attachment(
 async def remove_incident_attachment(
     incident_id: str = Field(..., description="The UUID of the incident from which the attachment will be removed."),
     attachment_id: str = Field(..., description="The unique identifier of the attachment to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an attachment from an incident. This permanently deletes the specified attachment associated with the incident."""
 
     # Construct request model with validation
@@ -12436,7 +12556,7 @@ async def remove_incident_attachment(
 
 # Tags: Incidents
 @mcp.tool()
-async def list_incident_impacts(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve impacts.")) -> dict[str, Any]:
+async def list_incident_impacts(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve impacts.")) -> dict[str, Any] | ToolResult:
     """Retrieve all impacts associated with a specific incident. Impacts represent the affected services, systems, or business areas resulting from the incident."""
 
     # Construct request model with validation
@@ -12478,7 +12598,7 @@ async def create_incident_impact(
     type_: Literal["incident_impacts"] = Field(..., alias="type", description="The resource type identifier for this impact record."),
     fields: dict[str, Any] | None = Field(None, description="Optional structured data providing additional impact details. Use this to specify custom fields like the number of customers affected or which products were impacted."),
     impact_interval: str | None = Field(None, description="Time interval in ISO 8601 format (start/end)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record the business or operational impact of an incident. This captures details about what was affected and the scope of the impact."""
 
     # Call helper functions
@@ -12526,7 +12646,7 @@ async def create_incident_impact(
 async def remove_incident_impact(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident from which the impact will be removed."),
     impact_id: str = Field(..., description="The unique identifier (UUID) of the incident impact to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an impact record from an incident. This permanently deletes the association between the incident and the specified impact."""
 
     # Construct request model with validation
@@ -12562,7 +12682,7 @@ async def remove_incident_impact(
 
 # Tags: Incidents
 @mcp.tool()
-async def list_incident_integrations(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve integration metadata.")) -> dict[str, Any]:
+async def list_incident_integrations(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve integration metadata.")) -> dict[str, Any] | ToolResult:
     """Retrieve all integration metadata associated with a specific incident. This provides details about external systems and services connected to the incident."""
 
     # Construct request model with validation
@@ -12604,7 +12724,7 @@ async def create_incident_integration(
     metadata: _models.SlackIntegrationMetadata | _models.JiraIntegrationMetadata | _models.MsTeamsIntegrationMetadata = Field(..., description="Custom metadata attributes specific to this integration, such as channel IDs, issue keys, or sync settings."),
     type_: Literal["incident_integrations"] = Field(..., alias="type", description="The resource type identifier for this integration metadata."),
     status: str | None = Field(None, description="The current state of the integration. Values indicate: 0 (unknown), 1 (pending), 2 (complete), 3 (manually created), 4 (manually updated), or 5 (failed)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create integration metadata for an incident, linking it to external systems like Slack or Jira. This establishes the connection and tracks the integration status."""
 
     _integration_type = _parse_int(integration_type)
@@ -12652,7 +12772,7 @@ async def create_incident_integration(
 async def get_incident_integration(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve integration metadata."),
     integration_metadata_id: str = Field(..., description="The unique identifier (UUID) of the specific integration metadata record to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve detailed metadata for a specific integration associated with an incident. This provides information about how an external integration is connected to and configured for the incident."""
 
     # Construct request model with validation
@@ -12695,7 +12815,7 @@ async def update_incident_integration(
     metadata: _models.SlackIntegrationMetadata | _models.JiraIntegrationMetadata | _models.MsTeamsIntegrationMetadata = Field(..., description="Custom metadata attributes associated with this incident integration. Structure depends on the integration type."),
     type_: Literal["incident_integrations"] = Field(..., alias="type", description="The resource type identifier for this integration metadata."),
     status: str | None = Field(None, description="The current status of this integration metadata. Unknown (0), pending (1), complete (2), manually created (3), manually updated (4), or failed (5)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing incident integration metadata record. Modify integration details such as type, status, and associated metadata for a specific incident."""
 
     _integration_type = _parse_int(integration_type)
@@ -12743,7 +12863,7 @@ async def update_incident_integration(
 async def remove_incident_integration(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident from which the integration will be removed."),
     integration_metadata_id: str = Field(..., description="The unique identifier (UUID) of the integration metadata to be deleted from the incident."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an integration metadata association from an incident. This deletes the link between the incident and its integration metadata."""
 
     # Construct request model with validation
@@ -12779,7 +12899,7 @@ async def remove_incident_integration(
 
 # Tags: Incidents
 @mcp.tool()
-async def list_incident_todos(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve todos.")) -> dict[str, Any]:
+async def list_incident_todos(incident_id: str = Field(..., description="The unique identifier (UUID) of the incident for which to retrieve todos.")) -> dict[str, Any] | ToolResult:
     """Retrieve all todos associated with a specific incident. Use this to view the complete list of action items and tasks that need to be completed for incident resolution."""
 
     # Construct request model with validation
@@ -12821,7 +12941,7 @@ async def create_incident_todo(
     content: str = Field(..., description="The description or title of the follow-up task to be completed."),
     type_: Literal["incident_todos"] = Field(..., alias="type", description="The resource type identifier for incident todos."),
     due_date: str | None = Field(None, description="Optional deadline for when the todo should be completed, specified as an ISO 8601 timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a follow-up todo task for an incident. Todos help track action items that need to be completed as part of incident resolution."""
 
     # Construct request model with validation
@@ -12866,7 +12986,7 @@ async def create_incident_todo(
 async def get_incident_todo(
     incident_id: str = Field(..., description="The unique identifier (UUID) of the incident containing the todo item."),
     todo_id: str = Field(..., description="The unique identifier (UUID) of the specific todo item to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific todo item associated with an incident. Use this to fetch the full information about a particular todo within an incident's todo list."""
 
     # Construct request model with validation
@@ -12909,7 +13029,7 @@ async def update_incident_todo(
     content: str = Field(..., description="The description or title of the follow-up task to be completed."),
     type_: Literal["incident_todos"] = Field(..., alias="type", description="The resource type identifier for this todo object."),
     due_date: str | None = Field(None, description="The deadline for completing this todo, specified as an ISO 8601 timestamp with timezone information."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing incident todo with new content, assignees, due date, and metadata. Use this to modify follow-up tasks associated with an incident."""
 
     # Construct request model with validation
@@ -12954,7 +13074,7 @@ async def update_incident_todo(
 async def remove_incident_todo(
     incident_id: str = Field(..., description="The UUID of the incident from which the todo will be removed."),
     todo_id: str = Field(..., description="The UUID of the todo item to be deleted from the incident."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a todo item from an incident. Deletes the relationship between the specified incident and todo."""
 
     # Construct request model with validation
@@ -12990,7 +13110,7 @@ async def remove_incident_todo(
 
 # Tags: AWS Integration
 @mcp.tool()
-async def list_aws_accounts(aws_account_id: str | None = Field(None, description="Filter results to a specific AWS Account ID. When omitted, all AWS account integrations are returned.")) -> dict[str, Any]:
+async def list_aws_accounts(aws_account_id: str | None = Field(None, description="Filter results to a specific AWS Account ID. When omitted, all AWS account integrations are returned.")) -> dict[str, Any] | ToolResult:
     """Retrieve a list of AWS account integrations, optionally filtered by a specific AWS Account ID. Returns all configured AWS integrations if no filter is provided."""
 
     # Construct request model with validation
@@ -13045,7 +13165,7 @@ async def create_aws_account_integration(
     cloud_security_posture_management_collection: bool | None = Field(None, description="Enable Cloud Security Management to scan AWS resources for vulnerabilities, misconfigurations, identity risks, and compliance violations. Requires extended_collection to be enabled."),
     extended_collection: bool | None = Field(None, description="Collect additional resource attributes and configuration details from your AWS account. Required to enable Cloud Security Management scanning."),
     xray_services: _models.XRayServicesIncludeAll | _models.XRayServicesIncludeOnly | None = Field(None, description="AWS X-Ray services from which to collect distributed traces. Leave unset to collect from all services."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new AWS account integration to enable Datadog monitoring of AWS resources. Configure authentication, data collection preferences, and security scanning for your AWS account."""
 
     # Construct request model with validation
@@ -13092,7 +13212,7 @@ async def create_aws_account_integration(
 
 # Tags: AWS Integration
 @mcp.tool()
-async def get_aws_account_integration(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration configuration you want to retrieve.")) -> dict[str, Any]:
+async def get_aws_account_integration(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration configuration you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific AWS Account Integration configuration by its Datadog config ID. Use the list_aws_account_integrations operation to discover available config IDs for your AWS accounts."""
 
     # Construct request model with validation
@@ -13146,7 +13266,7 @@ async def update_aws_account_integration(
     cloud_security_posture_management_collection: bool | None = Field(None, description="Enable Cloud Security Management to scan AWS resources for vulnerabilities, misconfigurations, identity risks, and compliance violations. Requires extended_collection to be enabled."),
     extended_collection: bool | None = Field(None, description="Enable collection of extended resource attributes and configuration details from your AWS account. Required to use Cloud Security Management collection."),
     xray_services: _models.XRayServicesIncludeAll | _models.XRayServicesIncludeOnly | None = Field(None, description="Specify which AWS X-Ray services to collect distributed traces from. Use 'include_only' to monitor all services or provide a list of specific service names."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an AWS account integration configuration by its unique config ID. Modify authentication, data collection settings, and monitoring preferences for an existing AWS account integration."""
 
     # Construct request model with validation
@@ -13194,7 +13314,7 @@ async def update_aws_account_integration(
 
 # Tags: AWS Integration
 @mcp.tool()
-async def delete_aws_account_integration(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration Config. Retrieve this ID using the list AWS integrations endpoint and filtering by your AWS Account ID.")) -> dict[str, Any]:
+async def delete_aws_account_integration(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration Config. Retrieve this ID using the list AWS integrations endpoint and filtering by your AWS Account ID.")) -> dict[str, Any] | ToolResult:
     """Delete an AWS Account Integration configuration by its unique Datadog config ID. This removes the AWS integration from your Datadog account."""
 
     # Construct request model with validation
@@ -13230,7 +13350,7 @@ async def delete_aws_account_integration(aws_account_config_id: str = Field(...,
 
 # Tags: AWS Integration
 @mcp.tool()
-async def get_aws_ccm_config(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS account integration configuration. Retrieve this ID using the list AWS integrations endpoint and filtering by your AWS Account ID.")) -> dict[str, Any]:
+async def get_aws_ccm_config(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS account integration configuration. Retrieve this ID using the list AWS integrations endpoint and filtering by your AWS Account ID.")) -> dict[str, Any] | ToolResult:
     """Retrieve the Cloud Cost Management configuration for an AWS account integration, which uses Cost and Usage Report (CUR) 2.0 for cost tracking and analysis."""
 
     # Construct request model with validation
@@ -13270,7 +13390,7 @@ async def configure_aws_account_ccm(
     aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS account integration configuration. Retrieve this ID using the List AWS integrations endpoint by querying your AWS Account ID."),
     data_export_configs: list[_models.DataExportConfig] = Field(..., description="An ordered list of data export configurations that define how Cost and Usage Reports should be exported and processed for cost analysis."),
     type_: Literal["ccm_config"] = Field(..., alias="type", description="The resource type identifier for this AWS Cloud Cost Management configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure Cloud Cost Management for an AWS account integration using Cost and Usage Report (CUR) 2.0. This enables cost tracking and analysis for the specified AWS account."""
 
     # Construct request model with validation
@@ -13318,7 +13438,7 @@ async def configure_aws_account_ccm_update(
     aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS account integration configuration to update. Retrieve this ID using the List AWS integrations endpoint by querying your AWS Account ID."),
     data_export_configs: list[_models.DataExportConfig] = Field(..., description="An ordered list of data export configurations that define how Cost and Usage Reports are collected and processed for this AWS account."),
     type_: Literal["ccm_config"] = Field(..., alias="type", description="The resource type identifier for AWS Cloud Cost Management configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the Cloud Cost Management configuration for an AWS account integration using Cost and Usage Report (CUR) 2.0 data exports."""
 
     # Construct request model with validation
@@ -13362,7 +13482,7 @@ async def configure_aws_account_ccm_update(
 
 # Tags: AWS Integration
 @mcp.tool()
-async def delete_aws_ccm_config(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration Config. Retrieve this ID using the List AWS integrations endpoint by querying your AWS Account ID.")) -> dict[str, Any]:
+async def delete_aws_ccm_config(aws_account_config_id: str = Field(..., description="The unique Datadog identifier for the AWS Account Integration Config. Retrieve this ID using the List AWS integrations endpoint by querying your AWS Account ID.")) -> dict[str, Any] | ToolResult:
     """Delete the Cloud Cost Management configuration for an AWS Account Integration. This removes the Cost and Usage Report (CUR) 2.0 setup associated with the specified AWS account config."""
 
     # Construct request model with validation
@@ -13398,7 +13518,7 @@ async def delete_aws_ccm_config(aws_account_config_id: str = Field(..., descript
 
 # Tags: AWS Integration
 @mcp.tool()
-async def list_aws_cloudwatch_namespaces() -> dict[str, Any]:
+async def list_aws_cloudwatch_namespaces() -> dict[str, Any] | ToolResult:
     """Retrieve all available AWS CloudWatch namespaces that can be integrated with Datadog for metric collection and monitoring."""
 
     # Extract parameters for API call
@@ -13425,7 +13545,7 @@ async def list_aws_cloudwatch_namespaces() -> dict[str, Any]:
 
 # Tags: AWS Integration
 @mcp.tool()
-async def list_event_bridge_sources() -> dict[str, Any]:
+async def list_event_bridge_sources() -> dict[str, Any] | ToolResult:
     """Retrieve all configured Amazon EventBridge sources available for integration. This operation lists all event sources that can be used to trigger workflows and automations."""
 
     # Extract parameters for API call
@@ -13458,7 +13578,7 @@ async def create_eventbridge_source(
     region: str = Field(..., description="The AWS region where the EventBridge source will be created."),
     type_: Literal["event_bridge"] = Field(..., alias="type", description="The type of EventBridge resource being created."),
     create_event_bus: bool | None = Field(None, description="When enabled, Datadog will create the event bus in addition to the event source. Requires the `events:CreateEventBus` permission in your AWS account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an Amazon EventBridge source to enable Datadog to receive events from your AWS account. Optionally creates the event bus if you have the required AWS permissions."""
 
     # Construct request model with validation
@@ -13504,7 +13624,7 @@ async def delete_event_bridge_source(
     event_generator_name: str = Field(..., description="The name of the event source to delete."),
     region: str = Field(..., description="The AWS region where the event source is located."),
     type_: Literal["event_bridge"] = Field(..., alias="type", description="The type of EventBridge resource being deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an Amazon EventBridge source from your AWS account. This operation removes the event source integration and stops event delivery."""
 
     # Construct request model with validation
@@ -13545,7 +13665,7 @@ async def delete_event_bridge_source(
 
 # Tags: AWS Integration
 @mcp.tool()
-async def generate_aws_external_id() -> dict[str, Any]:
+async def generate_aws_external_id() -> dict[str, Any] | ToolResult:
     """Generate a new external ID for AWS role-based authentication. This creates a unique identifier used to establish secure cross-account access to AWS resources."""
 
     # Extract parameters for API call
@@ -13572,7 +13692,7 @@ async def generate_aws_external_id() -> dict[str, Any]:
 
 # Tags: AWS Logs Integration
 @mcp.tool()
-async def list_aws_log_services() -> dict[str, Any]:
+async def list_aws_log_services() -> dict[str, Any] | ToolResult:
     """Retrieve a list of AWS services that are compatible with sending logs to Datadog. Use this to identify which services can be integrated for log collection."""
 
     # Extract parameters for API call
@@ -13599,7 +13719,7 @@ async def list_aws_log_services() -> dict[str, Any]:
 
 # Tags: GCP Integration
 @mcp.tool()
-async def list_gcp_sts_accounts() -> dict[str, Any]:
+async def list_gcp_sts_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all GCP STS-enabled service accounts configured in your Datadog account. Use this to view available service accounts for GCP integration."""
 
     # Extract parameters for API call
@@ -13639,7 +13759,7 @@ async def create_gcp_service_account(
     monitored_resource_configs: list[_models.GcpMonitoredResourceConfig] | None = Field(None, description="Configure which GCP resource types to monitor. Each configuration specifies a resource type and optional filters to match specific resources by label key-value pairs."),
     region_filter_configs: list[str] | None = Field(None, description="Restrict resource collection to specific GCP regions, multi-regions, or zones. Only resources matching these locations are imported. Omit to collect from all locations."),
     resource_collection_enabled: bool | None = Field(None, description="Enable automatic discovery and collection of all resources in your GCP environment. Required for CSPM and resource change collection features."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register a new GCP service account with Datadog for monitoring and security features. This enables metric collection, resource scanning, and optional security monitoring for your Google Cloud environment."""
 
     # Construct request model with validation
@@ -13691,7 +13811,7 @@ async def update_gcp_sts_account(
     monitored_resource_configs: list[_models.GcpMonitoredResourceConfig] | None = Field(None, description="Array of configurations for GCP monitored resources, specifying resource types and filter criteria to control which resources are imported."),
     region_filter_configs: list[str] | None = Field(None, description="Array of GCP location identifiers (regions, multi-regions, or zones) to filter resource collection. Only resources matching these locations are imported; by default all locations are collected."),
     resource_collection_enabled: bool | None = Field(None, description="When enabled, scans for all resources in your GCP environment to enable comprehensive monitoring and security analysis."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration for a GCP STS-enabled service account, including monitoring preferences, resource collection settings, and metric namespace configurations."""
 
     # Construct request model with validation
@@ -13730,7 +13850,7 @@ async def update_gcp_sts_account(
 
 # Tags: GCP Integration
 @mcp.tool()
-async def delete_gcp_sts_account(account_id: str = Field(..., description="The unique identifier of the GCP STS-enabled service account to delete.")) -> dict[str, Any]:
+async def delete_gcp_sts_account(account_id: str = Field(..., description="The unique identifier of the GCP STS-enabled service account to delete.")) -> dict[str, Any] | ToolResult:
     """Remove an STS-enabled GCP service account from Datadog. This operation permanently deletes the account integration and cannot be undone."""
 
     # Construct request model with validation
@@ -13766,7 +13886,7 @@ async def delete_gcp_sts_account(account_id: str = Field(..., description="The u
 
 # Tags: GCP Integration
 @mcp.tool()
-async def list_gcp_sts_delegates() -> dict[str, Any]:
+async def list_gcp_sts_delegates() -> dict[str, Any] | ToolResult:
     """Retrieve all Datadog-GCP STS delegate accounts configured in your Datadog organization. Use this to view existing GCP service account delegates for cross-account access."""
 
     # Extract parameters for API call
@@ -13793,7 +13913,7 @@ async def list_gcp_sts_delegates() -> dict[str, Any]:
 
 # Tags: GCP Integration
 @mcp.tool()
-async def create_gcp_principal(body: dict[str, Any] | None = Field(None, description="Configuration object for the GCP principal. Specify the service account details and delegation settings required to establish the integration.")) -> dict[str, Any]:
+async def create_gcp_principal(body: dict[str, Any] | None = Field(None, description="Configuration object for the GCP principal. Specify the service account details and delegation settings required to establish the integration.")) -> dict[str, Any] | ToolResult:
     """Create a Datadog GCP principal for service account delegation. This establishes the trust relationship needed for Datadog to access your GCP resources."""
 
     # Construct request model with validation
@@ -13835,7 +13955,7 @@ async def create_gcp_principal(body: dict[str, Any] | None = Field(None, descrip
 async def get_google_chat_space(
     domain_name: str = Field(..., description="The Google Chat domain name associated with the space."),
     space_display_name: str = Field(..., description="The display name of the Google Chat space to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve space information from the Datadog Google Chat integration by its display name, including the resource name and organization binding ID."""
 
     # Construct request model with validation
@@ -13871,7 +13991,7 @@ async def get_google_chat_space(
 
 # Tags: Google Chat Integration
 @mcp.tool()
-async def list_organization_handles(organization_binding_id: str = Field(..., description="The unique identifier for your organization binding in the Google Chat integration.")) -> dict[str, Any]:
+async def list_organization_handles(organization_binding_id: str = Field(..., description="The unique identifier for your organization binding in the Google Chat integration.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organization handles configured in the Datadog Google Chat integration for a specific organization binding."""
 
     # Construct request model with validation
@@ -13912,7 +14032,7 @@ async def create_organization_handle(
     name: str = Field(..., description="A descriptive name for the organization handle. This identifies the handle within your integration setup.", max_length=255),
     space_resource_name: str = Field(..., description="The Google Chat space resource name that this organization handle will be associated with. Format: spaces/{SPACE_ID}.", max_length=255),
     type_: Literal["google-chat-organization-handle"] = Field(..., alias="type", description="The resource type identifier for this organization handle."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create an organization handle to link a Google Chat space with your Datadog organization in the Google Chat integration."""
 
     # Construct request model with validation
@@ -13957,7 +14077,7 @@ async def create_organization_handle(
 async def get_organization_handle(
     organization_binding_id: str = Field(..., description="The unique identifier for your organization binding in the Google Chat integration."),
     handle_id: str = Field(..., description="The unique identifier for the organization handle you want to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific organization handle from the Datadog Google Chat integration. Use this to fetch details about a configured handle within your organization binding."""
 
     # Construct request model with validation
@@ -13998,7 +14118,7 @@ async def update_organization_handle(
     handle_id: str = Field(..., description="The unique identifier for the organization handle to update."),
     type_: Literal["google-chat-organization-handle"] = Field(..., alias="type", description="The resource type identifier for this organization handle."),
     space_resource_name: str | None = Field(None, description="The Google space resource name to associate with this organization handle. Must be a valid Google Chat space resource identifier.", max_length=255),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an organization handle configuration for the Datadog Google Chat integration. Modify the Google space resource association for an existing organization handle."""
 
     # Construct request model with validation
@@ -14041,7 +14161,7 @@ async def update_organization_handle(
 async def remove_organization_handle(
     organization_binding_id: str = Field(..., description="The unique identifier for your organization binding in the Google Chat integration."),
     handle_id: str = Field(..., description="The unique identifier for the organization handle to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an organization handle from the Datadog Google Chat integration. This operation permanently deletes the handle association for the specified organization binding."""
 
     # Construct request model with validation
@@ -14077,7 +14197,7 @@ async def remove_organization_handle(
 
 # Tags: Jira Integration
 @mcp.tool()
-async def list_jira_accounts() -> dict[str, Any]:
+async def list_jira_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve all Jira accounts configured for your organization. Use this to view available Jira integrations and their connection details."""
 
     # Extract parameters for API call
@@ -14104,7 +14224,7 @@ async def list_jira_accounts() -> dict[str, Any]:
 
 # Tags: Jira Integration
 @mcp.tool()
-async def delete_jira_account(account_id: str = Field(..., description="The unique identifier of the Jira account to delete, formatted as a UUID.")) -> dict[str, Any]:
+async def delete_jira_account(account_id: str = Field(..., description="The unique identifier of the Jira account to delete, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Jira account integration by its unique identifier. This action cannot be undone and will remove all associated Jira connections."""
 
     # Construct request model with validation
@@ -14140,7 +14260,7 @@ async def delete_jira_account(account_id: str = Field(..., description="The uniq
 
 # Tags: Jira Integration
 @mcp.tool()
-async def list_jira_issue_templates() -> dict[str, Any]:
+async def list_jira_issue_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all Jira issue templates available for your organization. Use these templates to understand the structure and fields required when creating Jira issues through integrations."""
 
     # Extract parameters for API call
@@ -14172,7 +14292,7 @@ async def create_issue_template(
     fields: dict[str, Any] | None = Field(None, description="Custom fields to include in the Jira issue template, specified as key-value pairs with field configuration details."),
     issue_type_id: str | None = Field(None, description="The Jira issue type ID to associate with this template (e.g., Bug, Task, Story)."),
     project_id: str | None = Field(None, description="The Jira project ID where the issue template will be available."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Jira issue template for a specified Jira account and project. This template defines default fields and issue type configuration for streamlined issue creation."""
 
     # Construct request model with validation
@@ -14215,7 +14335,7 @@ async def create_issue_template(
 
 # Tags: Jira Integration
 @mcp.tool()
-async def get_issue_template(issue_template_id: str = Field(..., description="The unique identifier of the Jira issue template to retrieve.")) -> dict[str, Any]:
+async def get_issue_template(issue_template_id: str = Field(..., description="The unique identifier of the Jira issue template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Jira issue template by its unique identifier. Use this to fetch template details for creating or managing Jira issues."""
 
     # Construct request model with validation
@@ -14251,7 +14371,7 @@ async def get_issue_template(issue_template_id: str = Field(..., description="Th
 
 # Tags: Jira Integration
 @mcp.tool()
-async def delete_issue_template(issue_template_id: str = Field(..., description="The unique identifier of the Jira issue template to delete.")) -> dict[str, Any]:
+async def delete_issue_template(issue_template_id: str = Field(..., description="The unique identifier of the Jira issue template to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a Jira issue template by its unique identifier. This operation permanently removes the template and cannot be undone."""
 
     # Construct request model with validation
@@ -14291,7 +14411,7 @@ async def get_teams_channel(
     tenant_name: str = Field(..., description="The Microsoft Teams tenant name where the channel resides."),
     team_name: str = Field(..., description="The Microsoft Teams team name that contains the channel."),
     channel_name: str = Field(..., description="The Microsoft Teams channel name to retrieve information for."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve channel information including tenant, team, and channel IDs from the Datadog Microsoft Teams integration."""
 
     # Construct request model with validation
@@ -14327,7 +14447,7 @@ async def get_teams_channel(
 
 # Tags: Microsoft Teams Integration
 @mcp.tool()
-async def list_ms_teams_tenant_handles(tenant_id: str | None = Field(None, description="The Microsoft Teams tenant identifier. When provided, filters handles to those associated with this specific tenant.")) -> dict[str, Any]:
+async def list_ms_teams_tenant_handles(tenant_id: str | None = Field(None, description="The Microsoft Teams tenant identifier. When provided, filters handles to those associated with this specific tenant.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tenant-based handles configured for the Datadog Microsoft Teams integration. Use this to view existing handle mappings for a specific tenant."""
 
     # Construct request model with validation
@@ -14365,7 +14485,7 @@ async def list_ms_teams_tenant_handles(tenant_id: str | None = Field(None, descr
 
 # Tags: Microsoft Teams Integration
 @mcp.tool()
-async def get_ms_teams_tenant_handle(handle_id: str = Field(..., description="The unique identifier of the tenant-based handle to retrieve.")) -> dict[str, Any]:
+async def get_ms_teams_tenant_handle(handle_id: str = Field(..., description="The unique identifier of the tenant-based handle to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve tenant, team, and channel information for a specific tenant-based handle in the Datadog Microsoft Teams integration."""
 
     # Construct request model with validation
@@ -14401,7 +14521,7 @@ async def get_ms_teams_tenant_handle(handle_id: str = Field(..., description="Th
 
 # Tags: Microsoft Teams Integration
 @mcp.tool()
-async def list_ms_teams_webhook_handles() -> dict[str, Any]:
+async def list_ms_teams_webhook_handles() -> dict[str, Any] | ToolResult:
     """Retrieve all webhook handles configured for Workflows in the Datadog Microsoft Teams integration. Use this to view existing webhook endpoints that route Teams events to your workflows."""
 
     # Extract parameters for API call
@@ -14428,7 +14548,7 @@ async def list_ms_teams_webhook_handles() -> dict[str, Any]:
 
 # Tags: Microsoft Teams Integration
 @mcp.tool()
-async def get_workflows_webhook_handle(handle_id: str = Field(..., description="The unique identifier of the Workflows webhook handle to retrieve.")) -> dict[str, Any]:
+async def get_workflows_webhook_handle(handle_id: str = Field(..., description="The unique identifier of the Workflows webhook handle to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration details of a Workflows webhook handle from the Datadog Microsoft Teams integration. Use this to fetch metadata about a specific webhook handle by its ID."""
 
     # Construct request model with validation
@@ -14464,7 +14584,7 @@ async def get_workflows_webhook_handle(handle_id: str = Field(..., description="
 
 # Tags: OCI Integration
 @mcp.tool()
-async def list_oci_products(product_keys: str = Field(..., alias="productKeys", description="Comma-separated list of product keys to filter results. Specify which Datadog products (such as Cloud Security Posture Management) to retrieve status information for.")) -> dict[str, Any]:
+async def list_oci_products(product_keys: str = Field(..., alias="productKeys", description="Comma-separated list of product keys to filter results. Specify which Datadog products (such as Cloud Security Posture Management) to retrieve status information for.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of Datadog products and their enabled/disabled status for specified OCI tenancies. Use product keys to filter which products to include in the results."""
 
     # Construct request model with validation
@@ -14502,7 +14622,7 @@ async def list_oci_products(product_keys: str = Field(..., alias="productKeys", 
 
 # Tags: OCI Integration
 @mcp.tool()
-async def list_tenancy_configs() -> dict[str, Any]:
+async def list_tenancy_configs() -> dict[str, Any] | ToolResult:
     """Retrieve all configured OCI tenancy integrations with their authentication credentials, region settings, and collection preferences for metrics, logs, and resources."""
 
     # Extract parameters for API call
@@ -14529,7 +14649,7 @@ async def list_tenancy_configs() -> dict[str, Any]:
 
 # Tags: OCI Integration
 @mcp.tool()
-async def get_tenancy_config(tenancy_ocid: str = Field(..., description="The Oracle Cloud Identifier (OCID) uniquely identifying the tenancy configuration to retrieve.")) -> dict[str, Any]:
+async def get_tenancy_config(tenancy_ocid: str = Field(..., description="The Oracle Cloud Identifier (OCID) uniquely identifying the tenancy configuration to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific OCI tenancy configuration by its OCID. Returns detailed settings including authentication credentials, enabled services, region configuration, and collection preferences."""
 
     # Construct request model with validation
@@ -14580,7 +14700,7 @@ async def update_tenancy_config(
     enabled_services: list[str] | None = Field(None, description="List of OCI service names for which log collection is enabled. Service names should match OCI service identifiers."),
     excluded_services: list[str] | None = Field(None, description="List of OCI service names to exclude from metrics collection. Excluded services will not have metrics collected."),
     resource_collection_enabled: bool | None = Field(None, description="Enable or disable resource collection from OCI for this tenancy."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing OCI tenancy configuration, including authentication credentials, data collection settings, service filters, and region configuration. Use with caution as changes apply immediately to data collection behavior."""
 
     # Construct request model with validation
@@ -14628,7 +14748,7 @@ async def update_tenancy_config(
 
 # Tags: OCI Integration
 @mcp.tool()
-async def delete_tenancy_config(tenancy_ocid: str = Field(..., description="The Oracle Cloud Infrastructure (OCI) OCID that uniquely identifies the tenancy configuration to delete.")) -> dict[str, Any]:
+async def delete_tenancy_config(tenancy_ocid: str = Field(..., description="The Oracle Cloud Infrastructure (OCI) OCID that uniquely identifies the tenancy configuration to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing OCI tenancy configuration, which stops all data collection from that tenancy and removes the stored configuration. This operation is permanent and cannot be undone."""
 
     # Construct request model with validation
@@ -14664,7 +14784,7 @@ async def delete_tenancy_config(tenancy_ocid: str = Field(..., description="The 
 
 # Tags: Opsgenie Integration
 @mcp.tool()
-async def list_opsgenie_services() -> dict[str, Any]:
+async def list_opsgenie_services() -> dict[str, Any] | ToolResult:
     """Retrieve all services configured in the Datadog Opsgenie integration. This returns a complete list of service objects available for monitoring and alerting."""
 
     # Extract parameters for API call
@@ -14697,7 +14817,7 @@ async def create_opsgenie_service(
     region: Literal["us", "eu", "custom"] = Field(..., description="The geographic region where your Opsgenie service is hosted. Use 'custom' if your instance is in a non-standard region and provide the custom_url."),
     type_: Literal["opsgenie-service"] = Field(..., alias="type", description="The resource type identifier for this Opsgenie service integration."),
     custom_url: str | None = Field(None, description="The custom URL for your Opsgenie instance when using a custom region. Required only when region is set to 'custom'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Opsgenie integration service to enable incident management and alerting capabilities. Configure the service with your Opsgenie API credentials and regional settings."""
 
     # Construct request model with validation
@@ -14738,7 +14858,7 @@ async def create_opsgenie_service(
 
 # Tags: Opsgenie Integration
 @mcp.tool()
-async def get_opsgenie_service(integration_service_id: str = Field(..., description="The UUID of the Opsgenie service to retrieve.")) -> dict[str, Any]:
+async def get_opsgenie_service(integration_service_id: str = Field(..., description="The UUID of the Opsgenie service to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single service from the Datadog Opsgenie integration by its unique identifier."""
 
     # Construct request model with validation
@@ -14781,7 +14901,7 @@ async def update_opsgenie_service(
     custom_url: str | None = Field(None, description="The custom URL endpoint for Opsgenie service in a custom region."),
     opsgenie_api_key: str | None = Field(None, description="The API key used to authenticate with your Opsgenie service."),
     region: Literal["us", "eu", "custom"] | None = Field(None, description="The geographic region where your Opsgenie service is hosted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Opsgenie service integration in Datadog. Modify service configuration including API credentials, region settings, and custom URLs."""
 
     # Construct request model with validation
@@ -14823,7 +14943,7 @@ async def update_opsgenie_service(
 
 # Tags: Opsgenie Integration
 @mcp.tool()
-async def delete_opsgenie_service(integration_service_id: str = Field(..., description="The UUID identifier of the Opsgenie service to delete.")) -> dict[str, Any]:
+async def delete_opsgenie_service(integration_service_id: str = Field(..., description="The UUID identifier of the Opsgenie service to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a service object from the Datadog Opsgenie integration. This operation removes the service configuration and its associated settings."""
 
     # Construct request model with validation
@@ -14859,7 +14979,7 @@ async def delete_opsgenie_service(integration_service_id: str = Field(..., descr
 
 # Tags: ServiceNow Integration
 @mcp.tool()
-async def list_assignment_groups(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance from which to retrieve assignment groups.")) -> dict[str, Any]:
+async def list_assignment_groups(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance from which to retrieve assignment groups.")) -> dict[str, Any] | ToolResult:
     """Retrieve all assignment groups configured for a specific ServiceNow instance. Assignment groups are used to organize and route work items to appropriate teams."""
 
     # Construct request model with validation
@@ -14895,7 +15015,7 @@ async def list_assignment_groups(instance_id: str = Field(..., description="The 
 
 # Tags: ServiceNow Integration
 @mcp.tool()
-async def list_business_services(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance from which to retrieve business services.")) -> dict[str, Any]:
+async def list_business_services(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance from which to retrieve business services.")) -> dict[str, Any] | ToolResult:
     """Retrieve all business services configured for a specified ServiceNow instance. This operation returns the complete list of business services available in the target instance."""
 
     # Construct request model with validation
@@ -14931,7 +15051,7 @@ async def list_business_services(instance_id: str = Field(..., description="The 
 
 # Tags: ServiceNow Integration
 @mcp.tool()
-async def list_servicenow_templates() -> dict[str, Any]:
+async def list_servicenow_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available ServiceNow templates configured for your organization. Use this to discover template options for ServiceNow integration workflows."""
 
     # Extract parameters for API call
@@ -14958,7 +15078,7 @@ async def list_servicenow_templates() -> dict[str, Any]:
 
 # Tags: ServiceNow Integration
 @mcp.tool()
-async def list_servicenow_instances() -> dict[str, Any]:
+async def list_servicenow_instances() -> dict[str, Any] | ToolResult:
     """Retrieve all ServiceNow instances configured for your organization. Use this to discover available ServiceNow integrations and their details."""
 
     # Extract parameters for API call
@@ -14985,7 +15105,7 @@ async def list_servicenow_instances() -> dict[str, Any]:
 
 # Tags: ServiceNow Integration
 @mcp.tool()
-async def list_servicenow_users(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance to query for users.")) -> dict[str, Any]:
+async def list_servicenow_users(instance_id: str = Field(..., description="The unique identifier of the ServiceNow instance to query for users.")) -> dict[str, Any] | ToolResult:
     """Retrieve all users from a specified ServiceNow instance. Use this to fetch the complete user roster for integration, reporting, or synchronization purposes."""
 
     # Construct request model with validation
@@ -15021,7 +15141,7 @@ async def list_servicenow_users(instance_id: str = Field(..., description="The u
 
 # Tags: Integrations
 @mcp.tool()
-async def list_integrations() -> dict[str, Any]:
+async def list_integrations() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all available integrations. Use this to discover and manage integrations configured in your workspace."""
 
     # Extract parameters for API call
@@ -15048,7 +15168,7 @@ async def list_integrations() -> dict[str, Any]:
 
 # Tags: Cloudflare Integration
 @mcp.tool()
-async def list_cloudflare_accounts() -> dict[str, Any]:
+async def list_cloudflare_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all connected Cloudflare accounts integrated with this system. Use this to view available Cloudflare accounts for further operations."""
 
     # Extract parameters for API call
@@ -15082,7 +15202,7 @@ async def create_cloudflare_account(
     email: str | None = Field(None, description="Email address associated with the Cloudflare account. Required when using an API key (as opposed to an API token)."),
     resources: list[str] | None = Field(None, description="Optional allowlist of resource types to monitor. Restricts metrics collection to specified resources only. Valid types include web, dns, lb (load balancer), and worker."),
     zones: list[str] | None = Field(None, description="Optional allowlist of zone IDs to monitor. Restricts metrics collection to specified zones only."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Cloudflare account integration to enable metrics collection. Optionally restrict data collection to specific resources and zones."""
 
     # Construct request model with validation
@@ -15123,7 +15243,7 @@ async def create_cloudflare_account(
 
 # Tags: Cloudflare Integration
 @mcp.tool()
-async def get_cloudflare_account(account_id: str = Field(..., description="The unique identifier of the Cloudflare account to retrieve.")) -> dict[str, Any]:
+async def get_cloudflare_account(account_id: str = Field(..., description="The unique identifier of the Cloudflare account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific Cloudflare account integration. Use this to fetch account information and configuration settings."""
 
     # Construct request model with validation
@@ -15165,7 +15285,7 @@ async def update_cloudflare_account(
     email: str | None = Field(None, description="The email address associated with the Cloudflare account. Required when using API key authentication (as opposed to API tokens)."),
     resources: list[str] | None = Field(None, description="An allowlist of resource types to restrict metrics collection. Specify which Cloudflare services to monitor: web (CDN/WAF), dns (DNS management), lb (load balancer), or worker (Cloudflare Workers)."),
     zones: list[str] | None = Field(None, description="An allowlist of zone IDs to restrict metrics collection. Only metrics from specified zones will be pulled; omit to collect from all zones."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Cloudflare account integration with new credentials and resource restrictions. Allows you to modify API authentication, restrict metrics collection to specific resources and zones, and manage account access."""
 
     # Construct request model with validation
@@ -15206,7 +15326,7 @@ async def update_cloudflare_account(
 
 # Tags: Cloudflare Integration
 @mcp.tool()
-async def delete_cloudflare_account(account_id: str = Field(..., description="The unique identifier of the Cloudflare account integration to delete.")) -> dict[str, Any]:
+async def delete_cloudflare_account(account_id: str = Field(..., description="The unique identifier of the Cloudflare account integration to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Cloudflare account integration. This action removes the account connection and cannot be undone."""
 
     # Construct request model with validation
@@ -15242,7 +15362,7 @@ async def delete_cloudflare_account(account_id: str = Field(..., description="Th
 
 # Tags: Confluent Cloud
 @mcp.tool()
-async def list_confluent_accounts() -> dict[str, Any]:
+async def list_confluent_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Confluent Cloud accounts integrated with this workspace. Use this to view available Confluent account connections."""
 
     # Extract parameters for API call
@@ -15275,7 +15395,7 @@ async def create_confluent_account(
     type_: Literal["confluent-cloud-accounts"] = Field(..., alias="type", description="The JSON:API resource type identifier for this Confluent Cloud account."),
     resources: list[_models.ConfluentAccountResourceAttributes] | None = Field(None, description="An optional list of Confluent resources to associate with this account integration."),
     tags: list[str] | None = Field(None, description="An optional list of tags for organizing and categorizing this account. Tags can be simple labels or key-value pairs separated by a colon."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Confluent Cloud account integration. This establishes a connection to your Confluent Cloud environment using API credentials."""
 
     # Construct request model with validation
@@ -15316,7 +15436,7 @@ async def create_confluent_account(
 
 # Tags: Confluent Cloud
 @mcp.tool()
-async def get_confluent_account(account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account to retrieve.")) -> dict[str, Any]:
+async def get_confluent_account(account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific Confluent Cloud account using its account ID. This operation returns the account configuration and metadata."""
 
     # Construct request model with validation
@@ -15358,7 +15478,7 @@ async def update_confluent_account(
     api_secret: str = Field(..., description="The API secret credential for authenticating with the Confluent account."),
     type_: Literal["confluent-cloud-accounts"] = Field(..., alias="type", description="The JSON:API resource type identifier for Confluent Cloud accounts."),
     tags: list[str] | None = Field(None, description="Optional list of tags for organizing and categorizing the account. Supports simple tags or key-value pairs separated by a colon."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Confluent Cloud account with new API credentials and metadata. Requires the account ID and valid API credentials for authentication."""
 
     # Construct request model with validation
@@ -15400,7 +15520,7 @@ async def update_confluent_account(
 
 # Tags: Confluent Cloud
 @mcp.tool()
-async def delete_confluent_account(account_id: str = Field(..., description="The unique identifier of the Confluent Cloud account to delete.")) -> dict[str, Any]:
+async def delete_confluent_account(account_id: str = Field(..., description="The unique identifier of the Confluent Cloud account to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Confluent Cloud account integration. This action removes the account and all associated configurations from the system."""
 
     # Construct request model with validation
@@ -15436,7 +15556,7 @@ async def delete_confluent_account(account_id: str = Field(..., description="The
 
 # Tags: Confluent Cloud
 @mcp.tool()
-async def list_confluent_resources(account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account whose resources you want to list.")) -> dict[str, Any]:
+async def list_confluent_resources(account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account whose resources you want to list.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Confluent resources associated with a specific Confluent Cloud account. This operation lists the resources available within the account identified by the provided account ID."""
 
     # Construct request model with validation
@@ -15479,7 +15599,7 @@ async def add_confluent_resource(
     type_: Literal["confluent-cloud-resources"] = Field(..., alias="type", description="The JSON:API resource type identifier for this request."),
     enable_custom_metrics: bool | None = Field(None, description="Enable collection of the custom consumer lag offset metric with additional metric tags for enhanced monitoring granularity."),
     tags: list[str] | None = Field(None, description="A list of tags for organizing and filtering the resource. Tags can be simple keys or key-value pairs separated by a colon (e.g., 'environment:production')."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new resource to a Confluent Cloud account. Supports Kafka, connectors, ksqlDB, and schema registry resources with optional custom metrics and tagging."""
 
     # Construct request model with validation
@@ -15524,7 +15644,7 @@ async def add_confluent_resource(
 async def get_confluent_resource(
     account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account containing the resource."),
     resource_id: str = Field(..., description="The unique identifier for the Confluent Cloud resource to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific Confluent Cloud resource by its resource ID from a given Confluent account. Use this to fetch details about a particular resource within your Confluent Cloud integration."""
 
     # Construct request model with validation
@@ -15568,7 +15688,7 @@ async def update_confluent_resource(
     type_: Literal["confluent-cloud-resources"] = Field(..., alias="type", description="The JSON:API resource type for this request. Must be set to confluent-cloud-resources."),
     enable_custom_metrics: bool | None = Field(None, description="Enable collection of the custom consumer lag offset metric with additional metric tags for enhanced monitoring."),
     tags: list[str] | None = Field(None, description="A list of tags to assign to the resource. Tags can be simple keys or key-value pairs separated by a colon."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Confluent resource configuration for a specified account. Modify resource settings such as custom metrics and tags."""
 
     # Construct request model with validation
@@ -15613,7 +15733,7 @@ async def update_confluent_resource(
 async def delete_confluent_resource(
     account_id: str = Field(..., description="The unique identifier for the Confluent Cloud account containing the resource to delete."),
     resource_id: str = Field(..., description="The unique identifier for the Confluent resource to delete from the account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a Confluent resource from the specified account. This operation permanently removes the resource and cannot be undone."""
 
     # Construct request model with validation
@@ -15649,7 +15769,7 @@ async def delete_confluent_resource(
 
 # Tags: Fastly Integration
 @mcp.tool()
-async def list_fastly_accounts() -> dict[str, Any]:
+async def list_fastly_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Fastly accounts integrated with your workspace. This operation returns account details for managing Fastly CDN configurations."""
 
     # Extract parameters for API call
@@ -15681,7 +15801,7 @@ async def create_fastly_account(
     name: str = Field(..., description="A descriptive name for this Fastly account integration."),
     type_: Literal["fastly-accounts"] = Field(..., alias="type", description="The JSON:API resource type identifier for this object. This value must always be set to the specified type."),
     services: list[_models.FastlyService] | None = Field(None, description="An optional list of Fastly services associated with this account. Services are processed in the order provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Fastly account integration. This establishes a connection to your Fastly CDN service by storing account credentials and metadata."""
 
     # Construct request model with validation
@@ -15722,7 +15842,7 @@ async def create_fastly_account(
 
 # Tags: Fastly Integration
 @mcp.tool()
-async def get_fastly_account(account_id: str = Field(..., description="The unique identifier for the Fastly account to retrieve.")) -> dict[str, Any]:
+async def get_fastly_account(account_id: str = Field(..., description="The unique identifier for the Fastly account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific Fastly account by its ID. Use this to fetch account configuration and metadata from your Fastly integration."""
 
     # Construct request model with validation
@@ -15758,7 +15878,7 @@ async def get_fastly_account(account_id: str = Field(..., description="The uniqu
 
 # Tags: Fastly Integration
 @mcp.tool()
-async def update_fastly_account(account_id: str = Field(..., description="The unique identifier of the Fastly account to update.")) -> dict[str, Any]:
+async def update_fastly_account(account_id: str = Field(..., description="The unique identifier of the Fastly account to update.")) -> dict[str, Any] | ToolResult:
     """Update configuration and settings for an existing Fastly account integration. This operation allows you to modify account details and preferences."""
 
     # Construct request model with validation
@@ -15794,7 +15914,7 @@ async def update_fastly_account(account_id: str = Field(..., description="The un
 
 # Tags: Fastly Integration
 @mcp.tool()
-async def delete_fastly_account(account_id: str = Field(..., description="The unique identifier of the Fastly account to delete.")) -> dict[str, Any]:
+async def delete_fastly_account(account_id: str = Field(..., description="The unique identifier of the Fastly account to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a Fastly account integration. This action cannot be undone and will remove all associated configuration and data."""
 
     # Construct request model with validation
@@ -15830,7 +15950,7 @@ async def delete_fastly_account(account_id: str = Field(..., description="The un
 
 # Tags: Fastly Integration
 @mcp.tool()
-async def list_services_fastly(account_id: str = Field(..., description="The unique identifier for the Fastly account whose services should be listed.")) -> dict[str, Any]:
+async def list_services_fastly(account_id: str = Field(..., description="The unique identifier for the Fastly account whose services should be listed.")) -> dict[str, Any] | ToolResult:
     """Retrieve all Fastly services configured for a specific account. Returns a list of services with their configurations and metadata."""
 
     # Construct request model with validation
@@ -15871,7 +15991,7 @@ async def create_fastly_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Fastly service to be created."),
     type_: Literal["fastly-services"] = Field(..., alias="type", description="The JSON:API resource type identifier for this operation."),
     tags: list[str] | None = Field(None, description="Optional labels to organize and categorize the Fastly service. Tags can include simple labels or key-value pairs separated by a colon."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Fastly service for an account. This registers a Fastly service with the integration, allowing you to manage and monitor it."""
 
     # Construct request model with validation
@@ -15916,7 +16036,7 @@ async def create_fastly_service(
 async def get_fastly_service(
     account_id: str = Field(..., description="The unique identifier for the Fastly account containing the service."),
     service_id: str = Field(..., description="The unique identifier for the Fastly service to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific Fastly service within an account. Returns the service configuration and metadata."""
 
     # Construct request model with validation
@@ -15958,7 +16078,7 @@ async def update_fastly_service(
     id_: str = Field(..., alias="id", description="The unique identifier of the Fastly service being updated. Must match the service_id parameter."),
     type_: Literal["fastly-services"] = Field(..., alias="type", description="The JSON:API resource type identifier for this operation. Must always be set to the standard Fastly services type."),
     tags: list[str] | None = Field(None, description="A list of tags to assign to the Fastly service for organization and filtering purposes. Tags can be simple labels or key-value pairs separated by a colon."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration and metadata for a Fastly service within an account. Allows modification of service tags and other service properties."""
 
     # Construct request model with validation
@@ -16003,7 +16123,7 @@ async def update_fastly_service(
 async def delete_fastly_service(
     account_id: str = Field(..., description="The unique identifier for the Fastly account containing the service to delete."),
     service_id: str = Field(..., description="The unique identifier for the Fastly service to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a Fastly service from an account. This operation permanently removes the specified service and cannot be undone."""
 
     # Construct request model with validation
@@ -16039,7 +16159,7 @@ async def delete_fastly_service(
 
 # Tags: Okta Integration
 @mcp.tool()
-async def list_okta_accounts() -> dict[str, Any]:
+async def list_okta_accounts() -> dict[str, Any] | ToolResult:
     """Retrieve a list of all Okta accounts integrated with the system. Use this operation to view available Okta account configurations."""
 
     # Extract parameters for API call
@@ -16072,7 +16192,7 @@ async def create_okta_account(
     name: str = Field(..., description="A descriptive name for this Okta account integration to identify it in your system."),
     type_: Literal["okta-accounts"] = Field(..., alias="type", description="The type classification for this Okta account integration."),
     client_id: str | None = Field(None, description="The Client ID from your Okta app integration. Required for OAuth-based authentication."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Okta account integration with the specified authentication method and domain. This establishes a connection to your Okta organization for identity management."""
 
     # Construct request model with validation
@@ -16113,7 +16233,7 @@ async def create_okta_account(
 
 # Tags: Okta Integration
 @mcp.tool()
-async def get_okta_account(account_id: str = Field(..., description="The unique identifier of the Okta account to retrieve.")) -> dict[str, Any]:
+async def get_okta_account(account_id: str = Field(..., description="The unique identifier of the Okta account to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve details for a specific Okta account integration. Use this to fetch configuration and status information for an Okta account by its unique identifier."""
 
     # Construct request model with validation
@@ -16154,7 +16274,7 @@ async def update_okta_account(
     auth_method: str = Field(..., description="The authorization method used to authenticate with the Okta account."),
     domain: str = Field(..., description="The domain URL associated with the Okta account (e.g., https://dev-test.okta.com/)."),
     client_id: str | None = Field(None, description="The Client ID credential for the Okta app integration. Required for OAuth-based authentication."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Okta account configuration, including authentication method, client credentials, and domain settings."""
 
     # Construct request model with validation
@@ -16195,7 +16315,7 @@ async def update_okta_account(
 
 # Tags: Okta Integration
 @mcp.tool()
-async def delete_okta_account(account_id: str = Field(..., description="The unique identifier of the Okta account to delete.")) -> dict[str, Any]:
+async def delete_okta_account(account_id: str = Field(..., description="The unique identifier of the Okta account to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an Okta account integration. This action cannot be undone and will remove all associated configuration and credentials."""
 
     # Construct request model with validation
@@ -16235,7 +16355,7 @@ async def list_experiments(
     filter_project_id: str | None = Field(None, alias="filterproject_id", description="Filter experiments by project ID. Either this or filter[dataset_id] is required to scope the results."),
     filter_dataset_id: str | None = Field(None, alias="filterdataset_id", description="Filter experiments by dataset ID to retrieve experiments associated with a specific dataset."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of experiment records to return in a single page of results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all LLM Observability experiments sorted by creation date in descending order. Filter results by project or dataset to narrow the scope."""
 
     _page_limit = _parse_int(page_limit)
@@ -16285,7 +16405,7 @@ async def create_experiment(
     description: str | None = Field(None, description="A human-readable description explaining the purpose or details of this experiment."),
     ensure_unique: bool | None = Field(None, description="Whether to enforce unique experiment names within the project. When enabled, the operation will fail if an experiment with the same name already exists."),
     metadata: dict[str, Any] | None = Field(None, description="Custom key-value metadata to attach to the experiment for tracking, categorization, or integration purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new LLM Observability experiment within a project using a specified dataset. The experiment can be configured with custom parameters, metadata, and optional version pinning."""
 
     _dataset_version = _parse_int(dataset_version)
@@ -16331,7 +16451,7 @@ async def create_experiment(
 async def delete_experiments(
     experiment_ids: list[str] = Field(..., description="List of experiment IDs to delete. Each ID uniquely identifies an experiment to be removed."),
     type_: Literal["experiments"] = Field(..., alias="type", description="Resource type identifier for LLM Observability experiments. Must be set to the standard resource type value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete one or more LLM Observability experiments. Permanently removes the specified experiments and their associated data."""
 
     # Construct request model with validation
@@ -16376,7 +16496,7 @@ async def update_experiment(
     experiment_id: str = Field(..., description="The unique identifier of the LLM Observability experiment to update."),
     type_: Literal["experiments"] = Field(..., alias="type", description="The resource type identifier for an LLM Observability experiment."),
     description: str | None = Field(None, description="Updated description for the experiment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update an existing LLM Observability experiment by modifying its description or other properties."""
 
     # Construct request model with validation
@@ -16423,7 +16543,7 @@ async def push_experiment_events(
     type_: Literal["events"] = Field(..., alias="type", description="The resource type identifier for LLM Observability experiment events."),
     metrics: list[_models.LlmObsExperimentMetric] | None = Field(None, description="An ordered list of metric objects to record for the experiment. Each metric captures quantitative measurements."),
     spans: list[_models.LlmObsExperimentSpan] | None = Field(None, description="An ordered list of span objects representing traced operations or events within the experiment execution."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Push spans and metrics data to an LLM Observability experiment for tracking and analysis."""
 
     # Construct request model with validation
@@ -16465,7 +16585,7 @@ async def push_experiment_events(
 
 # Tags: LLM Observability
 @mcp.tool()
-async def list_llm_observability_projects(page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of projects to return in a single page of results.")) -> dict[str, Any]:
+async def list_llm_observability_projects(page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of projects to return in a single page of results.")) -> dict[str, Any] | ToolResult:
     """Retrieve all LLM Observability projects sorted by creation date in descending order (newest first). Use pagination to control the number of results returned per page."""
 
     _page_limit = _parse_int(page_limit)
@@ -16509,7 +16629,7 @@ async def create_project_llm_obs(
     name: str = Field(..., description="The name of the project. Must be unique within your workspace."),
     type_: Literal["projects"] = Field(..., alias="type", description="The resource type identifier for an LLM Observability project."),
     description: str | None = Field(None, description="Optional description providing additional context or details about the project's purpose."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new LLM Observability project for monitoring and analyzing language model interactions. If a project with the same name already exists, the existing project is returned."""
 
     # Construct request model with validation
@@ -16553,7 +16673,7 @@ async def create_project_llm_obs(
 async def delete_llm_observability_projects(
     project_ids: list[str] = Field(..., description="List of unique identifiers for the LLM Observability projects to delete. Each ID must be a valid UUID."),
     type_: Literal["projects"] = Field(..., alias="type", description="The resource type identifier for LLM Observability projects. This parameter specifies the type of resources being deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete one or more LLM Observability projects. This operation permanently removes the specified projects and their associated data."""
 
     # Construct request model with validation
@@ -16598,7 +16718,7 @@ async def update_llm_observability_project(
     project_id: str = Field(..., description="The unique identifier of the LLM Observability project to update."),
     type_: Literal["projects"] = Field(..., alias="type", description="The resource type identifier for the LLM Observability project."),
     description: str | None = Field(None, description="The updated description for the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update an existing LLM Observability project by modifying its description and confirming its resource type."""
 
     # Construct request model with validation
@@ -16643,7 +16763,7 @@ async def update_llm_observability_project(
 async def list_datasets_llm_obs(
     project_id: str = Field(..., description="The unique identifier of the LLM Observability project containing the datasets to retrieve."),
     page_limit: str | None = Field(None, alias="pagelimit", description="The maximum number of datasets to return in a single page of results. Use this to control pagination size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all LLM Observability datasets for a project, sorted by creation date with newest first. Use pagination to control result size."""
 
     _page_limit = _parse_int(page_limit)
@@ -16690,7 +16810,7 @@ async def create_dataset_llm_obs(
     type_: Literal["datasets"] = Field(..., alias="type", description="The resource type identifier for this LLM Observability dataset."),
     description: str | None = Field(None, description="Optional description providing context about the dataset's purpose and contents."),
     metadata: dict[str, Any] | None = Field(None, description="Optional custom metadata as key-value pairs for storing additional dataset attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new LLM Observability dataset within the specified project. The dataset serves as a container for organizing and managing observability data."""
 
     # Construct request model with validation
@@ -16736,7 +16856,7 @@ async def delete_datasets(
     project_id: str = Field(..., description="The unique identifier of the LLM Observability project containing the datasets to delete."),
     dataset_ids: list[str] = Field(..., description="An array of dataset identifiers to delete. All specified datasets will be removed from the project."),
     type_: Literal["datasets"] = Field(..., alias="type", description="The resource type classification for LLM Observability datasets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete one or more LLM Observability datasets from the specified project. This operation permanently removes the selected datasets and their associated data."""
 
     # Construct request model with validation
@@ -16784,7 +16904,7 @@ async def update_dataset_llm_obs(
     type_: Literal["datasets"] = Field(..., alias="type", description="Resource type identifier for the LLM Observability dataset."),
     description: str | None = Field(None, description="Updated description of the dataset."),
     metadata: dict[str, Any] | None = Field(None, description="Updated metadata object associated with the dataset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update an existing LLM Observability dataset within a project. Allows modification of dataset description, metadata, and type."""
 
     # Construct request model with validation
@@ -16831,7 +16951,7 @@ async def list_dataset_records(
     dataset_id: str = Field(..., description="The unique identifier of the dataset from which to retrieve records."),
     filter_version: str | None = Field(None, alias="filterversion", description="Filter records to a specific dataset version. If not specified, returns records from the current version."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of records to return in a single page response. Use for pagination control."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all records from an LLM Observability dataset, sorted by creation date with newest records first. Supports filtering by dataset version and pagination."""
 
     _filter_version = _parse_int(filter_version)
@@ -16879,7 +16999,7 @@ async def append_dataset_records(
     records: list[_models.LlmObsDatasetRecordItem] = Field(..., description="An ordered list of records to append to the dataset. Each record should conform to the dataset's schema."),
     type_: Literal["records"] = Field(..., alias="type", description="The resource type identifier for LLM Observability dataset records."),
     deduplicate: bool | None = Field(None, description="Whether to deduplicate records before appending. When enabled, duplicate records are removed before insertion. Defaults to true."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Append one or more records to an LLM Observability dataset, with optional deduplication to prevent duplicate entries."""
 
     # Construct request model with validation
@@ -16926,7 +17046,7 @@ async def update_observability_records(
     dataset_id: str = Field(..., description="The unique identifier of the dataset within the project whose records will be updated."),
     records: list[_models.LlmObsDatasetRecordUpdateItem] = Field(..., description="An array of record objects to update. Each record should contain the necessary fields for the update operation."),
     type_: Literal["records"] = Field(..., alias="type", description="The resource type identifier for dataset records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update one or more existing records in an LLM Observability dataset. Allows bulk modifications to dataset records within a specified project."""
 
     # Construct request model with validation
@@ -16973,7 +17093,7 @@ async def delete_dataset_records(
     dataset_id: str = Field(..., description="The unique identifier of the LLM Observability dataset from which records will be deleted."),
     record_ids: list[str] = Field(..., description="List of record IDs to delete. Each ID uniquely identifies a record within the dataset."),
     type_: Literal["records"] = Field(..., alias="type", description="The resource type designation for LLM Observability dataset records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete one or more records from an LLM Observability dataset. Permanently removes the specified records from the dataset."""
 
     # Construct request model with validation
@@ -17015,7 +17135,7 @@ async def delete_dataset_records(
 
 # Tags: Logs
 @mcp.tool()
-async def send_logs(body: list[_models.HttpLogItem] = Field(..., description="Array of log objects to submit. Each log object contains message content and metadata (source, tags, hostname, service). Supports up to 1000 logs per request; individual logs exceeding 1MB are truncated by Datadog. Total uncompressed payload must not exceed 5MB.")) -> dict[str, Any]:
+async def send_logs(body: list[_models.HttpLogItem] = Field(..., description="Array of log objects to submit. Each log object contains message content and metadata (source, tags, hostname, service). Supports up to 1000 logs per request; individual logs exceeding 1MB are truncated by Datadog. Total uncompressed payload must not exceed 5MB.")) -> dict[str, Any] | ToolResult:
     """Submit logs to Datadog over HTTP. Supports single or batch log submissions with automatic truncation for oversized entries. Logs can be timestamped up to 18 hours in the past."""
 
     # Construct request model with validation
@@ -17062,7 +17182,7 @@ async def aggregate_logs(
     to: str | None = Field(None, description="End time for the log query window. Accepts date math expressions (e.g., now) or absolute timestamps in milliseconds."),
     group_by: list[_models.LogsGroupBy] | None = Field(None, description="Grouping rules to organize aggregated results into buckets by specified fields or dimensions."),
     time_offset: str | None = Field(None, alias="timeOffset", description="Time offset in seconds to apply to the entire query window, useful for timezone adjustments or relative time shifts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aggregate log events into buckets and compute metrics or timeseries data over a specified time range. Supports grouping, filtering by indexes, and querying across different storage tiers."""
 
     _time_offset = _parse_int(time_offset)
@@ -17104,7 +17224,7 @@ async def aggregate_logs(
 
 # Tags: Logs Archives
 @mcp.tool()
-async def list_archive_order() -> dict[str, Any]:
+async def list_archive_order() -> dict[str, Any] | ToolResult:
     """Retrieve the current ordering configuration of your log archives. This determines the sequence in which archives are processed or displayed."""
 
     # Extract parameters for API call
@@ -17134,7 +17254,7 @@ async def list_archive_order() -> dict[str, Any]:
 async def reorder_archives(
     archive_ids: list[str] = Field(..., description="An ordered array of archive IDs that defines the new processing sequence. The position of each ID in the array determines its priority in the archive order."),
     type_: Literal["archive_order"] = Field(..., alias="type", description="The type identifier for this archive order configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reorder your log archives to change the sequence in which logs are processed. Since archives are processed sequentially, changing the order may alter the structure and content of data processed by downstream archives."""
 
     # Construct request model with validation
@@ -17175,7 +17295,7 @@ async def reorder_archives(
 
 # Tags: Logs Archives
 @mcp.tool()
-async def list_log_archives() -> dict[str, Any]:
+async def list_log_archives() -> dict[str, Any] | ToolResult:
     """Retrieve all configured log archives with their complete definitions and settings."""
 
     # Extract parameters for API call
@@ -17210,7 +17330,7 @@ async def create_archive(
     include_tags: bool | None = Field(None, description="Whether to preserve tags when archiving logs. If false, tags are removed during archival."),
     rehydration_max_scan_size_in_gb: str | None = Field(None, description="Maximum amount of data (in GB) that can be scanned when rehydrating logs from this archive."),
     rehydration_tags: list[str] | None = Field(None, description="Tags to automatically add to logs when they are rehydrated from this archive. Specify as an array of tag strings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new logs archive in your organization to store logs matching a specific query. Archives enable long-term log retention and rehydration capabilities."""
 
     _rehydration_max_scan_size_in_gb = _parse_int(rehydration_max_scan_size_in_gb)
@@ -17253,7 +17373,7 @@ async def create_archive(
 
 # Tags: Logs Archives
 @mcp.tool()
-async def get_archive(archive_id: str = Field(..., description="The unique identifier of the archive to retrieve.")) -> dict[str, Any]:
+async def get_archive(archive_id: str = Field(..., description="The unique identifier of the archive to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific log archive from your organization by its ID. Use this to access archive configuration and details."""
 
     # Construct request model with validation
@@ -17298,7 +17418,7 @@ async def update_archive(
     include_tags: bool | None = Field(None, description="Whether to preserve tags when logs are sent to the archive. If false, tags will be removed from archived logs."),
     rehydration_max_scan_size_in_gb: str | None = Field(None, description="The maximum amount of data (in GB) that can be scanned when rehydrating logs from this archive."),
     rehydration_tags: list[str] | None = Field(None, description="An array of tags to automatically add to logs when they are rehydrated from this archive."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing log archive configuration by replacing it with the provided settings. This operation fully replaces the current archive configuration in your Datadog organization."""
 
     _rehydration_max_scan_size_in_gb = _parse_int(rehydration_max_scan_size_in_gb)
@@ -17342,7 +17462,7 @@ async def update_archive(
 
 # Tags: Logs Archives
 @mcp.tool()
-async def delete_archive(archive_id: str = Field(..., description="The unique identifier of the archive to delete.")) -> dict[str, Any]:
+async def delete_archive(archive_id: str = Field(..., description="The unique identifier of the archive to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a log archive from your organization. This action permanently removes the archive configuration and cannot be undone."""
 
     # Construct request model with validation
@@ -17378,7 +17498,7 @@ async def delete_archive(archive_id: str = Field(..., description="The unique id
 
 # Tags: Logs Archives
 @mcp.tool()
-async def list_archive_readers(archive_id: str = Field(..., description="The unique identifier of the archive for which to retrieve read roles.")) -> dict[str, Any]:
+async def list_archive_readers(archive_id: str = Field(..., description="The unique identifier of the archive for which to retrieve read roles.")) -> dict[str, Any] | ToolResult:
     """Retrieve all read roles that have access to a specific archive. Returns the list of roles with read permissions for the archive."""
 
     # Construct request model with validation
@@ -17414,7 +17534,7 @@ async def list_archive_readers(archive_id: str = Field(..., description="The uni
 
 # Tags: Logs Custom Destinations
 @mcp.tool()
-async def list_custom_destinations() -> dict[str, Any]:
+async def list_custom_destinations() -> dict[str, Any] | ToolResult:
     """Retrieve all configured custom log destinations in your organization, including their complete definitions and settings."""
 
     # Extract parameters for API call
@@ -17441,7 +17561,7 @@ async def list_custom_destinations() -> dict[str, Any]:
 
 # Tags: Logs Custom Destinations
 @mcp.tool()
-async def get_custom_destination(custom_destination_id: str = Field(..., description="The unique identifier of the custom destination to retrieve.")) -> dict[str, Any]:
+async def get_custom_destination(custom_destination_id: str = Field(..., description="The unique identifier of the custom destination to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom destination configuration from your organization. Use this to view the details and settings of a custom log destination."""
 
     # Construct request model with validation
@@ -17486,7 +17606,7 @@ async def update_custom_destination(
     forward_tags_restriction_list: list[str] | None = Field(None, description="List of tag keys to restrict from being forwarded. An empty list means no restriction is applied. Maximum 10 tag keys allowed.", min_length=0, max_length=10),
     forward_tags_restriction_list_type: Literal["ALLOW_LIST", "BLOCK_LIST"] | None = Field(None, description="Determines how the restriction list is applied. Use ALLOW_LIST to forward only tags in the restriction list, or BLOCK_LIST to forward all tags except those in the list."),
     forwarder_destination: _models.CustomDestinationForwardDestinationHttp | _models.CustomDestinationForwardDestinationSplunk | _models.CustomDestinationForwardDestinationElasticsearch | _models.CustomDestinationForwardDestinationMicrosoftSentinel | None = Field(None, description="The destination configuration specifying where logs should be forwarded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update specific fields of a custom destination to control log forwarding behavior and tag handling in your organization."""
 
     # Construct request model with validation
@@ -17528,7 +17648,7 @@ async def update_custom_destination(
 
 # Tags: Logs Custom Destinations
 @mcp.tool()
-async def delete_custom_destination(custom_destination_id: str = Field(..., description="The unique identifier of the custom destination to delete.")) -> dict[str, Any]:
+async def delete_custom_destination(custom_destination_id: str = Field(..., description="The unique identifier of the custom destination to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a custom destination from your organization. This action permanently removes the specified custom destination and cannot be undone."""
 
     # Construct request model with validation
@@ -17564,7 +17684,7 @@ async def delete_custom_destination(custom_destination_id: str = Field(..., desc
 
 # Tags: Logs Metrics
 @mcp.tool()
-async def list_log_metrics() -> dict[str, Any]:
+async def list_log_metrics() -> dict[str, Any] | ToolResult:
     """Retrieve all configured log-based metrics with their complete definitions and settings."""
 
     # Extract parameters for API call
@@ -17598,7 +17718,7 @@ async def create_logs_metric(
     include_percentiles: bool | None = Field(None, description="Include percentile calculations (p50, p75, p90, p95, p99) in the metric output. Only applicable when aggregation_type is 'distribution'."),
     path: str | None = Field(None, description="The log field path to aggregate on when using distribution aggregation. Use dot notation for nested fields and @ prefix for reserved fields."),
     group_by: list[_models.LogsMetricGroupBy] | None = Field(None, description="Array of grouping rules to segment the metric by log attributes. Each rule defines how to partition the aggregated data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a metric based on ingested logs in your organization. The metric can aggregate log data by count or distribution across specified dimensions."""
 
     # Construct request model with validation
@@ -17642,7 +17762,7 @@ async def create_logs_metric(
 
 # Tags: Logs Metrics
 @mcp.tool()
-async def get_logs_metric(metric_id: str = Field(..., description="The unique identifier or name of the log-based metric to retrieve.")) -> dict[str, Any]:
+async def get_logs_metric(metric_id: str = Field(..., description="The unique identifier or name of the log-based metric to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific log-based metric configuration from your organization. Use this to view the details and settings of a metric used for analyzing log data."""
 
     # Construct request model with validation
@@ -17683,7 +17803,7 @@ async def update_logs_metric(
     type_: Literal["logs_metrics"] = Field(..., alias="type", description="The resource type identifier. Must be set to the logs_metrics resource type."),
     include_percentiles: bool | None = Field(None, description="Include or exclude percentile aggregations for distribution metrics. Only applicable when the metric uses distribution aggregation."),
     group_by: list[_models.LogsMetricGroupBy] | None = Field(None, description="Rules for grouping the metric data. Specify as an ordered array of grouping criteria."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a log-based metric in your organization. Returns the updated log-based metric object."""
 
     # Construct request model with validation
@@ -17726,7 +17846,7 @@ async def update_logs_metric(
 
 # Tags: Logs Metrics
 @mcp.tool()
-async def delete_logs_metric(metric_id: str = Field(..., description="The unique identifier of the log-based metric to delete.")) -> dict[str, Any]:
+async def delete_logs_metric(metric_id: str = Field(..., description="The unique identifier of the log-based metric to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific log-based metric from your organization. This operation permanently removes the metric and stops collecting data for it."""
 
     # Construct request model with validation
@@ -17765,7 +17885,7 @@ async def delete_logs_metric(metric_id: str = Field(..., description="The unique
 async def list_restriction_queries(
     page_size: str | None = Field(None, alias="pagesize", description="Number of restriction queries to return per page. Use this to control result set size."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve. Use this to navigate through paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all restriction queries configured in the system, including their names and IDs. Results are paginated for efficient data retrieval."""
 
     _page_size = _parse_int(page_size)
@@ -17806,7 +17926,7 @@ async def list_restriction_queries(
 
 # Tags: Logs Restriction Queries
 @mcp.tool()
-async def get_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to retrieve.")) -> dict[str, Any]:
+async def get_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific restriction query by its ID from your organization. Restriction queries define data access controls and filtering rules."""
 
     # Construct request model with validation
@@ -17845,7 +17965,7 @@ async def get_restriction_query(restriction_query_id: str = Field(..., descripti
 async def update_restriction_query(
     restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to update."),
     restriction_query: str = Field(..., description="The restriction query string that defines the filtering criteria (e.g., environment or tag-based filters)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Modify an existing restriction query to change its filtering criteria. Use this to update query rules that control log access or filtering behavior."""
 
     # Construct request model with validation
@@ -17886,7 +18006,7 @@ async def update_restriction_query(
 
 # Tags: Logs Restriction Queries
 @mcp.tool()
-async def delete_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to delete.")) -> dict[str, Any]:
+async def delete_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a restriction query from the logs configuration. This action cannot be undone."""
 
     # Construct request model with validation
@@ -17926,7 +18046,7 @@ async def list_restriction_query_roles(
     restriction_query_id: str = Field(..., description="The unique identifier of the restriction query for which to retrieve associated roles."),
     page_size: str | None = Field(None, alias="pagesize", description="Number of roles to return per page. Maximum allowed is 100."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all roles associated with a specific restriction query. Use pagination to control the number of results returned."""
 
     _page_size = _parse_int(page_size)
@@ -17968,7 +18088,7 @@ async def list_restriction_query_roles(
 
 # Tags: Logs Restriction Queries
 @mcp.tool()
-async def grant_role_to_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to which the role will be granted access.")) -> dict[str, Any]:
+async def grant_role_to_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query to which the role will be granted access.")) -> dict[str, Any] | ToolResult:
     """Grant a role access to a restriction query, which automatically provisions the logs_read_data permission if not already assigned. Use this to control which roles can access specific log data restrictions."""
 
     # Construct request model with validation
@@ -18004,7 +18124,7 @@ async def grant_role_to_restriction_query(restriction_query_id: str = Field(...,
 
 # Tags: Logs Restriction Queries
 @mcp.tool()
-async def revoke_role_from_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query from which the role will be removed.")) -> dict[str, Any]:
+async def revoke_role_from_restriction_query(restriction_query_id: str = Field(..., description="The unique identifier of the restriction query from which the role will be removed.")) -> dict[str, Any] | ToolResult:
     """Removes a role from a restriction query, revoking its access permissions. This operation updates the role assignments for the specified restriction query."""
 
     # Construct request model with validation
@@ -18047,7 +18167,7 @@ async def search_logs(
     filter_to: str | None = Field(None, alias="filterto", description="End of the time range for log search. Logs with timestamps at or before this value are included."),
     filter_storage_tier: Literal["indexes", "online-archives", "flex"] | None = Field(None, alias="filterstorage_tier", description="Storage tier to query. Use 'indexes' for standard logs, 'online-archives' for archived logs, or 'flex' for flexible storage."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of logs to return in a single response. Use pagination to retrieve additional results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter logs matching a query with optional time range and index selection. Results are paginated and support multiple storage tiers including archives."""
 
     _page_limit = _parse_int(page_limit)
@@ -18097,7 +18217,7 @@ async def search_logs_advanced(
     to: str | None = Field(None, description="The end time for the log search. Supports date math expressions and Unix timestamps in milliseconds."),
     time_offset: str | None = Field(None, alias="timeOffset", description="Time offset in seconds to apply to the query timestamps. Useful for adjusting time-based filtering."),
     limit: str | None = Field(None, description="Maximum number of logs to return in the response. Useful for controlling response size and pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter logs matching a query with support for date ranges, index selection, and pagination. Results are paginated and can be retrieved from indexes, online archives, or flex storage."""
 
     _time_offset = _parse_int(time_offset)
@@ -18152,7 +18272,7 @@ async def list_metrics(
     tag_filters: list[dict[str, Any]] | None = Field(None, description="List of tag filter conditions. Each dict has 'key' (tag key), 'operator' (AND/OR/IN), and 'value' (tag value or comma-separated values for IN)"),
     tag_filter_logic: str | None = Field(None, description="How to combine multiple filters: 'AND' or 'OR'"),
     tag_wildcards_enabled: bool | None = Field(None, description="Whether to enable wildcard matching (e.g., service:web*)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of actively reporting metrics for your organization with optional filtering by configuration, type, and usage. Supports pagination via cursor-based navigation."""
 
     # Call helper functions
@@ -18204,7 +18324,7 @@ async def configure_metric_tags(
     include_actively_queried_tags_window: float | None = Field(None, description="Time window in seconds to automatically include all tags that have been actively queried for matching metrics. Allows tags to remain queryable based on recent usage patterns.", ge=1, le=7776000),
     override_existing_configurations: bool | None = Field(None, description="When true, replaces any existing tag configurations for matching metrics with this new configuration. When false, merges this configuration with existing ones."),
     tags: list[str] | None = Field(None, description="List of tag names to configure for metrics matching the prefix. Tag order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Configure queryable tags for multiple metrics by matching metric name prefixes. Tag configurations can be applied inclusively (only specified tags queryable) or exclusively (all tags except specified ones queryable), and results can be sent to specified email addresses."""
 
     # Construct request model with validation
@@ -18249,7 +18369,7 @@ async def remove_metric_tags(
     id_: str = Field(..., alias="id", description="Metric name prefix used to select which metrics to remove tags from. All metrics starting with this prefix will be affected."),
     type_: Literal["metric_bulk_configure_tags"] = Field(..., alias="type", description="The resource type for bulk metric tag configuration operations."),
     emails: list[str] | None = Field(None, description="Email addresses to notify when the tag deletion is completed. Notifications are sent to each address in the list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove custom tag configurations from multiple metrics by name prefix. Optionally notify specified email addresses when the deletion is applied."""
 
     # Construct request model with validation
@@ -18293,7 +18413,7 @@ async def remove_metric_tags(
 async def list_metric_configurations(
     metric_name: str = Field(..., description="The name of the metric to retrieve active configurations for."),
     window_seconds: str | None = Field(None, alias="windowseconds", description="The lookback window in seconds from the current time to analyze active metric usage. Defaults to 1 week."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve active metric configurations including tags and aggregations currently in use across dashboards, notebooks, monitors, the Metrics Explorer, and API queries for a specified metric."""
 
     _window_seconds = _parse_int(window_seconds)
@@ -18342,7 +18462,7 @@ async def list_metric_tags(
     filter_include_tag_values: bool | None = Field(None, alias="filterinclude_tag_values", description="Include tag values in the response. Defaults to true."),
     filter_allow_partial: bool | None = Field(None, alias="filterallow_partial", description="Allow partial results to be returned if the query cannot complete fully. Defaults to false."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve indexed and ingested tags for a specified metric, with results filtered by a configurable time window (default 4 hours)."""
 
     _window_seconds = _parse_int(window_seconds)
@@ -18384,7 +18504,7 @@ async def list_metric_tags(
 
 # Tags: Metrics
 @mcp.tool()
-async def get_metric_assets(metric_name: str = Field(..., description="The name of the metric to retrieve related assets for.")) -> dict[str, Any]:
+async def get_metric_assets(metric_name: str = Field(..., description="The name of the metric to retrieve related assets for.")) -> dict[str, Any] | ToolResult:
     """Retrieve all dashboards, monitors, notebooks, and SLOs that reference a specific metric. Asset data is updated every 24 hours."""
 
     # Construct request model with validation
@@ -18426,7 +18546,7 @@ async def estimate_metric_cardinality(
     filter_hours_ago: str | None = Field(None, alias="filterhours_ago", description="Number of hours to look back from the current time when estimating cardinality. Determines the historical data range used for the estimate."),
     filter_pct: bool | None = Field(None, alias="filterpct", description="For distribution metrics only, set to true to estimate cardinality including additional percentile aggregators in the calculation."),
     filter_timespan_h: str | None = Field(None, alias="filtertimespan_h", description="Time window in hours within the lookback period to use for cardinality estimation. Minimum and default is 1 hour."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Estimates the cardinality (unique value count) for a metric based on tag configuration, aggregation settings, and historical data window. Uses Metrics without Limits™ to optimize metric storage and query performance."""
 
     _filter_hours_ago = _parse_int(filter_hours_ago)
@@ -18468,7 +18588,7 @@ async def estimate_metric_cardinality(
 
 # Tags: Metrics
 @mcp.tool()
-async def get_metric_tag_cardinality_details(metric_name: str = Field(..., description="The name of the metric for which to retrieve tag cardinality details.")) -> dict[str, Any]:
+async def get_metric_tag_cardinality_details(metric_name: str = Field(..., description="The name of the metric for which to retrieve tag cardinality details.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed cardinality information for all tag keys associated with a specific metric. This helps understand the uniqueness and distribution of tag values within the metric."""
 
     # Construct request model with validation
@@ -18504,7 +18624,7 @@ async def get_metric_tag_cardinality_details(metric_name: str = Field(..., descr
 
 # Tags: Metrics
 @mcp.tool()
-async def get_metric_tags(metric_name: str = Field(..., description="The name of the metric for which to retrieve tag configuration.")) -> dict[str, Any]:
+async def get_metric_tags(metric_name: str = Field(..., description="The name of the metric for which to retrieve tag configuration.")) -> dict[str, Any] | ToolResult:
     """Retrieve the tag configuration for a specified metric. Returns all tags associated with the metric and their configuration details."""
 
     # Construct request model with validation
@@ -18548,7 +18668,7 @@ async def configure_metric_tags_single(
     type_: Literal["manage_tags"] = Field(..., alias="type", description="The resource type for metric tag configuration."),
     exclude_tags_mode: bool | None = Field(None, description="When true, tags in the list are excluded from queries (deny-list mode). When false, only tags in the list are queryable (allow-list mode). Defaults to false and requires the tags property to be set."),
     include_percentiles: bool | None = Field(None, description="Enable percentile aggregations for distribution metrics. Only applicable when metric_type is distribution. Defaults to false."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Define queryable tag keys for a metric and optionally configure percentile aggregations for distribution metrics. Use exclude_tags_mode to switch between allow-list and deny-list behavior."""
 
     # Construct request model with validation
@@ -18597,7 +18717,7 @@ async def update_metric_tag_configuration(
     exclude_tags_mode: bool | None = Field(None, description="When true, configured tags are excluded and all other tags are queryable (deny-list mode). When false, only configured tags are queryable (allow-list mode). Requires the tags property to be set."),
     include_percentiles: bool | None = Field(None, description="Include or exclude percentile aggregations for distribution metrics. Only applicable to metrics with type distribution."),
     tags: list[str] | None = Field(None, description="List of tag keys that will be queryable for this metric. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update tag configuration for a metric, including percentile aggregations for distribution metrics or custom aggregations for count, rate, or gauge metrics. Switch between allow-list and deny-list modes to control tag queryability."""
 
     # Construct request model with validation
@@ -18639,7 +18759,7 @@ async def update_metric_tag_configuration(
 
 # Tags: Metrics
 @mcp.tool()
-async def remove_metric_tag_configuration(metric_name: str = Field(..., description="The name of the metric whose tag configuration should be deleted.")) -> dict[str, Any]:
+async def remove_metric_tag_configuration(metric_name: str = Field(..., description="The name of the metric whose tag configuration should be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently removes the tag configuration for a metric. This operation is irreversible and requires the `Manage Tags for Metrics` permission."""
 
     # Construct request model with validation
@@ -18675,7 +18795,7 @@ async def remove_metric_tag_configuration(metric_name: str = Field(..., descript
 
 # Tags: Metrics
 @mcp.tool()
-async def list_metric_volumes(metric_name: str = Field(..., description="The name of the metric to retrieve volume data for.")) -> dict[str, Any]:
+async def list_metric_volumes(metric_name: str = Field(..., description="The name of the metric to retrieve volume data for.")) -> dict[str, Any] | ToolResult:
     """Retrieve distinct volume metrics for a specified metric name. Custom metrics generated in-app from other products will return null for ingested volumes."""
 
     # Construct request model with validation
@@ -18711,7 +18831,7 @@ async def list_metric_volumes(metric_name: str = Field(..., description="The nam
 
 # Tags: Monitors
 @mcp.tool()
-async def get_notification_rule_monitor(rule_id: str = Field(..., description="The unique identifier of the monitor notification rule to retrieve.")) -> dict[str, Any]:
+async def get_notification_rule_monitor(rule_id: str = Field(..., description="The unique identifier of the monitor notification rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific monitor notification rule by its ID. Use this to fetch the configuration and details of an existing notification rule."""
 
     # Construct request model with validation
@@ -18747,7 +18867,7 @@ async def get_notification_rule_monitor(rule_id: str = Field(..., description="T
 
 # Tags: Monitors
 @mcp.tool()
-async def delete_notification_rule_monitor(rule_id: str = Field(..., description="The unique identifier of the monitor notification rule to delete.")) -> dict[str, Any]:
+async def delete_notification_rule_monitor(rule_id: str = Field(..., description="The unique identifier of the monitor notification rule to delete.")) -> dict[str, Any] | ToolResult:
     """Deletes a monitor notification rule by its ID. This operation permanently removes the specified notification rule from the monitoring system."""
 
     # Construct request model with validation
@@ -18783,7 +18903,7 @@ async def delete_notification_rule_monitor(rule_id: str = Field(..., description
 
 # Tags: Monitors
 @mcp.tool()
-async def list_monitor_policies() -> dict[str, Any]:
+async def list_monitor_policies() -> dict[str, Any] | ToolResult:
     """Retrieve all monitor configuration policies. Returns a list of policies that define monitoring rules and configurations."""
 
     # Extract parameters for API call
@@ -18810,7 +18930,7 @@ async def list_monitor_policies() -> dict[str, Any]:
 
 # Tags: Monitors
 @mcp.tool()
-async def get_monitor_policy(policy_id: str = Field(..., description="The unique identifier of the monitor configuration policy to retrieve.")) -> dict[str, Any]:
+async def get_monitor_policy(policy_id: str = Field(..., description="The unique identifier of the monitor configuration policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific monitor configuration policy by its unique identifier. Use this to fetch policy details for viewing or validation purposes."""
 
     # Construct request model with validation
@@ -18852,7 +18972,7 @@ async def update_monitor_policy(
     policy_type: Literal["tag"] = Field(..., description="The type classification for this monitor configuration policy."),
     id_: str = Field(..., alias="id", description="The unique identifier for this monitor configuration policy resource."),
     type_: Literal["monitor-config-policy"] = Field(..., alias="type", description="The resource type identifier for monitor configuration policies."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing monitor configuration policy with new settings. Allows modification of policy configuration and metadata."""
 
     # Construct request model with validation
@@ -18894,7 +19014,7 @@ async def update_monitor_policy(
 
 # Tags: Monitors
 @mcp.tool()
-async def delete_monitor_policy(policy_id: str = Field(..., description="The unique identifier of the monitor configuration policy to delete.")) -> dict[str, Any]:
+async def delete_monitor_policy(policy_id: str = Field(..., description="The unique identifier of the monitor configuration policy to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a monitor configuration policy by its ID. This operation permanently removes the specified policy and cannot be undone."""
 
     # Construct request model with validation
@@ -18930,7 +19050,7 @@ async def delete_monitor_policy(policy_id: str = Field(..., description="The uni
 
 # Tags: Monitors
 @mcp.tool()
-async def list_monitor_templates() -> dict[str, Any]:
+async def list_monitor_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all monitor user templates available in the system. Returns a complete list of templates that can be used for monitor configuration."""
 
     # Extract parameters for API call
@@ -18964,7 +19084,7 @@ async def create_monitor_template(
     type_: Literal["monitor-user-template"] = Field(..., alias="type", description="The resource type identifier for this monitor template."),
     description: str | None = Field(None, description="A brief description explaining the purpose and use case of this monitor template."),
     template_variables: list[_models.MonitorUserTemplateTemplateVariablesItems] | None = Field(None, description="An optional list of template variables that can be substituted when instantiating monitors from this template. Variables enable dynamic configuration without creating multiple templates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new monitor template that can be reused to generate monitors with consistent configurations. Templates support variable substitution for dynamic monitor creation."""
 
     # Construct request model with validation
@@ -19008,7 +19128,7 @@ async def create_monitor_template(
 async def get_monitor_template(
     template_id: str = Field(..., description="The unique identifier of the monitor user template to retrieve."),
     with_all_versions: bool | None = Field(None, description="Include all historical versions of the template in the response. When enabled, versions will be populated in the response payload."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific monitor user template by its ID. Optionally include all historical versions of the template in the response."""
 
     # Construct request model with validation
@@ -19056,7 +19176,7 @@ async def update_monitor_template(
     type_: Literal["monitor-user-template"] = Field(..., alias="type", description="The resource type identifier for monitor templates."),
     description: str | None = Field(None, description="A brief description of the monitor template's purpose and scope."),
     template_variables: list[_models.MonitorUserTemplateTemplateVariablesItems] | None = Field(None, description="An optional array of template variables that can be substituted when applying this template to create monitors."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new version of an existing monitor user template with updated configuration, tags, and variables."""
 
     # Construct request model with validation
@@ -19098,7 +19218,7 @@ async def update_monitor_template(
 
 # Tags: Monitors
 @mcp.tool()
-async def delete_monitor_template(template_id: str = Field(..., description="The unique identifier of the monitor user template to delete.")) -> dict[str, Any]:
+async def delete_monitor_template(template_id: str = Field(..., description="The unique identifier of the monitor user template to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing monitor user template by its ID. This operation permanently removes the template and cannot be undone."""
 
     # Construct request model with validation
@@ -19143,7 +19263,7 @@ async def validate_monitor_template_update(
     type_: Literal["monitor-user-template"] = Field(..., alias="type", description="The resource type identifier for monitor user templates."),
     description: str | None = Field(None, description="A brief description of the monitor user template's purpose and scope."),
     template_variables: list[_models.MonitorUserTemplateTemplateVariablesItems] | None = Field(None, description="An array of template variables that can be substituted when instantiating the monitor from this template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate the structure and content of a monitor user template before updating it to a new version. Ensures the template definition, tags, and variables conform to the required schema."""
 
     # Construct request model with validation
@@ -19189,7 +19309,7 @@ async def list_monitor_downtimes(
     monitor_id: str = Field(..., description="The unique identifier of the monitor for which to retrieve active downtimes."),
     page_offset: str | None = Field(None, alias="pageoffset", description="The starting position for pagination, allowing you to retrieve results from a specific offset in the dataset."),
     page_limit: str | None = Field(None, alias="pagelimit", description="The maximum number of downtime records to return in a single response page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all active downtimes currently affecting a specified monitor. Use pagination to control the number of results returned."""
 
     _monitor_id = _parse_int(monitor_id)
@@ -19236,7 +19356,7 @@ async def list_devices(
     page_size: str | None = Field(None, alias="pagesize", description="Number of devices to return per page. Maximum allowed is 500 devices per request."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve. Use this to navigate through paginated results."),
     filter_tag: str | None = Field(None, alias="filtertag", description="Filter devices by a specific tag using key:value syntax (e.g., status:ok). Only devices matching the tag filter will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of devices with optional filtering by tag. Use pagination parameters to control result size and navigate through pages."""
 
     _page_size = _parse_int(page_size)
@@ -19277,7 +19397,7 @@ async def list_devices(
 
 # Tags: Network Device Monitoring
 @mcp.tool()
-async def get_device(device_id: str = Field(..., description="The unique identifier of the device to retrieve. Typically an IP address or device hostname.")) -> dict[str, Any]:
+async def get_device(device_id: str = Field(..., description="The unique identifier of the device to retrieve. Typically an IP address or device hostname.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific device by its identifier. Returns comprehensive device configuration and status data."""
 
     # Construct request model with validation
@@ -19316,7 +19436,7 @@ async def get_device(device_id: str = Field(..., description="The unique identif
 async def list_device_interfaces(
     device_id: str = Field(..., description="The unique identifier of the device from which to retrieve interfaces."),
     get_ip_addresses: bool | None = Field(None, description="Whether to include IP address information for each interface in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the list of network interfaces for a specified device. Optionally include IP address information for each interface."""
 
     # Construct request model with validation
@@ -19354,7 +19474,7 @@ async def list_device_interfaces(
 
 # Tags: Network Device Monitoring
 @mcp.tool()
-async def list_device_tags(device_id: str = Field(..., description="The unique identifier of the device for which to retrieve tags. This is typically an IP address or device hostname.")) -> dict[str, Any]:
+async def list_device_tags(device_id: str = Field(..., description="The unique identifier of the device for which to retrieve tags. This is typically an IP address or device hostname.")) -> dict[str, Any] | ToolResult:
     """Retrieve all tags associated with a specific device. Tags are used to organize and categorize devices for management and filtering purposes."""
 
     # Construct request model with validation
@@ -19393,7 +19513,7 @@ async def list_device_tags(device_id: str = Field(..., description="The unique i
 async def update_device_tags(
     device_id: str = Field(..., description="The unique identifier of the device whose tags should be updated. This is typically an IP address or device hostname."),
     tags: list[str] | None = Field(None, description="An ordered list of tags to assign to the device. Each tag should follow the format prefix:value to organize devices by category or attribute."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update or replace the tags assigned to a device. Tags are used to organize and categorize devices for management and filtering purposes."""
 
     # Construct request model with validation
@@ -19432,7 +19552,7 @@ async def update_device_tags(
 
 # Tags: Network Device Monitoring
 @mcp.tool()
-async def list_interface_tags(interface_id: str = Field(..., description="The unique identifier of the interface whose tags should be retrieved.")) -> dict[str, Any]:
+async def list_interface_tags(interface_id: str = Field(..., description="The unique identifier of the interface whose tags should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieves all tags associated with a specified network interface. Tags are used to organize and categorize interfaces for management and filtering purposes."""
 
     # Construct request model with validation
@@ -19471,7 +19591,7 @@ async def list_interface_tags(interface_id: str = Field(..., description="The un
 async def update_interface_tags(
     interface_id: str = Field(..., description="The unique identifier of the interface to update tags for, typically in the format of IP address and port."),
     tags: list[str] | None = Field(None, description="An ordered list of tags to assign to the interface. Each tag should follow the tag:name format. Omit this parameter to clear all tags from the interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the tags associated with a specific interface. Tags are used to organize and categorize interfaces for easier management and filtering."""
 
     # Construct request model with validation
@@ -19516,7 +19636,7 @@ async def list_aggregated_connections(
     group_by: str | None = Field(None, description="Comma-separated list of fields to group connections by for aggregation. Maximum of 10 fields allowed."),
     tags: str | None = Field(None, description="Comma-separated list of tags to filter connections. Only connections matching all specified tags are returned."),
     limit: str | None = Field(None, description="Maximum number of aggregated connection records to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated network connections with optional filtering by time range, tags, and grouping criteria. Supports pagination and flexible aggregation across multiple fields."""
 
     _from_ = _parse_int(from_)
@@ -19564,7 +19684,7 @@ async def list_aggregated_dns_traffic(
     group_by: str | None = Field(None, description="Comma-separated list of fields to group DNS traffic results by. Defaults to `network.dns_query` if not specified. Use `server_ungrouped` to retrieve ungrouped results. Maximum of 10 grouping fields allowed."),
     tags: str | None = Field(None, description="Comma-separated list of tags to filter DNS traffic results. Only traffic matching all specified tags will be included in the response."),
     limit: str | None = Field(None, description="Maximum number of aggregated DNS entries to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated DNS traffic data within a specified time window, optionally grouped by selected fields and filtered by tags. Useful for analyzing DNS query patterns and network behavior."""
 
     _from_ = _parse_int(from_)
@@ -19609,7 +19729,7 @@ async def list_aggregated_dns_traffic(
 async def list_pipelines(
     page_size: str | None = Field(None, alias="pagesize", description="Number of pipelines to return per page. Maximum allowed is 100 pipelines per request."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve. Use this to navigate through paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all available pipelines. Use pagination parameters to control the number of results and navigate through pages."""
 
     _page_size = _parse_int(page_size)
@@ -19658,7 +19778,7 @@ async def validate_pipeline(
     pipeline_type: Literal["logs", "metrics"] | None = Field(None, description="The type of data the pipeline processes. Determines how the pipeline handles and validates incoming data."),
     processor_groups: list[_models.ObservabilityPipelineConfigProcessorGroup] | None = Field(None, description="List of processor groups that transform or enrich data as it flows through the pipeline. Processors are applied in order to matching data."),
     use_legacy_search_syntax: bool | None = Field(None, description="Enable legacy search syntax for filter queries during migration. Set to true to use deprecated syntax while migrating queries to the new format. Requires Observability Pipelines Worker 2.11 or later."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validates an observability pipeline configuration without persisting any changes. Returns a list of validation errors if the configuration is invalid."""
 
     # Construct request model with validation
@@ -19702,7 +19822,7 @@ async def validate_pipeline(
 
 # Tags: Observability Pipelines
 @mcp.tool()
-async def get_pipeline(pipeline_id: str = Field(..., description="The unique identifier of the pipeline to retrieve.")) -> dict[str, Any]:
+async def get_pipeline(pipeline_id: str = Field(..., description="The unique identifier of the pipeline to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific pipeline by its ID. Use this to fetch detailed information about a pipeline configuration and its current state."""
 
     # Construct request model with validation
@@ -19748,7 +19868,7 @@ async def update_pipeline(
     pipeline_type: Literal["logs", "metrics"] | None = Field(None, description="The type of data this pipeline processes. Determines how data is ingested and processed."),
     processor_groups: list[_models.ObservabilityPipelineConfigProcessorGroup] | None = Field(None, description="List of processor groups that transform, filter, or enrich incoming data. Processors are applied in the order specified within each group."),
     use_legacy_search_syntax: bool | None = Field(None, description="Enable legacy filter query syntax for backward compatibility during migration. Disable after all queries are migrated to the new syntax. Requires Observability Pipelines Worker 2.11 or later."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing observability pipeline configuration, including its data sources, processor groups, and destinations. Changes take effect immediately on the pipeline."""
 
     # Construct request model with validation
@@ -19793,7 +19913,7 @@ async def update_pipeline(
 
 # Tags: Observability Pipelines
 @mcp.tool()
-async def delete_pipeline(pipeline_id: str = Field(..., description="The unique identifier of the pipeline to delete.")) -> dict[str, Any]:
+async def delete_pipeline(pipeline_id: str = Field(..., description="The unique identifier of the pipeline to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a pipeline and remove it from the system. This action cannot be undone."""
 
     # Construct request model with validation
@@ -19834,7 +19954,7 @@ async def create_escalation_policy(
     steps: list[_models.EscalationPolicyCreateRequestDataAttributesStepsItems] = Field(..., description="An ordered list of escalation steps (1-10 steps) that define how alerts are assigned and escalated. Each step specifies assignment rules, escalation timeout, and target recipients.", min_length=1, max_length=10),
     type_: Literal["policies"] = Field(..., alias="type", description="The resource type identifier for this policy."),
     resolve_page_on_policy_end: bool | None = Field(None, description="Whether to automatically resolve the page when the escalation policy completes all steps."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new on-call escalation policy that defines how alerts are routed and escalated to team members. The policy consists of sequential escalation steps with timeouts and target assignments."""
 
     # Construct request model with validation
@@ -19875,7 +19995,7 @@ async def create_escalation_policy(
 
 # Tags: On-Call
 @mcp.tool()
-async def get_escalation_policy(policy_id: str = Field(..., description="The unique identifier of the escalation policy to retrieve.")) -> dict[str, Any]:
+async def get_escalation_policy(policy_id: str = Field(..., description="The unique identifier of the escalation policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific on-call escalation policy by its ID. Use this to view the escalation rules and notification chain for a policy."""
 
     # Construct request model with validation
@@ -19918,7 +20038,7 @@ async def update_escalation_policy(
     type_: Literal["policies"] = Field(..., alias="type", description="The resource type, which must be set to 'policies' to indicate this is an escalation policy resource."),
     resolve_page_on_policy_end: bool | None = Field(None, description="Whether the page should be automatically resolved when the escalation policy ends."),
     steps: list[_models.EscalationPolicyUpdateRequestDataAttributesStepsItems] | None = Field(None, description="A list of escalation steps, each defining assignment, escalation timeout, and targets.", min_length=1, max_length=10),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing on-call escalation policy with a new name and resolution behavior. The policy ID and type must be specified to identify and validate the resource being modified."""
 
     # Construct request model with validation
@@ -19960,7 +20080,7 @@ async def update_escalation_policy(
 
 # Tags: On-Call
 @mcp.tool()
-async def delete_escalation_policy(policy_id: str = Field(..., description="The unique identifier of the escalation policy to delete.")) -> dict[str, Any]:
+async def delete_escalation_policy(policy_id: str = Field(..., description="The unique identifier of the escalation policy to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an on-call escalation policy. This action cannot be undone and will remove all routing rules associated with the policy."""
 
     # Construct request model with validation
@@ -20002,7 +20122,7 @@ async def create_page(
     urgency: Literal["low", "high"] = Field(..., description="The severity level of the page, determining notification priority and escalation urgency."),
     description: str | None = Field(None, description="A short summary providing context about the incident or issue being escalated."),
     tags: list[str] | None = Field(None, description="Tags to categorize, filter, or organize the page for better tracking and reporting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Trigger a new on-call page to alert responders about an incident or issue. Pages are used to notify on-call team members based on escalation policies."""
 
     # Construct request model with validation
@@ -20043,7 +20163,7 @@ async def create_page(
 
 # Tags: On-Call Paging
 @mcp.tool()
-async def acknowledge_page(page_id: str = Field(..., description="The unique identifier of the on-call page to acknowledge.")) -> dict[str, Any]:
+async def acknowledge_page(page_id: str = Field(..., description="The unique identifier of the on-call page to acknowledge.")) -> dict[str, Any] | ToolResult:
     """Acknowledges an on-call page to indicate receipt and awareness of the alert. This marks the page as acknowledged in the on-call system."""
 
     # Construct request model with validation
@@ -20079,7 +20199,7 @@ async def acknowledge_page(page_id: str = Field(..., description="The unique ide
 
 # Tags: On-Call Paging
 @mcp.tool()
-async def escalate_page(page_id: str = Field(..., description="The unique identifier of the on-call page to escalate.")) -> dict[str, Any]:
+async def escalate_page(page_id: str = Field(..., description="The unique identifier of the on-call page to escalate.")) -> dict[str, Any] | ToolResult:
     """Escalates an on-call page to notify additional responders or escalation policies. Use this when the current on-call assignment needs to be escalated due to urgency or lack of response."""
 
     # Construct request model with validation
@@ -20115,7 +20235,7 @@ async def escalate_page(page_id: str = Field(..., description="The unique identi
 
 # Tags: On-Call Paging
 @mcp.tool()
-async def resolve_page(page_id: str = Field(..., description="The unique identifier of the on-call page to resolve.")) -> dict[str, Any]:
+async def resolve_page(page_id: str = Field(..., description="The unique identifier of the on-call page to resolve.")) -> dict[str, Any] | ToolResult:
     """Resolves an on-call page, marking it as handled and closing the alert. This acknowledges the page and prevents further escalations."""
 
     # Construct request model with validation
@@ -20156,7 +20276,7 @@ async def create_schedule(
     name: str = Field(..., description="A human-readable name for the schedule that identifies its purpose or team."),
     time_zone: str = Field(..., description="The timezone in which all schedule times and rotations are evaluated. Use standard timezone identifiers."),
     type_: Literal["schedules"] = Field(..., alias="type", description="The resource type identifier for this schedule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new on-call schedule with defined coverage layers, timezone, and rotation rules. The schedule establishes when team members are on-call and any restrictions that apply to their coverage."""
 
     # Construct request model with validation
@@ -20197,7 +20317,7 @@ async def create_schedule(
 
 # Tags: On-Call
 @mcp.tool()
-async def get_schedule_oncall(schedule_id: str = Field(..., description="The unique identifier of the on-call schedule to retrieve.")) -> dict[str, Any]:
+async def get_schedule_oncall(schedule_id: str = Field(..., description="The unique identifier of the on-call schedule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific on-call schedule by its ID. Returns the schedule configuration and details."""
 
     # Construct request model with validation
@@ -20240,7 +20360,7 @@ async def update_schedule_oncall(
     time_zone: str = Field(..., description="The timezone used when interpreting and displaying rotation times. Use standard IANA timezone identifiers."),
     id_: str = Field(..., alias="id", description="The unique identifier of the schedule resource being updated. Must match the schedule_id path parameter."),
     type_: Literal["schedules"] = Field(..., alias="type", description="The resource type identifier for this schedule object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing on-call schedule with new layers, name, and timezone configuration. All fields are required to maintain schedule integrity."""
 
     # Construct request model with validation
@@ -20282,7 +20402,7 @@ async def update_schedule_oncall(
 
 # Tags: On-Call
 @mcp.tool()
-async def delete_schedule_oncall(schedule_id: str = Field(..., description="The unique identifier of the on-call schedule to delete.")) -> dict[str, Any]:
+async def delete_schedule_oncall(schedule_id: str = Field(..., description="The unique identifier of the on-call schedule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete an on-call schedule. This action cannot be undone and will remove all associated scheduling data."""
 
     # Construct request model with validation
@@ -20321,7 +20441,7 @@ async def delete_schedule_oncall(schedule_id: str = Field(..., description="The 
 async def get_on_call_user(
     schedule_id: str = Field(..., description="The unique identifier of the schedule to query for on-call coverage."),
     filter_at_ts: str | None = Field(None, alias="filterat_ts", description="The timestamp at which to retrieve the on-call user, specified in RFC3339 format. Defaults to the current time if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the user currently on-call for a specified schedule. Optionally query the on-call status at a specific point in time."""
 
     # Construct request model with validation
@@ -20360,7 +20480,7 @@ async def get_on_call_user(
 
 # Tags: On-Call
 @mcp.tool()
-async def list_team_on_call_users(team_id: str = Field(..., description="The unique identifier of the team for which to retrieve on-call users.")) -> dict[str, Any]:
+async def list_team_on_call_users(team_id: str = Field(..., description="The unique identifier of the team for which to retrieve on-call users.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of users currently on-call for a specific team. This shows who is actively on-call at the time of the request."""
 
     # Construct request model with validation
@@ -20396,7 +20516,7 @@ async def list_team_on_call_users(team_id: str = Field(..., description="The uni
 
 # Tags: On-Call
 @mcp.tool()
-async def list_notification_channels(user_id: str = Field(..., description="The unique identifier of the user whose notification channels should be retrieved.")) -> dict[str, Any]:
+async def list_notification_channels(user_id: str = Field(..., description="The unique identifier of the user whose notification channels should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all notification channels configured for a specific user's on-call notifications. The authenticated user must be the target user or have on-call admin permissions."""
 
     # Construct request model with validation
@@ -20436,7 +20556,7 @@ async def create_notification_channel(
     user_id: str = Field(..., description="The unique identifier of the user for whom the notification channel is being created."),
     type_: Literal["notification_channels"] = Field(..., alias="type", description="The resource type identifier for notification channels."),
     config: _models.CreatePhoneNotificationChannelConfig | _models.CreateEmailNotificationChannelConfig | None = Field(None, description="Configuration settings for the notification channel, such as delivery method, contact information, and preferences."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new notification channel for an on-call user. The authenticated user must be the target user or have the `on_call_admin` permission."""
 
     # Construct request model with validation
@@ -20481,7 +20601,7 @@ async def create_notification_channel(
 async def get_notification_channel(
     user_id: str = Field(..., description="The unique identifier of the user whose notification channel is being retrieved."),
     channel_id: str = Field(..., description="The unique identifier of the notification channel to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific notification channel for an on-call user. The authenticated user must be the target user or have on-call admin permissions."""
 
     # Construct request model with validation
@@ -20520,7 +20640,7 @@ async def get_notification_channel(
 async def remove_notification_channel(
     user_id: str = Field(..., description="The unique identifier of the user whose notification channel will be removed."),
     channel_id: str = Field(..., description="The unique identifier of the notification channel to remove."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a notification channel from an On-Call user. The authenticated user must be the target user or have the `on_call_admin` permission."""
 
     # Construct request model with validation
@@ -20556,7 +20676,7 @@ async def remove_notification_channel(
 
 # Tags: On-Call
 @mcp.tool()
-async def get_notification_rules_user(user_id: str = Field(..., description="The unique identifier of the user whose notification rules should be retrieved.")) -> dict[str, Any]:
+async def get_notification_rules_user(user_id: str = Field(..., description="The unique identifier of the user whose notification rules should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all notification rules configured for a specific user's on-call schedule. The authenticated user must be the target user or have on-call admin permissions."""
 
     # Construct request model with validation
@@ -20595,7 +20715,7 @@ async def get_notification_rules_user(user_id: str = Field(..., description="The
 async def get_notification_rule_user(
     user_id: str = Field(..., description="The unique identifier of the user whose notification rule is being retrieved."),
     rule_id: str = Field(..., description="The unique identifier of the notification rule to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific on-call notification rule for a user. The authenticated user must be the target user or have the `on_call_admin` permission."""
 
     # Construct request model with validation
@@ -20634,7 +20754,7 @@ async def get_notification_rule_user(
 async def remove_notification_rule(
     user_id: str = Field(..., description="The unique identifier of the user whose notification rule will be deleted."),
     rule_id: str = Field(..., description="The unique identifier of the notification rule to be deleted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove an on-call notification rule for a user. The authenticated user must be the target user or have the `on_call_admin` permission to perform this action."""
 
     # Construct request model with validation
@@ -20675,7 +20795,7 @@ async def list_org_connections(
     source_org_id: str | None = Field(None, description="Filter results to connections where this organization is the source. Specify the organization UUID to filter by source org."),
     limit: str | None = Field(None, description="Maximum number of connections to return per request. Useful for controlling response size in large datasets."),
     offset: str | None = Field(None, description="Number of connections to skip before returning results. Use with limit for pagination through large result sets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of organization connections, optionally filtered by source and sink organizations. Use this to discover existing connections between organizations."""
 
     _limit = _parse_int(limit)
@@ -20719,7 +20839,7 @@ async def list_org_connections(
 async def establish_org_connection(
     connection_types: list[Literal["logs", "metrics", "audit"]] = Field(..., description="Types of connections to establish between organizations. At least one connection type must be specified.", min_length=1),
     type_: Literal["org_connection"] = Field(..., alias="type", description="The type of organization connection being created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Establish a new connection between the current organization and a target organization. Specify the types of connections to enable between the two orgs."""
 
     # Construct request model with validation
@@ -20765,7 +20885,7 @@ async def update_org_connection(
     connection_types: list[Literal["logs", "metrics", "audit"]] = Field(..., description="List of connection types to associate with this org connection. Must contain at least one type.", min_length=1),
     id_: str = Field(..., alias="id", description="The unique identifier of the org connection being updated. Must match the connection_id parameter."),
     type_: Literal["org_connection"] = Field(..., alias="type", description="The type classification for this org connection resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing organization connection with new connection types. This modifies which data types (logs, metrics, etc.) are associated with the org connection."""
 
     # Construct request model with validation
@@ -20807,7 +20927,7 @@ async def update_org_connection(
 
 # Tags: Org Connections
 @mcp.tool()
-async def delete_org_connection(connection_id: str = Field(..., description="The unique identifier of the organization connection to delete.")) -> dict[str, Any]:
+async def delete_org_connection(connection_id: str = Field(..., description="The unique identifier of the organization connection to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing organization connection by its unique identifier. This action permanently removes the connection and cannot be undone."""
 
     # Construct request model with validation
@@ -20857,7 +20977,7 @@ async def list_findings(
     filter_status: Literal["critical", "high", "medium", "low", "info"] | None = Field(None, alias="filterstatus", description="Filter findings by severity level. Returns findings matching the specified risk level."),
     filter_vulnerability_type: list[Literal["misconfiguration", "attack_path", "identity_risk", "api_security"]] | None = Field(None, alias="filtervulnerability_type", description="Filter findings by vulnerability type category. Multiple types can be specified to include findings matching any of the selected categories."),
     detailed_findings: bool | None = Field(None, description="Include additional extension fields in the response such as external resource IDs, descriptions with remediation steps, Datadog links, and IP addresses."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of security findings including misconfigurations and identity risks. Supports filtering by multiple attributes, tags, and time ranges to identify specific security issues across your infrastructure."""
 
     _page_limit = _parse_int(page_limit)
@@ -20906,7 +21026,7 @@ async def update_findings_mute_status(
     description: str | None = Field(None, description="Additional context explaining why findings are being muted or unmuted. Limited to 280 characters."),
     expiration_date: str | None = Field(None, description="Unix timestamp in milliseconds when the mute or unmute action expires. If omitted, the action remains indefinitely in effect."),
     findings: list[_models.BulkMuteFindingsRequestMetaFindings] | None = Field(None, description="Array of finding identifiers to mute or unmute. Each entry should be a finding UUID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mute or unmute a batch of security findings with optional expiration and reason documentation. Use this to suppress findings that are false positives, accepted risks, or pending remediation."""
 
     _expiration_date = _parse_int(expiration_date)
@@ -20955,7 +21075,7 @@ async def update_findings_mute_status(
 async def get_finding(
     finding_id: str = Field(..., description="The unique identifier of the finding to retrieve."),
     snapshot_timestamp: str | None = Field(None, description="Retrieve the finding as it existed at a specific point in time, specified as a Unix timestamp in milliseconds. If omitted, returns the current state of the finding."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific finding with its message and resource configuration. Optionally retrieve the finding state at a particular point in time."""
 
     _snapshot_timestamp = _parse_int(snapshot_timestamp)
@@ -20999,7 +21119,7 @@ async def get_finding(
 async def list_powerpacks(
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of powerpacks to return in a single response. Useful for controlling response size and pagination."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Number of powerpacks to skip from the beginning of the result set. Use this to navigate through paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of all available powerpacks. Use limit and offset parameters to control pagination."""
 
     _page_limit = _parse_int(page_limit)
@@ -21048,7 +21168,7 @@ async def create_powerpack(
     live_span: Literal["1m", "5m", "10m", "15m", "30m", "1h", "4h", "1d", "2d", "1w", "1mo", "3mo", "6mo", "1y", "alert"] | None = Field(None, description="The time span for data display in the powerpack widgets."),
     tags: list[str] | None = Field(None, description="A list of tags for categorizing and identifying this powerpack. Maximum of 8 tags allowed.", max_length=8),
     template_variables: list[_models.PowerpackTemplateVariable] | None = Field(None, description="A list of template variables that can be used within the powerpack for dynamic filtering and parameterization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new powerpack with customizable widgets, layout, and template variables for dashboard organization and monitoring."""
 
     # Construct request model with validation
@@ -21091,7 +21211,7 @@ async def create_powerpack(
 
 # Tags: Powerpack
 @mcp.tool()
-async def get_powerpack(powerpack_id: str = Field(..., description="The unique identifier of the powerpack to retrieve.")) -> dict[str, Any]:
+async def get_powerpack(powerpack_id: str = Field(..., description="The unique identifier of the powerpack to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific powerpack by its ID. Returns the powerpack's configuration and metadata."""
 
     # Construct request model with validation
@@ -21136,7 +21256,7 @@ async def update_powerpack(
     live_span: Literal["1m", "5m", "10m", "15m", "30m", "1h", "4h", "1d", "2d", "1w", "1mo", "3mo", "6mo", "1y", "alert"] | None = Field(None, description="The timeframe for data display in the powerpack. The available options depend on the specific widgets included."),
     tags: list[str] | None = Field(None, description="An ordered list of tags for categorizing and identifying this powerpack. Maximum of 8 tags allowed.", max_length=8),
     template_variables: list[_models.PowerpackTemplateVariable] | None = Field(None, description="An ordered list of template variables that can be used within the powerpack for dynamic configuration. Each variable includes a name and optional default values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing powerpack with new configuration, metadata, or layout settings. Modify the powerpack's name, description, widgets, timeframe, tags, and template variables."""
 
     # Construct request model with validation
@@ -21180,7 +21300,7 @@ async def update_powerpack(
 
 # Tags: Powerpack
 @mcp.tool()
-async def delete_powerpack(powerpack_id: str = Field(..., description="The unique identifier of the powerpack to delete.")) -> dict[str, Any]:
+async def delete_powerpack(powerpack_id: str = Field(..., description="The unique identifier of the powerpack to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a powerpack by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -21222,7 +21342,7 @@ async def list_processes(
     from_: str | None = Field(None, alias="from", description="Unix timestamp marking the start of the query window in seconds since epoch. Defaults to 15 minutes before the `to` timestamp if not provided. If neither `from` nor `to` are specified, defaults to 15 minutes before the current time."),
     to: str | None = Field(None, description="Unix timestamp marking the end of the query window in seconds since epoch. Defaults to 15 minutes after the `from` timestamp if not provided. If neither `from` nor `to` are specified, defaults to the current time."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per request for pagination. Adjust to balance response size and data completeness."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all processes for your organization with optional filtering by search terms, tags, and time range. Results are paginated with a default limit of 1000 items."""
 
     _from_ = _parse_int(from_)
@@ -21271,7 +21391,7 @@ async def send_server_event(
     usr_id: str = Field(..., alias="usrId", description="The user ID associated with the event in your Datadog organization."),
     name: str = Field(..., description="The name of the event used for searching and filtering in Product Analytics. Use dot-notation for hierarchical event names (e.g., checkout.completed, payment.processed)."),
     type_: Literal["server"] = Field(..., alias="type", description="The event type classification. Must be set to 'server' for server-side events."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Send server-side events to Product Analytics for tracking server-initiated actions. Server-side events are retained for 15 months and integrated into Product Analytics for filtering and analysis alongside client-side events."""
 
     # Construct request model with validation
@@ -21318,7 +21438,7 @@ async def list_account_facet_values(
     facet_id: str = Field(..., description="The identifier of the account attribute facet to retrieve values for."),
     limit: str = Field(..., description="Maximum number of facet values to return in the response."),
     type_: Literal["users_facet_info_request"] = Field(..., alias="type", description="The resource type for the facet info request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve facet value information for a specified account attribute, including possible values and their counts. Use this to explore available options for filtering or segmenting account data."""
 
     _limit = _parse_int(limit)
@@ -21366,7 +21486,7 @@ async def query_accounts(
     limit: str | None = Field(None, description="Maximum number of account records to return in the response."),
     select_columns: list[str] | None = Field(None, description="List of account attribute column names to include in the response. Specify which fields should be returned for each account."),
     wildcard_search_term: str | None = Field(None, description="Free-text term used for wildcard search across all account attribute values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query accounts with flexible filtering and column selection based on account properties. Supports wildcard search and customizable result limits."""
 
     _limit = _parse_int(limit)
@@ -21417,7 +21537,7 @@ async def compute_product_analytics(
     group_by: list[_models.ProductAnalyticsGroupBy] | None = Field(None, description="Dimensions to segment results by. Results will be grouped by each dimension specified in order."),
     indexes: list[str] | None = Field(None, description="Restrict query to a specific analytics index.", max_length=1),
     time_range: str | None = Field(None, description="Time range as epoch milliseconds in format 'from,to' (e.g., '1609459200000,1609545600000')"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compute aggregated analytics metrics for product events, with optional segmentation by user segments and dimensions. Returns scalar values such as counts, averages, and percentiles."""
 
     # Call helper functions
@@ -21472,7 +21592,7 @@ async def analyze_product_timeseries(
     group_by: list[_models.ProductAnalyticsGroupBy] | None = Field(None, description="Segment results by one or more dimensions (e.g., user properties, event attributes). Order matters for result hierarchy."),
     indexes: list[str] | None = Field(None, description="Restrict query to a specific analytics index.", max_length=1),
     time_range: str | None = Field(None, description="Time range in ISO 8601 interval format (from/to), where from and to are epoch milliseconds"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Compute time-bucketed analytics for product events, enabling trend analysis and chart visualization. Results are aggregated into configurable time intervals for temporal insights."""
 
     # Call helper functions
@@ -21534,7 +21654,7 @@ async def query_users_by_event_and_properties(
     time_constraint: str | None = Field(None, description="Optional time constraint within the event query (e.g., 'last_7_days', 'last_30_days')"),
     facet_filters: str | None = Field(None, description="List of facet filters. Each dict has 'facet' (string) and 'values' (list of strings). Multiple values within a facet are OR'd together."),
     combine_operator: str | None = Field(None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query and filter users based on their event activity and user property attributes. Returns matching user records within a specified time window with optional aggregation and column selection."""
 
     _limit = _parse_int(limit)
@@ -21583,7 +21703,7 @@ async def list_user_facet_values(
     facet_id: str = Field(..., description="The identifier of the user attribute facet to retrieve values for."),
     limit: str = Field(..., description="Maximum number of facet values to return in the response."),
     type_: Literal["users_facet_info_request"] = Field(..., alias="type", description="The resource type for this users facet info request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve facet values and their counts for a specified user attribute. Returns possible values for the facet along with occurrence counts to support filtering and analysis."""
 
     _limit = _parse_int(limit)
@@ -21631,7 +21751,7 @@ async def query_users(
     limit: str | None = Field(None, description="Maximum number of user records to return in the response. Limits the result set size."),
     select_columns: list[str] | None = Field(None, description="List of user attribute column names to include in the response. Only specified attributes will be returned for each user record."),
     wildcard_search_term: str | None = Field(None, description="Free-text term used for wildcard search across all user attribute values. Matches partial strings in user properties."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query users with flexible filtering by user properties and optional wildcard search across attribute values. Returns a list of user records matching the specified criteria."""
 
     _limit = _parse_int(limit)
@@ -21674,7 +21794,7 @@ async def query_users(
 
 # Tags: Rum Audience Management
 @mcp.tool()
-async def get_entity_mapping(entity: str = Field(..., description="The entity type for which to retrieve mapping configuration and available attributes.")) -> dict[str, Any]:
+async def get_entity_mapping(entity: str = Field(..., description="The entity type for which to retrieve mapping configuration and available attributes.")) -> dict[str, Any] | ToolResult:
     """Retrieve the mapping configuration for a specified entity, including all available attributes and their properties. Use this to understand the schema and structure of data for a given entity type."""
 
     # Construct request model with validation
@@ -21718,7 +21838,7 @@ async def create_entity_connection(
     data_type: Literal["connection_id"] = Field(..., alias="dataType", description="The resource type identifier for the connection object."),
     fields: list[_models.CreateConnectionRequestDataAttributesFieldsItems] | None = Field(None, description="List of custom attribute fields to import from the data source. Order and format depend on the data source type."),
     metadata: dict[str, str] | None = Field(None, description="Additional key-value metadata to associate with the connection for tracking or configuration purposes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new data connection for an entity, specifying how to join external data source records with entity records using a designated attribute."""
 
     # Construct request model with validation
@@ -21767,7 +21887,7 @@ async def update_entity_connection(
     fields_to_add: list[_models.CreateConnectionRequestDataAttributesFieldsItems] | None = Field(None, description="Array of new fields to add to the connection from the data source. Fields are added in the order specified."),
     fields_to_delete: list[str] | None = Field(None, description="Array of field identifiers to remove from the connection. Specify field IDs in the order they should be deleted."),
     fields_to_update: list[_models.UpdateConnectionRequestDataAttributesFieldsToUpdateItems] | None = Field(None, description="Array of existing fields with updated metadata to apply to the connection. Updates are applied in the order specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing data connection for an entity by adding new fields, modifying existing field metadata, or removing fields from the connection."""
 
     # Construct request model with validation
@@ -21812,7 +21932,7 @@ async def update_entity_connection(
 async def delete_data_connection(
     id_: str = Field(..., alias="id", description="The unique identifier of the data connection to delete."),
     entity: str = Field(..., description="The entity type for which the data connection should be deleted (e.g., users, events, products)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an existing data connection for a specified entity in product analytics. This operation removes the mapping between the entity and its connected data source."""
 
     # Construct request model with validation
@@ -21848,7 +21968,7 @@ async def delete_data_connection(
 
 # Tags: Rum Audience Management
 @mcp.tool()
-async def list_data_connections(entity: str = Field(..., description="The entity identifier for which to retrieve data connections (e.g., 'users', 'events', 'products').")) -> dict[str, Any]:
+async def list_data_connections(entity: str = Field(..., description="The entity identifier for which to retrieve data connections (e.g., 'users', 'events', 'products').")) -> dict[str, Any] | ToolResult:
     """Retrieve all data connections configured for a specified entity in product analytics. This allows you to view which data sources are mapped to an entity."""
 
     # Construct request model with validation
@@ -21890,7 +22010,7 @@ async def query_scalar_metrics(
     to: str = Field(..., description="End date (exclusive) for the query range, specified in milliseconds since Unix epoch."),
     type_: Literal["scalar_request"] = Field(..., alias="type", description="Resource type identifier for this request. Must be set to scalar_request."),
     formulas: list[_models.QueryFormula] | None = Field(None, description="List of formulas to calculate derived values from the query results. Formulas are applied to the query outputs in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query scalar metric values across multiple data sources with optional formula-based calculations. Supports aggregation and filtering for use in dashboards and reports."""
 
     _from_ = _parse_int(from_)
@@ -21941,7 +22061,7 @@ async def query_timeseries(
     type_: Literal["timeseries_request"] = Field(..., alias="type", description="Resource type identifier for this request. Must always be set to the timeseries request type."),
     formulas: list[_models.QueryFormula] | None = Field(None, description="Optional list of formulas to calculate derived metrics from the query results. Formulas are applied to the data returned by queries."),
     interval: str | None = Field(None, description="Time interval in milliseconds for aggregating data points. If omitted, a reasonable interval is automatically selected based on the query timeframe. The system may use a larger interval if the query would return too many points."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Query timeseries data across multiple data sources and optionally apply formulas to transform the results. Returns time-indexed data points within the specified date range."""
 
     _from_ = _parse_int(from_)
@@ -21990,7 +22110,7 @@ async def query_reference_table_rows(
     row_ids: list[str] = Field(..., description="Array of primary key values identifying which rows to retrieve from the reference table. Order is not significant."),
     table_id: str = Field(..., description="The unique identifier of the reference table to query."),
     type_: Literal["reference-tables-batch-rows-query"] = Field(..., alias="type", description="Resource type identifier that specifies this is a batch query operation for reference table rows."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve multiple rows from a reference table by their primary key values. Returns only the rows that were found."""
 
     # Construct request model with validation
@@ -22035,7 +22155,7 @@ async def list_reference_tables(
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of tables to return per page. Use this to control result set size."),
     page_offset: str | None = Field(None, alias="pageoffset", description="Number of tables to skip from the beginning for pagination. Use with limit to navigate through results."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter results by table status to show only tables in a specific state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all reference tables in your organization with pagination and optional status filtering."""
 
     _page_limit = _parse_int(page_limit)
@@ -22085,7 +22205,7 @@ async def create_reference_table(
     description: str | None = Field(None, description="Optional text describing the purpose or contents of this reference table."),
     file_metadata: _models.CreateTableRequestDataAttributesFileMetadataCloudStorage | _models.CreateTableRequestDataAttributesFileMetadataLocalFile | None = Field(None, description="Metadata specifying where and how to access the reference table's data file. Use either an upload_id from a prior file upload operation or access_details pointing to a CSV file in cloud storage."),
     tags: list[str] | None = Field(None, description="Tags for organizing and filtering reference tables. Provide as an array of string values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a reference table from CSV data stored locally or in cloud storage. Data can be uploaded directly via chunked file transfer or accessed from an existing cloud storage location."""
 
     # Construct request model with validation
@@ -22129,7 +22249,7 @@ async def create_reference_table(
 
 # Tags: Reference Tables
 @mcp.tool()
-async def get_reference_table(id_: str = Field(..., alias="id", description="The unique identifier of the reference table to retrieve.")) -> dict[str, Any]:
+async def get_reference_table(id_: str = Field(..., alias="id", description="The unique identifier of the reference table to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific reference table by its unique identifier. Use this to fetch the complete definition and contents of a reference table for use in your application."""
 
     # Construct request model with validation
@@ -22173,7 +22293,7 @@ async def update_reference_table(
     description: str | None = Field(None, description="Optional text describing the purpose or contents of this reference table."),
     file_metadata: _models.PatchTableRequestDataAttributesFileMetadataCloudStorage | _models.PatchTableRequestDataAttributesFileMetadataLocalFile | None = Field(None, description="Metadata specifying where and how to access the reference table's data file. For LOCAL_FILE tables, include the upload_id from a prior upload request. For cloud-sourced tables, include updated access_details with credentials and file path."),
     tags: list[str] | None = Field(None, description="Array of tags for organizing and filtering reference tables across your workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing reference table's data, description, and tags by ID. For LOCAL_FILE tables, upload CSV data first then provide the upload ID; for cloud-sourced tables (S3, GCS, Azure), provide updated access details pointing to the new CSV file."""
 
     # Construct request model with validation
@@ -22218,7 +22338,7 @@ async def update_reference_table(
 
 # Tags: Reference Tables
 @mcp.tool()
-async def delete_reference_table(id_: str = Field(..., alias="id", description="The unique identifier of the reference table to delete.")) -> dict[str, Any]:
+async def delete_reference_table(id_: str = Field(..., alias="id", description="The unique identifier of the reference table to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a reference table by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -22257,7 +22377,7 @@ async def delete_reference_table(id_: str = Field(..., alias="id", description="
 async def fetch_reference_table_rows(
     id_: str = Field(..., alias="id", description="The unique identifier of the reference table from which to retrieve rows."),
     row_id: list[str] = Field(..., description="An array of primary key values identifying which rows to retrieve from the reference table. Order is preserved in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve specific rows from a reference table by their primary key values. Use this to fetch one or more rows identified by their row IDs."""
 
     # Construct request model with validation
@@ -22299,7 +22419,7 @@ async def fetch_reference_table_rows(
 async def upsert_reference_table_rows(
     id_: str = Field(..., alias="id", description="The unique identifier of the reference table where rows will be created or updated."),
     data: list[_models.BatchUpsertRowsRequestData] = Field(..., description="An ordered list of row objects to create or update in the reference table. Each row must contain primary key values and any fields to be created or updated.", max_length=200),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create or update rows in a reference table by their primary key values. Existing rows are updated; new primary keys create new rows."""
 
     # Construct request model with validation
@@ -22341,7 +22461,7 @@ async def upsert_reference_table_rows(
 async def delete_reference_table_rows(
     id_: str = Field(..., alias="id", description="The unique identifier of the reference table from which rows will be deleted."),
     data: list[_models.TableRowResourceIdentifier] = Field(..., description="An array of row resources to delete, identified by their primary key values. Order is not significant. Maximum 200 rows per request.", max_length=200),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete multiple rows from a reference table by specifying their primary key values. Supports batch deletion of up to 200 rows in a single request."""
 
     # Construct request model with validation
@@ -22386,7 +22506,7 @@ async def initiate_reference_table_upload(
     part_size: str = Field(..., description="Size of each upload part in bytes. All parts except the final one must be at least 5,000,000 bytes to meet multipart upload requirements."),
     table_name: str = Field(..., description="Name of the reference table where the uploaded data will be stored."),
     type_: Literal["upload"] = Field(..., alias="type", description="Classification of this upload resource. Indicates this is a standard upload operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a multipart upload session for bulk data ingestion into a reference table. This operation prepares the upload infrastructure by defining the schema, file partitioning strategy, and target table."""
 
     _part_count = _parse_int(part_count)
@@ -22430,7 +22550,7 @@ async def initiate_reference_table_upload(
 
 # Tags: Application Security
 @mcp.tool()
-async def list_waf_custom_rules() -> dict[str, Any]:
+async def list_waf_custom_rules() -> dict[str, Any] | ToolResult:
     """Retrieve all custom WAF rules configured in your application security settings. This returns the complete list of custom rules used to protect your application."""
 
     # Extract parameters for API call
@@ -22469,7 +22589,7 @@ async def create_waf_custom_rule(
     parameters: dict[str, Any] | None = Field(None, description="Additional parameters that configure the behavior of the action specified above, such as redirect URLs or custom response details."),
     path_glob: str | None = Field(None, description="A glob pattern that restricts this rule to specific URL paths. Use wildcards to match multiple paths (e.g., /api/search/*)."),
     scope: list[_models.ApplicationSecurityWafCustomRuleScope] | None = Field(None, description="Array defining the scope or context where this rule applies, such as specific services, environments, or request types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Web Application Firewall (WAF) custom rule to protect against specific attack patterns or enforce business logic. The rule will be evaluated against incoming requests based on defined conditions."""
 
     # Construct request model with validation
@@ -22514,7 +22634,7 @@ async def create_waf_custom_rule(
 
 # Tags: Application Security
 @mcp.tool()
-async def get_waf_custom_rule(custom_rule_id: str = Field(..., description="The unique identifier of the WAF custom rule to retrieve.")) -> dict[str, Any]:
+async def get_waf_custom_rule(custom_rule_id: str = Field(..., description="The unique identifier of the WAF custom rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific WAF custom rule by its ID. Use this to fetch detailed configuration and settings for a custom rule in your Web Application Firewall."""
 
     # Construct request model with validation
@@ -22563,7 +22683,7 @@ async def update_waf_custom_rule(
     parameters: dict[str, Any] | None = Field(None, description="Additional parameters for the action taken when the rule triggers, such as redirect URL for redirect actions."),
     path_glob: str | None = Field(None, description="A glob pattern to restrict the rule to specific URL paths. Use wildcards for flexible matching."),
     scope: list[_models.ApplicationSecurityWafCustomRuleScope] | None = Field(None, description="Array defining the scope where this rule applies, such as specific applications or environments."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a specific WAF custom rule configuration. Returns the updated custom rule object on success."""
 
     # Construct request model with validation
@@ -22609,7 +22729,7 @@ async def update_waf_custom_rule(
 
 # Tags: Application Security
 @mcp.tool()
-async def delete_waf_custom_rule(custom_rule_id: str = Field(..., description="The unique identifier of the WAF custom rule to delete.")) -> dict[str, Any]:
+async def delete_waf_custom_rule(custom_rule_id: str = Field(..., description="The unique identifier of the WAF custom rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific WAF custom rule by its ID. This operation permanently removes the custom rule from your Web Application Firewall configuration."""
 
     # Construct request model with validation
@@ -22645,7 +22765,7 @@ async def delete_waf_custom_rule(custom_rule_id: str = Field(..., description="T
 
 # Tags: Application Security
 @mcp.tool()
-async def list_waf_exclusion_filters() -> dict[str, Any]:
+async def list_waf_exclusion_filters() -> dict[str, Any] | ToolResult:
     """Retrieve all Web Application Firewall (WAF) exclusion filters configured in your application security settings. Exclusion filters define rules and conditions that bypass WAF protection for specified requests."""
 
     # Extract parameters for API call
@@ -22682,7 +22802,7 @@ async def create_waf_exclusion_filter(
     path_glob: str | None = Field(None, description="HTTP path glob pattern to match against request URLs."),
     rules_target: list[_models.ApplicationSecurityWafExclusionFilterRulesTarget] | None = Field(None, description="List of specific WAF rule IDs or rule groups targeted by this exclusion filter."),
     scope: list[_models.ApplicationSecurityWafExclusionFilterScope] | None = Field(None, description="List of service names where this exclusion filter should be deployed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new WAF exclusion filter to prevent the Application Security WAF product from blocking matched requests. Exclusion filters (passlist entries) allow you to ignore specific requests based on IP addresses, paths, parameters, or targeted rules."""
 
     # Construct request model with validation
@@ -22723,7 +22843,7 @@ async def create_waf_exclusion_filter(
 
 # Tags: Application Security
 @mcp.tool()
-async def get_waf_exclusion_filter(exclusion_filter_id: str = Field(..., description="The unique identifier of the WAF exclusion filter to retrieve.")) -> dict[str, Any]:
+async def get_waf_exclusion_filter(exclusion_filter_id: str = Field(..., description="The unique identifier of the WAF exclusion filter to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific WAF exclusion filter by its identifier. Use this to view the configuration and rules of an existing exclusion filter."""
 
     # Construct request model with validation
@@ -22770,7 +22890,7 @@ async def update_waf_exclusion_filter(
     path_glob: str | None = Field(None, description="HTTP path glob pattern to match against request paths."),
     rules_target: list[_models.ApplicationSecurityWafExclusionFilterRulesTarget] | None = Field(None, description="List of WAF rules targeted by this exclusion filter."),
     scope: list[_models.ApplicationSecurityWafExclusionFilterScope] | None = Field(None, description="List of services where this exclusion filter should be deployed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a WAF exclusion filter configuration by its identifier. Returns the updated exclusion filter object."""
 
     # Construct request model with validation
@@ -22812,7 +22932,7 @@ async def update_waf_exclusion_filter(
 
 # Tags: Application Security
 @mcp.tool()
-async def delete_waf_exclusion_filter(exclusion_filter_id: str = Field(..., description="The unique identifier of the WAF exclusion filter to delete.")) -> dict[str, Any]:
+async def delete_waf_exclusion_filter(exclusion_filter_id: str = Field(..., description="The unique identifier of the WAF exclusion filter to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific WAF exclusion filter by its identifier. This operation permanently removes the exclusion filter from your Web Application Firewall configuration."""
 
     # Construct request model with validation
@@ -22848,7 +22968,7 @@ async def delete_waf_exclusion_filter(exclusion_filter_id: str = Field(..., desc
 
 # Tags: CSM Threats
 @mcp.tool()
-async def list_agent_rules() -> dict[str, Any]:
+async def list_agent_rules() -> dict[str, Any] | ToolResult:
     """Retrieve all Workload Protection agent rules configured in your environment. This endpoint is not available for Government (US1-FED) sites."""
 
     # Extract parameters for API call
@@ -22886,7 +23006,7 @@ async def create_workload_protection_agent_rule(
     filters: list[str] | None = Field(None, description="Array of supported platforms for this rule (e.g., linux, windows, macos). The rule only applies to agents running on specified platforms."),
     product_tags: list[str] | None = Field(None, description="Array of product tags for categorizing and organizing the rule within Workload Protection."),
     silent: bool | None = Field(None, description="When enabled, the rule executes its actions without generating alerts or notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Workload Protection agent rule that defines security policies for Datadog agents. The rule uses SECL expressions to specify conditions and associated actions when triggered."""
 
     # Construct request model with validation
@@ -22927,7 +23047,7 @@ async def create_workload_protection_agent_rule(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def get_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to retrieve.")) -> dict[str, Any]:
+async def get_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific Workload Protection agent rule by its ID. This endpoint is not available for Government (US1-FED) sites."""
 
     # Construct request model with validation
@@ -22973,7 +23093,7 @@ async def update_agent_rule(
     expression: str | None = Field(None, description="The SECL (Security Expression Language) expression that defines when the rule triggers."),
     product_tags: list[str] | None = Field(None, description="A list of product tags to categorize and organize the rule."),
     silent: bool | None = Field(None, description="When enabled, the rule will not generate alerts or notifications when triggered."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Workload Protection agent rule with new configuration. Returns the updated agent rule object on success."""
 
     # Construct request model with validation
@@ -23015,7 +23135,7 @@ async def update_agent_rule(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def delete_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to delete.")) -> dict[str, Any]:
+async def delete_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific Workload Protection agent rule. This operation permanently removes the agent rule configuration from your Workload Protection settings."""
 
     # Construct request model with validation
@@ -23051,7 +23171,7 @@ async def delete_agent_rule(agent_rule_id: str = Field(..., description="The uni
 
 # Tags: CSM Threats
 @mcp.tool()
-async def list_workload_protection_policies() -> dict[str, Any]:
+async def list_workload_protection_policies() -> dict[str, Any] | ToolResult:
     """Retrieve all Workload Protection policies configured in your organization. This endpoint is not available for Government (US1-FED) sites."""
 
     # Extract parameters for API call
@@ -23083,7 +23203,7 @@ async def create_workload_protection_policy(
     type_: Literal["policy"] = Field(..., alias="type", description="The resource type, which must be set to 'policy' for Workload Protection policies."),
     description: str | None = Field(None, description="A human-readable description of the policy's purpose and scope."),
     enabled: bool | None = Field(None, description="Whether the policy is active and enforced on workloads."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Workload Protection policy to define security rules and configurations for your workloads. The policy name and type are required; description and enabled status are optional."""
 
     # Construct request model with validation
@@ -23124,7 +23244,7 @@ async def create_workload_protection_policy(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def download_workload_protection_policy() -> dict[str, Any]:
+async def download_workload_protection_policy() -> dict[str, Any] | ToolResult:
     """Download the currently active Workload Protection policy as a `.policy` file that can be deployed to agents in your environment. This endpoint generates the policy file from your active agent rules."""
 
     # Extract parameters for API call
@@ -23151,7 +23271,7 @@ async def download_workload_protection_policy() -> dict[str, Any]:
 
 # Tags: CSM Threats
 @mcp.tool()
-async def get_workload_protection_policy(policy_id: str = Field(..., description="The unique identifier of the Workload Protection policy to retrieve.")) -> dict[str, Any]:
+async def get_workload_protection_policy(policy_id: str = Field(..., description="The unique identifier of the Workload Protection policy to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific Workload Protection policy by its ID. This endpoint is not available for Government (US1-FED) sites."""
 
     # Construct request model with validation
@@ -23192,7 +23312,7 @@ async def update_workload_protection_policy(
     type_: Literal["policy"] = Field(..., alias="type", description="The resource type identifier for this policy object."),
     description: str | None = Field(None, description="A human-readable description of the policy's purpose and configuration."),
     enabled: bool | None = Field(None, description="Whether the policy is currently active and enforced."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a Workload Protection policy configuration. Returns the updated policy object on success."""
 
     # Construct request model with validation
@@ -23234,7 +23354,7 @@ async def update_workload_protection_policy(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def delete_workload_protection_policy(policy_id: str = Field(..., description="The unique identifier of the Workload Protection policy to delete.")) -> dict[str, Any]:
+async def delete_workload_protection_policy(policy_id: str = Field(..., description="The unique identifier of the Workload Protection policy to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific Workload Protection policy by its ID. This operation permanently removes the policy and is not available for Government (US1-FED) sites."""
 
     # Construct request model with validation
@@ -23275,7 +23395,7 @@ async def list_heatmap_snapshots(
     filter_device_type: str | None = Field(None, alias="filterdevice_type", description="Filter snapshots by device type (e.g., desktop, mobile, tablet)."),
     page_limit: int | None = Field(None, alias="pagelimit", description="Maximum number of snapshots to return in the response. Useful for pagination."),
     filter_application_id: str | None = Field(None, alias="filterapplication_id", description="Filter snapshots by the application ID to retrieve heatmaps from a specific application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve heatmap snapshots for a specific view, with optional filtering by device type and application. Use this to analyze user interaction patterns across different devices and applications."""
 
     # Construct request model with validation
@@ -23324,7 +23444,7 @@ async def create_heatmap_snapshot(
     type_: Literal["snapshots"] = Field(..., alias="type", description="The resource type identifier for this snapshot."),
     session_id: str | None = Field(None, description="The unique identifier of the RUM session associated with this snapshot."),
     view_id: str | None = Field(None, description="The unique identifier of the RUM view where the snapshot was captured."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a heatmap snapshot for a RUM session to capture user interaction data at a specific point in time. This snapshot records device type, view information, and timing details for replay analysis."""
 
     _start = _parse_int(start)
@@ -23375,7 +23495,7 @@ async def update_heatmap_snapshot(
     type_: Literal["snapshots"] = Field(..., alias="type", description="Resource type identifier for snapshots."),
     session_id: str | None = Field(None, description="Unique identifier of the RUM session associated with this snapshot."),
     view_id: str | None = Field(None, description="Unique identifier of the RUM view associated with this snapshot."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a replay heatmap snapshot with event and session context. Allows modification of snapshot metadata including device type selection and timing information."""
 
     _start = _parse_int(start)
@@ -23419,7 +23539,7 @@ async def update_heatmap_snapshot(
 
 # Tags: Rum Replay Heatmaps
 @mcp.tool()
-async def delete_heatmap_snapshot(snapshot_id: str = Field(..., description="The unique identifier of the heatmap snapshot to delete.")) -> dict[str, Any]:
+async def delete_heatmap_snapshot(snapshot_id: str = Field(..., description="The unique identifier of the heatmap snapshot to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a heatmap snapshot from the replay system. This operation permanently removes the specified snapshot and cannot be undone."""
 
     # Construct request model with validation
@@ -23458,7 +23578,7 @@ async def delete_heatmap_snapshot(snapshot_id: str = Field(..., description="The
 async def list_roles(
     page_size: str | None = Field(None, alias="pagesize", description="Number of roles to return per page. Maximum allowed is 100 roles per request."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all available roles with their names and unique identifiers. Results are paginated for efficient data retrieval."""
 
     _page_size = _parse_int(page_size)
@@ -23499,7 +23619,7 @@ async def list_roles(
 
 # Tags: Roles
 @mcp.tool()
-async def list_role_templates() -> dict[str, Any]:
+async def list_role_templates() -> dict[str, Any] | ToolResult:
     """Retrieve all available role templates that can be used as blueprints for creating new roles. Role templates provide predefined permission sets and configurations."""
 
     # Extract parameters for API call
@@ -23526,7 +23646,7 @@ async def list_role_templates() -> dict[str, Any]:
 
 # Tags: Roles
 @mcp.tool()
-async def get_role(role_id: str = Field(..., description="The unique identifier that specifies which role to retrieve.")) -> dict[str, Any]:
+async def get_role(role_id: str = Field(..., description="The unique identifier that specifies which role to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific role by its unique identifier. Returns the role's details and configuration within the organization."""
 
     # Construct request model with validation
@@ -23567,7 +23687,7 @@ async def clone_role(
     name: str = Field(..., description="The name for the newly cloned role."),
     type_: Literal["roles"] = Field(..., alias="type", description="The type designation for this role."),
     receives_permissions_from: list[str] | None = Field(None, description="Optional managed role from which the new role automatically inherits new permissions. Specify one of the predefined managed roles, or leave empty if no automatic permission inheritance is desired."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new role by cloning an existing role, optionally inheriting permissions from a managed role."""
 
     # Construct request model with validation
@@ -23613,7 +23733,7 @@ async def list_role_users(
     role_id: str = Field(..., description="The unique identifier of the role whose users you want to retrieve."),
     page_size: str | None = Field(None, alias="pagesize", description="Number of users to return per page. Larger values reduce the number of requests needed but increase response size."),
     page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 0 for the first page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all users assigned to a specific role. Results are paginated to allow efficient browsing of large user lists."""
 
     _page_size = _parse_int(page_size)
@@ -23659,7 +23779,7 @@ async def remove_user_from_role(
     role_id: str = Field(..., description="The unique identifier of the role from which the user will be removed."),
     id_: str = Field(..., alias="id", description="The unique identifier of the user to remove from the role."),
     type_: Literal["users"] = Field(..., alias="type", description="The resource type identifier, which must be set to 'users' for this operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a role, revoking their access and permissions associated with that role."""
 
     # Construct request model with validation
@@ -23704,7 +23824,7 @@ async def aggregate_rum_events(
     to: str | None = Field(None, description="End of the time range for events. Accepts ISO 8601 dates with UTC timezone, relative expressions (e.g., 'now'), or millisecond timestamps."),
     group_by: list[_models.RumGroupBy] | None = Field(None, description="Grouping rules to organize aggregated results by specified dimensions (e.g., by service, by browser type). Order matters for hierarchical grouping."),
     limit: str | None = Field(None, description="Maximum number of buckets to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aggregate Real User Monitoring (RUM) events into time-series buckets with computed metrics. Use this to analyze RUM data across specified time ranges with optional grouping and filtering."""
 
     _limit = _parse_int(limit)
@@ -23746,7 +23866,7 @@ async def aggregate_rum_events(
 
 # Tags: RUM
 @mcp.tool()
-async def list_rum_applications() -> dict[str, Any]:
+async def list_rum_applications() -> dict[str, Any] | ToolResult:
     """Retrieve all Real User Monitoring (RUM) applications configured in your organization. This provides a complete inventory of RUM applications available for monitoring and analysis."""
 
     # Extract parameters for API call
@@ -23779,7 +23899,7 @@ async def create_rum_application(
     product_analytics_retention_state: Literal["MAX", "NONE"] | None = Field(None, description="Controls how long Product Analytics data derived from RUM events is retained. MAX retains data for the maximum period, NONE disables retention."),
     rum_event_processing_state: Literal["ALL", "ERROR_FOCUSED_MODE", "NONE"] | None = Field(None, description="Determines which RUM events are processed and stored. ALL processes all events, ERROR_FOCUSED_MODE prioritizes error events, NONE disables event processing."),
     attributes_type: str | None = Field(None, alias="attributesType", description="The platform type for the RUM application. Specifies which SDK or platform the application targets."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Real User Monitoring (RUM) application in your organization. Configure event processing and data retention policies for the application."""
 
     # Construct request model with validation
@@ -23820,7 +23940,7 @@ async def create_rum_application(
 
 # Tags: Rum Retention Filters
 @mcp.tool()
-async def order_retention_filters(app_id: str = Field(..., description="The unique identifier of the RUM application whose retention filters should be reordered.")) -> dict[str, Any]:
+async def order_retention_filters(app_id: str = Field(..., description="The unique identifier of the RUM application whose retention filters should be reordered.")) -> dict[str, Any] | ToolResult:
     """Reorder RUM retention filters for a RUM application. Returns the reordered retention filter objects."""
 
     # Construct request model with validation
@@ -23856,7 +23976,7 @@ async def order_retention_filters(app_id: str = Field(..., description="The uniq
 
 # Tags: Rum Retention Filters
 @mcp.tool()
-async def list_retention_filters(app_id: str = Field(..., description="The unique identifier of the RUM application for which to retrieve retention filters.")) -> dict[str, Any]:
+async def list_retention_filters(app_id: str = Field(..., description="The unique identifier of the RUM application for which to retrieve retention filters.")) -> dict[str, Any] | ToolResult:
     """Retrieve all RUM retention filters configured for a specific RUM application. Retention filters control which RUM data is retained based on defined criteria."""
 
     # Construct request model with validation
@@ -23901,7 +24021,7 @@ async def create_rum_retention_filter(
     type_: Literal["retention_filters"] = Field(..., alias="type", description="The resource type identifier, which must always be set to retention_filters."),
     trace_enabled: bool | None = Field(None, description="Enable cross-product retention filtering for APM traces associated with this RUM application."),
     enabled: bool | None = Field(None, description="Activate or deactivate this retention filter without deleting it."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a retention filter for a RUM application to control data sampling and retention policies. The filter applies to specified RUM event types and can optionally include cross-product APM trace filtering."""
 
     # Construct request model with validation
@@ -23949,7 +24069,7 @@ async def create_rum_retention_filter(
 async def get_retention_filter(
     app_id: str = Field(..., description="The unique identifier of the RUM application containing the retention filter."),
     rf_id: str = Field(..., description="The unique identifier of the retention filter to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific RUM retention filter configuration for a RUM application. Use this to inspect retention filter settings and rules."""
 
     # Construct request model with validation
@@ -23995,7 +24115,7 @@ async def update_retention_filter(
     enabled: bool | None = Field(None, description="Enable or disable the RUM retention filter."),
     event_type: Literal["session", "view", "action", "error", "resource", "long_task", "vital"] | None = Field(None, description="The type of RUM events to apply the retention filter to."),
     sample_rate: float | None = Field(None, description="The sample rate for RUM event retention, expressed as a percentage between 0.1 and 100.", ge=0.1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a RUM retention filter configuration for a RUM application, including sampling rates and event type filtering. Returns the updated retention filter object."""
 
     # Construct request model with validation
@@ -24041,7 +24161,7 @@ async def update_retention_filter(
 async def delete_retention_filter(
     app_id: str = Field(..., description="The unique identifier of the RUM application containing the retention filter to delete."),
     rf_id: str = Field(..., description="The unique identifier of the retention filter to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a retention filter from a RUM application. This operation permanently removes the specified retention filter and its associated rules."""
 
     # Construct request model with validation
@@ -24077,7 +24197,7 @@ async def delete_retention_filter(
 
 # Tags: RUM
 @mcp.tool()
-async def get_rum_application(id_: str = Field(..., alias="id", description="The unique identifier of the RUM application to retrieve.")) -> dict[str, Any]:
+async def get_rum_application(id_: str = Field(..., alias="id", description="The unique identifier of the RUM application to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific RUM (Real User Monitoring) application by its ID from your organization. Use this to fetch detailed configuration and metadata for a RUM application."""
 
     # Construct request model with validation
@@ -24120,7 +24240,7 @@ async def update_rum_application(
     product_analytics_retention_state: Literal["MAX", "NONE"] | None = Field(None, description="Controls how long Product Analytics data derived from RUM events is retained."),
     rum_event_processing_state: Literal["ALL", "ERROR_FOCUSED_MODE", "NONE"] | None = Field(None, description="Determines which RUM events are processed and stored for this application."),
     attributes_type: str | None = Field(None, alias="attributesType", description="The platform type for the RUM application (browser, mobile, desktop, or game engine)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration settings for a RUM application in your organization, including data retention policies and event processing modes."""
 
     # Construct request model with validation
@@ -24162,7 +24282,7 @@ async def update_rum_application(
 
 # Tags: RUM
 @mcp.tool()
-async def delete_rum_application(id_: str = Field(..., alias="id", description="The unique identifier of the RUM application to delete.")) -> dict[str, Any]:
+async def delete_rum_application(id_: str = Field(..., alias="id", description="The unique identifier of the RUM application to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing RUM (Real User Monitoring) application from your organization. This action is permanent and cannot be undone."""
 
     # Construct request model with validation
@@ -24198,7 +24318,7 @@ async def delete_rum_application(id_: str = Field(..., alias="id", description="
 
 # Tags: Rum Metrics
 @mcp.tool()
-async def list_rum_metrics() -> dict[str, Any]:
+async def list_rum_metrics() -> dict[str, Any] | ToolResult:
     """Retrieve all configured Real User Monitoring (RUM) metrics with their definitions. Use this to discover available metrics for RUM data collection and analysis."""
 
     # Extract parameters for API call
@@ -24235,7 +24355,7 @@ async def create_rum_metric(
     include_percentiles: bool | None = Field(None, description="Include percentile calculations (p50, p75, p90, p95, p99) in the metric results. Only applicable when aggregation_type is 'distribution'."),
     path: str | None = Field(None, description="The RUM event attribute path to aggregate on (e.g., duration, memory, custom attributes). Only applicable when aggregation_type is 'distribution'."),
     group_by: list[_models.RumMetricGroupBy] | None = Field(None, description="Dimensions to group the metric by. Specify RUM attributes as an array to break down metric results by those dimensions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a custom metric based on your organization's RUM (Real User Monitoring) data. The metric aggregates RUM events according to specified criteria and returns the created metric object."""
 
     # Construct request model with validation
@@ -24281,7 +24401,7 @@ async def create_rum_metric(
 
 # Tags: Rum Metrics
 @mcp.tool()
-async def get_rum_metric(metric_id: str = Field(..., description="The unique identifier of the RUM-based metric to retrieve.")) -> dict[str, Any]:
+async def get_rum_metric(metric_id: str = Field(..., description="The unique identifier of the RUM-based metric to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific RUM-based metric from your organization by its identifier. Use this to fetch configuration and details for a particular real user monitoring metric."""
 
     # Construct request model with validation
@@ -24323,7 +24443,7 @@ async def update_rum_metric(
     type_: Literal["rum_metrics"] = Field(..., alias="type", description="The resource type identifier. Must always be set to rum_metrics."),
     include_percentiles: bool | None = Field(None, description="Include or exclude percentile aggregations for distribution metrics. Only applicable when the metric uses distribution aggregation type."),
     group_by: list[_models.RumMetricGroupBy] | None = Field(None, description="An array of grouping rules that define how to segment the metric data. Order matters and determines the hierarchy of grouping."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a specific RUM-based metric configuration in your organization. Returns the updated metric object when successful."""
 
     # Construct request model with validation
@@ -24369,7 +24489,7 @@ async def update_rum_metric(
 
 # Tags: Rum Metrics
 @mcp.tool()
-async def delete_rum_metric(metric_id: str = Field(..., description="The unique identifier of the RUM-based metric to delete.")) -> dict[str, Any]:
+async def delete_rum_metric(metric_id: str = Field(..., description="The unique identifier of the RUM-based metric to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific RUM-based metric from your organization. This action permanently removes the metric and cannot be undone."""
 
     # Construct request model with validation
@@ -24410,7 +24530,7 @@ async def list_rum_events(
     filter_from: str | None = Field(None, alias="filterfrom", description="Earliest timestamp to include in results. Events before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="Latest timestamp to include in results. Events after this time are excluded."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of events to return in a single response. Useful for controlling response size and pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of Real User Monitoring (RUM) events matching your search criteria. Use this endpoint to query your latest RUM events with optional filtering by time range and custom RUM search syntax."""
 
     _page_limit = _parse_int(page_limit)
@@ -24454,7 +24574,7 @@ async def search_rum_events(
     from_: str | None = Field(None, alias="from", description="Start of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now-15m), or millisecond timestamps."),
     to: str | None = Field(None, description="End of the time range for events. Accepts ISO 8601 formatted dates with UTC indicator, mathematical expressions (e.g., now), or millisecond timestamps."),
     limit: str | None = Field(None, description="Maximum number of events to return in the response. Useful for controlling pagination and response size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter RUM (Real User Monitoring) events using complex query criteria with paginated results. Use this endpoint to retrieve events within a specified time range with customizable result limits."""
 
     _limit = _parse_int(limit)
@@ -24500,7 +24620,7 @@ async def list_replay_playlists(
     filter_query: str | None = Field(None, alias="filterquery", description="Search playlists by name using a text query string."),
     page_number: int | None = Field(None, alias="pagenumber", description="Zero-indexed page number for pagination to retrieve a specific page of results."),
     page_size: int | None = Field(None, alias="pagesize", description="Maximum number of playlists to return per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of RUM replay playlists with optional filtering by creator or name. Use pagination parameters to control result set size and offset."""
 
     # Construct request model with validation
@@ -24545,7 +24665,7 @@ async def create_replay_playlist(
     uuid_: str = Field(..., alias="uuid", description="UUID of the user creating the playlist. Must match the creator's unique identifier."),
     type_: Literal["rum_replay_playlist"] = Field(..., alias="type", description="Resource type identifier for RUM replay playlists."),
     description: str | None = Field(None, description="Optional description explaining the playlist's purpose or contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new RUM replay playlist for organizing and managing session recordings. The playlist is associated with the user who creates it."""
 
     # Construct request model with validation
@@ -24589,7 +24709,7 @@ async def create_replay_playlist(
 
 # Tags: Rum Replay Playlists
 @mcp.tool()
-async def get_replay_playlist(playlist_id: int = Field(..., description="The unique identifier of the replay playlist to retrieve.")) -> dict[str, Any]:
+async def get_replay_playlist(playlist_id: int = Field(..., description="The unique identifier of the replay playlist to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific RUM replay playlist by its unique identifier. Use this to access playlist details and configuration."""
 
     # Construct request model with validation
@@ -24633,7 +24753,7 @@ async def update_replay_playlist(
     uuid_: str = Field(..., alias="uuid", description="The UUID of the user who created the playlist."),
     type_: Literal["rum_replay_playlist"] = Field(..., alias="type", description="The resource type identifier for a RUM replay playlist."),
     description: str | None = Field(None, description="An optional human-readable description explaining the playlist's purpose or contents."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing RUM replay playlist with new metadata, name, or description. Requires the playlist ID and creator information to identify and modify the target playlist."""
 
     # Construct request model with validation
@@ -24678,7 +24798,7 @@ async def update_replay_playlist(
 
 # Tags: Rum Replay Playlists
 @mcp.tool()
-async def delete_replay_playlist(playlist_id: int = Field(..., description="The unique identifier of the replay playlist to delete.")) -> dict[str, Any]:
+async def delete_replay_playlist(playlist_id: int = Field(..., description="The unique identifier of the replay playlist to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a replay playlist by its unique identifier. This action permanently removes the playlist and cannot be undone."""
 
     # Construct request model with validation
@@ -24718,7 +24838,7 @@ async def list_replay_playlist_sessions(
     playlist_id: int = Field(..., description="The unique identifier of the playlist from which to retrieve sessions."),
     page_number: int | None = Field(None, alias="pagenumber", description="Zero-indexed page number for pagination to retrieve a specific page of results."),
     page_size: int | None = Field(None, alias="pagesize", description="Maximum number of sessions to return per page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of sessions contained within a specific replay playlist. Use pagination parameters to control result set size and offset."""
 
     # Construct request model with validation
@@ -24760,7 +24880,7 @@ async def list_replay_playlist_sessions(
 async def remove_replay_playlist_sessions(
     playlist_id: int = Field(..., description="The unique identifier of the playlist from which sessions will be removed."),
     data: list[_models.SessionIdData] = Field(..., description="Array of session identifier objects to remove from the playlist. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more sessions from a replay playlist. Specify the playlist and provide an array of session identifiers to be removed."""
 
     # Construct request model with validation
@@ -24803,7 +24923,7 @@ async def add_session_to_replay_playlist(
     playlist_id: int = Field(..., description="The unique identifier of the playlist to which the session will be added."),
     session_id: str = Field(..., description="The unique identifier of the RUM replay session to add to the playlist."),
     ts: str = Field(..., description="Server-side timestamp indicating when the operation is being performed, specified in milliseconds since epoch."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a RUM replay session to an existing playlist. This operation associates a session with a playlist for organizational and playback purposes."""
 
     _ts = _parse_int(ts)
@@ -24847,7 +24967,7 @@ async def add_session_to_replay_playlist(
 async def remove_session_from_replay_playlist(
     playlist_id: int = Field(..., description="The unique identifier of the playlist from which the session will be removed."),
     session_id: str = Field(..., description="The unique identifier of the session to be removed from the playlist."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a session from a RUM replay playlist. This operation deletes the association between a specific session and its parent playlist."""
 
     # Construct request model with validation
@@ -24887,7 +25007,7 @@ async def list_session_view_segments(
     view_id: str = Field(..., description="The unique identifier of the view within the session."),
     session_id: str = Field(..., description="The unique identifier of the session containing the view."),
     source: str | None = Field(None, description="The storage backend from which to retrieve segments. Determines whether data is fetched from the event platform or blob storage."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all segments for a specific view within a session. Segments represent distinct portions of a session recording that can be analyzed independently."""
 
     # Construct request model with validation
@@ -24930,7 +25050,7 @@ async def list_replay_session_watchers(
     session_id: str = Field(..., description="The unique identifier of the RUM replay session for which to list watchers."),
     page_size: int | None = Field(None, alias="pagesize", description="The number of watcher records to return per page."),
     page_number: int | None = Field(None, alias="pagenumber", description="The zero-indexed page number to retrieve from the paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of watchers monitoring a specific RUM replay session. Supports pagination to manage large result sets."""
 
     # Construct request model with validation
@@ -24975,7 +25095,7 @@ async def record_session_watch(
     event_id: str = Field(..., description="The unique identifier of the RUM event within the session that was watched."),
     timestamp: str = Field(..., description="The date and time when the session watch was recorded, in ISO 8601 format."),
     type_: Literal["rum_replay_watch"] = Field(..., alias="type", description="The resource type identifier for this rum replay watch record."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record that a user watched a specific RUM session event. This creates a watch record linking a session to an event at a particular timestamp."""
 
     # Construct request model with validation
@@ -25017,7 +25137,7 @@ async def record_session_watch(
 
 # Tags: Rum Replay Viewership
 @mcp.tool()
-async def delete_replay_session_watch(session_id: str = Field(..., description="The unique identifier of the RUM replay session whose watch history should be deleted.")) -> dict[str, Any]:
+async def delete_replay_session_watch(session_id: str = Field(..., description="The unique identifier of the RUM replay session whose watch history should be deleted.")) -> dict[str, Any] | ToolResult:
     """Delete the watch history for a specific RUM replay session. This removes tracking of the session from the user's watched sessions."""
 
     # Construct request model with validation
@@ -25061,7 +25181,7 @@ async def list_replay_viewership_sessions(
     filter_session_ids: str | None = Field(None, alias="filtersession_ids", description="Filter by specific session IDs using a comma-separated list. Multiple IDs can be provided to retrieve only those sessions."),
     page_size: int | None = Field(None, alias="pagesize", description="Number of sessions to return per page. Controls pagination size."),
     filter_application_id: str | None = Field(None, alias="filterapplication_id", description="Filter sessions by application ID to retrieve viewership history for a specific application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of watched replay sessions, with optional filtering by time range, user, application, or specific session IDs."""
 
     _filter_watched_at__start = _parse_int(filter_watched_at__start)
@@ -25111,7 +25231,7 @@ async def list_scorecard_outcomes(
     filter_rule__enabled: bool | None = Field(None, alias="filterruleenabled", description="Filter outcomes based on whether the associated rule is currently enabled or disabled."),
     filter_rule__id: str | None = Field(None, alias="filterruleid", description="Filter outcomes by the unique identifier of the associated rule."),
     filter_rule__name: str | None = Field(None, alias="filterrulename", description="Filter outcomes by the name of the associated rule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all rule outcomes from the scorecard system with optional filtering by service, state, and rule properties. Supports pagination and field selection for flexible result customization."""
 
     _page_size = _parse_int(page_size)
@@ -25152,7 +25272,7 @@ async def list_scorecard_outcomes(
 
 # Tags: Service Scorecards
 @mcp.tool()
-async def batch_update_scorecard_outcomes(results: list[_models.UpdateOutcomesAsyncRequestItem] | None = Field(None, description="Array of scorecard outcome objects to update. Each item represents a single scorecard rule outcome with its updated values. Order is not significant.")) -> dict[str, Any]:
+async def batch_update_scorecard_outcomes(results: list[_models.UpdateOutcomesAsyncRequestItem] | None = Field(None, description="Array of scorecard outcome objects to update. Each item represents a single scorecard rule outcome with its updated values. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Asynchronously update multiple scorecard rule outcomes in a single batched request. This operation processes outcomes in parallel for improved performance when updating large sets of scorecard results."""
 
     # Construct request model with validation
@@ -25190,7 +25310,7 @@ async def batch_update_scorecard_outcomes(results: list[_models.UpdateOutcomesAs
 
 # Tags: Service Scorecards
 @mcp.tool()
-async def batch_create_scorecard_outcomes(results: list[_models.OutcomesBatchRequestItem] | None = Field(None, description="Array of scorecard outcome objects to create or update. Each item in the array represents a single service-rule outcome with its associated data. Order is preserved as submitted.")) -> dict[str, Any]:
+async def batch_create_scorecard_outcomes(results: list[_models.OutcomesBatchRequestItem] | None = Field(None, description="Array of scorecard outcome objects to create or update. Each item in the array represents a single service-rule outcome with its associated data. Order is preserved as submitted.")) -> dict[str, Any] | ToolResult:
     """Create multiple scorecard outcomes in a single batched request. This operation allows you to set service-rule outcomes efficiently by processing multiple results together."""
 
     # Construct request model with validation
@@ -25236,7 +25356,7 @@ async def list_scorecard_rules(
     filter_rule__custom: bool | None = Field(None, alias="filterrulecustom", description="Filter to return only custom rules when set to true."),
     filter_rule__name: str | None = Field(None, alias="filterrulename", description="Filter results by rule name using partial or exact matching."),
     filter_rule__description: str | None = Field(None, alias="filterruledescription", description="Filter results by rule description using partial or exact matching."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of scorecard rules with optional filtering by ID, enabled status, custom flag, name, or description."""
 
     _page_size = _parse_int(page_size)
@@ -25284,7 +25404,7 @@ async def create_scorecard_rule(
     level: str | None = Field(None, description="The maturity level this rule applies to, ranging from 1 (lowest) to 3 (highest)."),
     owner: str | None = Field(None, description="The user or team responsible for maintaining and updating this rule."),
     scorecard_name: str | None = Field(None, description="The name of the scorecard this rule belongs to and will contribute to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new rule for a scorecard that can be used to calculate maturity scores. Rules can be custom or built-in, and can be enabled to be included in score calculations."""
 
     _level = _parse_int(level)
@@ -25332,7 +25452,7 @@ async def update_scorecard_rule(
     level: str | None = Field(None, description="The maturity level this rule assesses, ranging from 1 (basic) to 3 (advanced)."),
     owner: str | None = Field(None, description="The user or team responsible for maintaining and updating this rule."),
     scorecard_name: str | None = Field(None, description="The name of the scorecard this rule belongs to and contributes to."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing scorecard rule to modify its configuration, maturity level, ownership, or enabled status. Changes take effect immediately in scorecard calculations."""
 
     _level = _parse_int(level)
@@ -25373,7 +25493,7 @@ async def update_scorecard_rule(
 
 # Tags: Service Scorecards
 @mcp.tool()
-async def delete_scorecard_rule(rule_id: str = Field(..., description="The unique identifier of the scorecard rule to delete.")) -> dict[str, Any]:
+async def delete_scorecard_rule(rule_id: str = Field(..., description="The unique identifier of the scorecard rule to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a scorecard rule by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -25412,7 +25532,7 @@ async def delete_scorecard_rule(rule_id: str = Field(..., description="The uniqu
 async def list_seat_users(
     product_code: str = Field(..., description="The product code identifying which product's seat assignments to retrieve."),
     page_limit: int | None = Field(None, alias="pagelimit", description="Maximum number of user records to return in a single response for pagination control."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the list of users assigned seats for a specified product code. Use pagination to control the number of results returned."""
 
     # Construct request model with validation
@@ -25454,7 +25574,7 @@ async def assign_seats_to_users(
     product_code: str = Field(..., description="The product code identifying which product's seats to assign."),
     user_uuids: list[str] = Field(..., description="List of user UUIDs to assign seats to. Order is not significant."),
     type_: Literal["seat-assignments"] = Field(..., alias="type", description="The type classification for this seat assignment request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Assign product seats to specified users. This operation allocates seat licenses for a given product code to one or more users."""
 
     # Construct request model with validation
@@ -25499,7 +25619,7 @@ async def unassign_seats(
     product_code: str = Field(..., description="The product identifier for which to unassign seats."),
     user_uuids: list[str] = Field(..., description="List of user identifiers to unassign seats from. Order is not significant."),
     type_: Literal["seat-assignments"] = Field(..., alias="type", description="The category type for this unassignment request."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove seat assignments from specified users for a given product. This operation revokes access rights associated with the product seats."""
 
     # Construct request model with validation
@@ -25550,7 +25670,7 @@ async def list_entity_risk_scores(
     filter_risk_score_min: float | None = Field(None, description="Minimum risk score threshold (0-100)"),
     filter_risk_score_max: float | None = Field(None, description="Maximum risk score threshold (0-100)"),
     filter_custom_attribute: str | None = Field(None, description="Custom attribute filter in key:value format"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve entity risk scores for your organization to assess security risks across cloud resources, identities, and services. Scores are based on detected signals, misconfigurations, and identity risks."""
 
     # Call helper functions
@@ -25594,7 +25714,7 @@ async def list_entity_risk_scores(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def download_workload_policy() -> dict[str, Any]:
+async def download_workload_policy() -> dict[str, Any] | ToolResult:
     """Download the active Workload Protection policy as a `.policy` file that can be deployed to agents in your environment. This endpoint is exclusively for the Government (US1-FED) site."""
 
     # Extract parameters for API call
@@ -25626,7 +25746,7 @@ async def search_security_findings(
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of findings to return in the response."),
     facet_filters: str | None = Field(None, description="List of facet filters. Each dict has 'facet' (string) and 'values' (list of strings). Multiple values within a facet are OR'd together."),
     combine_operator: str | None = Field(None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and retrieve security findings using log query syntax. Filter by severity, status, tags, and other attributes to identify and manage security issues."""
 
     _page_limit = _parse_int(page_limit)
@@ -25669,7 +25789,7 @@ async def search_security_findings(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def create_security_cases(data: list[_models.CreateCaseRequestData] = Field(..., description="Array of case creation request objects. Each object defines a case to create with its associated security findings. Up to 50 cases can be created per request, with each case supporting up to 50 security findings.")) -> dict[str, Any]:
+async def create_security_cases(data: list[_models.CreateCaseRequestData] = Field(..., description="Array of case creation request objects. Each object defines a case to create with its associated security findings. Up to 50 cases can be created per request, with each case supporting up to 50 security findings.")) -> dict[str, Any] | ToolResult:
     """Create cases for security findings and associate them with up to 50 findings per case. Findings already attached to other cases will be automatically detached and reassigned to the newly created cases."""
 
     # Construct request model with validation
@@ -25707,7 +25827,7 @@ async def create_security_cases(data: list[_models.CreateCaseRequestData] = Fiel
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def detach_findings_from_case(type_: Literal["cases"] = Field(..., alias="type", description="The resource type identifier for cases.")) -> dict[str, Any]:
+async def detach_findings_from_case(type_: Literal["cases"] = Field(..., alias="type", description="The resource type identifier for cases.")) -> dict[str, Any] | ToolResult:
     """Detach security findings from their associated cases. This operation dissociates findings from cases without deleting the cases themselves, supporting up to 50 findings per request. Findings not currently attached to any case are ignored."""
 
     # Construct request model with validation
@@ -25749,7 +25869,7 @@ async def attach_findings_to_case(
     case_id: str = Field(..., description="The unique identifier of the case to attach security findings to."),
     id_: str = Field(..., alias="id", description="The unique identifier of the case resource."),
     type_: Literal["cases"] = Field(..., alias="type", description="The resource type identifier for cases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach security findings to a case for centralized tracking and management. Up to 50 findings can be attached per case; findings already attached to another case will be automatically detached and moved to the specified case."""
 
     # Construct request model with validation
@@ -25788,7 +25908,7 @@ async def attach_findings_to_case(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def create_security_finding_jira_issues(data: list[_models.CreateJiraIssueRequestData] = Field(..., description="Array of Jira issue creation request objects. Each object defines the Jira issue details and associated security findings. Order is not significant.")) -> dict[str, Any]:
+async def create_security_finding_jira_issues(data: list[_models.CreateJiraIssueRequestData] = Field(..., description="Array of Jira issue creation request objects. Each object defines the Jira issue details and associated security findings. Order is not significant.")) -> dict[str, Any] | ToolResult:
     """Create Jira issues for security findings with bidirectional sync to Datadog cases. Supports bulk creation of up to 50 Jira issues per request, with each issue linked to up to 50 security findings. Findings already attached to other Jira issues will be automatically reassigned."""
 
     # Construct request model with validation
@@ -25831,7 +25951,7 @@ async def attach_security_findings_to_jira_issue(
     type_: Literal["jira_issues"] = Field(..., alias="type", description="The resource type identifier for Jira issues."),
     findings_data: list[_models.FindingData] | None = Field(None, alias="findingsData", description="Array of security finding objects to attach to the Jira issue. Each object represents a security finding to be linked."),
     project_data: dict[str, Any] | None = Field(None, alias="projectData", description="Case management project information to associate with the Jira issue attachment."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Attach security findings to a Jira issue. If the Jira issue is not linked to an existing case, a new case will be created automatically. Up to 50 security findings can be attached per operation, and findings previously attached to other Jira issues will be moved to the specified issue."""
 
     # Construct request model with validation
@@ -25874,7 +25994,7 @@ async def attach_security_findings_to_jira_issue(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def search_findings(limit: str | None = Field(None, description="Maximum number of security findings to return in the response.")) -> dict[str, Any]:
+async def search_findings(limit: str | None = Field(None, description="Maximum number of security findings to return in the response.")) -> dict[str, Any] | ToolResult:
     """Search security findings using the logs query syntax to filter by attributes (prefixed with @) and tags. Returns a list of findings matching your search criteria."""
 
     _limit = _parse_int(limit)
@@ -25922,7 +26042,7 @@ async def list_sboms(
     filter_package_version: str | None = Field(None, alias="filterpackage_version", description="Filter results by the version of a package or dependency component included in the asset."),
     filter_license_name: str | None = Field(None, alias="filterlicense_name", description="Filter results by the software license name of a package or dependency component included in the asset."),
     filter_license_type: Literal["network_strong_copyleft", "non_standard_copyleft", "other_non_free", "other_non_standard", "permissive", "public_domain", "strong_copyleft", "weak_copyleft"] | None = Field(None, alias="filterlicense_type", description="Filter results by the software license type classification of a package or dependency component included in the asset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of Software Bill of Materials (SBOMs) for assets in your organization, with support for filtering by asset type, name, package details, and license information."""
 
     _page_number = _parse_int(page_number)
@@ -25967,7 +26087,7 @@ async def get_sbom(
     filter_asset_name: str = Field(..., alias="filterasset_name", description="The identifier or name of the asset. For repositories, use the full repository path; for images, use the image name."),
     filter_repo_digest: str | None = Field(None, alias="filterrepo_digest", description="The container image digest identifier. Required when asset_type is 'Image' to uniquely identify the specific image version."),
     ext_format: Literal["CycloneDX", "SPDX"] | None = Field(None, alias="extformat", description="The SBOM format standard for the returned document."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a Software Bill of Materials (SBOM) for a specific asset by type and identifier. Supports multiple asset types and SBOM standards for security and compliance purposes."""
 
     # Construct request model with validation
@@ -26012,7 +26132,7 @@ async def list_scanned_assets(
     filter_asset_name: str | None = Field(None, alias="filterasset.name", description="Filter results by the name or identifier of the scanned asset (e.g., instance ID, image name, or digest)."),
     filter_last_success_origin: str | None = Field(None, alias="filterlast_success.origin", description="Filter results by the origin of the last successful scan (e.g., agent, scanner, or other source)."),
     filter_last_success_env: str | None = Field(None, alias="filterlast_success.env", description="Filter results by the environment where the last successful scan occurred (e.g., prod, staging, dev)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve security scan metadata for assets in your organization, including hosts, host images, and container images. Results can be filtered by asset type, name, and scan origin/environment."""
 
     _page_number = _parse_int(page_number)
@@ -26062,7 +26182,7 @@ async def update_signal_notification_rule(
     severities: list[Literal["critical", "high", "medium", "low", "unknown", "info"]] | None = Field(None, description="Security severity levels to filter on. Only issues matching the specified severities will trigger notifications."),
     targets: list[str] | None = Field(None, description="List of notification targets (email addresses, Slack channels, PagerDuty services, etc.). Required integrations must be configured to deliver notifications to specified targets."),
     time_aggregation: str | None = Field(None, description="Time window in seconds for aggregating notification rule results using a rolling window. Only applies to vulnerability-based rules. Set to 0 or omit for no aggregation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a signal-based notification rule. All fields are optional; only provided fields will be updated."""
 
     _time_aggregation = _parse_int(time_aggregation)
@@ -26149,7 +26269,7 @@ async def list_vulnerabilities(
     filter_asset_arch: str | None = Field(None, alias="filterasset.arch", description="Filter vulnerabilities by the processor architecture of the affected asset (e.g., x86_64, arm64)."),
     filter_asset_operating_system_name: str | None = Field(None, alias="filterasset.operating_system.name", description="Filter vulnerabilities by the operating system name of the affected asset."),
     filter_asset_operating_system_version: str | None = Field(None, alias="filterasset.operating_system.version", description="Filter vulnerabilities by the operating system version of the affected asset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of vulnerabilities with support for filtering by type, severity, status, affected assets, and risk factors. Results are paginated with automatic token-based consistency for multi-page requests."""
 
     _page_number = _parse_int(page_number)
@@ -26205,7 +26325,7 @@ async def list_vulnerable_assets(
     filter_arch: str | None = Field(None, alias="filterarch", description="Filter by processor architecture to identify assets running on specific CPU types."),
     filter_operating_system_name: str | None = Field(None, alias="filteroperating_system.name", description="Filter by operating system name to focus on specific OS distributions."),
     filter_operating_system_version: str | None = Field(None, alias="filteroperating_system.version", description="Filter by operating system version to target specific OS releases."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of vulnerable assets across your infrastructure, with support for filtering by asset type, version, risk factors, environment, and system characteristics. Use filters to identify assets requiring remediation based on production status, attack exposure, accessibility, and data sensitivity."""
 
     _page_number = _parse_int(page_number)
@@ -26245,7 +26365,7 @@ async def list_vulnerable_assets(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def list_workload_security_agent_rules() -> dict[str, Any]:
+async def list_workload_security_agent_rules() -> dict[str, Any] | ToolResult:
     """Retrieve all Workload Protection agent rules configured in your environment. This endpoint is exclusively available for the Government (US1-FED) site."""
 
     # Extract parameters for API call
@@ -26283,7 +26403,7 @@ async def create_workload_security_agent_rule(
     filters: list[str] | None = Field(None, description="Array of supported platforms for this rule (e.g., Linux, Windows, Kubernetes). Specifies where the rule can be enforced."),
     product_tags: list[str] | None = Field(None, description="Array of product tags for categorizing and organizing the rule within security monitoring systems."),
     silent: bool | None = Field(None, description="When enabled, the rule executes actions without generating alerts or notifications."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Workload Protection agent rule for the Government (US1-FED) site. Define security monitoring behavior using SECL expressions to detect and respond to workload threats."""
 
     # Construct request model with validation
@@ -26324,7 +26444,7 @@ async def create_workload_security_agent_rule(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def get_workload_security_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to retrieve.")) -> dict[str, Any]:
+async def get_workload_security_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific Workload Protection agent rule. This endpoint is exclusively available for the Government (US1-FED) site."""
 
     # Construct request model with validation
@@ -26370,7 +26490,7 @@ async def update_workload_security_agent_rule(
     expression: str | None = Field(None, description="The SECL (Security Expression Language) expression that defines the rule's detection logic."),
     product_tags: list[str] | None = Field(None, description="A list of product tags for categorizing and organizing the rule."),
     silent: bool | None = Field(None, description="When enabled, the rule will not generate alerts or notifications when triggered."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a specific Workload Protection agent rule configuration. This endpoint is exclusively for the Government (US1-FED) site and returns the updated agent rule object."""
 
     # Construct request model with validation
@@ -26412,7 +26532,7 @@ async def update_workload_security_agent_rule(
 
 # Tags: CSM Threats
 @mcp.tool()
-async def delete_workload_security_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to delete.")) -> dict[str, Any]:
+async def delete_workload_security_agent_rule(agent_rule_id: str = Field(..., description="The unique identifier of the agent rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific Workload Protection agent rule. This operation is only available for the Government (US1-FED) site."""
 
     # Construct request model with validation
@@ -26448,7 +26568,7 @@ async def delete_workload_security_agent_rule(agent_rule_id: str = Field(..., de
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_critical_assets() -> dict[str, Any]:
+async def list_critical_assets() -> dict[str, Any] | ToolResult:
     """Retrieve the complete list of critical assets configured in the security monitoring system. Use this to view all assets designated as critical for your organization's security posture."""
 
     # Extract parameters for API call
@@ -26484,7 +26604,7 @@ async def create_critical_asset(
     combine_operator: str | None = Field(None, description="Operator to combine facets: 'AND' or 'OR'. Default is 'AND'."),
     rule_filters: list[dict[str, Any]] | None = Field(None, description="List of filter objects for rules. Each filter has 'field' (string: 'name', 'type', 'severity', 'status', 'tag'), 'operator' (string: 'equals', 'contains', 'matches'), and 'value' (string). Filters are combined with AND logic by default."),
     rule_logic: str | None = Field(None, description="Logical operator to combine rule filters: 'AND' or 'OR'. Defaults to 'AND'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new critical asset for security monitoring. Critical assets are monitored resources with configurable severity levels and organizational tags."""
 
     # Call helper functions
@@ -26529,7 +26649,7 @@ async def create_critical_asset(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_critical_assets_by_rule(rule_id: str = Field(..., description="The unique identifier of the security rule for which to retrieve associated critical assets.")) -> dict[str, Any]:
+async def list_critical_assets_by_rule(rule_id: str = Field(..., description="The unique identifier of the security rule for which to retrieve associated critical assets.")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of critical assets that are associated with and affect a specific security rule. Use this to understand which critical assets are monitored or impacted by a particular rule configuration."""
 
     # Construct request model with validation
@@ -26565,7 +26685,7 @@ async def list_critical_assets_by_rule(rule_id: str = Field(..., description="Th
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_critical_asset(critical_asset_id: str = Field(..., description="The unique identifier of the critical asset to retrieve.")) -> dict[str, Any]:
+async def get_critical_asset(critical_asset_id: str = Field(..., description="The unique identifier of the critical asset to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific critical asset in the security monitoring system. Use this to view configuration and status of assets designated as critical for your infrastructure."""
 
     # Construct request model with validation
@@ -26608,7 +26728,7 @@ async def update_critical_asset(
     rule_query: str | None = Field(None, description="Detection rule query that determines which rules this critical asset applies to. Uses the same syntax as the detection rules search interface."),
     severity: Literal["info", "low", "medium", "high", "critical", "increase", "decrease", "no-op"] | None = Field(None, description="Severity level for alerts on this critical asset. Can be set to a specific level, increased, decreased, or left unchanged."),
     tags: list[str] | None = Field(None, description="List of tags for categorizing and organizing the critical asset. Tags are unordered and support hierarchical naming conventions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update configuration for a critical asset, including its enabled status, detection rule applicability, severity level, and associated tags."""
 
     # Construct request model with validation
@@ -26650,7 +26770,7 @@ async def update_critical_asset(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def delete_critical_asset(critical_asset_id: str = Field(..., description="The unique identifier of the critical asset to delete.")) -> dict[str, Any]:
+async def delete_critical_asset(critical_asset_id: str = Field(..., description="The unique identifier of the critical asset to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a critical asset from security monitoring configuration. This operation permanently removes the specified critical asset and its associated monitoring rules."""
 
     # Construct request model with validation
@@ -26686,7 +26806,7 @@ async def delete_critical_asset(critical_asset_id: str = Field(..., description=
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_security_filters() -> dict[str, Any]:
+async def list_security_filters() -> dict[str, Any] | ToolResult:
     """Retrieve all configured security filters with their complete definitions and settings. Use this to view the current security filter configuration for your monitoring setup."""
 
     # Extract parameters for API call
@@ -26720,7 +26840,7 @@ async def create_security_filter(
     name: str = Field(..., description="A descriptive name for this security filter to identify its purpose."),
     query: str = Field(..., description="The query expression that defines which logs this security filter applies to. Use Datadog query syntax to specify matching criteria."),
     type_: Literal["security_filters"] = Field(..., alias="type", description="The resource type identifier. This must always be set to 'security_filters' for security filter resources."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new security filter to monitor and control log data in your security platform. Security filters help you exclude specific logs from security monitoring based on defined criteria."""
 
     # Construct request model with validation
@@ -26761,7 +26881,7 @@ async def create_security_filter(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_security_filter(security_filter_id: str = Field(..., description="The unique identifier of the security filter to retrieve.")) -> dict[str, Any]:
+async def get_security_filter(security_filter_id: str = Field(..., description="The unique identifier of the security filter to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the configuration details of a specific security filter used in security monitoring. This includes the filter's rules, conditions, and settings."""
 
     # Construct request model with validation
@@ -26803,7 +26923,7 @@ async def update_security_filter(
     exclusion_filters: list[_models.SecurityFilterExclusionFilter] | None = Field(None, description="List of exclusion filters to prevent specific logs from being processed by this security filter. Each exclusion filter is applied in order."),
     filtered_data_type: Literal["logs"] | None = Field(None, description="The type of data this security filter applies to."),
     is_enabled: bool | None = Field(None, description="Enable or disable this security filter. When disabled, the filter will not process incoming data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing security filter configuration to modify its enabled status, data type filtering, or exclusion rules. Returns the updated security filter object."""
 
     # Construct request model with validation
@@ -26845,7 +26965,7 @@ async def update_security_filter(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def delete_security_filter(security_filter_id: str = Field(..., description="The unique identifier of the security filter to delete.")) -> dict[str, Any]:
+async def delete_security_filter(security_filter_id: str = Field(..., description="The unique identifier of the security filter to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific security filter from the security monitoring configuration. This operation permanently removes the filter and its associated rules."""
 
     # Construct request model with validation
@@ -26884,7 +27004,7 @@ async def delete_security_filter(security_filter_id: str = Field(..., descriptio
 async def list_suppressions(
     page_size: str | None = Field(None, alias="pagesize", description="Number of suppression rules to return per page. Use -1 to retrieve all suppression rules at once."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve. Use with page[size] to paginate through suppression rules."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all security monitoring suppression rules configured in your account. Use pagination parameters to control the number of results returned."""
 
     _page_size = _parse_int(page_size)
@@ -26936,7 +27056,7 @@ async def create_suppression_rule(
     start_date: str | None = Field(None, description="Unix millisecond timestamp marking when this suppression rule becomes active and starts suppressing signals."),
     suppression_query: str | None = Field(None, description="A signal query using Signals Explorer syntax to identify which generated signals should be suppressed. Signals matching this query will not be triggered."),
     tags: list[str] | None = Field(None, description="List of tags for organizing and categorizing this suppression rule. Tags use key:value format and support filtering and search."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new security monitoring suppression rule to exclude events from detection rules or suppress generated signals based on specified criteria. Suppression rules can be time-bound and support complex query syntax for precise targeting."""
 
     _expiration_date = _parse_int(expiration_date)
@@ -26996,7 +27116,7 @@ async def get_suppressions_affecting_rule(
     tags: list[str] | None = Field(None, description="Tags applied to generated signals for organization, filtering, and correlation purposes."),
     third_party_cases: list[_models.SecurityMonitoringThirdPartyRuleCaseCreate] | None = Field(None, alias="thirdPartyCases", description="Cases for generating signals from third-party rules. Only applicable when the rule originates from a third-party source."),
     compliance_signal_options: _models.CloudConfigurationRuleComplianceSignalOptions | None = Field(None, alias="complianceSignalOptions", description="Configuration options specific to compliance-related signal generation and reporting."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the list of suppressions that would affect a given security monitoring rule based on its configuration. This helps identify which active suppressions would suppress signals generated by the rule."""
 
     # Construct request model with validation
@@ -27034,7 +27154,7 @@ async def get_suppressions_affecting_rule(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_rule_suppressions(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule for which to retrieve affecting suppressions.")) -> dict[str, Any]:
+async def list_rule_suppressions(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule for which to retrieve affecting suppressions.")) -> dict[str, Any] | ToolResult:
     """Retrieve all suppressions that are currently affecting a specific security monitoring rule. This helps identify which suppression policies are preventing alerts for the given rule."""
 
     # Construct request model with validation
@@ -27081,7 +27201,7 @@ async def validate_suppression_rule(
     start_date: str | None = Field(None, description="Unix millisecond timestamp marking when this suppression rule becomes active and starts suppressing signals."),
     suppression_query: str | None = Field(None, description="A signal query using Signals Explorer syntax. Signals matching this query will be suppressed and not triggered. Leave empty to suppress all signals matched by the rule query."),
     tags: list[str] | None = Field(None, description="List of tags for organizing and categorizing this suppression rule. Tags use key:value format for structured metadata."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate a security monitoring suppression rule configuration before creation or update. Ensures the rule syntax, queries, and parameters are correct and compatible with the security monitoring system."""
 
     _expiration_date = _parse_int(expiration_date)
@@ -27125,7 +27245,7 @@ async def validate_suppression_rule(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_suppression(suppression_id: str = Field(..., description="The unique identifier of the suppression rule to retrieve.")) -> dict[str, Any]:
+async def get_suppression(suppression_id: str = Field(..., description="The unique identifier of the suppression rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the details of a specific security monitoring suppression rule by its ID."""
 
     # Construct request model with validation
@@ -27172,7 +27292,7 @@ async def update_suppression(
     start_date: str | None = Field(None, description="Unix millisecond timestamp marking when the suppression rule begins suppressing signals. Set to null to remove an existing start date. If omitted, the current start date is unchanged."),
     suppression_query: str | None = Field(None, description="A signal query using signal explorer syntax to identify which signals should be suppressed. Signals matching this query will not trigger alerts."),
     tags: list[str] | None = Field(None, description="Tags for organizing and categorizing the suppression rule. Tags are provided as a list of strings."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing security monitoring suppression rule to modify its query conditions, scope, timing, or enabled status."""
 
     _expiration_date = _parse_int(expiration_date)
@@ -27217,7 +27337,7 @@ async def update_suppression(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def delete_suppression(suppression_id: str = Field(..., description="The unique identifier of the suppression rule to delete.")) -> dict[str, Any]:
+async def delete_suppression(suppression_id: str = Field(..., description="The unique identifier of the suppression rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a specific security monitoring suppression rule by its ID. This removes the suppression and re-enables monitoring for the affected resources."""
 
     # Construct request model with validation
@@ -27257,7 +27377,7 @@ async def list_suppression_versions(
     suppression_id: str = Field(..., description="The unique identifier of the suppression rule whose version history you want to retrieve."),
     page_size: str | None = Field(None, alias="pagesize", description="Number of version records to return per page. Use this to control pagination size."),
     page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve when results are paginated. Use zero-based indexing."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the version history of a suppression rule, showing all changes and revisions made over time."""
 
     _page_size = _parse_int(page_size)
@@ -27299,7 +27419,7 @@ async def list_suppression_versions(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_content_pack_states() -> dict[str, Any]:
+async def list_content_pack_states() -> dict[str, Any] | ToolResult:
     """Retrieve the activation and configuration states for all security monitoring content packs. Returns status information including activation state, integration status, and log collection status for each content pack."""
 
     # Extract parameters for API call
@@ -27326,7 +27446,7 @@ async def list_content_pack_states() -> dict[str, Any]:
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def activate_content_pack(content_pack_id: str = Field(..., description="The unique identifier of the content pack to activate.")) -> dict[str, Any]:
+async def activate_content_pack(content_pack_id: str = Field(..., description="The unique identifier of the content pack to activate.")) -> dict[str, Any] | ToolResult:
     """Activate a security monitoring content pack to enable log and security filtering based on your pricing model. This configures the necessary filters and updates the content pack's activation state."""
 
     # Construct request model with validation
@@ -27362,7 +27482,7 @@ async def activate_content_pack(content_pack_id: str = Field(..., description="T
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def deactivate_content_pack(content_pack_id: str = Field(..., description="The unique identifier of the content pack to deactivate.")) -> dict[str, Any]:
+async def deactivate_content_pack(content_pack_id: str = Field(..., description="The unique identifier of the content pack to deactivate.")) -> dict[str, Any] | ToolResult:
     """Deactivate a security monitoring content pack by removing its configuration from active log and security filters. This updates the content pack's activation state to inactive."""
 
     # Construct request model with validation
@@ -27401,7 +27521,7 @@ async def deactivate_content_pack(content_pack_id: str = Field(..., description=
 async def list_security_monitoring_rules(
     page_size: str | None = Field(None, alias="pagesize", description="Number of rules to return per page. Maximum allowed is 100 rules."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of security monitoring rules. Use pagination parameters to control the number of results and navigate through pages."""
 
     _page_size = _parse_int(page_size)
@@ -27445,7 +27565,7 @@ async def list_security_monitoring_rules(
 async def export_security_monitoring_rules(
     rule_ids: list[str] = Field(..., alias="ruleIds", description="List of rule IDs to include in the export. Each rule will be saved as a separate JSON file in the resulting ZIP archive.", min_length=1),
     type_: Literal["security_monitoring_rules_bulk_export"] = Field(..., alias="type", description="The resource type identifier for this bulk export operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Export a list of security monitoring rules as a ZIP file containing individual JSON rule definitions. Each rule is saved as a separate JSON file named after the rule ID."""
 
     # Construct request model with validation
@@ -27503,7 +27623,7 @@ async def convert_security_monitoring_rule_to_terraform(
     scheduling_options: _models.SecurityMonitoringSchedulingOptions | None = Field(None, alias="schedulingOptions", description="Configuration for scheduled rule execution, including frequency and timezone. Required when using calculatedFields."),
     tags: list[str] | None = Field(None, description="Key-value tags attached to generated signals for organization, filtering, and correlation. Use colon-separated format."),
     third_party_cases: list[_models.SecurityMonitoringThirdPartyRuleCaseCreate] | None = Field(None, alias="thirdPartyCases", description="Signal generation cases specific to third-party rules. Only applicable for rules sourced from third-party providers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert a security monitoring rule from JSON format to Terraform configuration for the Datadog provider. Supports App and API Protection, Cloud SIEM (log detection and signal correlation), and Workload Protection rule types."""
 
     # Construct request model with validation
@@ -27544,7 +27664,7 @@ async def convert_security_monitoring_rule_to_terraform(
 async def test_security_rule(
     rule: _models.SecurityMonitoringStandardRuleTestPayload | None = Field(None, description="The security monitoring rule configuration to be tested."),
     rule_query_payloads: list[_models.SecurityMonitoringRuleQueryPayload] | None = Field(None, alias="ruleQueryPayloads", description="Array of test data payloads with expected results used to validate the rule's query behavior. Order matters as payloads are processed sequentially."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate a security monitoring rule by testing it against sample data payloads to verify expected behavior and query results."""
 
     # Construct request model with validation
@@ -27600,7 +27720,7 @@ async def validate_security_rule(
     tags: list[str] | None = Field(None, description="Labels applied to signals generated by this rule for organization, filtering, and correlation purposes."),
     third_party_cases: list[_models.SecurityMonitoringThirdPartyRuleCaseCreate] | None = Field(None, alias="thirdPartyCases", description="Detection cases sourced from third-party rule providers. Only applicable for third-party managed rules."),
     compliance_signal_options: _models.CloudConfigurationRuleComplianceSignalOptions | None = Field(None, alias="complianceSignalOptions", description="Configuration options specific to compliance-related signals, including severity mapping and remediation guidance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate a security monitoring detection rule to ensure it is properly configured before deployment. This operation checks the rule's queries, cases, message formatting, and other settings for correctness."""
 
     # Construct request model with validation
@@ -27638,7 +27758,7 @@ async def validate_security_rule(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_security_monitoring_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to retrieve.")) -> dict[str, Any]:
+async def get_security_monitoring_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific security monitoring rule by its ID. Use this to inspect rule configuration, conditions, and settings."""
 
     # Construct request model with validation
@@ -27674,7 +27794,7 @@ async def get_security_monitoring_rule(rule_id: str = Field(..., description="Th
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def delete_security_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to delete.")) -> dict[str, Any]:
+async def delete_security_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing security monitoring rule. Default rules cannot be deleted and will return an error if deletion is attempted."""
 
     # Construct request model with validation
@@ -27710,7 +27830,7 @@ async def delete_security_rule(rule_id: str = Field(..., description="The unique
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def convert_security_monitoring_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to convert.")) -> dict[str, Any]:
+async def convert_security_monitoring_rule(rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to convert.")) -> dict[str, Any] | ToolResult:
     """Convert an existing Datadog security monitoring rule from JSON to Terraform configuration for the datadog_security_monitoring_rule resource. Supports App and API Protection, Cloud SIEM (log detection and signal correlation), and Workload Protection rule types."""
 
     # Construct request model with validation
@@ -27750,7 +27870,7 @@ async def test_security_monitoring_rule(
     rule_id: str = Field(..., description="The unique identifier of the security monitoring rule to test."),
     rule: _models.SecurityMonitoringStandardRuleTestPayload | None = Field(None, description="The rule configuration to test. Provide the complete rule definition including query logic and conditions."),
     rule_query_payloads: list[_models.SecurityMonitoringRuleQueryPayload] | None = Field(None, alias="ruleQueryPayloads", description="Array of test data payloads used to validate the rule's query behavior. Each payload should include sample data and the expected result to verify the rule executes correctly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate an existing security monitoring rule by testing it against sample data payloads. This operation verifies that the rule functions correctly and produces expected results."""
 
     # Construct request model with validation
@@ -27793,7 +27913,7 @@ async def list_rule_versions(
     rule_id: str = Field(..., description="The unique identifier of the security monitoring rule whose version history you want to retrieve."),
     page_size: str | None = Field(None, alias="pagesize", description="Number of version records to return per page. Use this to control pagination size."),
     page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve when results span multiple pages. Pages are zero-indexed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the complete version history for a security monitoring rule, including all past changes and revisions with pagination support."""
 
     _page_size = _parse_int(page_size)
@@ -27840,7 +27960,7 @@ async def list_security_signals(
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp (inclusive) for filtering security signals. Specify in ISO 8601 format."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a list of security signals matching specified search criteria and time range. Use this endpoint to quickly query security signals with optional filtering by query, timestamp bounds, and result limit."""
 
     _page_limit = _parse_int(page_limit)
@@ -27884,7 +28004,7 @@ async def list_security_signals_search(
     from_: str | None = Field(None, alias="from", description="Start of the time range for security signals. Only signals at or after this timestamp will be included in results."),
     to: str | None = Field(None, description="End of the time range for security signals. Only signals at or before this timestamp will be included in results."),
     limit: str | None = Field(None, description="Maximum number of security signals to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve security signals matching optional time range and result limit criteria. Use this endpoint to search and filter security signals by timestamp."""
 
     _limit = _parse_int(limit)
@@ -27925,7 +28045,7 @@ async def list_security_signals_search(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_signal(signal_id: str = Field(..., description="The unique identifier of the security monitoring signal to retrieve.")) -> dict[str, Any]:
+async def get_signal(signal_id: str = Field(..., description="The unique identifier of the security monitoring signal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific security monitoring signal by its ID."""
 
     # Construct request model with validation
@@ -27964,7 +28084,7 @@ async def get_signal(signal_id: str = Field(..., description="The unique identif
 async def assign_security_signal(
     signal_id: str = Field(..., description="The unique identifier of the security signal to reassign."),
     uuid_: str = Field(..., alias="uuid", description="The UUID of the Datadog user account to assign as the new triage owner for this signal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Reassign a security signal to a different user for triage and investigation. Updates the assignee responsible for handling the signal."""
 
     # Construct request model with validation
@@ -28010,7 +28130,7 @@ async def assign_security_signal(
 async def update_security_signal_incidents(
     signal_id: str = Field(..., description="The unique identifier of the security signal to update."),
     incident_ids: list[int] = Field(..., description="Array of incident IDs to associate with this signal. Incidents are identified by their numeric IDs."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the incidents associated with a security monitoring signal. Use this to link or unlink incidents from a specific security signal."""
 
     # Construct request model with validation
@@ -28056,7 +28176,7 @@ async def update_security_signal_state(
     state: Literal["open", "archived", "under_review"] = Field(..., description="The new triage state to assign to the signal, determining its visibility and workflow status."),
     archive_comment: str | None = Field(None, description="Optional comment to attach to the signal when archiving it, providing additional context for future reference."),
     archive_reason: Literal["none", "false_positive", "testing_or_maintenance", "investigated_case_opened", "true_positive_benign", "true_positive_malicious", "other"] | None = Field(None, description="The reason for archiving the signal. Select from predefined categories to standardize signal disposition tracking."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the triage state of a security signal, optionally providing an archive reason and comment. Use this to transition signals between open, under review, and archived states."""
 
     # Construct request model with validation
@@ -28097,7 +28217,7 @@ async def update_security_signal_state(
 
 # Tags: Sensitive Data Scanner
 @mcp.tool()
-async def list_scanning_groups() -> dict[str, Any]:
+async def list_scanning_groups() -> dict[str, Any] | ToolResult:
     """Retrieve all Sensitive Data Scanner groups configured in your organization. Use this to view and manage your data scanning configurations."""
 
     # Extract parameters for API call
@@ -28124,7 +28244,7 @@ async def list_scanning_groups() -> dict[str, Any]:
 
 # Tags: Sensitive Data Scanner
 @mcp.tool()
-async def reorder_scanning_groups() -> dict[str, Any]:
+async def reorder_scanning_groups() -> dict[str, Any] | ToolResult:
     """Reorder the list of sensitive data scanner groups to change their priority or sequence. This operation updates the group ordering in the scanner configuration."""
 
     # Extract parameters for API call
@@ -28158,7 +28278,7 @@ async def create_scanning_group(
     product_list: list[Literal["logs", "rum", "events", "apm"]] | None = Field(None, description="List of products this scanning group monitors. Determines which data sources are scanned by this group."),
     samplings: list[_models.SensitiveDataScannerSamplings] | None = Field(None, description="List of sampling rates applied per product type. Controls the percentage of data scanned for each product to balance coverage and performance."),
     data: dict[str, Any] | None = Field(None, description="The Sensitive Data Scanner configuration to associate with this group. Establishes the relationship between the group and its parent configuration."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new scanning group for sensitive data detection. The group can optionally be associated with a configuration, and will be positioned last in the configuration's group ordering."""
 
     # Construct request model with validation
@@ -28208,7 +28328,7 @@ async def update_scanning_group(
     samplings: list[_models.SensitiveDataScannerSamplings] | None = Field(None, description="Sampling rates configured per product type, controlling the percentage of data scanned for each product."),
     configuration_data: dict[str, Any] | None = Field(None, alias="configurationData", description="The sensitive data scanner configuration associated with this group."),
     rules_data: list[_models.SensitiveDataScannerRule] | None = Field(None, alias="rulesData", description="Rules included in the group, ordered by priority. When provided, must contain linkages for all rules currently in the group and no others. Order determines rule evaluation sequence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a sensitive data scanning group's configuration, including its description, enabled status, product applicability, sampling rates, and rule ordering. When reordering rules, all current rules must be included in the rules relationship."""
 
     # Construct request model with validation
@@ -28249,7 +28369,7 @@ async def update_scanning_group(
 
 # Tags: Sensitive Data Scanner
 @mcp.tool()
-async def delete_scanning_group(group_id: str = Field(..., description="The unique identifier of the scanning group to delete.")) -> dict[str, Any]:
+async def delete_scanning_group(group_id: str = Field(..., description="The unique identifier of the scanning group to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a scanning group and remove all associated scanning rules. This operation permanently removes the group configuration."""
 
     # Construct request model with validation
@@ -28305,7 +28425,7 @@ async def create_scanning_rule(
     should_save_match: bool | None = Field(None, description="When enabled with replacement_string masking, allows authorized users to unmask matched values in logs. Use cautiously for highly sensitive, long-lived data."),
     group_data: dict[str, Any] | None = Field(None, alias="groupData", description="Reference to the sensitive data scanner group that contains this rule."),
     standard_pattern_data: dict[str, Any] | None = Field(None, alias="standard_patternData", description="Reference to a standard pattern that defines the detection logic. Cannot be used together with a custom regex pattern."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new scanning rule within a sensitive data scanner group to detect and handle sensitive information. The rule must be associated with a group and use either a standard pattern or custom regex pattern (not both)."""
 
     _character_count = _parse_int(character_count)
@@ -28376,7 +28496,7 @@ async def update_scanning_rule(
     replacement_string: str | None = Field(None, description="Static string to replace matched sensitive data. Required when masking type is replacement_string."),
     should_save_match: bool | None = Field(None, description="When enabled with replacement_string masking, allows authorized users to unmask matches in logs. Use cautiously for highly sensitive, long-lived data."),
     data: dict[str, Any] | None = Field(None, description="Associates the rule with a scanning group for organizational management and policy application."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing sensitive data scanning rule configuration. Modify rule behavior, keywords, matching patterns, and suppression criteria. Note: rules with standard pattern relationships cannot have their regex or standard_pattern relationship edited."""
 
     _character_count = _parse_int(character_count)
@@ -28427,7 +28547,7 @@ async def update_scanning_rule(
 
 # Tags: Sensitive Data Scanner
 @mcp.tool()
-async def delete_scanning_rule(rule_id: str = Field(..., description="The unique identifier of the scanning rule to delete.")) -> dict[str, Any]:
+async def delete_scanning_rule(rule_id: str = Field(..., description="The unique identifier of the scanning rule to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a sensitive data scanning rule by its ID. This operation permanently removes the rule from the scanner configuration."""
 
     # Construct request model with validation
@@ -28463,7 +28583,7 @@ async def delete_scanning_rule(rule_id: str = Field(..., description="The unique
 
 # Tags: Sensitive Data Scanner
 @mcp.tool()
-async def list_standard_patterns() -> dict[str, Any]:
+async def list_standard_patterns() -> dict[str, Any] | ToolResult:
     """Retrieves all standard patterns available in the sensitive data scanner configuration. These patterns are pre-defined rules used to detect and identify sensitive data across your organization."""
 
     # Extract parameters for API call
@@ -28490,7 +28610,7 @@ async def list_standard_patterns() -> dict[str, Any]:
 
 # Tags: Metrics
 @mcp.tool()
-async def submit_timeseries(series: list[_models.MetricSeries] = Field(..., description="An ordered list of timeseries objects to submit. Each timeseries must include a metric name, array of timestamp-value points, and resource metadata (such as hostname). Order is preserved in submission.")) -> dict[str, Any]:
+async def submit_timeseries(series: list[_models.MetricSeries] = Field(..., description="An ordered list of timeseries objects to submit. Each timeseries must include a metric name, array of timestamp-value points, and resource metadata (such as hostname). Order is preserved in submission.")) -> dict[str, Any] | ToolResult:
     """Submit time-series metric data to Datadog for visualization on dashboards. Supports payloads up to 500 KB (5 MB decompressed) containing metric names, timestamps, values, and associated resources like hostnames."""
 
     # Construct request model with validation
@@ -28533,7 +28653,7 @@ async def create_service_account(
     service_account: bool = Field(..., description="Designates this user as a service account. Must be set to true for service account creation."),
     type_: Literal["users"] = Field(..., alias="type", description="The resource type identifier for this user object."),
     title: str | None = Field(None, description="The job title or role description for the service account."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a service account for your organization. Service accounts are non-human identities used for automated processes and integrations."""
 
     # Construct request model with validation
@@ -28580,7 +28700,7 @@ async def list_application_keys_service_account(
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve for paginated results."),
     filter_created_at__start: str | None = Field(None, alias="filtercreated_atstart", description="Filter to include only application keys created on or after this date. Use ISO 8601 format."),
     filter_created_at__end: str | None = Field(None, alias="filtercreated_atend", description="Filter to include only application keys created on or before this date. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all application keys associated with a service account. Supports pagination and filtering by creation date to help manage service account credentials."""
 
     _page_size = _parse_int(page_size)
@@ -28625,7 +28745,7 @@ async def list_application_keys_service_account(
 async def get_application_key_service_account(
     service_account_id: str = Field(..., description="The unique identifier of the service account that owns the application key."),
     app_key_id: str = Field(..., description="The unique identifier of the application key to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific application key owned by a service account. Use this to view details of an application key associated with the service account."""
 
     # Construct request model with validation
@@ -28667,7 +28787,7 @@ async def update_service_account_application_key(
     id_: str = Field(..., alias="id", description="The unique identifier of the application key being updated."),
     type_: Literal["application_keys"] = Field(..., alias="type", description="The resource type identifier for application keys."),
     scopes: list[str] | None = Field(None, description="List of permission scopes to grant to the application key. Scopes define what actions the key is authorized to perform."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the scopes and configuration of an application key associated with a service account. This allows you to modify permissions granted to an existing application key."""
 
     # Construct request model with validation
@@ -28712,7 +28832,7 @@ async def update_service_account_application_key(
 async def delete_application_key_service_account(
     service_account_id: str = Field(..., description="The unique identifier of the service account that owns the application key."),
     app_key_id: str = Field(..., description="The unique identifier of the application key to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete an application key owned by a service account. This operation permanently removes the specified application key and invalidates any credentials associated with it."""
 
     # Construct request model with validation
@@ -28752,7 +28872,7 @@ async def list_service_definitions(
     page_size: str | None = Field(None, alias="pagesize", description="Number of service definitions to return per page. Maximum allowed is 100."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
     schema_version: Literal["v1", "v2", "v2.1", "v2.2"] | None = Field(None, description="Schema version for the response format. Determines the structure and fields included in returned service definitions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all service definitions from the Datadog Service Catalog. Results are paginated and support schema version selection for response format compatibility."""
 
     _page_size = _parse_int(page_size)
@@ -28810,7 +28930,7 @@ async def register_service_definition(
     dd_team: str | None = Field(None, alias="dd-team", description="Team handle that corresponds to a team in the Datadog Teams product. This is an experimental feature."),
     docs: list[_models.ServiceDefinitionV2Doc] | None = Field(None, description="List of documentation resources (runbooks, architecture diagrams, API docs, etc.) related to this service."),
     repos: list[_models.ServiceDefinitionV2Repo] | None = Field(None, description="List of code repository URLs or identifiers where the service source code is hosted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register or update a service definition in the Datadog Service Catalog. This operation creates a new service entry or updates an existing one with metadata including ownership, documentation, and technical details."""
 
     # Construct request model with validation
@@ -28851,7 +28971,7 @@ async def register_service_definition(
 async def get_service_definition(
     service_name: str = Field(..., description="The name of the service to retrieve the definition for."),
     schema_version: Literal["v1", "v2", "v2.1", "v2.2"] | None = Field(None, description="The schema version for the response structure. Defaults to the latest available version if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a single service definition from the Datadog Service Catalog. Optionally specify the schema version to control the response structure."""
 
     # Construct request model with validation
@@ -28890,7 +29010,7 @@ async def get_service_definition(
 
 # Tags: Service Definition
 @mcp.tool()
-async def delete_service_definition(service_name: str = Field(..., description="The name identifier of the service definition to delete.")) -> dict[str, Any]:
+async def delete_service_definition(service_name: str = Field(..., description="The name identifier of the service definition to delete.")) -> dict[str, Any] | ToolResult:
     """Remove a service definition from the Datadog Service Catalog. This operation permanently deletes the specified service and its associated metadata."""
 
     # Construct request model with validation
@@ -28931,7 +29051,7 @@ async def list_security_signals_threat_hunting(
     filter_from: str | None = Field(None, alias="filterfrom", description="Start of the time range for retrieving security signals. Only signals at or after this timestamp will be included."),
     filter_to: str | None = Field(None, alias="filterto", description="End of the time range for retrieving security signals. Only signals at or before this timestamp will be included."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in the response. Useful for pagination and controlling response size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical security signals from your threat hunting data with optional filtering by query, time range, and result limits. Use this to search and analyze security events within specified parameters."""
 
     _page_limit = _parse_int(page_limit)
@@ -28975,7 +29095,7 @@ async def search_security_signals(
     from_: str | None = Field(None, alias="from", description="Start of the time range for security signals. Only signals with timestamps at or after this value are included in results."),
     to: str | None = Field(None, description="End of the time range for security signals. Only signals with timestamps at or before this value are included in results."),
     limit: str | None = Field(None, description="Maximum number of security signals to return in the response. Useful for pagination and controlling result set size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search historical security signals within a specified time range. Returns matching signals up to the specified limit for threat hunting and investigation purposes."""
 
     _limit = _parse_int(limit)
@@ -29016,7 +29136,7 @@ async def search_security_signals(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_threat_hunting_signal(histsignal_id: str = Field(..., description="The unique identifier of the threat hunting signal to retrieve.")) -> dict[str, Any]:
+async def get_threat_hunting_signal(histsignal_id: str = Field(..., description="The unique identifier of the threat hunting signal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific threat hunting signal by its ID. Use this to access signal metadata, detection details, and associated threat intelligence."""
 
     # Construct request model with validation
@@ -29056,7 +29176,7 @@ async def list_threat_hunting_jobs(
     page_size: str | None = Field(None, alias="pagesize", description="Number of threat hunting jobs to return per page. Maximum allowed is 100 jobs per request."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the result set."),
     filter_query: str | None = Field(None, alias="filterquery", description="Filter expression to narrow results by job attributes such as security level and status. Supports key:value syntax for filtering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of threat hunting jobs with optional filtering capabilities. Use pagination parameters to control result set size and offset."""
 
     _page_size = _parse_int(page_size)
@@ -29116,7 +29236,7 @@ async def start_threat_hunting_job(
     tags: list[str] | None = Field(None, description="Labels to attach to generated security signals for organization and filtering."),
     third_party_cases: list[_models.SecurityMonitoringThirdPartyRuleCaseCreate] | None = Field(None, alias="thirdPartyCases", description="List of third-party case identifiers for integrating results from external detection methods. Only applicable when using third-party detection sources."),
     type_: str | None = Field(None, alias="type", description="Classification of the threat hunting job (e.g., rule-based, behavioral analysis)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate a threat hunting job to analyze security logs based on detection rules and custom queries. The job processes data within a specified time range and generates signals grouped by specified criteria."""
 
     _from_rule_from = _parse_int(from_rule_from)
@@ -29169,7 +29289,7 @@ async def create_signal_from_job_result(
     notifications: list[str] = Field(..., description="Array of notification channels or recipients to alert when the signal is created. Specifies where signal notifications should be sent."),
     signal_message: str = Field(..., alias="signalMessage", description="Human-readable message describing the security threat or finding detected. This message appears in the generated signal and alerts."),
     signal_severity: Literal["info", "low", "medium", "high", "critical"] = Field(..., alias="signalSeverity", description="Severity classification for the security signal, indicating the urgency and impact level of the threat."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Convert job results from threat hunting operations into security signals for alerting and incident tracking. Specify the severity level and notification recipients for the generated signal."""
 
     # Construct request model with validation
@@ -29209,7 +29329,7 @@ async def create_signal_from_job_result(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def get_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to retrieve.")) -> dict[str, Any]:
+async def get_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific threat hunting job, including its status, configuration, and results."""
 
     # Construct request model with validation
@@ -29245,7 +29365,7 @@ async def get_threat_hunting_job(job_id: str = Field(..., description="The uniqu
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def delete_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to delete.")) -> dict[str, Any]:
+async def delete_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to delete.")) -> dict[str, Any] | ToolResult:
     """Delete an existing threat hunting job by its ID. This operation permanently removes the job and its associated data from the system."""
 
     # Construct request model with validation
@@ -29281,7 +29401,7 @@ async def delete_threat_hunting_job(job_id: str = Field(..., description="The un
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def cancel_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to cancel.")) -> dict[str, Any]:
+async def cancel_threat_hunting_job(job_id: str = Field(..., description="The unique identifier of the threat hunting job to cancel.")) -> dict[str, Any] | ToolResult:
     """Cancel an active or pending threat hunting job. This operation stops the job from executing further and prevents additional resource consumption."""
 
     # Construct request model with validation
@@ -29323,7 +29443,7 @@ async def list_security_signals_by_job(
     filter_from: str | None = Field(None, alias="filterfrom", description="The earliest timestamp to include in results. Signals before this time are excluded."),
     filter_to: str | None = Field(None, alias="filterto", description="The latest timestamp to include in results. Signals after this time are excluded."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of security signals to return in a single response. Useful for pagination and controlling response size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical security signals for a specific threat hunting job. Results can be filtered by query, time range, and paginated for large result sets."""
 
     _page_limit = _parse_int(page_limit)
@@ -29369,7 +29489,7 @@ async def generate_slo_report(
     query: str = Field(..., description="Filter expression to select which SLOs to include in the report. Supports filtering by service name (service:<name>) and SLO name."),
     to_ts: str = Field(..., description="End of the reporting period as a Unix timestamp in seconds."),
     interval: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Aggregation frequency for report data generation. Determines whether data points are grouped daily, weekly, or monthly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiate an asynchronous job to generate an SLO report filtered by query parameters and time range. The report is processed in the background and made available as a CSV file for download using the returned report_id."""
 
     _from_ts = _parse_int(from_ts)
@@ -29412,7 +29532,7 @@ async def generate_slo_report(
 
 # Tags: Service Level Objectives
 @mcp.tool()
-async def download_slo_report(report_id: str = Field(..., description="The unique identifier of the SLO report job to download.")) -> dict[str, Any]:
+async def download_slo_report(report_id: str = Field(..., description="The unique identifier of the SLO report job to download.")) -> dict[str, Any] | ToolResult:
     """Download a completed SLO report. Reports are not guaranteed to persist indefinitely, so download immediately after the report job completes."""
 
     # Construct request model with validation
@@ -29448,7 +29568,7 @@ async def download_slo_report(report_id: str = Field(..., description="The uniqu
 
 # Tags: Service Level Objectives
 @mcp.tool()
-async def get_slo_report_status(report_id: str = Field(..., description="The unique identifier of the SLO report job whose status you want to retrieve.")) -> dict[str, Any]:
+async def get_slo_report_status(report_id: str = Field(..., description="The unique identifier of the SLO report job whose status you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of an SLO report generation job. Use this to monitor the progress and completion state of asynchronous SLO report requests."""
 
     # Construct request model with validation
@@ -29489,7 +29609,7 @@ async def get_slo_status(
     from_ts: str = Field(..., description="The start of the time period for the SLO status query, specified as a Unix timestamp in seconds."),
     to_ts: str = Field(..., description="The end of the time period for the SLO status query, specified as a Unix timestamp in seconds."),
     disable_corrections: bool | None = Field(None, description="Whether to exclude correction windows from the SLO status calculation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current status of a Service Level Objective (SLO) for a specified time period, including the SLI value, error budget remaining, and related metrics."""
 
     _from_ts = _parse_int(from_ts)
@@ -29537,7 +29657,7 @@ async def aggregate_spans(
     to: str | None = Field(None, description="End of the time range for span aggregation. Supports ISO 8601 datetime format, date math expressions, or millisecond timestamps."),
     group_by: list[_models.SpansGroupBy] | None = Field(None, description="Grouping rules that define how spans are partitioned into buckets. Rules are applied in order and determine the bucket structure."),
     time_offset: str | None = Field(None, alias="timeOffset", description="Time offset in seconds to apply to the query, useful for timezone adjustments or relative time calculations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Aggregate spans into time-based buckets and compute metrics or timeseries data. This endpoint supports filtering by time range and grouping rules, with a rate limit of 300 requests per hour."""
 
     _time_offset = _parse_int(time_offset)
@@ -29584,7 +29704,7 @@ async def list_spans(
     filter_from: str | None = Field(None, alias="filterfrom", description="Minimum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     filter_to: str | None = Field(None, alias="filterto", description="Maximum timestamp for the span search range. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of spans to return in a single response page."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of spans matching your search criteria. Use this endpoint to query your latest spans with filtering by time range and custom span syntax queries."""
 
     _page_limit = _parse_int(page_limit)
@@ -29629,7 +29749,7 @@ async def search_spans(
     to: str | None = Field(None, description="The end of the time range for the search. Accepts ISO 8601 date-time format, date math expressions, or millisecond timestamps."),
     time_offset: str | None = Field(None, alias="timeOffset", description="An optional time offset in seconds to shift the query time range."),
     limit: str | None = Field(None, description="The maximum number of spans to return in the response."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter spans using complex query criteria with paginated results. This endpoint supports flexible time range queries and is rate limited to 300 requests per hour."""
 
     _time_offset = _parse_int(time_offset)
@@ -29687,7 +29807,7 @@ async def submit_sca_dependencies(
     vulnerabilities: list[_models.ScaRequestDataAttributesVulnerabilitiesItems] | None = Field(None, description="The list of vulnerabilities identified in the dependency graph. Order reflects discovery sequence. Each item represents a detected security issue with associated severity and remediation details."),
     author: str | None = Field(None, description="Commit author in RFC 5322 format: 'Name <email@domain>'"),
     committer: str | None = Field(None, description="Committer in RFC 5322 format: 'Name <email@domain>'"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit discovered dependencies and vulnerability data from a static code analysis (SCA) scan for processing and analysis. This operation accepts dependency manifests, inter-component relationships, and identified vulnerabilities along with repository and commit context."""
 
     # Call helper functions
@@ -29737,7 +29857,7 @@ async def submit_sca_dependencies(
 async def resolve_vulnerable_symbols(
     type_: Literal["resolve-vulnerable-symbols-request"] = Field(..., alias="type", description="The request type identifier that specifies this operation resolves vulnerable symbols."),
     purls: list[str] | None = Field(None, description="List of Package URLs (PURLs) identifying the packages for which to resolve vulnerable symbols. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Resolve vulnerable symbols for specified packages to identify which vulnerabilities affect your codebase. This operation maps Package URLs to their vulnerable symbols for detailed vulnerability analysis."""
 
     # Construct request model with validation
@@ -29778,7 +29898,7 @@ async def resolve_vulnerable_symbols(
 
 # Tags: Static Analysis
 @mcp.tool()
-async def get_custom_ruleset(ruleset_name: str = Field(..., description="The name of the custom ruleset to retrieve. This is the unique identifier for the ruleset configuration.")) -> dict[str, Any]:
+async def get_custom_ruleset(ruleset_name: str = Field(..., description="The name of the custom ruleset to retrieve. This is the unique identifier for the ruleset configuration.")) -> dict[str, Any] | ToolResult:
     """Retrieve a custom ruleset by its name. Use this to fetch the configuration and rules for a specific custom ruleset used in static analysis."""
 
     # Construct request model with validation
@@ -29819,7 +29939,7 @@ async def update_ruleset(
     description: str | None = Field(None, description="Base64-encoded full description text for the ruleset. Provides detailed documentation of the ruleset's purpose and usage."),
     rules: list[_models.CustomRule] | None = Field(None, description="Array of rules to include in the ruleset. Rules are processed in the order specified and define the static analysis checks to be applied."),
     short_description: str | None = Field(None, description="Base64-encoded short description text for the ruleset. Provides a brief summary displayed in listings and overviews."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing custom ruleset by modifying its description, rules, or metadata. Changes are applied to the specified ruleset."""
 
     # Construct request model with validation
@@ -29858,7 +29978,7 @@ async def update_ruleset(
 
 # Tags: Static Analysis
 @mcp.tool()
-async def delete_ruleset(ruleset_name: str = Field(..., description="The name of the custom ruleset to delete. This identifier uniquely identifies the ruleset within the static analysis system.")) -> dict[str, Any]:
+async def delete_ruleset(ruleset_name: str = Field(..., description="The name of the custom ruleset to delete. This identifier uniquely identifies the ruleset within the static analysis system.")) -> dict[str, Any] | ToolResult:
     """Delete a custom ruleset by name. This operation permanently removes the specified ruleset from the static analysis configuration."""
 
     # Construct request model with validation
@@ -29894,7 +30014,7 @@ async def delete_ruleset(ruleset_name: str = Field(..., description="The name of
 
 # Tags: Static Analysis
 @mcp.tool()
-async def create_custom_rule(ruleset_name: str = Field(..., description="The name of the ruleset where the custom rule will be created. This identifies which ruleset collection to add the rule to.")) -> dict[str, Any]:
+async def create_custom_rule(ruleset_name: str = Field(..., description="The name of the ruleset where the custom rule will be created. This identifies which ruleset collection to add the rule to.")) -> dict[str, Any] | ToolResult:
     """Create a new custom rule within a specified ruleset for static analysis. This rule will be added to the ruleset's collection of custom analysis rules."""
 
     # Construct request model with validation
@@ -29933,7 +30053,7 @@ async def create_custom_rule(ruleset_name: str = Field(..., description="The nam
 async def get_custom_rule(
     ruleset_name: str = Field(..., description="The name of the ruleset containing the custom rule. This identifies which rule collection to query."),
     rule_name: str = Field(..., description="The name of the custom rule to retrieve. This uniquely identifies the rule within the specified ruleset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific custom rule from a ruleset by its name. Use this to view the configuration and details of an individual custom static analysis rule."""
 
     # Construct request model with validation
@@ -29972,7 +30092,7 @@ async def get_custom_rule(
 async def delete_custom_rule(
     ruleset_name: str = Field(..., description="The name of the ruleset containing the custom rule to delete."),
     rule_name: str = Field(..., description="The name of the custom rule to delete from the ruleset."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete a custom rule from a specified ruleset. This operation permanently removes the rule and cannot be undone."""
 
     # Construct request model with validation
@@ -30013,7 +30133,7 @@ async def list_rule_revisions(
     rule_name: str = Field(..., description="The name of the custom rule to retrieve revisions for."),
     page_offset: int | None = Field(None, alias="pageoffset", description="The number of results to skip before returning revisions, used for pagination."),
     page_limit: int | None = Field(None, alias="pagelimit", description="The maximum number of revisions to return per request, used for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all revisions for a specific custom rule within a ruleset. Use pagination to control the number of results returned."""
 
     # Construct request model with validation
@@ -30072,7 +30192,7 @@ async def create_rule_revision(
     tags: list[str] = Field(..., description="Array of tags for categorizing and filtering the rule. Tags are unordered and used for organization and discovery."),
     tests: list[_models.CustomRuleRevisionTest] = Field(..., description="Array of test cases validating the rule's behavior against known code patterns."),
     tree_sitter_query: str = Field(..., description="Tree-sitter query used to identify code patterns matching this rule, typically base64-encoded."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new revision for a custom static analysis rule within a ruleset. This operation captures the rule's logic, metadata, severity, and associated security references."""
 
     # Construct request model with validation
@@ -30118,7 +30238,7 @@ async def revert_custom_rule(
     rule_name: str = Field(..., description="The name of the custom rule to revert."),
     current_revision: str | None = Field(None, alias="currentRevision", description="The current revision ID of the custom rule before reverting."),
     revert_to_revision: str | None = Field(None, alias="revertToRevision", description="The target revision ID to revert the custom rule to. Must be a previous revision of the rule."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Revert a custom rule to a previous revision within a ruleset. Specify the target revision to restore the rule to its prior state."""
 
     # Construct request model with validation
@@ -30161,7 +30281,7 @@ async def get_custom_rule_revision(
     ruleset_name: str = Field(..., description="The name of the ruleset containing the custom rule."),
     rule_name: str = Field(..., description="The name of the custom rule within the ruleset."),
     id_: str = Field(..., alias="id", description="The unique identifier of the rule revision to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific revision of a custom rule within a ruleset. Use this to view historical versions of a rule and compare changes across revisions."""
 
     # Construct request model with validation
@@ -30202,7 +30322,7 @@ async def fetch_rulesets(
     include_testing_rules: bool | None = Field(None, description="Include rules that are currently available in testing mode in the response."),
     include_tests: bool | None = Field(None, description="Include test cases associated with each rule in the response."),
     rulesets: list[str] | None = Field(None, description="List of ruleset names to retrieve. If not provided, all available rulesets are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve rules and metadata for multiple rulesets in a single batch request. Optionally include testing-mode rules and associated test cases."""
 
     # Construct request model with validation
@@ -30243,7 +30363,7 @@ async def fetch_rulesets(
 
 # Tags: Security Monitoring
 @mcp.tool()
-async def list_secrets_rules() -> dict[str, Any]:
+async def list_secrets_rules() -> dict[str, Any] | ToolResult:
     """Retrieves a list of all Secrets detection rules with their identifiers, patterns, descriptions, priority levels, and associated SDS IDs. Use this to understand available secret detection rules in your security scanning configuration."""
 
     # Extract parameters for API call
@@ -30273,7 +30393,7 @@ async def list_secrets_rules() -> dict[str, Any]:
 async def list_status_pages(
     page_offset: int | None = Field(None, alias="pageoffset", description="The number of records to skip from the beginning of the result set. Use this to navigate through paginated results."),
     page_limit: int | None = Field(None, alias="pagelimit", description="The maximum number of status pages to return in a single response. Adjust this value to balance between response size and number of requests needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all status pages configured for your organization. Results are paginated to allow efficient browsing of large status page collections."""
 
     # Construct request model with validation
@@ -30323,7 +30443,7 @@ async def create_status_page(
     email_header_image: str | None = Field(None, description="Base64-encoded image included in email notifications sent to status page subscribers."),
     favicon: str | None = Field(None, description="Base64-encoded image displayed in the browser tab favicon."),
     subscriptions_enabled: bool | None = Field(None, description="Whether visitors can subscribe to status page updates via email or other notification channels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new public or internal status page with customizable branding, components, and subscription settings. The status page will be accessible via a unique subdomain URL."""
 
     # Construct request model with validation
@@ -30369,7 +30489,7 @@ async def list_degradations(
     page_offset: int | None = Field(None, alias="pageoffset", description="Number of results to skip before returning the page. Use with limit for pagination."),
     page_limit: int | None = Field(None, alias="pagelimit", description="Maximum number of degradations to return in this page."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter results by degradation status. Only degradations matching the specified status will be returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all degradations for your organization with optional filtering by page and status. Use pagination parameters to control result size and offset."""
 
     # Construct request model with validation
@@ -30412,7 +30532,7 @@ async def list_maintenances(
     page_offset: int | None = Field(None, alias="pageoffset", description="Number of results to skip before returning maintenances. Use with limit for pagination."),
     page_limit: int | None = Field(None, alias="pagelimit", description="Maximum number of maintenances to return per page."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter maintenances by their current status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all maintenances for your organization with optional filtering by page and status. Use pagination parameters to control result size and offset."""
 
     # Construct request model with validation
@@ -30450,7 +30570,7 @@ async def list_maintenances(
 
 # Tags: Status Pages
 @mcp.tool()
-async def get_status_page(page_id: str = Field(..., description="The unique identifier of the status page to retrieve, formatted as a UUID.")) -> dict[str, Any]:
+async def get_status_page(page_id: str = Field(..., description="The unique identifier of the status page to retrieve, formatted as a UUID.")) -> dict[str, Any] | ToolResult:
     """Retrieves a specific status page by its unique identifier. Use this to fetch detailed information about a status page including its current state and configuration."""
 
     # Construct request model with validation
@@ -30499,7 +30619,7 @@ async def update_status_page(
     subscriptions_enabled: bool | None = Field(None, description="Whether visitors can subscribe to status page updates via email or other notification channels."),
     attributes_type: Literal["public", "internal"] | None = Field(None, alias="attributesType", description="The access control type determining who can view the status page. Public pages are accessible to anyone with the URL; internal pages require authentication."),
     visualization_type: Literal["bars_and_uptime_percentage", "bars_only", "component_name_only"] | None = Field(None, description="How component status information is displayed on the status page. Bars show historical uptime; uptime percentage adds numeric values; component name only shows text labels."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing status page's configuration, including branding, visibility settings, and subscription options. Changes take effect immediately."""
 
     # Construct request model with validation
@@ -30544,7 +30664,7 @@ async def update_status_page(
 
 # Tags: Status Pages
 @mcp.tool()
-async def delete_status_page(page_id: str = Field(..., description="The unique identifier of the status page to delete.")) -> dict[str, Any]:
+async def delete_status_page(page_id: str = Field(..., description="The unique identifier of the status page to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a status page and all associated data. This action cannot be undone."""
 
     # Construct request model with validation
@@ -30580,7 +30700,7 @@ async def delete_status_page(page_id: str = Field(..., description="The unique i
 
 # Tags: Status Pages
 @mcp.tool()
-async def list_status_page_components(page_id: str = Field(..., description="The unique identifier of the status page for which to retrieve components.")) -> dict[str, Any]:
+async def list_status_page_components(page_id: str = Field(..., description="The unique identifier of the status page for which to retrieve components.")) -> dict[str, Any] | ToolResult:
     """Retrieves all components associated with a specific status page. Components represent the services or infrastructure elements monitored on the status page."""
 
     # Construct request model with validation
@@ -30623,7 +30743,7 @@ async def create_component(
     attributes_type: Literal["component", "group"] = Field(..., alias="attributesType", description="The component type: 'component' for a standard component or 'group' for a container of multiple components."),
     data_type: Literal["components"] = Field(..., alias="dataType", description="The resource type identifier for the API request payload."),
     components: list[_models.CreateComponentRequestDataAttributesComponentsItems] | None = Field(None, description="Child components to include when creating a group-type component. Items are ordered by position and must include name, position, and type for each component."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new component or component group on a status page. Components can be individual items or groups containing multiple child components."""
 
     _position = _parse_int(position)
@@ -30670,7 +30790,7 @@ async def create_component(
 async def get_component(
     page_id: str = Field(..., description="The unique identifier of the status page containing the component."),
     component_id: str = Field(..., description="The unique identifier of the component to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific component from a status page using its unique identifier. Use this to fetch detailed information about a single component."""
 
     # Construct request model with validation
@@ -30712,7 +30832,7 @@ async def update_component(
     id_: str = Field(..., alias="id", description="The unique identifier of the component being updated."),
     type_: Literal["components"] = Field(..., alias="type", description="The resource type identifier for this component."),
     position: str | None = Field(None, description="The display position of the component. If the component belongs to a group, this position is relative to other components within that group."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing component on a status page with new attributes such as position or other component properties."""
 
     _position = _parse_int(position)
@@ -30759,7 +30879,7 @@ async def update_component(
 async def delete_component(
     page_id: str = Field(..., description="The unique identifier of the status page containing the component to delete."),
     component_id: str = Field(..., description="The unique identifier of the component to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a component from a status page. This action cannot be undone."""
 
     # Construct request model with validation
@@ -30803,7 +30923,7 @@ async def create_degradation(
     type_: Literal["degradations"] = Field(..., alias="type", description="Resource type identifier for this degradation incident."),
     notify_subscribers: bool | None = Field(None, description="Whether to send notifications to page subscribers about this degradation."),
     description: str | None = Field(None, description="Detailed explanation of the degradation, including what users are experiencing and current investigation status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new degradation incident on a status page to notify subscribers about service issues affecting specific components."""
 
     # Construct request model with validation
@@ -30851,7 +30971,7 @@ async def create_degradation(
 async def get_degradation(
     page_id: str = Field(..., description="The unique identifier of the status page containing the degradation."),
     degradation_id: str = Field(..., description="The unique identifier of the degradation incident to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a specific degradation incident by its ID from a status page. Use this to fetch detailed information about a service degradation."""
 
     # Construct request model with validation
@@ -30897,7 +31017,7 @@ async def update_degradation(
     description: str | None = Field(None, description="A detailed description of the degradation, including any updates on investigation progress or resolution."),
     status: Literal["investigating", "identified", "monitoring", "resolved"] | None = Field(None, description="The current status of the degradation, indicating the stage of investigation or resolution."),
     title: str | None = Field(None, description="A brief title summarizing the degradation incident."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing degradation on a status page, including its status, description, affected components, and notification settings."""
 
     # Construct request model with validation
@@ -30945,7 +31065,7 @@ async def update_degradation(
 async def delete_degradation(
     page_id: str = Field(..., description="The unique identifier of the status page containing the degradation."),
     degradation_id: str = Field(..., description="The unique identifier of the degradation to delete."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Permanently deletes a degradation from a status page by its ID. This action cannot be undone."""
 
     # Construct request model with validation
@@ -30992,7 +31112,7 @@ async def schedule_maintenance(
     in_progress_description: str | None = Field(None, description="The status message displayed while the maintenance is actively in progress."),
     scheduled_description: str | None = Field(None, description="The status message displayed when the maintenance is scheduled but has not yet started."),
     start_date: str | None = Field(None, description="The timestamp indicating when the maintenance is scheduled to begin. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Schedule a new maintenance window for a status page. Optionally notify subscribers and provide descriptions for different maintenance states (scheduled, in progress, completed)."""
 
     # Construct request model with validation
@@ -31040,7 +31160,7 @@ async def schedule_maintenance(
 async def get_maintenance(
     page_id: str = Field(..., description="The unique identifier of the status page containing the maintenance event."),
     maintenance_id: str = Field(..., description="The unique identifier of the maintenance event to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves detailed information about a specific maintenance event on a status page by its unique identifier."""
 
     # Construct request model with validation
@@ -31090,7 +31210,7 @@ async def update_maintenance(
     start_date: str | None = Field(None, description="The date and time when the maintenance is scheduled to begin."),
     status: Literal["scheduled", "in_progress", "completed"] | None = Field(None, description="The current state of the maintenance event."),
     title: str | None = Field(None, description="A brief title or name for the maintenance event."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing maintenance event on a status page, including its schedule, status, descriptions, and affected components. Optionally notify subscribers of changes."""
 
     # Construct request model with validation
@@ -31143,7 +31263,7 @@ async def create_synthetics_suite(
     message: str | None = Field(None, description="Optional notification message to associate with the suite for alerting purposes."),
     alerting_threshold: float | None = Field(None, description="The percentage threshold (0 to 1) of critical test failures required for the suite to be marked as failed. A value of 0.5 means 50% of critical tests must fail to trigger a suite failure.", ge=0, le=1),
     tags: list[str] | None = Field(None, description="Array of tags to attach to the suite for categorization and filtering. Tags follow a key:value format for organizing suites by environment, team, or other attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new Synthetic test suite to group and manage related synthetic tests. The suite can include alerting thresholds and tags for organization and monitoring."""
 
     # Construct request model with validation
@@ -31190,7 +31310,7 @@ async def create_synthetics_suite(
 async def delete_suites(
     public_ids: list[str] = Field(..., description="List of public IDs identifying the Synthetic test suites to delete."),
     force_delete_dependencies: bool | None = Field(None, description="Force deletion of suites even if they have dependent resources that would normally prevent removal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Bulk delete Synthetic test suites by their public IDs. Optionally force deletion of suites that have dependent resources."""
 
     # Construct request model with validation
@@ -31234,7 +31354,7 @@ async def search_suites(
     facets_only: bool | None = Field(None, description="Return only aggregated facet counts instead of full test suite details. Useful for building filtered search interfaces."),
     start: str | None = Field(None, description="Zero-based offset for pagination. Use this to skip results and retrieve subsequent pages."),
     count: str | None = Field(None, description="Maximum number of test suites to return per request. Limits result set size for performance."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search for test suites with optional filtering and pagination. Returns matching test suites or aggregated facet data for refined searching."""
 
     _start = _parse_int(start)
@@ -31275,7 +31395,7 @@ async def search_suites(
 
 # Tags: Synthetics
 @mcp.tool()
-async def get_synthetics_suite(public_id: str = Field(..., description="The unique public identifier for the synthetics suite to retrieve.")) -> dict[str, Any]:
+async def get_synthetics_suite(public_id: str = Field(..., description="The unique public identifier for the synthetics suite to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific synthetics suite using its public ID. Returns the suite configuration, tests, and metadata."""
 
     # Construct request model with validation
@@ -31320,7 +31440,7 @@ async def update_synthetics_suite(
     message: str | None = Field(None, description="Optional notification message to associate with the suite for alerting purposes."),
     alerting_threshold: float | None = Field(None, description="Threshold percentage (0-100%) of critical test failures required for the suite to be marked as failed.", ge=0, le=1),
     tags: list[str] | None = Field(None, description="List of tags to categorize and organize the suite. Tags use key:value format for filtering and organization."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Synthetic test suite with new configuration, tests, and alerting settings. Allows modification of suite name, tests, tags, notification message, and failure thresholds."""
 
     # Construct request model with validation
@@ -31368,7 +31488,7 @@ async def update_synthetics_suite(
 async def bulk_delete_synthetics_tests(
     public_ids: list[str] = Field(..., description="List of public IDs identifying the Synthetic tests to delete."),
     force_delete_dependencies: bool | None = Field(None, description="Force deletion of tests even if they have dependent resources that would normally prevent removal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Delete multiple Synthetic tests in a single operation. Optionally force deletion of tests that have dependent resources."""
 
     # Construct request model with validation
@@ -31427,7 +31547,7 @@ async def create_network_test(
     status: Literal["live", "paused"] | None = Field(None, description="Initial test state: 'live' to start monitoring immediately or 'paused' to defer execution."),
     subtype: Literal["tcp", "udp", "icmp"] | None = Field(None, description="Network protocol type for the test: 'tcp' for TCP connections, 'udp' for UDP packets, or 'icmp' for ping-style connectivity checks."),
     tags: list[str] | None = Field(None, description="Array of tags for organizing and filtering the test in dashboards and reports. Use key:value format for structured tagging."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a synthetic network path test to monitor network connectivity and performance between endpoints. Network path tests can run from managed cloud locations for public endpoints or from Datadog Agents for private environments."""
 
     _min_failure_duration = _parse_int(min_failure_duration)
@@ -31477,7 +31597,7 @@ async def create_network_test(
 
 # Tags: Synthetics
 @mcp.tool()
-async def get_network_test(public_id: str = Field(..., description="The unique public identifier of the Network Path test to retrieve.")) -> dict[str, Any]:
+async def get_network_test(public_id: str = Field(..., description="The unique public identifier of the Network Path test to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information about a specific Network Path test using its public identifier. Returns the test configuration, monitoring settings, and other metadata."""
 
     # Construct request model with validation
@@ -31533,7 +31653,7 @@ async def update_network_test(
     status: Literal["live", "paused"] | None = Field(None, description="Test execution state: use 'live' to run the test or 'paused' to disable it."),
     subtype: Literal["tcp", "udp", "icmp"] | None = Field(None, description="Network protocol type for the test."),
     tags: list[str] | None = Field(None, description="Array of tags for organizing and filtering the test in Datadog."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing Network Path test configuration, including assertions, request details, execution locations, and monitoring settings."""
 
     _min_failure_duration = _parse_int(min_failure_duration)
@@ -31587,7 +31707,7 @@ async def update_network_test(
 async def update_global_variable(
     variable_id: str = Field(..., description="The unique identifier of the global variable to update."),
     json_patch: list[_models.JsonPatchOperation] | None = Field(None, description="Array of JSON Patch operations to apply to the variable. Each operation specifies an action (replace, add, remove), a JSON pointer path to the target field, and optionally a new value. Operations are applied in order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Partially update a global variable using JSON Patch operations (RFC 6902). Specify only the fields you want to modify, such as name, value, description, or tags."""
 
     # Construct request model with validation
@@ -31626,7 +31746,7 @@ async def update_global_variable(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def list_tag_pipeline_rulesets() -> dict[str, Any]:
+async def list_tag_pipeline_rulesets() -> dict[str, Any] | ToolResult:
     """Retrieve all tag pipeline rulesets configured for your organization. This lists the enrichment rules that automatically apply tags based on defined conditions."""
 
     # Extract parameters for API call
@@ -31653,7 +31773,7 @@ async def list_tag_pipeline_rulesets() -> dict[str, Any]:
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def reorder_tag_pipeline_rulesets(data: list[_models.ReorderRulesetResourceData] = Field(..., description="An ordered array of ruleset resources specifying the new execution sequence. The position of each ruleset in the array determines its execution order in the pipeline.")) -> dict[str, Any]:
+async def reorder_tag_pipeline_rulesets(data: list[_models.ReorderRulesetResourceData] = Field(..., description="An ordered array of ruleset resources specifying the new execution sequence. The position of each ruleset in the array determines its execution order in the pipeline.")) -> dict[str, Any] | ToolResult:
     """Reorder the execution sequence of tag pipeline rulesets to control how enrichment rules are applied. The order of rulesets determines their execution priority in the tag enrichment pipeline."""
 
     # Construct request model with validation
@@ -31694,7 +31814,7 @@ async def reorder_tag_pipeline_rulesets(data: list[_models.ReorderRulesetResourc
 async def validate_tag_query(
     query: str = Field(..., alias="Query", description="The tag pipeline query string to validate for correct syntax and structure."),
     type_: Literal["validate_query"] = Field(..., alias="type", description="The resource type for query validation, which identifies this as a tag query validation operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Validate the syntax and structure of a tag pipeline query to ensure it conforms to the expected format before execution."""
 
     # Construct request model with validation
@@ -31735,7 +31855,7 @@ async def validate_tag_query(
 
 # Tags: Cloud Cost Management
 @mcp.tool()
-async def get_tag_pipeline_ruleset(ruleset_id: str = Field(..., description="The unique identifier of the tag pipeline ruleset to retrieve.")) -> dict[str, Any]:
+async def get_tag_pipeline_ruleset(ruleset_id: str = Field(..., description="The unique identifier of the tag pipeline ruleset to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific tag pipeline ruleset by its unique identifier. Use this to fetch the configuration and rules for a particular tag enrichment pipeline."""
 
     # Construct request model with validation
@@ -31776,7 +31896,7 @@ async def list_teams(
     page_size: str | None = Field(None, alias="pagesize", description="The number of teams to return per page. Maximum allowed value is 100."),
     filter_keyword: str | None = Field(None, alias="filterkeyword", description="Search query to filter teams by name, handle, or email address of team members."),
     filter_me: bool | None = Field(None, alias="filterme", description="When true, returns only teams that the current user is a member of."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all teams with optional filtering by keyword or membership. Use search and membership filters to find specific teams or limit results to teams the current user belongs to."""
 
     _page_number = _parse_int(page_number)
@@ -31827,7 +31947,7 @@ async def create_team(
     description: str | None = Field(None, description="Markdown-formatted description or content displayed on the team's homepage."),
     hidden_modules: list[str] | None = Field(None, description="List of module identifiers to hide from the team's interface."),
     visible_modules: list[str] | None = Field(None, description="List of module identifiers to display in the team's interface."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new team with specified configuration and add users to it. The users are associated through the data relationship field."""
 
     _banner = _parse_int(banner)
@@ -31878,7 +31998,7 @@ async def list_team_hierarchy_links(
     page_size: str | None = Field(None, alias="pagesize", description="The number of results to return per page. Maximum allowed value is 100."),
     filter_parent_team: str | None = Field(None, alias="filterparent_team", description="Filter results to only include hierarchy links where the specified team is the parent."),
     filter_sub_team: str | None = Field(None, alias="filtersub_team", description="Filter results to only include hierarchy links where the specified team is the sub team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all team hierarchy links with optional filtering by parent or sub team. Supports pagination to manage large result sets."""
 
     _page_number = _parse_int(page_number)
@@ -31919,7 +32039,7 @@ async def list_team_hierarchy_links(
 
 # Tags: Teams
 @mcp.tool()
-async def create_team_hierarchy_link(type_: Literal["team_hierarchy_links"] = Field(..., alias="type", description="The type of team hierarchy link being created.")) -> dict[str, Any]:
+async def create_team_hierarchy_link(type_: Literal["team_hierarchy_links"] = Field(..., alias="type", description="The type of team hierarchy link being created.")) -> dict[str, Any] | ToolResult:
     """Create a new hierarchy link between a parent team and a sub team to establish organizational structure relationships."""
 
     # Construct request model with validation
@@ -31957,7 +32077,7 @@ async def create_team_hierarchy_link(type_: Literal["team_hierarchy_links"] = Fi
 
 # Tags: Teams
 @mcp.tool()
-async def get_team_hierarchy_link(link_id: str = Field(..., description="The unique identifier of the team hierarchy link to retrieve.")) -> dict[str, Any]:
+async def get_team_hierarchy_link(link_id: str = Field(..., description="The unique identifier of the team hierarchy link to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific team hierarchy link by its identifier. Use this to fetch details about a relationship between teams in the organizational hierarchy."""
 
     # Construct request model with validation
@@ -31993,7 +32113,7 @@ async def get_team_hierarchy_link(link_id: str = Field(..., description="The uni
 
 # Tags: Teams
 @mcp.tool()
-async def delete_team_hierarchy_link(link_id: str = Field(..., description="The unique identifier of the team hierarchy link to remove.")) -> dict[str, Any]:
+async def delete_team_hierarchy_link(link_id: str = Field(..., description="The unique identifier of the team hierarchy link to remove.")) -> dict[str, Any] | ToolResult:
     """Remove a team hierarchy link by its identifier. This operation deletes the relationship between teams in the hierarchy structure."""
 
     # Construct request model with validation
@@ -32036,7 +32156,7 @@ async def list_team_connections(
     filter_team_ids: list[str] | None = Field(None, alias="filterteam_ids", description="Filter results by Datadog team IDs. Accepts an array of team identifiers."),
     filter_connected_team_ids: list[str] | None = Field(None, alias="filterconnected_team_ids", description="Filter results by connected team IDs from external systems. Accepts an array of external team identifiers."),
     filter_connection_ids: list[str] | None = Field(None, alias="filterconnection_ids", description="Filter results by connection IDs. Accepts an array of connection identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all team connections with optional filtering and pagination. Returns a paginated list of connections between teams and external source systems."""
 
     _page_size = _parse_int(page_size)
@@ -32083,7 +32203,7 @@ async def list_team_connections(
 
 # Tags: Teams
 @mcp.tool()
-async def create_team_connections(data: list[_models.TeamConnectionCreateData] = Field(..., description="Array of team connection objects to create. Each item in the array represents a single connection configuration. Order is preserved as submitted.")) -> dict[str, Any]:
+async def create_team_connections(data: list[_models.TeamConnectionCreateData] = Field(..., description="Array of team connection objects to create. Each item in the array represents a single connection configuration. Order is preserved as submitted.")) -> dict[str, Any] | ToolResult:
     """Create multiple team connections in bulk. Accepts an array of connection configurations to establish relationships between team members or teams."""
 
     # Construct request model with validation
@@ -32121,7 +32241,7 @@ async def create_team_connections(data: list[_models.TeamConnectionCreateData] =
 
 # Tags: Teams
 @mcp.tool()
-async def delete_team_connections(data: list[_models.TeamConnectionDeleteRequestDataItem] = Field(..., description="Array of team connection IDs to delete. Each ID identifies a specific connection to be removed.")) -> dict[str, Any]:
+async def delete_team_connections(data: list[_models.TeamConnectionDeleteRequestDataItem] = Field(..., description="Array of team connection IDs to delete. Each ID identifies a specific connection to be removed.")) -> dict[str, Any] | ToolResult:
     """Delete multiple team connections by their IDs. This operation removes the specified connections from the team."""
 
     # Construct request model with validation
@@ -32159,7 +32279,7 @@ async def delete_team_connections(data: list[_models.TeamConnectionDeleteRequest
 
 # Tags: Teams
 @mcp.tool()
-async def list_team_sync_configurations(filter_source: Literal["github"] = Field(..., alias="filtersource", description="Filter configurations by the external source platform used for team synchronization.")) -> dict[str, Any]:
+async def list_team_sync_configurations(filter_source: Literal["github"] = Field(..., alias="filtersource", description="Filter configurations by the external source platform used for team synchronization.")) -> dict[str, Any] | ToolResult:
     """Retrieve all team synchronization configurations for external source integrations. Returns a list of configurations used to link or provision teams with external platforms like GitHub."""
 
     # Construct request model with validation
@@ -32197,7 +32317,7 @@ async def list_team_sync_configurations(filter_source: Literal["github"] = Field
 
 # Tags: Teams
 @mcp.tool()
-async def get_team(team_id: str = Field(..., description="The unique identifier of the team to retrieve.")) -> dict[str, Any]:
+async def get_team(team_id: str = Field(..., description="The unique identifier of the team to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a single team by its unique identifier. Use this to fetch detailed information about a specific team."""
 
     # Construct request model with validation
@@ -32243,7 +32363,7 @@ async def update_team(
     description: str | None = Field(None, description="Markdown-formatted text for the team's homepage description or content."),
     hidden_modules: list[str] | None = Field(None, description="Array of module identifiers to hide from the team's interface. Order is not significant."),
     visible_modules: list[str] | None = Field(None, description="Array of module identifiers to display in the team's interface. Order is significant and determines display sequence."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update team details including name, handle, avatar, banner, and description. If team links are provided, they replace existing links in the specified order."""
 
     _banner = _parse_int(banner)
@@ -32287,7 +32407,7 @@ async def update_team(
 
 # Tags: Teams
 @mcp.tool()
-async def delete_team(team_id: str = Field(..., description="The unique identifier of the team to be deleted.")) -> dict[str, Any]:
+async def delete_team(team_id: str = Field(..., description="The unique identifier of the team to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a team from the system using its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -32323,7 +32443,7 @@ async def delete_team(team_id: str = Field(..., description="The unique identifi
 
 # Tags: Teams
 @mcp.tool()
-async def list_team_links(team_id: str = Field(..., description="The unique identifier of the team for which to retrieve links.")) -> dict[str, Any]:
+async def list_team_links(team_id: str = Field(..., description="The unique identifier of the team for which to retrieve links.")) -> dict[str, Any] | ToolResult:
     """Retrieve all links associated with a specific team. Returns a collection of links that have been created or shared within the team."""
 
     # Construct request model with validation
@@ -32365,7 +32485,7 @@ async def add_team_link(
     url: str = Field(..., description="The destination URL for the link. Must be a valid, fully-qualified web address."),
     type_: Literal["team_links"] = Field(..., alias="type", description="The classification type for this link. Currently only team links are supported."),
     position: str | None = Field(None, description="The display order of the link within the team's link list. Lower values appear first. Omit to append at the end."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new link to a team. Links are displayed on the team's profile and can be sorted by position."""
 
     _position = _parse_int(position)
@@ -32412,7 +32532,7 @@ async def add_team_link(
 async def get_team_link(
     team_id: str = Field(..., description="The unique identifier of the team that owns the link."),
     link_id: str = Field(..., description="The unique identifier of the link to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific link associated with a team. Use this to fetch details about a single team link by its identifier."""
 
     # Construct request model with validation
@@ -32455,7 +32575,7 @@ async def update_team_link(
     url: str = Field(..., description="The destination URL for the link. Must be a valid web address."),
     type_: Literal["team_links"] = Field(..., alias="type", description="The classification type for this team link. Currently only team links are supported."),
     position: str | None = Field(None, description="The display order of the link within the team's link collection. Lower values appear first. Maximum value is 2,147,483,647."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update an existing team link with new label, URL, position, or type. Changes are applied immediately to the team's link collection."""
 
     _position = _parse_int(position)
@@ -32502,7 +32622,7 @@ async def update_team_link(
 async def remove_team_link(
     team_id: str = Field(..., description="The unique identifier of the team from which the link will be removed."),
     link_id: str = Field(..., description="The unique identifier of the link to be removed from the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a link from a team. This operation deletes the specified link associated with the given team."""
 
     # Construct request model with validation
@@ -32543,7 +32663,7 @@ async def list_team_members(
     page_size: str | None = Field(None, alias="pagesize", description="Number of members to return per page. Maximum allowed is 100."),
     page_number: str | None = Field(None, alias="pagenumber", description="The page number to retrieve, starting from 0 for the first page."),
     filter_keyword: str | None = Field(None, alias="filterkeyword", description="Optional search filter to find members by email address or full name."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of members belonging to a specific team. Supports filtering by user email or name."""
 
     _page_size = _parse_int(page_size)
@@ -32589,7 +32709,7 @@ async def add_team_member(
     team_id: str = Field(..., description="The unique identifier of the team to which the user will be added."),
     type_: Literal["team_memberships"] = Field(..., alias="type", description="The type of team membership object being created."),
     role: Literal["admin"] | None = Field(None, description="The role to assign to the user within the team. If not specified, the user will be added with default permissions."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a user to a team with an optional role assignment. Team membership modification permissions are determined by team settings and the `user_access_manage` permission."""
 
     # Construct request model with validation
@@ -32636,7 +32756,7 @@ async def update_team_member_role(
     user_id: str = Field(..., description="The unique identifier of the user whose team membership should be updated."),
     type_: Literal["team_memberships"] = Field(..., alias="type", description="The type of team membership object being updated."),
     role: Literal["admin"] | None = Field(None, description="The role to assign to the user within the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update a user's role and membership attributes within a team. Requires appropriate team membership management permissions to modify team membership."""
 
     # Construct request model with validation
@@ -32681,7 +32801,7 @@ async def update_team_member_role(
 async def remove_team_member(
     team_id: str = Field(..., description="The unique identifier of the team from which the user will be removed."),
     user_id: str = Field(..., description="The unique identifier of the user to remove from the team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a user from a team. Access to modify team membership is controlled by team settings and typically requires the `user_access_manage` permission."""
 
     # Construct request model with validation
@@ -32720,7 +32840,7 @@ async def remove_team_member(
 async def list_flaky_tests(
     include_history: bool | None = Field(None, description="Include the complete status change history for each flaky test, ordered from most recent to oldest. Disabled by default for better performance."),
     limit: str | None = Field(None, description="Maximum number of flaky tests to return in the response. Must be between 1 and 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of flaky tests from Flaky Test Management with comprehensive metadata including failure rates, pipeline impact, and optional status change history."""
 
     _limit = _parse_int(limit)
@@ -32764,7 +32884,7 @@ async def list_flaky_tests(
 async def update_flaky_tests(
     tests: list[_models.UpdateFlakyTestsRequestTest] = Field(..., description="List of flaky tests to update. Each item specifies a test and its new state."),
     type_: Literal["update_flaky_test_state_request"] = Field(..., alias="type", description="Request type identifier that specifies this is a flaky test state update operation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the state of multiple flaky tests in Flaky Test Management. Allows bulk state transitions for flaky tests to track their status and resolution progress."""
 
     # Construct request model with validation
@@ -32808,7 +32928,7 @@ async def update_flaky_tests(
 async def list_billing_dimension_mappings(
     filter_month: str | None = Field(None, alias="filtermonth", description="Filter mappings by the month they become effective, specified as an ISO-8601 datetime in UTC. Defaults to the current month if not provided."),
     filter_view: str | None = Field(None, alias="filterview", description="Filter to retrieve either active billing dimension mappings for the current contract or all available mappings across all contracts."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the mapping of billing dimensions to usage metering API endpoint keys for a specified month and contract view. This data is updated monthly and is only available to parent-level organizations."""
 
     # Construct request model with validation
@@ -32851,7 +32971,7 @@ async def estimate_cost_by_organization(
     start_date: str | None = Field(None, description="Start date for the cost period in ISO-8601 format (YYYY-MM-DD). Cannot exceed two months in the past. Specify either this or start_month, but not both. Pair with end_date to view cumulative day-over-day costs."),
     end_date: str | None = Field(None, description="End date for the cost period in ISO-8601 format (YYYY-MM-DD). Used with start_date to define the cost reporting window."),
     include_connected_accounts: bool | None = Field(None, description="Whether to include partner customer accounts connected through the Datadog partner network program in the cost calculation."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve estimated costs for the current or previous month across your account, broken down by parent organization or sub-organizations. Cost data is delayed by up to 72 hours; use the historical cost endpoint for older data."""
 
     # Construct request model with validation
@@ -32893,7 +33013,7 @@ async def list_historical_costs(
     start_month: str = Field(..., description="The month for which to retrieve cost data, specified in ISO-8601 format (YYYY-MM). Cost data for a given month becomes available no later than the 16th of the following month."),
     view: str | None = Field(None, description="Specifies the cost breakdown granularity: `summary` for parent-organization level or `sub-org` for sub-organization level breakdown."),
     include_connected_accounts: bool | None = Field(None, description="Whether to include accounts connected to the current account as partner customers in the Datadog partner network program."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical cost data across your account, broken down by parent organization or sub-organization. Cost data becomes available no later than the 16th of the following month and is only accessible for parent-level organizations."""
 
     # Construct request model with validation
@@ -32940,7 +33060,7 @@ async def list_hourly_usage(
     filter_include_breakdown: bool | None = Field(None, alias="filterinclude_breakdown", description="Include detailed breakdown of usage by subcategories where applicable. Currently supported for the logs product family only."),
     page_limit: str | None = Field(None, alias="pagelimit", description="Maximum number of results to return per page. Useful for paginating large result sets."),
     page_next_record_id: str | None = Field(None, alias="pagenext_record_id", description="Pagination token from a previous response. Use this to retrieve the next page of results when the response contains additional records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve hourly usage metrics aggregated by product family for a specified time range. Supports filtering by product families, organizational hierarchy, and partner accounts with optional usage breakdowns."""
 
     _page_limit = _parse_int(page_limit)
@@ -32983,7 +33103,7 @@ async def list_hourly_usage(
 async def get_projected_cost(
     view: str | None = Field(None, description="Specifies the cost breakdown granularity. Use `summary` for parent-org level aggregation or `sub-org` for individual sub-organization breakdown."),
     include_connected_accounts: bool | None = Field(None, description="When enabled, includes costs from accounts connected to your organization through the Datadog partner network program."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the projected cost for the current month across your account, broken down by parent-org or sub-org level. Projected cost data becomes available around the 12th of each month and is only accessible for parent-level organizations."""
 
     # Construct request model with validation
@@ -33021,7 +33141,7 @@ async def get_projected_cost(
 
 # Tags: Usage Metering
 @mcp.tool()
-async def list_usage_attribution_types() -> dict[str, Any]:
+async def list_usage_attribution_types() -> dict[str, Any] | ToolResult:
     """Retrieve all available usage attribution types that can be used to categorize and track usage metrics. This operation returns the complete list of attribution type options supported by the system."""
 
     # Extract parameters for API call
@@ -33048,7 +33168,7 @@ async def list_usage_attribution_types() -> dict[str, Any]:
 
 # Tags: Users
 @mcp.tool()
-async def send_invitations(data: list[_models.UserInvitationData] = Field(..., description="Array of user invitation objects to send. Each invitation specifies a recipient and invitation details. Order is preserved during processing.")) -> dict[str, Any]:
+async def send_invitations(data: list[_models.UserInvitationData] = Field(..., description="Array of user invitation objects to send. Each invitation specifies a recipient and invitation details. Order is preserved during processing.")) -> dict[str, Any] | ToolResult:
     """Send invitation emails to one or more users inviting them to join the organization. Each invitation is processed and delivered to the specified recipients."""
 
     # Construct request model with validation
@@ -33086,7 +33206,7 @@ async def send_invitations(data: list[_models.UserInvitationData] = Field(..., d
 
 # Tags: Users
 @mcp.tool()
-async def get_invitation(user_invitation_uuid: str = Field(..., description="The unique identifier (UUID) of the user invitation to retrieve.")) -> dict[str, Any]:
+async def get_invitation(user_invitation_uuid: str = Field(..., description="The unique identifier (UUID) of the user invitation to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a specific user invitation by its UUID. Returns the invitation details including status and recipient information."""
 
     # Construct request model with validation
@@ -33126,7 +33246,7 @@ async def list_users(
     page_size: str | None = Field(None, alias="pagesize", description="Number of users to return per page. Maximum allowed is 100 users per page."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve from the paginated results."),
     filter_status: str | None = Field(None, alias="filterstatus", description="Filter results by user status. Accepts comma-separated values to match multiple statuses. Omit to return all users regardless of status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all users in the organization with optional pagination and status filtering. Results include active, pending, and deactivated users."""
 
     _page_size = _parse_int(page_size)
@@ -33171,7 +33291,7 @@ async def create_user(
     email: str = Field(..., description="The email address for the new user. Must be a valid email format unique to your organization."),
     type_: Literal["users"] = Field(..., alias="type", description="The resource type identifier for this user object."),
     title: str | None = Field(None, description="The job title or role designation for the user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new user account for your organization. The user will be assigned the specified email address and optional job title."""
 
     # Construct request model with validation
@@ -33212,7 +33332,7 @@ async def create_user(
 
 # Tags: Users
 @mcp.tool()
-async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve.")) -> dict[str, Any]:
+async def get_user(user_id: str = Field(..., description="The unique identifier of the user to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve detailed information for a specific user in the organization by their unique user ID."""
 
     # Construct request model with validation
@@ -33253,7 +33373,7 @@ async def update_user(
     id_: str = Field(..., alias="id", description="The unique identifier of the user resource being updated."),
     type_: Literal["users"] = Field(..., alias="type", description="The resource type identifier for users."),
     email: str | None = Field(None, description="The new email address for the user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update user details such as email. Requires administrator privileges via application key authentication."""
 
     # Construct request model with validation
@@ -33295,7 +33415,7 @@ async def update_user(
 
 # Tags: Users
 @mcp.tool()
-async def disable_user(user_id: str = Field(..., description="The unique identifier of the user to disable.")) -> dict[str, Any]:
+async def disable_user(user_id: str = Field(..., description="The unique identifier of the user to disable.")) -> dict[str, Any] | ToolResult:
     """Disable a user account. This operation requires administrator privileges and can only be performed using an application key belonging to an administrator user."""
 
     # Construct request model with validation
@@ -33331,7 +33451,7 @@ async def disable_user(user_id: str = Field(..., description="The unique identif
 
 # Tags: Users
 @mcp.tool()
-async def list_user_organizations(user_id: str = Field(..., description="The unique identifier of the user whose organizations you want to retrieve.")) -> dict[str, Any]:
+async def list_user_organizations(user_id: str = Field(..., description="The unique identifier of the user whose organizations you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve all organizations that a user belongs to. Returns the user's information along with a complete list of organizations they have joined."""
 
     # Construct request model with validation
@@ -33367,7 +33487,7 @@ async def list_user_organizations(user_id: str = Field(..., description="The uni
 
 # Tags: Teams
 @mcp.tool()
-async def list_user_memberships(user_uuid: str = Field(..., description="The unique identifier of the user whose memberships should be retrieved.")) -> dict[str, Any]:
+async def list_user_memberships(user_uuid: str = Field(..., description="The unique identifier of the user whose memberships should be retrieved.")) -> dict[str, Any] | ToolResult:
     """Retrieve all memberships associated with a specific user. Returns a list of groups, organizations, or teams the user belongs to."""
 
     # Construct request model with validation
@@ -33403,7 +33523,7 @@ async def list_user_memberships(user_uuid: str = Field(..., description="The uni
 
 # Tags: Workflow Automation
 @mcp.tool()
-async def get_workflow(workflow_id: str = Field(..., description="The unique identifier of the workflow to retrieve.")) -> dict[str, Any]:
+async def get_workflow(workflow_id: str = Field(..., description="The unique identifier of the workflow to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieve a workflow by its ID. Requires a registered application key or appropriate Actions API permissions configured in the UI."""
 
     # Construct request model with validation
@@ -33439,7 +33559,7 @@ async def get_workflow(workflow_id: str = Field(..., description="The unique ide
 
 # Tags: Workflow Automation
 @mcp.tool()
-async def delete_workflow(workflow_id: str = Field(..., description="The unique identifier of the workflow to delete.")) -> dict[str, Any]:
+async def delete_workflow(workflow_id: str = Field(..., description="The unique identifier of the workflow to delete.")) -> dict[str, Any] | ToolResult:
     """Delete a workflow by its ID. Requires a registered application key or appropriate Actions API permissions configured in the UI."""
 
     # Construct request model with validation
@@ -33479,7 +33599,7 @@ async def list_workflow_instances(
     workflow_id: str = Field(..., description="The unique identifier of the workflow whose instances you want to list."),
     page_size: str | None = Field(None, alias="pagesize", description="Number of instances to return per page. Maximum allowed is 100."),
     page_number: str | None = Field(None, alias="pagenumber", description="Zero-indexed page number to retrieve for pagination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all instances of a specified workflow with pagination support. Requires a registered application key or Actions API access configured in your account."""
 
     _page_size = _parse_int(page_size)
@@ -33524,7 +33644,7 @@ async def list_workflow_instances(
 async def execute_workflow(
     workflow_id: str = Field(..., description="The unique identifier of the workflow to execute."),
     payload: dict[str, Any] | None = Field(None, description="Input parameters passed to the workflow execution. Structure and required fields depend on the workflow definition."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Execute a workflow instance with optional input parameters. Requires a registered application key with Actions API access."""
 
     # Construct request model with validation
@@ -33566,7 +33686,7 @@ async def execute_workflow(
 async def get_workflow_instance(
     workflow_id: str = Field(..., description="The unique identifier of the workflow to which the instance belongs."),
     instance_id: str = Field(..., description="The unique identifier of the specific workflow instance execution to retrieve."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a specific execution instance of a workflow. This operation requires a registered application key or appropriate Actions API permissions configured in your Datadog account."""
 
     # Construct request model with validation
@@ -33605,7 +33725,7 @@ async def get_workflow_instance(
 async def cancel_workflow_instance(
     workflow_id: str = Field(..., description="The unique identifier of the workflow containing the instance to cancel."),
     instance_id: str = Field(..., description="The unique identifier of the workflow instance execution to cancel."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Cancels a specific execution of a workflow. Requires a registered application key or Actions API access configured in the UI."""
 
     # Construct request model with validation
