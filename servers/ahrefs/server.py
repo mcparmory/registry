@@ -5,7 +5,7 @@ Ahrefs API MCP Server
 API Info:
 - Terms of Service: https://ahrefs.com/terms
 
-Generated: 2026-04-14 18:13:08 UTC
+Generated: 2026-04-23 20:56:02 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -39,6 +40,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://api.ahrefs.com")
@@ -470,12 +472,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -497,7 +524,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -539,18 +570,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -622,7 +717,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -670,6 +773,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -732,7 +839,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -758,10 +873,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -857,16 +970,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -880,6 +994,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -922,6 +1037,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -933,18 +1063,26 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
 
 # Authentication scheme priority (most secure first)
 AUTH_SCHEME_PRIORITY = [
+    'AhrefsConnectOAuth',
     'bearerAuth',
 ]
 
 # Initialize authentication handlers at server startup
 _auth_handlers: dict[str, Any] = {}
+try:
+    _auth_handlers["AhrefsConnectOAuth"] = _auth.OAuth2Auth()
+    logging.info("Authentication configured: AhrefsConnectOAuth")
+except ValueError as e:
+    # Extract credential names from error message (first sentence before "Leave empty")
+    error_msg = str(e).split("Leave empty")[0].strip()
+    logging.warning(f"Credentials for AhrefsConnectOAuth not configured: {error_msg}")
+    _auth_handlers["AhrefsConnectOAuth"] = None
 try:
     _auth_handlers["bearerAuth"] = _auth.BearerTokenAuth(env_var="BEARER_TOKEN", token_format="Bearer")
     logging.info("Authentication configured: bearerAuth")
@@ -1078,7 +1216,7 @@ async def get_domain_rating(
     target: str = Field(..., description="The domain or URL to analyze. This is the primary target for which you want to retrieve the domain rating."),
     date: str = Field(..., description="The date for which to retrieve metrics, specified in YYYY-MM-DD format (e.g., 2024-01-15)."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol scheme to include in the analysis. Choose 'http' for HTTP only, 'https' for HTTPS only, or 'both' to analyze both protocols together. Defaults to 'both' if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the domain rating for a target domain or URL on a specific date. Domain rating is a metric that indicates the authority and trustworthiness of a domain."""
 
     # Construct request model with validation
@@ -1121,7 +1259,7 @@ async def get_backlinks_stats(
     date: str = Field(..., description="The date for which to retrieve backlink metrics, specified in YYYY-MM-DD format."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol to include in the search results: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both protocols if not specified."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The scope of the search relative to your target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to subdomains if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve backlink statistics for a target domain or URL on a specific date. Returns metrics about incoming links based on your specified scope and protocol."""
 
     # Construct request model with validation
@@ -1163,7 +1301,7 @@ async def list_outlinks_stats(
     target: str = Field(..., description="The domain or URL to analyze for outlink statistics."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol to filter by: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both protocols if not specified."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The scope of the search relative to your target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to all subdomains if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve outlink statistics for a target domain or URL. This beta endpoint provides insights into outbound links, though data may not perfectly match the Ahrefs UI and accuracy improvements are ongoing."""
 
     # Construct request model with validation
@@ -1207,7 +1345,7 @@ async def get_domain_metrics(
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Determines how search volume is calculated: use 'monthly' for monthly averages or 'average' for overall average. This affects volume, traffic, and traffic value calculations. Defaults to 'monthly'."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol scheme to include in the analysis: 'http', 'https', or 'both' to include both protocols. Defaults to 'both'."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The scope of analysis relative to your target: 'exact' for the exact URL, 'prefix' for URL prefix matching, 'domain' for the entire domain, or 'subdomains' to include all subdomains. Defaults to 'subdomains'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve comprehensive SEO metrics for a domain or URL, including keyword rankings, traffic estimates, and search volume data for a specified date."""
 
     # Construct request model with validation
@@ -1252,7 +1390,7 @@ async def get_refdomains_history(
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data points. Choose from daily, weekly, or monthly aggregation; defaults to monthly."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol scope to include in the analysis: both HTTP and HTTPS, HTTP only, or HTTPS only; defaults to both."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The search scope relative to your target: exact domain match, prefix match, entire domain, or all subdomains; defaults to subdomains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical data on referring domains for a target domain or URL over a specified time period, with flexible grouping and protocol filtering options."""
 
     # Construct request model with validation
@@ -1295,7 +1433,7 @@ async def get_domain_rating_history(
     date_from: str = Field(..., description="The start date for the historical data range in YYYY-MM-DD format (e.g., 2024-01-01)."),
     date_to: str | None = Field(None, description="The end date for the historical data range in YYYY-MM-DD format (e.g., 2024-12-31). If not provided, defaults to today's date."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="How to group the historical data by time interval: daily, weekly, or monthly. Defaults to monthly grouping if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical Domain Rating data for a domain or URL over a specified time period, grouped by your chosen time interval."""
 
     # Construct request model with validation
@@ -1338,7 +1476,7 @@ async def get_url_rating_history(
     date_from: str = Field(..., description="The start date for the historical data retrieval in YYYY-MM-DD format (e.g., 2024-01-01)."),
     date_to: str | None = Field(None, description="The end date for the historical data retrieval in YYYY-MM-DD format (e.g., 2024-12-31). If omitted, defaults to the current date."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data points. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the historical URL Rating progression for a target domain or URL over a specified date range, with flexible time-based grouping options."""
 
     # Construct request model with validation
@@ -1384,7 +1522,7 @@ async def list_page_history(
     date_to: str | None = Field(None, description="The end date for the historical period in YYYY-MM-DD format (e.g., 2024-12-31). If omitted, defaults to the current date."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data: 'daily' for day-by-day data, 'weekly' for week-by-week aggregation, or 'monthly' for month-by-month aggregation. Defaults to 'monthly'."),
     page_positions: Literal["top10", "top100"] | None = Field(None, description="Filter results by ranking position: 'top10' returns only pages ranking in the top 10 positions, or 'top100' returns all pages ranking in the top 100. Defaults to 'top100'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical ranking data for pages from a target domain or URL over a specified time period. Results can be grouped by daily, weekly, or monthly intervals and filtered by search scope and ranking position."""
 
     # Construct request model with validation
@@ -1431,7 +1569,7 @@ async def get_domain_metrics_history(
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly for broader trends."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Filter results by protocol: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The scope of analysis relative to the target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to subdomains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical performance metrics for a domain or URL over a specified date range, with options to customize time intervals, volume calculations, and protocol scope."""
 
     # Construct request model with validation
@@ -1477,7 +1615,7 @@ async def list_keyword_history(
     select: str | None = Field(None, description="A comma-separated list of data columns to include in the response. Defaults to date, top 3 keywords, top 4-10 keywords, and top 11+ keywords."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Filter results by protocol: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the historical ranking data for keywords associated with a target domain or URL across a specified date range, with options to group results by time interval and filter by protocol."""
 
     # Construct request model with validation
@@ -1522,7 +1660,7 @@ async def list_country_metrics(
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Determines how search volume is calculated: either as a monthly total or as an average. This affects volume, traffic, and traffic value metrics. Defaults to monthly."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="The protocol to include in the analysis: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="The scope of analysis based on your target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to subdomains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve performance metrics broken down by country for a target domain or URL on a specific date. Useful for analyzing geographic traffic distribution and keyword performance across regions."""
 
     # Construct request model with validation
@@ -1565,7 +1703,7 @@ async def list_pages_by_traffic(
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Calculate search volume based on monthly totals or average values. Defaults to monthly calculation, which also affects traffic and traffic value metrics."),
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Filter results by protocol type: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both protocols."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="Define the search scope relative to your target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to subdomains."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve pages grouped by traffic volume ranges for a domain or URL. Useful for identifying high-traffic pages and traffic distribution patterns across your site."""
 
     # Construct request model with validation
@@ -1612,7 +1750,7 @@ async def get_search_volume_history(
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="How search volume is calculated: monthly totals or average per month. This affects reported volume, traffic, and traffic value metrics. Defaults to monthly totals."),
     top_positions: Literal["top_10", "top_100"] | None = Field(None, description="The number of top organic search positions to include in volume calculations: top 10 or top 100 results. Defaults to top 10."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="The time interval for grouping historical data: daily, weekly, or monthly snapshots. Defaults to monthly grouping."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical search volume data for a domain or URL over a specified time period. Use this to analyze organic search trends and traffic patterns."""
 
     # Construct request model with validation
@@ -1660,7 +1798,7 @@ async def list_backlinks(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid options; link_group_count is not supported for sorting."),
     where: str | None = Field(None, description="Filter expression to narrow results based on column values. Refer to the response schema for recognized column identifiers."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve all backlinks pointing to a target domain or URL, including detailed backlink profile metrics and historical data. Results can be aggregated, filtered, and sorted to analyze link quality and sources."""
 
     # Construct request model with validation
@@ -1707,7 +1845,7 @@ async def list_broken_backlinks(
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Protocol to search within: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to searching both protocols."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="Scope of the search relative to your target. Use 'exact' for the precise URL, 'prefix' for URLs starting with the target, 'domain' for the exact domain, or 'subdomains' to include all subdomains. Defaults to subdomains."),
     aggregation: Literal["similar_links", "1_per_domain", "all"] | None = Field(None, description="Grouping strategy for backlinks: 'similar_links' groups by similarity, '1_per_domain' returns one backlink per referring domain, or 'all' returns every backlink. Defaults to similar_links."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve broken backlinks pointing to a target domain or URL. Returns backlinks that result in HTTP errors, with options to filter, sort, and aggregate results by domain or similarity."""
 
     # Construct request model with validation
@@ -1754,7 +1892,7 @@ async def list_refdomains(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid column identifiers."),
     where: str | None = Field(None, description="Filter expression to narrow results based on column values. Refer to the response schema for recognized column identifiers."),
     history: str | None = Field(None, description="Time frame for historical backlink data: 'live' for current data only, 'since:<date>' for data since a specific date in YYYY-MM-DD format, or 'all_time' for complete history. Defaults to all_time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve referring domains data for a target domain or URL, with filtering and sorting capabilities to analyze backlink sources."""
 
     # Construct request model with validation
@@ -1801,7 +1939,7 @@ async def list_anchor_text(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid column identifiers."),
     where: str | None = Field(None, description="Filter expression to narrow results based on specific column values. Supports the column identifiers documented in the response schema."),
     history: str | None = Field(None, description="Time frame for historical data: 'live' for current data only, 'since:YYYY-MM-DD' to include data from a specific date forward, or 'all_time' for complete historical records. Defaults to all_time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve anchor text (clickable words in hyperlinks) that point to a target domain or URL. Use this to analyze inbound link text and understand how external sites reference your target."""
 
     # Construct request model with validation
@@ -1849,7 +1987,7 @@ async def list_organic_keywords(
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Protocol scheme to target: both HTTP and HTTPS, HTTP only, or HTTPS only; defaults to both."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="Search scope relative to the target: exact URL match, URL prefix match, entire domain, or domain with subdomains; defaults to subdomains."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Method for calculating search volume: monthly totals or average across the period; defaults to monthly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve organic keywords that drive traffic to a target domain or URL, with metrics for a specified date. Results can be filtered, sorted, and customized to show specific data columns."""
 
     # Construct request model with validation
@@ -1899,7 +2037,7 @@ async def list_organic_competitors(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Must correspond to a valid response schema field."),
     where: str | None = Field(None, description="Filter expression to narrow results. Supports column identifiers from the response schema (different set than select parameter)."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Search volume calculation method: monthly totals or average across the period. Affects volume, traffic, and traffic value metrics. Defaults to monthly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Identify organic search competitors for a target domain or URL by analyzing shared keyword rankings in a specific country and date."""
 
     # Construct request model with validation
@@ -1947,7 +2085,7 @@ async def list_top_pages(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid column identifiers."),
     where: str | None = Field(None, description="Filter expression to narrow results based on column values. Refer to the response schema for recognized column identifiers and filtering syntax."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Calculation method for search volume metrics: 'monthly' for current month data or 'average' for historical average. Affects volume, traffic, and traffic value calculations. Defaults to monthly."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the top-performing pages for a domain or URL, including organic search metrics such as traffic and rankings for a specified date."""
 
     # Construct request model with validation
@@ -1995,7 +2133,7 @@ async def list_paid_pages(
     protocol: Literal["both", "http", "https"] | None = Field(None, description="Protocol to search within: both HTTP and HTTPS, HTTP only, or HTTPS only. Defaults to both."),
     mode: Literal["exact", "prefix", "domain", "subdomains"] | None = Field(None, description="Search scope relative to the target: exact URL match, URL prefix match, entire domain, or all subdomains. Defaults to all subdomains."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Calculation method for search volume metrics: monthly totals or average over time. Defaults to monthly and affects volume, traffic, and traffic value columns."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve paid search pages for a target domain or URL, showing which pages are generating paid search traffic on a specified date."""
 
     # Construct request model with validation
@@ -2044,7 +2182,7 @@ async def list_pages_by_backlinks(
     where_column: str | None = Field(None, description="Column identifier to filter on (e.g., 'backlinks', 'url_rating_source', 'domain_rating_source')"),
     where_operator: str | None = Field(None, description="Comparison operator: '>', '<', '>=', '<=', '==', '!=' (default: '==')"),
     where_value: str | None = Field(None, description="Value to compare against (will be properly escaped)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the best performing pages for a target domain or URL ranked by backlink count. Use this to identify which pages attract the most external links and understand your site's link profile."""
 
     # Call helper functions
@@ -2093,7 +2231,7 @@ async def list_pages_by_internal_links(
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000."),
     order_by: str | None = Field(None, description="Column identifier to sort results by. See the response schema for valid options. Note that certain columns like http_code_target, languages_target, last_visited_target, powered_by_target, target_redirect, title_target, url_rating_target, and target_redirect are not supported for sorting."),
     where: str | None = Field(None, description="Filter expression to narrow results. Accepts column identifiers recognized by the API's filter syntax (note: these may differ from the select parameter's column identifiers)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the best-performing pages for a target domain or URL ranked by the number of internal links pointing to them. Use this to identify which pages are most linked internally and understand your site's link structure."""
 
     # Construct request model with validation
@@ -2139,7 +2277,7 @@ async def list_linked_domains(
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000."),
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid column identifiers."),
     where: str | None = Field(None, description="Filter expression to narrow results. Supports column identifiers recognized by the API (note: these may differ from the select parameter identifiers)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve domains that link to your target domain or URL, with customizable filtering, sorting, and column selection for link analysis."""
 
     # Construct request model with validation
@@ -2185,7 +2323,7 @@ async def list_external_anchors(
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000."),
     order_by: str | None = Field(None, description="Column identifier to sort results by. See response schema for valid column names."),
     where: str | None = Field(None, description="Filter expression to narrow results. Supports column identifiers recognized by the API (note: different set than the select parameter)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve outgoing external anchor links from a target domain or URL. Results can be filtered by search scope, protocol, and custom expressions, with configurable sorting and pagination."""
 
     # Construct request model with validation
@@ -2231,7 +2369,7 @@ async def list_internal_anchors(
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000."),
     order_by: str | None = Field(None, description="Column identifier to sort results by. See response schema for valid column identifiers."),
     where: str | None = Field(None, description="Filter expression to narrow results. Supports the column identifiers listed in the response schema (note: different identifiers than the select parameter)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve outgoing internal anchor links from a target domain or URL. Results can be filtered, ordered, and scoped by search mode and protocol."""
 
     # Construct request model with validation
@@ -2281,7 +2419,7 @@ async def get_keyword_metrics(
     order_by: str | None = Field(None, description="Column identifier to sort results by. Refer to the response schema for valid options; note that volume_monthly is not supported for sorting on this endpoint."),
     limit: int | None = Field(None, description="Maximum number of results to return. Defaults to 1000 if not specified."),
     search_engine: Literal["google"] | None = Field(None, description="Deprecated parameter. Only 'google' is supported; included for backward compatibility."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve keyword performance metrics and search data for specified keywords in a target country, with optional filtering by domain/URL ranking position and historical volume trends."""
 
     # Construct request model with validation
@@ -2324,7 +2462,7 @@ async def get_keyword_volume_history(
     keyword: str = Field(..., description="The keyword term to retrieve volume history for."),
     date_from: str | None = Field(None, description="The start date for the historical period in YYYY-MM-DD format. If omitted, defaults to the earliest available data."),
     date_to: str | None = Field(None, description="The end date for the historical period in YYYY-MM-DD format. If omitted, defaults to the most recent available data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical search volume data for a keyword across a specified date range in a given country. Use this to analyze keyword popularity trends over time."""
 
     # Construct request model with validation
@@ -2366,7 +2504,7 @@ async def get_keyword_volume_by_country(
     keyword: str = Field(..., description="The keyword to analyze. Provide the exact search term you want to get volume data for."),
     limit: int | None = Field(None, description="Maximum number of countries to return in the results. Omit to get all available data."),
     search_engine: Literal["google"] | None = Field(None, description="Search engine to query (currently only Google is supported). This parameter is deprecated as of August 5, 2024."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve search volume metrics for a keyword broken down by country. Use this to understand geographic demand patterns and identify high-opportunity markets for your target keyword."""
 
     # Construct request model with validation
@@ -2413,7 +2551,7 @@ async def search_matching_keywords(
     search_engine: Literal["google"] | None = Field(None, description="Deprecated parameter. Only 'google' is supported; included for backward compatibility."),
     match_mode: Literal["terms", "phrase"] | None = Field(None, description="Search matching mode: 'terms' finds keywords containing your search words in any order, while 'phrase' requires exact word order. Defaults to 'terms' mode."),
     terms: Literal["all", "questions"] | None = Field(None, description="Filter results to include all keyword ideas or only those phrased as questions. Defaults to returning all keyword ideas."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Find keyword variations and related search terms with performance metrics for a specific country. Returns matching keywords based on search mode (exact phrase or term-based) with optional filtering and sorting capabilities."""
 
     # Construct request model with validation
@@ -2459,7 +2597,7 @@ async def list_related_keywords(
     where: str | None = Field(None, description="Filter expression to narrow results. Use column identifiers from the response schema to create conditions (note: different identifiers than those used in the select parameter)."),
     view_for: Literal["top_10", "top_100"] | None = Field(None, description="Scope of analysis: analyze keywords from the top 10 or top 100 ranking pages. Defaults to top 10 if not specified."),
     terms: Literal["also_rank_for", "also_talk_about", "all"] | None = Field(None, description="Type of related keywords to retrieve: keywords the top pages also rank for, topics they mention, or both combined. Defaults to all types if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Discover related keywords that top-ranking pages rank for or mention, including keywords they also target and topics they discuss. Use this to identify keyword opportunities and content gaps around your target search terms."""
 
     # Construct request model with validation
@@ -2504,7 +2642,7 @@ async def search_keyword_suggestions(
     order_by: str | None = Field(None, description="Column name to sort results by. Refer to the response schema for valid column identifiers; note that monthly search volume is not available as a sort option for this endpoint."),
     where: str | None = Field(None, description="Filter expression to narrow results. Use column identifiers from the response schema to create conditions (different identifiers than those used in the select parameter)."),
     search_engine: Literal["google"] | None = Field(None, description="Search engine source for suggestions. Currently supports Google only; this parameter is deprecated as of August 5, 2024."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve keyword search suggestions for a specified country. Returns relevant keyword variations and related search terms to help identify search opportunities in your target market."""
 
     # Construct request model with validation
@@ -2546,7 +2684,7 @@ async def list_audit_projects(
     project_url: str | None = Field(None, description="Filter results to projects matching this target URL. The comparison ignores protocol differences and trailing slashes for flexible matching."),
     project_name: str | None = Field(None, description="Filter results to projects matching this name."),
     date: str | None = Field(None, description="Retrieve metrics from a specific crawl date and time in ISO 8601 format (YYYY-MM-DDThh:mm:ss UTC). If omitted, returns data from the most recent available crawl. For scheduled crawls, returns the latest crawl completed before this timestamp; for Always-on audits, returns data as of the specified moment. The time component defaults to 00:00:00 if not provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve health scores and performance metrics for Site Audit projects. Returns data from the most recent crawl by default, or from a specified crawl date if provided."""
 
     # Construct request model with validation
@@ -2587,7 +2725,7 @@ async def list_audit_projects(
 async def list_audit_issues(
     project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Site Audit project dashboard (https://app.ahrefs.com/site-audit/#project_id#)."),
     date: str | None = Field(None, description="Optional timestamp in ISO 8601 format (YYYY-MM-DDThh:mm:ss UTC) to retrieve issues from a specific crawl. Defaults to the most recent crawl if not provided. For scheduled crawls, returns data from the latest crawl completed before this timestamp; for Always-on audits, returns data as of the specified date and time. If only the date is provided without time, it defaults to 00:00:00 UTC."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve site audit issues for a specific project. This operation costs 50 API units per request and returns issues from either a specified crawl date or the most recent available crawl."""
 
     # Construct request model with validation
@@ -2630,7 +2768,7 @@ async def get_page_content(
     target_url: str = Field(..., description="The full URL of the page to retrieve content for."),
     project_id: int = Field(..., description="The unique identifier of the Site Audit project. Only projects with verified ownership are supported. You can find this ID in your Site Audit project URL on Ahrefs."),
     date: str | None = Field(None, description="Optional crawl date in ISO 8601 format (YYYY-MM-DDThh:mm:ss UTC). Defaults to the most recent crawl if omitted. For scheduled crawls, returns data from the latest crawl completed before this timestamp; for Always-on audits, returns data as of the specified date and time. If only the date is provided, the time defaults to 00:00:00 UTC."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve page content and metadata from a Site Audit project for a specific URL. This operation consumes 50 API units per request."""
 
     # Construct request model with validation
@@ -2679,7 +2817,7 @@ async def list_audit_pages(
     where_column: str | None = Field(None, description="Column identifier to filter on (e.g., 'backlinks', 'url_rating_source', 'domain_rating_source')"),
     where_operator: str | None = Field(None, description="Comparison operator: '>', '<', '>=', '<=', '==', '!=' (default: '==')"),
     where_value: str | None = Field(None, description="Value to compare against (will be properly escaped)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve page-level metrics and SEO data from a Site Audit crawl. This endpoint costs 50 API units per request and supports filtering, sorting, and comparison against previous crawls."""
 
     # Call helper functions
@@ -2729,7 +2867,7 @@ async def get_rank_tracker_overview(
     order_by: str | None = Field(None, description="A column identifier to sort results by. Refer to the response schema for valid column identifiers."),
     limit: int | None = Field(None, description="The maximum number of results to return. Defaults to 1000 if not specified."),
     where: str | None = Field(None, description="A filter expression to narrow results by specific criteria. Refer to the response schema for recognized column identifiers and filter syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve overview metrics for all tracked keywords in a Rank Tracker project on a specific date, with support for filtering, sorting, and device-specific rankings."""
 
     # Construct request model with validation
@@ -2776,7 +2914,7 @@ async def get_serp_overview(
     location_id: int | None = Field(None, description="Optional location ID for the tracked keyword. Use the management/project-keywords endpoint to find the correct location ID for your keyword."),
     date: str | None = Field(None, description="Optional timestamp to retrieve historical SERP data in ISO 8601 format (YYYY-MM-DDThh:mm:ss). If omitted, returns the most recent available data."),
     top_positions: int | None = Field(None, description="Optional limit on the number of top organic positions to return. If not specified, all available positions are included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the current SERP overview for a tracked keyword, including top organic positions and ranking data. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -2823,7 +2961,7 @@ async def list_competitor_rankings(
     order_by: str | None = Field(None, description="The column identifier to sort results by. Refer to the response schema for valid column names."),
     where: str | None = Field(None, description="A filter expression to narrow results. Supports filtering by recognized column identifiers (which may differ from those used in the select parameter)."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="The method for calculating search volume metrics: monthly (default) or average. This affects volume, traffic, and traffic value calculations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve an overview of competitor rankings for your tracked keywords on a specific date. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -2871,7 +3009,7 @@ async def list_competitor_pages(
     where: str | None = Field(None, description="A filter expression to narrow results. Supports column identifiers recognized by the API (which may differ from select parameter identifiers)."),
     target_and_tracked_competitors_only: bool | None = Field(None, description="When enabled, restricts results to only target and tracked competitors. Defaults to false."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="The method for calculating search volume: monthly (default) or average. This affects volume, traffic, and traffic value metrics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve competitor pages data for a Rank Tracker project on a specific date, filtered by device type and customizable metrics."""
 
     # Construct request model with validation
@@ -2915,7 +3053,7 @@ async def list_competitor_stats(
     device: Literal["desktop", "mobile"] = Field(..., description="The device type to report rankings for: either desktop or mobile."),
     project_id: int = Field(..., description="The unique identifier of your Rank Tracker project, found in the project URL within Ahrefs."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="The method for calculating search volume metrics: monthly (default) for monthly averages or average for overall average volume. This affects volume, traffic, and traffic value calculations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve competitor performance metrics for tracked keywords on a specified date and device type. Use this to analyze how competitors rank for your target keywords and monitor their search visibility."""
 
     # Construct request model with validation
@@ -2959,7 +3097,7 @@ async def get_serp_overview_keyword(
     keyword: str = Field(..., description="The search keyword to retrieve SERP overview data for."),
     top_positions: int | None = Field(None, description="Maximum number of top organic search results to return. If omitted, all available positions are included."),
     date: str | None = Field(None, description="Specific date and time for which to retrieve SERP data in ISO 8601 format (YYYY-MM-DDThh:mm:ss). If not provided, the most recent available data is returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve SERP (Search Engine Results Page) overview data for a keyword in a specified country, including top organic positions and customizable metrics."""
 
     # Construct request model with validation
@@ -3002,7 +3140,7 @@ async def analyze_targets_batch(
     targets: list[_models.PostV3BatchAnalysisBodyTargetsItem] = Field(..., description="Provide a list of targets (domains, URLs, or keywords) to analyze. Each target will be evaluated for the selected metrics."),
     order_by: str | None = Field(None, description="Sort results by a specific SEO metric column. Refer to the response schema for valid column identifiers."),
     volume_mode: Literal["monthly", "average"] | None = Field(None, description="Choose how search volume is calculated: monthly (current month data) or average (historical average). This affects volume, traffic, and traffic value metrics."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Perform batch SEO analysis on multiple targets to retrieve comprehensive metrics including backlinks, keywords, traffic, and ranking data. Customize which metrics to return and how results are ordered."""
 
     # Construct request model with validation
@@ -3040,7 +3178,7 @@ async def analyze_targets_batch(
 
 # Tags: Subscription Information
 @mcp.tool()
-async def get_subscription_limits_and_usage() -> dict[str, Any]:
+async def get_subscription_limits_and_usage() -> dict[str, Any] | ToolResult:
     """Retrieve current workspace and API key limits and usage information. This request is free and does not consume any API units."""
 
     # Extract parameters for API call
@@ -3071,7 +3209,7 @@ async def list_projects(
     owned_by: str | None = Field(None, description="Filter projects by the email address of the project owner."),
     access: Literal["private", "shared"] | None = Field(None, description="Filter projects by access type: either private (accessible only to you) or shared (accessible to others)."),
     has_keywords: bool | None = Field(None, description="Filter to only include projects that have Rank Tracker keywords configured."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve your projects with optional filtering by owner, access type, and keyword tracking status. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3116,7 +3254,7 @@ async def create_project(
     project_name: str = Field(..., description="A descriptive name for this project to identify it within the workspace."),
     owned_by: str | None = Field(None, description="The email address of the user who will own this project. If not specified, ownership defaults to the workspace owner."),
     access: Literal["private", "shared"] | None = Field(None, description="The access control level for this project, either private (restricted to owner) or shared (accessible to workspace members)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a new project by specifying a target URL, protocol, and matching scope. The project will be assigned to the specified owner or the workspace owner by default."""
 
     # Construct request model with validation
@@ -3157,7 +3295,7 @@ async def create_project(
 async def update_project_access(
     access: Literal["private", "shared"] = Field(..., description="The new access level for the project. Must be either 'private' to restrict access to the project owner, or 'shared' to allow others to access it."),
     project_id: int = Field(..., description="The unique identifier of the project to update. You can find this ID in the URL of your Rank Tracker project dashboard in Ahrefs (the numeric value in the project URL)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the access setting for a project to control whether it is private or shared. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3195,7 +3333,7 @@ async def update_project_access(
 
 # Tags: Management
 @mcp.tool()
-async def list_project_keywords(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project URL).")) -> dict[str, Any]:
+async def list_project_keywords(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project URL).")) -> dict[str, Any] | ToolResult:
     """Retrieve all keywords tracked for a specific project in Rank Tracker. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3237,7 +3375,7 @@ async def add_keywords(
     project_id: int = Field(..., description="The unique identifier of the project you want to add keywords to. You can find this ID in the URL of your Rank Tracker project dashboard."),
     locations: list[_models.PutV3ManagementProjectKeywordsBodyLocationsItem] = Field(..., description="A list of locations where the keywords should be tracked. Use the Locations and languages endpoint to retrieve valid country codes, language codes, and location IDs for your target regions."),
     keywords: list[_models.PutV3ManagementProjectKeywordsBodyKeywordsItem] = Field(..., description="A list of keywords to add to the project. Each keyword will be assigned to all specified locations."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add keywords to a project and assign them to specific locations for tracking. This operation allows you to expand your keyword monitoring across different geographic regions."""
 
     # Construct request model with validation
@@ -3281,7 +3419,7 @@ async def add_keywords(
 async def delete_keywords(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project, found in the project URL within Ahrefs."),
     keywords: list[_models.PutV3ManagementProjectKeywordsDeleteBodyKeywordsItem] = Field(..., description="An array of keywords to remove from the project. Each keyword should be specified as a string value."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more keywords from a Rank Tracker project. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3322,7 +3460,7 @@ async def delete_keywords(
 
 # Tags: Management
 @mcp.tool()
-async def list_project_competitors(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project overview URL).")) -> dict[str, Any]:
+async def list_project_competitors(project_id: int = Field(..., description="The unique identifier of the project, found in the URL of your Rank Tracker project dashboard (the numeric ID in the project overview URL).")) -> dict[str, Any] | ToolResult:
     """Retrieve the list of competitors tracked for a specific project. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3363,7 +3501,7 @@ async def list_project_competitors(project_id: int = Field(..., description="The
 async def add_competitors(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project. You can find this ID in the URL of your project dashboard (https://app.ahrefs.com/rank-tracker/overview/#project_id#)."),
     competitors: list[_models.PostV3ManagementProjectCompetitorsBodyCompetitorsItem] = Field(..., description="An array of competitor entries to add to the project. Each item represents a competitor domain or website to track."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add competitors to a Rank Tracker project for monitoring and comparison. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3407,7 +3545,7 @@ async def add_competitors(
 async def delete_competitors(
     project_id: int = Field(..., description="The unique identifier of the Rank Tracker project, found in the project URL within Ahrefs (e.g., https://app.ahrefs.com/rank-tracker/overview/#project_id#)."),
     competitors: list[_models.PostV3ManagementProjectCompetitorsDeleteBodyCompetitorsItem] = Field(..., description="An array of competitor identifiers to remove from the project. Each item should be a competitor ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove competitors from a Rank Tracker project. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3451,7 +3589,7 @@ async def delete_competitors(
 async def list_locations(
     country_code: Literal["ad", "ae", "af", "ag", "ai", "al", "am", "ao", "ar", "as", "at", "au", "aw", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bn", "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cd", "cf", "cg", "ch", "ci", "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cy", "cz", "de", "dj", "dk", "dm", "do", "dz", "ec", "ee", "eg", "es", "et", "fi", "fj", "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn", "gp", "gq", "gr", "gt", "gu", "gy", "hk", "hn", "hr", "ht", "hu", "id", "ie", "il", "im", "in", "iq", "is", "it", "je", "jm", "jo", "jp", "ke", "kg", "kh", "ki", "kn", "kr", "kw", "ky", "kz", "la", "lb", "lc", "li", "lk", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mk", "ml", "mm", "mn", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx", "my", "mz", "na", "nc", "ne", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz", "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pn", "pr", "ps", "pt", "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "se", "sg", "sh", "si", "sk", "sl", "sm", "sn", "so", "sr", "st", "sv", "td", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tw", "tz", "ua", "ug", "us", "uy", "uz", "vc", "ve", "vg", "vi", "vn", "vu", "ws", "ye", "yt", "za", "zm", "zw"] = Field(..., description="The two-letter ISO 3166-1 alpha-2 country code identifying the country for which to retrieve location and language information."),
     us_state: Literal["al", "ak", "az", "ar", "ca", "co", "ct", "de", "dc", "fl", "ga", "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "va", "wa", "wv", "wi", "wy"] | None = Field(None, description="The two-letter ISO 3166-2:US state code. Required only when country_code is set to 'us' to retrieve state-specific location and language data."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve available locations and supported languages for a specified country. This is a free operation that does not consume API units."""
 
     # Construct request model with validation
@@ -3489,7 +3627,7 @@ async def list_locations(
 
 # Tags: Management
 @mcp.tool()
-async def list_keyword_list_keywords(keyword_list_id: int = Field(..., description="The unique identifier of the keyword list from which to retrieve keywords.")) -> dict[str, Any]:
+async def list_keyword_list_keywords(keyword_list_id: int = Field(..., description="The unique identifier of the keyword list from which to retrieve keywords.")) -> dict[str, Any] | ToolResult:
     """Retrieve all keywords from a specified keyword list. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3530,7 +3668,7 @@ async def list_keyword_list_keywords(keyword_list_id: int = Field(..., descripti
 async def add_keywords_to_list(
     keyword_list_id: int = Field(..., description="The unique identifier of the keyword list to update. Must reference an existing keyword list."),
     keywords: list[str] = Field(..., description="An array of keywords to add to the list. Each keyword is a string value; order is preserved as provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add one or more keywords to an existing keyword list. The keywords will be appended to the list's current contents."""
 
     # Construct request model with validation
@@ -3574,7 +3712,7 @@ async def add_keywords_to_list(
 async def delete_keyword_list_keywords(
     keyword_list_id: int = Field(..., description="The unique identifier of the keyword list from which keywords will be removed."),
     keywords: list[str] = Field(..., description="An array of keywords to delete from the specified keyword list. Each keyword in the array will be removed from the list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove one or more keywords from an existing keyword list. Specify the keyword list by its ID and provide the keywords to be deleted."""
 
     # Construct request model with validation
@@ -3615,7 +3753,7 @@ async def delete_keyword_list_keywords(
 
 # Tags: Management
 @mcp.tool()
-async def list_brand_radar_prompts(report_id: str = Field(..., description="The unique identifier of the Brand Radar report. You can find this ID in the URL of your Brand Radar report within Ahrefs (the #report_id# segment in https://app.ahrefs.com/brand-radar/reports/#report_id#/...).")) -> dict[str, Any]:
+async def list_brand_radar_prompts(report_id: str = Field(..., description="The unique identifier of the Brand Radar report. You can find this ID in the URL of your Brand Radar report within Ahrefs (the #report_id# segment in https://app.ahrefs.com/brand-radar/reports/#report_id#/...).")) -> dict[str, Any] | ToolResult:
     """Retrieve the Brand Radar prompts associated with a specific report. This operation is free and does not consume any API units."""
 
     # Construct request model with validation
@@ -3657,7 +3795,7 @@ async def create_brand_radar_prompt(
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report where prompts will be applied. You can find this ID in the URL of your Brand Radar report in Ahrefs."),
     countries: list[str] = Field(..., description="A list of two-letter country codes in ISO 3166-1 alpha-2 format specifying the geographic regions for the prompts."),
     prompts: list[str] = Field(..., description="A list of custom prompts to apply to the report. Each prompt must be valid UTF-8 text and not exceed 400 characters in length."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create custom prompts for Brand Radar reports to customize monitoring and analysis. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3702,7 +3840,7 @@ async def delete_brand_radar_prompts(
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report from which to delete prompts. You can find this ID in the URL of your Brand Radar report in Ahrefs."),
     prompts: list[str] = Field(..., description="List of custom prompts to delete. Each prompt must be valid UTF-8 encoded text and not exceed 400 characters in length."),
     countries: list[str] | None = Field(None, description="Optional list of two-letter country codes (ISO 3166-1 alpha-2 format) to scope the prompt deletion to specific countries."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove custom prompts from a Brand Radar report. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3743,7 +3881,7 @@ async def delete_brand_radar_prompts(
 
 # Tags: Management
 @mcp.tool()
-async def list_brand_radar_reports() -> dict[str, Any]:
+async def list_brand_radar_reports() -> dict[str, Any] | ToolResult:
     """Retrieve brand radar reports to monitor brand performance and competitive insights. This endpoint is free to use and does not consume any API units."""
 
     # Extract parameters for API call
@@ -3774,7 +3912,7 @@ async def create_brand_radar_report(
     data_source: Literal["chatgpt", "gemini", "perplexity", "copilot"] = Field(..., description="The AI data source to monitor for brand mentions. Choose from ChatGPT, Gemini, Perplexity, or Copilot."),
     frequency: Literal["daily", "weekly", "monthly", "off"] = Field(..., description="The update frequency for the report. Select daily for real-time monitoring, weekly for periodic summaries, monthly for long-term trends, or off to disable the report."),
     name: str | None = Field(None, description="A custom name for the report to help identify it in your dashboard."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create a brand radar report that monitors brand mentions across AI-powered data sources. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3815,7 +3953,7 @@ async def create_brand_radar_report(
 async def update_brand_radar_report(
     prompts_frequency: list[_models.PatchV3ManagementBrandRadarReportsBodyPromptsFrequencyItem] = Field(..., description="The frequency at which the report should generate prompts. Specify as an array of frequency values."),
     report_id: str = Field(..., description="The unique identifier of the Brand Radar report to update. You can find this ID in the URL of your report in Ahrefs at https://app.ahrefs.com/brand-radar/reports/#report_id#/..."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Update the configuration of a Brand Radar report, including its monitoring frequency. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -3862,7 +4000,7 @@ async def list_ai_responses(
     order_by: Literal["relevance", "volume"] | None = Field(None, description="Column to sort results by. Choose between relevance (default) or volume-based ordering."),
     report_id: str | None = Field(None, description="ID of a saved report to use as the base configuration. When provided, brand, competitors, market, and country settings are inherited from the report, though country and filters can be overridden."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to use for generating responses. Choose Ahrefs prompts (standard pricing), custom prompts (free, requires report_id), or both (default). Custom prompts require a report_id to be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve AI-generated responses from multiple chatbot models for brand-related queries. API unit consumption depends on prompt type: custom prompts are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -3908,7 +4046,7 @@ async def list_cited_pages(
     date: str | None = Field(None, description="Specific date to search for in YYYY-MM-DD format. If omitted, returns results across all available dates."),
     report_id: str | None = Field(None, description="ID of a saved Brand Radar report to use as the configuration source. When provided, brand, competitors, market, and country settings are inherited from the report. You can find this ID in your Ahrefs Brand Radar report URL. Country and filter parameters will override report settings if also provided."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to apply: 'ahrefs' for Ahrefs-generated prompts, 'custom' for your own prompts (requires report_id), or omit to use both types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve pages that cite your brand across specified chatbot models and AI overviews. API unit consumption depends on the prompts parameter: custom prompt data requests are free, while requests including Ahrefs prompt data incur standard API unit charges."""
 
     # Construct request model with validation
@@ -3954,7 +4092,7 @@ async def list_cited_domains(
     date: str | None = Field(None, description="Specific date to retrieve data for, formatted as YYYY-MM-DD."),
     report_id: str | None = Field(None, description="ID of a saved Brand Radar report to use as the configuration source. When provided, brand, competitors, market, and country settings are inherited from the report. You can find this ID in the URL of your Brand Radar report in Ahrefs. Country and filter parameters can override report settings if provided."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to use for analysis. Choose 'ahrefs' for Ahrefs-generated prompts, 'custom' for your own prompts (requires report_id), or omit to use both types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve domains cited in AI visibility data from chatbot models and search engines. API unit consumption depends on the prompts parameter: requests using only custom prompts are free, while requests including Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -3998,7 +4136,7 @@ async def list_brand_radar_impression_overviews(
     where: str | None = Field(None, description="Filter expression to narrow results using recognized column identifiers. Refer to the response schema for valid column names to use in filter conditions."),
     report_id: str | None = Field(None, description="ID of an existing Brand Radar report to use as a configuration source. When provided, brand, competitors, market, and country settings are inherited from the report. Can be found in the URL of your Brand Radar report in Ahrefs. Country and filter parameters will override report settings if also provided."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to use for data retrieval: 'ahrefs' for Ahrefs-generated prompts, 'custom' for user-defined prompts, or omit to use both types. Custom prompts require a report_id to be specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve impressions overview data for Brand Radar across specified chatbot models and data sources. API unit consumption depends on prompt type: custom prompts are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4042,7 +4180,7 @@ async def list_brand_mentions_overview(
     where: str | None = Field(None, description="Filter expression to narrow results using recognized column identifiers. Use this to apply conditions on the mentions data."),
     report_id: str | None = Field(None, description="The Brand Radar report ID to use as a template. When provided, brand, competitors, market, and country settings are inherited from the report. You can find this ID in your Brand Radar report URL. Country or filter parameters will override report settings if also provided."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to apply to the data. Choose 'ahrefs' for Ahrefs-generated prompts, 'custom' for your own prompts (requires a report_id), or omit to use both types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve an overview of brand mentions data across specified data sources. API unit consumption depends on prompt type: custom prompts only are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4085,7 +4223,7 @@ async def get_share_of_voice_overview(
     where: str | None = Field(None, description="Filter expression to narrow results using recognized column identifiers specific to this endpoint."),
     report_id: str | None = Field(None, description="The Brand Radar report ID to use as a base configuration. When provided, brand, competitors, market, and country settings are inherited from the report, though country and filter parameters can override report settings if explicitly provided."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Specify which prompt types to include: 'ahrefs' for Ahrefs-generated prompts, 'custom' for custom prompts (requires report_id), or omit to use both types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Share of Voice data for brands across specified data sources. API unit consumption depends on prompt type: custom prompts only are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4131,7 +4269,7 @@ async def list_brand_mention_impressions_history(
     report_id: str | None = Field(None, description="The ID of a saved report to use as a template. When provided, market, country, and filter settings are inherited from the report, though country and filters can be overridden with explicit parameters."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="The type of prompts to include in results: 'ahrefs' for Ahrefs-generated prompts, 'custom' for user-defined prompts (requires report_id), or omit to include both types."),
     where: str | None = Field(None, description="A filter expression to narrow results. Supports recognized column identifiers for advanced filtering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical impression data for brand mentions across AI chatbot platforms. API consumption varies based on prompt type: custom prompts are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4177,7 +4315,7 @@ async def list_brand_mention_history(
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Filter results to a specific prompt type: 'ahrefs' for Ahrefs-generated prompts or 'custom' for user-defined prompts. If not specified, both types are included. Custom prompts require a report_id."),
     report_id: str | None = Field(None, description="The Brand Radar report ID to use as a configuration source. When provided, market, country, and filter settings are inherited from the report, though country and filters parameters can override report settings. Find the report ID in your Ahrefs Brand Radar report URL."),
     where: str | None = Field(None, description="A filter expression to narrow results by specific columns. Refer to API documentation for recognized column identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical mention data for a brand across specified AI chatbot models and date range. API consumption varies based on prompt type: custom prompts are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4222,7 +4360,7 @@ async def list_brand_sov_history(
     where: str | None = Field(None, description="Optional filter expression to narrow results based on specific column identifiers."),
     report_id: str | None = Field(None, description="ID of an existing Brand Radar report to use as a template. When provided, brand, competitors, market, and country settings are inherited from the report, though country and filters parameters can override report settings."),
     prompts: Literal["ahrefs", "custom"] | None = Field(None, description="Type of prompts to include in results: 'ahrefs' for Ahrefs-generated prompts, 'custom' for user-defined prompts (requires report_id), or omit to include both types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical Share of Voice data for brands across specified chatbot models and date ranges. API unit consumption depends on prompt type: custom prompts only are free, while Ahrefs prompts follow standard pricing."""
 
     # Construct request model with validation
@@ -4267,7 +4405,7 @@ async def list_web_analytics_stats(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics. Use standard filter syntax to specify conditions on available dimensions and metrics."),
     order_by: str | None = Field(None, description="Sort results by a metric in ascending or descending order, specified as metric_name:asc or metric_name:desc."),
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Useful for pagination and controlling response size."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve aggregated web analytics statistics for a project, with optional filtering, sorting, and date range constraints."""
 
     # Construct request model with validation
@@ -4311,7 +4449,7 @@ async def get_web_analytics_chart(
     where: str | None = Field(None, description="Optional filter expression to narrow results by specific dimensions and metrics. Use standard filter syntax to refine the data returned."),
     from_: str | None = Field(None, alias="from", description="Optional start datetime for the query range. Specify in ISO 8601 format to define when the data collection period begins."),
     to: str | None = Field(None, description="Optional end datetime for the query range. Specify in ISO 8601 format to define when the data collection period ends."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve time-series chart data for web analytics metrics with configurable time granularity. Use this to visualize analytics trends across different time periods."""
 
     # Construct request model with validation
@@ -4356,7 +4494,7 @@ async def list_source_channels(
     where: str | None = Field(None, description="Filter results using expressions that reference dimensions and metrics to narrow down the data returned."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics data grouped by source channels, including visitor counts, bounce rates, and session duration metrics. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -4401,7 +4539,7 @@ async def get_source_channels_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics. Use standard filter syntax to refine the dataset."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format to define the beginning of the analysis period."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format to define the end of the analysis period."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve source channels chart data with visitor analytics and session metrics, aggregated at the specified time granularity."""
 
     # Construct request model with validation
@@ -4446,7 +4584,7 @@ async def list_traffic_sources(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics to narrow down the data."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve traffic sources data for a project, showing where visitors are coming from. Results can be filtered by date range and custom criteria, with optional sorting and pagination."""
 
     # Construct request model with validation
@@ -4491,7 +4629,7 @@ async def get_traffic_sources_chart(
     where: str | None = Field(None, description="Optional filter expression to narrow results by dimensions and metrics relevant to your traffic sources data."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range in ISO 8601 format. If omitted, data retrieval begins from the earliest available records."),
     to: str | None = Field(None, description="End datetime for the data query range in ISO 8601 format. If omitted, data retrieval extends to the most recent available records."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve traffic sources chart data with visitor metrics aggregated by your specified time granularity (hourly, daily, weekly, or monthly). This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -4536,7 +4674,7 @@ async def list_referrers(
     where: str | None = Field(None, description="Filter results using a filter expression that can reference available dimensions and metrics to narrow down referrer data."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve referrer traffic sources and their associated metrics for a project, with optional filtering, sorting, and date range selection."""
 
     # Construct request model with validation
@@ -4581,7 +4719,7 @@ async def get_referrers_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics. Use standard filter syntax to refine the data returned."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format for the timestamp."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format for the timestamp."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve referrers chart data for web analytics, showing traffic sources over a specified time period with configurable granularity and filtering options."""
 
     # Construct request model with validation
@@ -4627,7 +4765,7 @@ async def list_utm_parameters(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics."),
     to: str | None = Field(None, description="End datetime for the data query range in ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve UTM parameter data for web analytics, grouped by a specified UTM dimension (source, medium, campaign, term, or content) with optional filtering and time range selection."""
 
     # Construct request model with validation
@@ -4673,7 +4811,7 @@ async def get_utm_params_chart(
     where: str | None = Field(None, description="Optional filter expression to refine the data. You can reference available dimensions and metrics to narrow results based on specific criteria."),
     from_: str | None = Field(None, alias="from", description="Optional start datetime for the data query range. Use ISO 8601 format to define when the analytics period begins."),
     to: str | None = Field(None, description="Optional end datetime for the data query range. Use ISO 8601 format to define when the analytics period ends."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve UTM parameters chart data for web analytics, visualizing traffic patterns across a specified UTM dimension over time. Use this to analyze campaign performance, traffic sources, or other UTM-tracked metrics."""
 
     # Construct request model with validation
@@ -4721,7 +4859,7 @@ async def list_entry_pages(
     where_column: str | None = Field(None, description="Column identifier to filter on (e.g., 'backlinks', 'url_rating_source', 'domain_rating_source')"),
     where_operator: str | None = Field(None, description="Comparison operator: '>', '<', '>=', '<=', '==', '!=' (default: '==')"),
     where_value: str | None = Field(None, description="Value to compare against (will be properly escaped)"),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve entry pages analytics data for a project, showing which pages users first land on. Supports filtering by date range and result limits."""
 
     # Call helper functions
@@ -4770,7 +4908,7 @@ async def get_entry_pages_chart(
     where: str | None = Field(None, description="Apply filters to the data using dimension and metric expressions to narrow results to specific criteria."),
     to: str | None = Field(None, description="End datetime for the data query range in ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve entry pages chart data for a project, showing visitor traffic patterns across specified time periods. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -4815,7 +4953,7 @@ async def list_exit_pages(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics to narrow down the data."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve exit pages analytics data for a project, showing which pages users exit from most frequently. Supports filtering, sorting, and date range specification."""
 
     # Construct request model with validation
@@ -4860,7 +4998,7 @@ async def get_exit_pages_chart(
     where: str | None = Field(None, description="Filter the data using expressions that reference available dimensions and metrics to narrow results."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve exit pages chart data for a project, showing which pages visitors exit from. Supports filtering, time-based aggregation, and customizable metrics selection."""
 
     # Construct request model with validation
@@ -4905,7 +5043,7 @@ async def list_top_pages_by_pageviews(
     where: str | None = Field(None, description="Apply filters to narrow results by dimensions and metrics. Specify filter conditions to focus on specific pages or traffic characteristics."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query. Specify as an ISO 8601 formatted datetime."),
     to: str | None = Field(None, description="End of the date range for the analytics query. Specify as an ISO 8601 formatted datetime."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve the top-performing pages for a project ranked by pageviews and other engagement metrics. Use filtering and date range parameters to analyze specific traffic patterns and time periods."""
 
     # Construct request model with validation
@@ -4950,7 +5088,7 @@ async def get_top_pages_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics (e.g., country, device type, traffic source)."),
     to: str | None = Field(None, description="End datetime for the data query range in ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a chart of your top-performing pages with visitor metrics and engagement statistics, aggregated at your specified time granularity."""
 
     # Construct request model with validation
@@ -4995,7 +5133,7 @@ async def list_web_analytics_by_city(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics. Allows narrowing data to specific criteria."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format. Data returned will be from this point forward."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format. Data returned will be up to this point."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics metrics aggregated by city for a specified project. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5040,7 +5178,7 @@ async def get_web_analytics_cities_chart(
     where: str | None = Field(None, description="Optional filter expression to narrow results based on dimensions and metrics. Use this to segment data by specific criteria."),
     from_: str | None = Field(None, alias="from", description="The start datetime for the data query range. Use ISO 8601 format to specify when the analytics period begins."),
     to: str | None = Field(None, description="The end datetime for the data query range. Use ISO 8601 format to specify when the analytics period ends."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve cities chart data for web analytics showing visitor distribution across geographic locations. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5085,7 +5223,7 @@ async def list_continent_analytics(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics to narrow down the data returned."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics metrics aggregated by continent for a specified project and time period. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5130,7 +5268,7 @@ async def get_continents_chart(
     where: str | None = Field(None, description="Filter expression to narrow results based on dimensions and metrics. Use standard filter syntax to refine the data."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the query in ISO 8601 format. Data will be included from this datetime onwards."),
     to: str | None = Field(None, description="End of the date range for the query in ISO 8601 format. Data will be included up to this datetime."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics chart data aggregated by continent. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5175,7 +5313,7 @@ async def list_web_analytics_by_country(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics. Enables targeted analysis of specific geographic or performance segments."),
     to: str | None = Field(None, description="End datetime for the analytics query range in ISO 8601 format. Data will be included up to this point in time."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the analytics query range in ISO 8601 format. Data will be included from this point forward."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics metrics aggregated by country for a specified project and time period. Results can be filtered, sorted, and paginated to analyze geographic performance data."""
 
     # Construct request model with validation
@@ -5220,7 +5358,7 @@ async def get_countries_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics (e.g., visitor count thresholds, traffic source)."),
     to: str | None = Field(None, description="End datetime for the query range in ISO 8601 format. If omitted, defaults to the current time."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the query range in ISO 8601 format. If omitted, defaults to a standard lookback period."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve web analytics chart data aggregated by country with configurable time granularity and filtering. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -5265,7 +5403,7 @@ async def list_language_analytics(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics to narrow down the dataset."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format. Data returned will be from this point forward."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format. Data returned will be up to this point."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve browser language statistics for a project, showing how visitors are distributed across different language preferences. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5310,7 +5448,7 @@ async def get_language_analytics_chart(
     where: str | None = Field(None, description="Optional filter expression to narrow results based on dimensions and metrics available in the analytics dataset."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the analytics query range in ISO 8601 format. If omitted, defaults to an appropriate historical starting point."),
     to: str | None = Field(None, description="End datetime for the analytics query range in ISO 8601 format. If omitted, defaults to the current time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve browser language distribution data for web analytics with support for time-series charting across different granularities. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5355,7 +5493,7 @@ async def list_browser_analytics(
     where: str | None = Field(None, description="Filter results using expressions that reference dimensions (such as browser) and metrics (such as visitors or bounce rate)."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve browser analytics data for a project, including visitor counts, bounce rates, and session duration metrics. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -5400,7 +5538,7 @@ async def get_browser_chart(
     where: str | None = Field(None, description="Filter expression to narrow results based on dimensions and metrics. Use this to segment data by specific criteria."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format to define when the analytics period begins."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format to define when the analytics period ends."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve browser usage chart data for a project, showing visitor distribution across different browsers over a specified time period with configurable granularity."""
 
     # Construct request model with validation
@@ -5445,7 +5583,7 @@ async def list_browser_versions(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics. Allows you to narrow down the data returned."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the query in ISO 8601 datetime format. Data returned will be from this point forward."),
     to: str | None = Field(None, description="End of the date range for the query in ISO 8601 datetime format. Data returned will be up to this point."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve browser version statistics and metrics for web analytics. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5490,7 +5628,7 @@ async def get_browser_versions_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics (e.g., country, device type, traffic source)."),
     to: str | None = Field(None, description="End date and time for the data query in ISO 8601 format. If omitted, defaults to the current time."),
     from_: str | None = Field(None, alias="from", description="Start date and time for the data query in ISO 8601 format. If omitted, defaults to a standard lookback period."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a chart of browser version performance metrics including visitor counts and session statistics over a specified time period."""
 
     # Construct request model with validation
@@ -5535,7 +5673,7 @@ async def list_device_analytics(
     where: str | None = Field(None, description="Filter results using a filter expression that can reference available dimensions and metrics to narrow the dataset."),
     from_: str | None = Field(None, alias="from", description="Start of the time range for the query in ISO 8601 datetime format (inclusive)."),
     to: str | None = Field(None, description="End of the time range for the query in ISO 8601 datetime format (inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve device analytics data for a project, including metrics such as user counts, sessions, and engagement by device type. Results can be filtered, sorted, and scoped to a specific time range."""
 
     # Construct request model with validation
@@ -5580,7 +5718,7 @@ async def get_devices_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics (e.g., country, device type, visitor segment)."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve device analytics chart data showing visitor distribution across different devices over a specified time period. This endpoint is free and does not consume API units."""
 
     # Construct request model with validation
@@ -5625,7 +5763,7 @@ async def list_operating_systems_analytics(
     where: str | None = Field(None, description="Filter results using expressions that reference dimensions and metrics. Allows you to narrow down data based on specific criteria."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the analytics query in ISO 8601 datetime format. Data returned will include this date and time onward."),
     to: str | None = Field(None, description="End of the date range for the analytics query in ISO 8601 datetime format. Data returned will include results up to this date and time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve analytics data for operating systems across your project. This endpoint provides insights into visitor behavior by operating system and is available at no cost."""
 
     # Construct request model with validation
@@ -5670,7 +5808,7 @@ async def get_operating_systems_chart(
     where: str | None = Field(None, description="Filter the data using expressions that reference available dimensions and metrics to narrow results to specific criteria."),
     to: str | None = Field(None, description="End datetime for the data query range. Use ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range. Use ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve operating systems chart data for web analytics across a specified time period and granularity. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -5715,7 +5853,7 @@ async def list_operating_system_versions(
     where: str | None = Field(None, description="Filter results using expressions that reference available dimensions and metrics to narrow the dataset."),
     from_: str | None = Field(None, alias="from", description="Start of the date range for the query in ISO 8601 datetime format."),
     to: str | None = Field(None, description="End of the date range for the query in ISO 8601 datetime format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve operating system versions analytics data for a specified project, with optional filtering, sorting, and date range selection."""
 
     # Construct request model with validation
@@ -5760,7 +5898,7 @@ async def get_operating_system_versions_chart(
     where: str | None = Field(None, description="Filter expression to narrow results by dimensions and metrics (e.g., country, device type, engagement thresholds)."),
     to: str | None = Field(None, description="End datetime for the data query range in ISO 8601 format."),
     from_: str | None = Field(None, alias="from", description="Start datetime for the data query range in ISO 8601 format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a time-series chart of visitor counts and engagement metrics broken down by operating system versions. Data can be filtered, aggregated at different time intervals, and limited to specific OS versions."""
 
     # Construct request model with validation
@@ -5805,7 +5943,7 @@ async def get_search_performance_history(
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Specify the search result category to analyze: web, image, video, or news. Defaults to web search results."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Choose the time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly grouping."),
     date_to: str | None = Field(None, description="The end date for the historical period in YYYY-MM-DD format. If not specified, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Google Search Console performance metrics over a specified historical period, with options to filter by device type, search category, and time interval grouping."""
 
     # Construct request model with validation
@@ -5850,7 +5988,7 @@ async def list_keyword_position_history(
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Specify the type of search results to analyze: web, image, video, or news. Defaults to web search results."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Set the time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly aggregation."),
     date_to: str | None = Field(None, description="The end date for the historical period in YYYY-MM-DD format. If not specified, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical keyword position data for a project, aggregated into position ranges over a specified time period. Use this to analyze ranking trends and performance across different time intervals."""
 
     # Construct request model with validation
@@ -5895,7 +6033,7 @@ async def list_page_history_gsc(
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Specify the search result category to analyze: web, image, video, or news. Defaults to web search results."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Set the time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly grouping."),
     date_to: str | None = Field(None, description="The end date for the historical period in YYYY-MM-DD format. If not specified, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical page performance metrics from Google Search Console, including impressions, clicks, and rankings over a specified time period."""
 
     # Construct request model with validation
@@ -5938,7 +6076,7 @@ async def list_device_performance(
     date_to: str | None = Field(None, description="End date for the performance data in YYYY-MM-DD format (e.g., 2024-01-31). If not provided, defaults to the current date. Must be on or after the start date."),
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Filter results to a specific search type: web search, image search, video search, or news search. Defaults to web search if not specified."),
     where: str | None = Field(None, description="Optional filter expression to narrow results by supported fields (e.g., country, device, query). Use this to segment performance data further."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Google Search Console performance metrics aggregated by device type (desktop, mobile, tablet) for a specified date range."""
 
     # Construct request model with validation
@@ -5983,7 +6121,7 @@ async def list_gsc_metrics_by_country(
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Specify the type of search results to include in metrics: web, image, video, or news. Defaults to web search."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Set the time interval for grouping historical data: daily, weekly, or monthly. Defaults to monthly aggregation."),
     date_to: str | None = Field(None, description="The end date for the metrics period in YYYY-MM-DD format. If not specified, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve Google Search Console metrics aggregated by country for a specified date range. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -6025,7 +6163,7 @@ async def list_ctr_by_position(
     date_from: str = Field(..., description="Start date for the historical period in YYYY-MM-DD format (required)."),
     date_to: str | None = Field(None, description="End date for the historical period in YYYY-MM-DD format. If omitted, defaults to the start date."),
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet. If omitted, returns metrics across all device types."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve click-through rate (CTR) metrics aggregated by search position for a specified date range. This endpoint is free to use and does not consume API units."""
 
     # Construct request model with validation
@@ -6069,7 +6207,7 @@ async def list_search_performance_by_position(
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet."),
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Specify the type of search results to analyze: web, image, video, or news. Defaults to web search results."),
     date_to: str | None = Field(None, description="The end date for the historical period you want to analyze, specified in YYYY-MM-DD format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve search performance metrics aggregated by search result position. This endpoint provides free access to performance data without consuming API units."""
 
     # Construct request model with validation
@@ -6113,7 +6251,7 @@ async def list_keyword_history_gsc(
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Group historical data by time interval: daily, weekly, or monthly. Defaults to monthly grouping."),
     date_to: str | None = Field(None, description="End date for the historical period in YYYY-MM-DD format (inclusive)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical Google Search Console keyword performance data with optional filtering by device type, country, and date range. Data can be grouped by daily, weekly, or monthly intervals."""
 
     # Construct request model with validation
@@ -6158,7 +6296,7 @@ async def list_gsc_keywords(
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet."),
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Type of search results to include: web, image, video, or news. Defaults to web if not specified."),
     date_to: str | None = Field(None, description="End date for the historical data range in YYYY-MM-DD format. If not provided, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve keywords from Google Search Console data for a specified date range. This operation is free and does not consume API units."""
 
     # Construct request model with validation
@@ -6202,7 +6340,7 @@ async def get_page_history(
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet. If not specified, data for all device types is included."),
     history_grouping: Literal["daily", "weekly", "monthly"] | None = Field(None, description="Time interval for grouping historical data points. Choose from daily, weekly, or monthly granularity. Defaults to monthly if not specified."),
     date_to: str | None = Field(None, description="End date for the historical period in YYYY-MM-DD format. If not specified, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve historical performance data for specified pages from Google Search Console, including metrics like clicks, impressions, and average position over a configurable time period."""
 
     # Construct request model with validation
@@ -6247,7 +6385,7 @@ async def list_gsc_pages(
     device: Literal["desktop", "mobile", "tablet"] | None = Field(None, description="Filter results by device type: desktop, mobile, or tablet."),
     search_type: Literal["web", "image", "video", "news"] | None = Field(None, description="Type of search results to include in the data; defaults to web search and supports web, image, video, and news results."),
     date_to: str | None = Field(None, description="End date for the historical data range in YYYY-MM-DD format; if omitted, defaults to the current date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve page performance metrics from Google Search Console, including impressions, clicks, and rankings for specified date ranges and filters."""
 
     # Construct request model with validation
@@ -6293,7 +6431,7 @@ async def list_anonymous_queries(
     limit: int | None = Field(None, description="Maximum number of results to return in the response. Defaults to 1000 if not specified."),
     order_by: str | None = Field(None, description="Column name to sort results by. Refer to the response schema for valid column identifiers available for ordering."),
     where: str | None = Field(None, description="Filter expression to narrow results. Supports filtering by keyword (string) and url (string) columns using standard filter syntax."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve anonymous search queries for a specific project and country. Returns query data filtered by date range with customizable columns, sorting, and filtering options."""
 
     # Construct request model with validation

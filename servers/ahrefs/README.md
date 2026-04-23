@@ -1,11 +1,12 @@
 # Ahrefs API MCP Server
+<!-- mcp-name: com.mcparmory/ahrefs -->
 
 Base URL: https://api.ahrefs.com
 | | |
 |---|---|
 | **Category** | Analytics |
 | **Tools** | 118 |
-| **Auth** | Bearer Token |
+| **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
 - **Terms of Service:** [https://ahrefs.com/terms](https://ahrefs.com/terms)
@@ -17,6 +18,9 @@ Base URL: https://api.ahrefs.com
 ### Quick Start (recommended)
 
 ```bash
+OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 uvx mcparmory-ahrefs
 ```
@@ -25,6 +29,9 @@ uvx mcparmory-ahrefs
 
 ```bash
 pip install mcparmory-ahrefs
+OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
 BEARER_TOKEN=YOUR_BEARER_TOKEN \
 mcparmory-ahrefs
 ```
@@ -40,6 +47,9 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
       "command": "uvx",
       "args": ["mcparmory-ahrefs"],
       "env": {
+        "OAUTH2_CLIENT_ID": "YOUR_OAUTH2_CLIENT_ID",
+        "OAUTH2_CLIENT_SECRET": "YOUR_OAUTH2_CLIENT_SECRET",
+        "OAUTH2_SCOPES": "YOUR_OAUTH2_SCOPES",
         "BEARER_TOKEN": "YOUR_BEARER_TOKEN"
       }
     }
@@ -47,14 +57,33 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, Codex):
 }
 ```
 
+Set `OAUTH2_SCOPES` to a comma-separated list of scopes your app requires (e.g. `OAUTH2_SCOPES=scope_a,scope_b`). Open `.env` to see all available scopes with descriptions.
+
 ---
 
 ## Credentials
 
 Set the following environment variables (via MCP client `env` config, shell export, or `.env` file):
 
+- `OAUTH2_CLIENT_ID` — OAuth2 client ID
+- `OAUTH2_CLIENT_SECRET` — OAuth2 client secret
+- `OAUTH2_SCOPES` — OAuth2 scopes (comma-separated)
 - `BEARER_TOKEN` — Bearer token
 Do not commit credentials to version control.
+
+### OAuth2
+
+Add this **redirect URI** to your OAuth provider's allowed redirect URIs:
+
+```
+http://localhost:9400/callback
+```
+
+If you change `OAUTH2_CALLBACK_PORT` in `.env`, update the redirect URI to match.
+
+On first use, a browser window opens automatically for OAuth authorization. Grant access when prompted — tokens are saved to `tokens/oauth2_tokens.json` and refreshed automatically.
+
+**Re-authorization:** Delete `tokens/oauth2_tokens.json` and restart the server.
 
 ---
 
@@ -87,14 +116,33 @@ Example (if server is at `/home/user/mcp-servers/ahrefs`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/ahrefs:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
 docker build -t ahrefs .
-docker run -p 8000:8000 --env-file .env ahrefs
+mkdir -p tokens
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env ahrefs
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
+
+On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {
