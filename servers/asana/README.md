@@ -1,11 +1,12 @@
 # Asana MCP Server
+<!-- mcp-name: com.mcparmory/asana -->
 
 Base URL: https://app.asana.com/api/1.0
 | | |
 |---|---|
 | **Category** | Productivity |
 | **Tools** | 220 |
-| **Auth** | OAuth2, Bearer Token |
+| **Auth** | Bearer Token, OAuth2 |
 
 ## API Info
 - **API License:** Apache 2.0 — [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0)
@@ -117,6 +118,19 @@ Example (if server is at `/home/user/mcp-servers/asana`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens \
+  -e OAUTH2_CLIENT_ID=YOUR_OAUTH2_CLIENT_ID \
+  -e OAUTH2_CLIENT_SECRET=YOUR_OAUTH2_CLIENT_SECRET \
+  -e OAUTH2_SCOPES=YOUR_OAUTH2_SCOPES \
+  -e BEARER_TOKEN=YOUR_BEARER_TOKEN \
+  ghcr.io/mcparmory/asana:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -128,6 +142,8 @@ docker run -p 8000:8000 -p 9400:9400 -v ./tokens:/app/tokens --env-file .env asa
 **Before running**, make sure ports 8000, 9400 are free. If you changed the callback port in `.env`, update the `-p` port mapping and your OAuth provider's redirect URI to match.
 
 On first run, the server prints an authorization URL — check `docker logs` for the URL. Open it in your browser to complete OAuth consent. Tokens are persisted to `./tokens/` via the volume mount so re-authorization is not needed on subsequent runs.
+### MCP client config (Docker)
+
 For Docker, use SSE transport in your MCP client config:
 ```json
 {

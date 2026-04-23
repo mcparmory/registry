@@ -1,7 +1,7 @@
 """
 Authentication module for Asana MCP server.
 
-Generated: 2026-04-14 18:14:32 UTC
+Generated: 2026-04-23 20:59:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -74,50 +74,54 @@ class OAuth2Auth:
         Refresh URL: https://app.asana.com/-/oauth_token
 
     Available Scopes (configure via OAUTH2_SCOPES):
-        - default
-        - openid
-        - email
-        - profile
         - attachments:read
         - attachments:write
         - attachments:delete
         - custom_fields:read
         - custom_fields:write
         - goals:read
+        - openid
+        - email
+        - profile
         - jobs:read
         - ooo_entries:read
         - ooo_entries:write
         - ooo_entries:delete
-        - tasks:read
-        - tasks:write
-        - tasks:delete
-        - task_custom_types:read
-        - task_templates:read
-        - team_memberships:read
         - portfolios:read
         - portfolios:write
-        - project_templates:read
         - project_portfolio_settings:read
         - project_portfolio_settings:write
-        - projects:delete
+        - project_templates:read
         - projects:read
         - projects:write
+        - projects:delete
         - roles:read
         - roles:write
         - roles:delete
-        - users:read
-        - teams:read
-        - time_tracking_entries:read
-        - timesheet_approval_statuses:read
-        - timesheet_approval_statuses:write
         - stories:read
         - stories:write
         - tags:read
         - tags:write
+        - task_custom_types:read
+        - task_templates:read
+        - tasks:read
+        - tasks:write
+        - tasks:delete
+        - team_memberships:read
+        - teams:read
+        - time_tracking_categories:read
+        - time_tracking_categories:write
+        - time_tracking_categories:delete
+        - time_tracking_entries:read
+        - timesheet_approval_statuses:read
+        - timesheet_approval_statuses:write
+        - users:read
         - webhooks:read
         - webhooks:write
         - webhooks:delete
         - workspaces:read
+        - workspaces.typeahead:read
+        - default
     """
 
     def __init__(self):

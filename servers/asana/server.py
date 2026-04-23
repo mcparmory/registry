@@ -7,7 +7,7 @@ API Info:
 - Contact: Asana Support (https://asana.com/support)
 - Terms of Service: https://asana.com/terms
 
-Generated: 2026-04-14 18:14:32 UTC
+Generated: 2026-04-23 20:59:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +42,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://app.asana.com/api/1.0")
@@ -472,12 +474,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -499,7 +526,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -541,18 +572,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -624,7 +719,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -672,6 +775,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -734,7 +841,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -760,10 +875,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -828,16 +941,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -851,6 +965,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -893,6 +1008,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -904,7 +1034,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1057,7 +1186,7 @@ mcp = FastMCP("Asana", middleware=[_JsonCoercionMiddleware()])
 async def list_access_requests(
     target: str = Field(..., description="The globally unique identifier of the target object for which to retrieve pending access requests."),
     user: str | None = Field(None, description="Filters results to access requests submitted by a specific user. Accepts the literal string 'me' for the authenticated user, a user's email address, or a user's globally unique identifier."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves pending access requests for a specified target object, optionally filtered to a specific user. Useful for reviewing who is awaiting permission to access a resource."""
 
     # Construct request model with validation
@@ -1098,7 +1227,7 @@ async def list_access_requests(
 async def request_access(
     target: str = Field(..., description="The unique global ID (gid) of the private object you are requesting access to. Supports projects and portfolios."),
     message: str | None = Field(None, description="An optional message to accompany the access request, allowing the requester to provide context or justification for why access is needed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submits an access request for a private project or portfolio, notifying the owner so they can grant or deny access."""
 
     # Construct request model with validation
@@ -1136,7 +1265,7 @@ async def request_access(
 
 # Tags: Access requests
 @mcp.tool()
-async def approve_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to approve.")) -> dict[str, Any]:
+async def approve_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to approve.")) -> dict[str, Any] | ToolResult:
     """Approves a pending access request, granting the requester access to the associated target object. Use this to fulfill access requests that have been reviewed and authorized."""
 
     # Construct request model with validation
@@ -1172,7 +1301,7 @@ async def approve_access_request(access_request_gid: str = Field(..., descriptio
 
 # Tags: Access requests
 @mcp.tool()
-async def reject_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to reject.")) -> dict[str, Any]:
+async def reject_access_request(access_request_gid: str = Field(..., description="The globally unique identifier of the access request to reject.")) -> dict[str, Any] | ToolResult:
     """Rejects a pending access request for a target object, denying the requester permission to access the resource. Use this to explicitly decline access requests that should not be granted."""
 
     # Construct request model with validation
@@ -1208,7 +1337,7 @@ async def reject_access_request(access_request_gid: str = Field(..., description
 
 # Tags: Allocations
 @mcp.tool()
-async def get_allocation(allocation_gid: str = Field(..., description="The globally unique identifier for the allocation you want to retrieve.")) -> dict[str, Any]:
+async def get_allocation(allocation_gid: str = Field(..., description="The globally unique identifier for the allocation you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single allocation, including all associated details and metadata. Use this to fetch full information about a specific allocation by its unique identifier."""
 
     # Construct request model with validation
@@ -1247,7 +1376,7 @@ async def get_allocation(allocation_gid: str = Field(..., description="The globa
 async def update_allocation(
     allocation_gid: str = Field(..., description="The globally unique identifier of the allocation to update."),
     data: _models.AllocationRequest | None = Field(None, description="An object containing the allocation fields to update; only the fields included will be modified, all other fields will retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing allocation by replacing only the fields provided in the request body, leaving all unspecified fields unchanged. Returns the complete updated allocation record."""
 
     # Construct request model with validation
@@ -1286,7 +1415,7 @@ async def update_allocation(
 
 # Tags: Allocations
 @mcp.tool()
-async def delete_allocation(allocation_gid: str = Field(..., description="The globally unique identifier of the allocation to delete.")) -> dict[str, Any]:
+async def delete_allocation(allocation_gid: str = Field(..., description="The globally unique identifier of the allocation to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing allocation by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -1326,7 +1455,7 @@ async def list_allocations(
     parent: str | None = Field(None, description="The unique identifier of the project to filter allocations by, returning only allocations associated with that project."),
     assignee: str | None = Field(None, description="The unique identifier of the user or placeholder to filter allocations by, returning only allocations assigned to that individual or placeholder resource."),
     workspace: str | None = Field(None, description="The unique identifier of the workspace to scope the allocation results to, limiting results to allocations within that workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of allocations, optionally filtered by project, assignee, or workspace. Useful for reviewing how resources are distributed across tasks and team members."""
 
     # Construct request model with validation
@@ -1364,7 +1493,7 @@ async def list_allocations(
 
 # Tags: Allocations
 @mcp.tool()
-async def create_allocation(data: _models.CreateAllocationBodyData | None = Field(None, description="The allocation data to create, including all relevant fields for the new allocation record.")) -> dict[str, Any]:
+async def create_allocation(data: _models.CreateAllocationBodyData | None = Field(None, description="The allocation data to create, including all relevant fields for the new allocation record.")) -> dict[str, Any] | ToolResult:
     """Creates a new allocation and returns the full record of the newly created allocation."""
 
     # Construct request model with validation
@@ -1402,7 +1531,7 @@ async def create_allocation(data: _models.CreateAllocationBodyData | None = Fiel
 
 # Tags: Attachments
 @mcp.tool()
-async def get_attachment(attachment_gid: str = Field(..., description="The globally unique identifier of the attachment to retrieve.")) -> dict[str, Any]:
+async def get_attachment(attachment_gid: str = Field(..., description="The globally unique identifier of the attachment to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a single attachment, including its metadata and download URL. Requires the attachments:read scope."""
 
     # Construct request model with validation
@@ -1438,7 +1567,7 @@ async def get_attachment(attachment_gid: str = Field(..., description="The globa
 
 # Tags: Attachments
 @mcp.tool()
-async def delete_attachment(attachment_gid: str = Field(..., description="The globally unique identifier (GID) of the attachment to delete.")) -> dict[str, Any]:
+async def delete_attachment(attachment_gid: str = Field(..., description="The globally unique identifier (GID) of the attachment to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific attachment by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -1474,7 +1603,7 @@ async def delete_attachment(attachment_gid: str = Field(..., description="The gl
 
 # Tags: Attachments
 @mcp.tool()
-async def list_attachments(parent: str = Field(..., description="The globally unique identifier (GID) of the parent object whose attachments you want to retrieve. Must reference a project, project brief, or task.")) -> dict[str, Any]:
+async def list_attachments(parent: str = Field(..., description="The globally unique identifier (GID) of the parent object whose attachments you want to retrieve. Must reference a project, project brief, or task.")) -> dict[str, Any] | ToolResult:
     """Retrieves all attachments associated with a specified project, project brief, or task. For projects, this returns files in the 'Key resources' section; for tasks, this includes all associated files including inline images."""
 
     # Construct request model with validation
@@ -1519,7 +1648,7 @@ async def upload_attachment(
     url: str | None = Field(None, description="The publicly accessible URL of the external resource to attach. Required when 'resource_subtype' is 'external'."),
     name: str | None = Field(None, description="A display name for the external resource being attached. Required when 'resource_subtype' is 'external'."),
     connect_to_app: bool | None = Field(None, description="When true, associates the current OAuth app with this external attachment to enable an in-task app components widget. Only applicable to external attachments on a parent task, requires OAuth authentication, and the app must be installed on a project containing the parent task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Upload a file or link an external resource as an attachment to a task, project, or project brief in Asana. Supports direct file uploads (up to 100MB) or external URL attachments; multipart/form-data encoding is required for file uploads."""
 
     # Construct request model with validation
@@ -1551,6 +1680,7 @@ async def upload_attachment(
         request_id=_request_id,
         body=_http_body,
         body_content_type="multipart/form-data",
+        multipart_file_fields=["file"],
         headers=_http_headers,
     )
 
@@ -1567,7 +1697,7 @@ async def list_audit_log_events(
     actor_gid: str | None = Field(None, description="Restricts results to events triggered by the actor with this specific globally unique identifier. When provided, actor_type should be omitted."),
     resource_gid: str | None = Field(None, description="Restricts results to events associated with the resource that has this globally unique identifier."),
     limit: int | None = Field(None, description="The number of audit log events to return per page. Must be between 1 and 100 inclusive. Use the offset from the previous response to retrieve the next page of results.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieve a paginated list of audit log events captured in a workspace or organization, sorted by creation time in ascending order. Supports filtering by time range, event type, actor, and resource, and can be polled continuously to stream new events as they are captured."""
 
     # Construct request model with validation
@@ -1606,7 +1736,7 @@ async def list_audit_log_events(
 
 # Tags: Budgets
 @mcp.tool()
-async def list_budgets(parent: str = Field(..., description="The globally unique identifier of the parent object whose budgets should be retrieved. Currently only project identifiers are supported as valid parents.")) -> dict[str, Any]:
+async def list_budgets(parent: str = Field(..., description="The globally unique identifier of the parent object whose budgets should be retrieved. Currently only project identifiers are supported as valid parents.")) -> dict[str, Any] | ToolResult:
     """Retrieves all budgets associated with a given parent object. Returns at most one budget per parent, which must be a project."""
 
     # Construct request model with validation
@@ -1644,7 +1774,7 @@ async def list_budgets(parent: str = Field(..., description="The globally unique
 
 # Tags: Budgets
 @mcp.tool()
-async def create_budget(data: _models.BudgetRequest | None = Field(None, description="The budget object containing all required fields to define the new budget, such as name, amount, currency, and associated scope or time period.")) -> dict[str, Any]:
+async def create_budget(data: _models.BudgetRequest | None = Field(None, description="The budget object containing all required fields to define the new budget, such as name, amount, currency, and associated scope or time period.")) -> dict[str, Any] | ToolResult:
     """Creates a new budget with the specified configuration. Use this to define spending limits and tracking parameters for a project, team, or time period."""
 
     # Construct request model with validation
@@ -1682,7 +1812,7 @@ async def create_budget(data: _models.BudgetRequest | None = Field(None, descrip
 
 # Tags: Budgets
 @mcp.tool()
-async def get_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to retrieve.")) -> dict[str, Any]:
+async def get_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single budget, including all associated details and metadata. Use this to inspect a specific budget by its unique identifier."""
 
     # Construct request model with validation
@@ -1721,7 +1851,7 @@ async def get_budget(budget_gid: str = Field(..., description="The globally uniq
 async def update_budget(
     budget_gid: str = Field(..., description="The globally unique identifier of the budget to update."),
     data: _models.BudgetRequest | None = Field(None, description="An object containing the budget fields to update; only the fields included will be modified, all others will retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing budget by replacing only the fields provided in the request body, leaving all unspecified fields unchanged."""
 
     # Construct request model with validation
@@ -1760,7 +1890,7 @@ async def update_budget(
 
 # Tags: Budgets
 @mcp.tool()
-async def delete_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to delete.")) -> dict[str, Any]:
+async def delete_budget(budget_gid: str = Field(..., description="The globally unique identifier of the budget to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing budget by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -1799,7 +1929,7 @@ async def delete_budget(budget_gid: str = Field(..., description="The globally u
 async def list_project_custom_field_settings(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field settings to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all custom field settings configured on a specific project, returned in compact form. Use opt_fields to request additional field data beyond the default compact representation."""
 
     # Construct request model with validation
@@ -1841,7 +1971,7 @@ async def list_project_custom_field_settings(
 async def list_portfolio_custom_field_settings(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field setting objects to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all custom field settings configured on a specific portfolio, returned in compact form. Requires the portfolios:read scope."""
 
     # Construct request model with validation
@@ -1883,7 +2013,7 @@ async def list_portfolio_custom_field_settings(
 async def list_goal_custom_field_settings(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal whose custom field settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field settings to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all custom field settings associated with a specific goal in compact form. Use opt_fields to request additional fields beyond the default compact representation."""
 
     # Construct request model with validation
@@ -1922,7 +2052,7 @@ async def list_goal_custom_field_settings(
 
 # Tags: Custom field settings
 @mcp.tool()
-async def list_team_custom_field_settings(team_gid: str = Field(..., description="The globally unique identifier for the team whose custom field settings you want to retrieve.")) -> dict[str, Any]:
+async def list_team_custom_field_settings(team_gid: str = Field(..., description="The globally unique identifier for the team whose custom field settings you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all custom field settings associated with a specific team, returned in compact form. Use opt_fields to request additional field data beyond the default compact representation."""
 
     # Construct request model with validation
@@ -1958,7 +2088,7 @@ async def list_team_custom_field_settings(team_gid: str = Field(..., description
 
 # Tags: Custom fields
 @mcp.tool()
-async def create_custom_field(data: _models.CustomFieldCreateRequest | None = Field(None, description="The request body containing the custom field definition, including required properties such as workspace, name, and type (one of: text, enum, multi_enum, number, date, or people).")) -> dict[str, Any]:
+async def create_custom_field(data: _models.CustomFieldCreateRequest | None = Field(None, description="The request body containing the custom field definition, including required properties such as workspace, name, and type (one of: text, enum, multi_enum, number, date, or people).")) -> dict[str, Any] | ToolResult:
     """Creates a new custom field within a specified workspace, supporting types such as text, enum, multi_enum, number, date, or people. The field name must be unique within the workspace and cannot conflict with existing task property names."""
 
     # Construct request model with validation
@@ -1996,7 +2126,7 @@ async def create_custom_field(data: _models.CustomFieldCreateRequest | None = Fi
 
 # Tags: Custom fields
 @mcp.tool()
-async def get_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to retrieve.")) -> dict[str, Any]:
+async def get_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete metadata definition for a specific custom field, including type-specific properties such as enum options, validation rules, and display settings."""
 
     # Construct request model with validation
@@ -2035,7 +2165,7 @@ async def get_custom_field(custom_field_gid: str = Field(..., description="The g
 async def update_custom_field(
     custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to update."),
     data: _models.CustomFieldRequest | None = Field(None, description="An object containing only the custom field properties you wish to update; omitted fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing custom field by its unique identifier, applying only the fields provided in the request body while leaving unspecified fields unchanged. Note that a custom field's type cannot be changed, enum options must be managed separately, and locked fields can only be updated by the user who locked them."""
 
     # Construct request model with validation
@@ -2074,7 +2204,7 @@ async def update_custom_field(
 
 # Tags: Custom fields
 @mcp.tool()
-async def delete_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to delete.")) -> dict[str, Any]:
+async def delete_custom_field(custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing custom field by its unique identifier. Note that locked custom fields can only be deleted by the user who originally locked the field."""
 
     # Construct request model with validation
@@ -2113,7 +2243,7 @@ async def delete_custom_field(custom_field_gid: str = Field(..., description="Th
 async def list_workspace_custom_fields(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose custom fields you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom field records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of all custom fields defined in a given workspace or organization. Returns compact representations suitable for discovery and reference."""
 
     # Construct request model with validation
@@ -2155,7 +2285,7 @@ async def list_workspace_custom_fields(
 async def create_enum_option(
     custom_field_gid: str = Field(..., description="The globally unique identifier of the custom field to which the new enum option will be added."),
     data: _models.EnumOptionRequest | None = Field(None, description="The payload defining the new enum option's properties, such as its name, color, and enabled state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new enum option and appends it to the specified custom field's list of selectable values. A custom field supports up to 500 enum options (including disabled ones); locked fields can only be modified by the user who locked them."""
 
     # Construct request model with validation
@@ -2199,7 +2329,7 @@ async def reorder_enum_option(
     enum_option: str | None = Field(None, description="The unique identifier of the enum option to move to a new position within the custom field."),
     before_enum_option: str | None = Field(None, description="The unique identifier of an existing enum option in this custom field; the target enum option will be inserted immediately before it. Mutually exclusive with after_enum_option."),
     after_enum_option: str | None = Field(None, description="The unique identifier of an existing enum option in this custom field; the target enum option will be inserted immediately after it. Mutually exclusive with before_enum_option."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Repositions a specific enum option within a custom field's ordered list by placing it before or after another existing enum option. Locked custom fields can only be reordered by the user who locked the field."""
 
     # Construct request model with validation
@@ -2243,7 +2373,7 @@ async def update_enum_option(
     name: str | None = Field(None, description="The display name of the enum option as it appears in the custom field."),
     enabled: bool | None = Field(None, description="Controls whether this enum option is selectable by users on the custom field. At least one option must remain enabled on the field."),
     color: str | None = Field(None, description="The color associated with the enum option for visual identification. Defaults to none if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing enum option on a custom field, allowing changes to its name, color, or enabled state. Locked custom fields can only be modified by the user who locked them, and at least one enabled enum option must remain on the field."""
 
     # Construct request model with validation
@@ -2285,7 +2415,7 @@ async def update_enum_option(
 async def list_custom_types(
     project: str = Field(..., description="The globally unique identifier of the project whose associated custom types you want to retrieve."),
     limit: int | None = Field(None, description="The number of custom types to return per page. Accepts values between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all custom types associated with a specified project. Use `opt_fields` to request additional fields beyond the default compact representation."""
 
     # Construct request model with validation
@@ -2323,7 +2453,7 @@ async def list_custom_types(
 
 # Tags: Custom types
 @mcp.tool()
-async def get_custom_type(custom_type_gid: str = Field(..., description="The globally unique identifier of the custom type to retrieve.")) -> dict[str, Any]:
+async def get_custom_type(custom_type_gid: str = Field(..., description="The globally unique identifier of the custom type to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single custom type by its unique identifier. Use this to inspect the full definition and configuration of a specific custom type."""
 
     # Construct request model with validation
@@ -2362,7 +2492,7 @@ async def get_custom_type(custom_type_gid: str = Field(..., description="The glo
 async def list_resource_events(
     resource: str = Field(..., description="The unique ID of the resource (task, project, or goal) whose events you want to retrieve."),
     sync: str | None = Field(None, description="A sync token from a previous response used to fetch only new events since that point in time. Omit on the first request to receive a fresh sync token; if the token has expired (HTTP 412), use the new token returned in that error response to resume."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all events that have occurred on a resource (task, project, or goal) since a given sync token was created. Returns up to 100 events per request, with a new sync token to paginate forward through additional events."""
 
     # Construct request model with validation
@@ -2400,7 +2530,7 @@ async def list_resource_events(
 
 # Tags: Exports
 @mcp.tool()
-async def export_graph(parent: str | None = Field(None, description="The globally unique ID of the parent object (goal, project, portfolio, or team) whose graph data should be exported.")) -> dict[str, Any]:
+async def export_graph(parent: str | None = Field(None, description="The globally unique ID of the parent object (goal, project, portfolio, or team) whose graph data should be exported.")) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous graph export job for a goal, team, portfolio, or project. Use the jobs endpoint to monitor progress; exports exceeding 1,000 tasks are cached for 4 hours, with subsequent requests returning the cached result."""
 
     # Construct request model with validation
@@ -2441,7 +2571,7 @@ async def export_graph(parent: str | None = Field(None, description="The globall
 async def create_resource_export(
     workspace: str | None = Field(None, description="The GID of the workspace whose resources will be exported. Only one in-progress export is permitted per workspace at a time."),
     export_request_parameters: list[_models.ResourceExportRequestParameter] | None = Field(None, description="An array of export request parameter objects, where each object specifies a resource GID and its associated export options (such as filters and fields). Providing multiple entries for the same resource type achieves a disjunctive filter but may produce duplicate results. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Initiates an asynchronous bulk export of workspace resources (tasks, teams, or messages) in gzip-compressed JSON Lines format. Export progress can be monitored via the jobs endpoint, and the resulting file is accessible for 30 days after completion."""
 
     # Construct request model with validation
@@ -2479,7 +2609,7 @@ async def create_resource_export(
 
 # Tags: Goal relationships
 @mcp.tool()
-async def get_goal_relationship(goal_relationship_gid: str = Field(..., description="The unique identifier of the goal relationship to retrieve. This ID is returned when a goal relationship is created or listed.")) -> dict[str, Any]:
+async def get_goal_relationship(goal_relationship_gid: str = Field(..., description="The unique identifier of the goal relationship to retrieve. This ID is returned when a goal relationship is created or listed.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single goal relationship, including details about how two goals are linked. Use this to inspect the nature and status of a specific goal-to-goal connection."""
 
     # Construct request model with validation
@@ -2518,7 +2648,7 @@ async def get_goal_relationship(goal_relationship_gid: str = Field(..., descript
 async def update_goal_relationship(
     goal_relationship_gid: str = Field(..., description="The globally unique identifier of the goal relationship to update."),
     data: _models.GoalRelationshipRequest | None = Field(None, description="The fields to update on the goal relationship; only provided fields will be modified, all others remain unchanged."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing goal relationship by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated goal relationship record."""
 
     # Construct request model with validation
@@ -2561,7 +2691,7 @@ async def list_goal_relationships(
     supported_goal: str = Field(..., description="The globally unique identifier of the supported goal whose relationships you want to retrieve. This is a required field that scopes the results to a specific goal."),
     limit: int | None = Field(None, description="The maximum number of goal relationship records to return per page, between 1 and 100.", ge=1, le=100),
     resource_subtype: str | None = Field(None, description="Filters the returned goal relationships to only those matching the specified resource subtype, such as a subgoal relationship."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact goal relationship records for a specified supported goal, allowing you to explore how goals are connected within your workspace."""
 
     # Construct request model with validation
@@ -2605,7 +2735,7 @@ async def add_goal_supporting_relationship(
     insert_before: str | None = Field(None, description="The GID of an existing subgoal of the parent goal; the new subgoal will be inserted immediately before it. Cannot be used together with `insert_after`. Only supported when adding a subgoal."),
     insert_after: str | None = Field(None, description="The GID of an existing subgoal of the parent goal; the new subgoal will be inserted immediately after it. Cannot be used together with `insert_before`. Only supported when adding a subgoal."),
     contribution_weight: float | None = Field(None, description="A weight between 0 and 1 (inclusive) that determines how much the supporting resource's progress contributes to the parent goal's overall progress. Must be greater than 0 for the supporting resource to count toward automatically calculated parent goal metrics. Defaults to 0."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Links a supporting resource (goal, project, task, or portfolio) to a parent goal, establishing a progress relationship between them. Returns the newly created goal relationship record."""
 
     # Construct request model with validation
@@ -2647,7 +2777,7 @@ async def add_goal_supporting_relationship(
 async def remove_goal_supporting_relationship(
     goal_gid: str = Field(..., description="The unique identifier of the parent goal from which the supporting relationship will be removed."),
     supporting_resource: str = Field(..., description="The unique identifier of the supporting resource to unlink from the parent goal; must be the identifier of a goal, project, task, or portfolio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a supporting relationship between a child resource and a parent goal, unlinking a goal, project, task, or portfolio that was previously set as a supporting resource."""
 
     # Construct request model with validation
@@ -2686,7 +2816,7 @@ async def remove_goal_supporting_relationship(
 
 # Tags: Goals
 @mcp.tool()
-async def get_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to retrieve.")) -> dict[str, Any]:
+async def get_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single goal, including all associated fields and metadata. Requires the goals:read scope, with additional time_periods:read scope needed to access the time_period field."""
 
     # Construct request model with validation
@@ -2725,7 +2855,7 @@ async def get_goal(goal_gid: str = Field(..., description="The globally unique i
 async def update_goal(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal to update."),
     data: _models.GoalUpdateRequest | None = Field(None, description="An object containing the goal fields to update; only the fields included will be modified, all unspecified fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing goal by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated goal record."""
 
     # Construct request model with validation
@@ -2764,7 +2894,7 @@ async def update_goal(
 
 # Tags: Goals
 @mcp.tool()
-async def delete_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to delete.")) -> dict[str, Any]:
+async def delete_goal(goal_gid: str = Field(..., description="The globally unique identifier of the goal to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing goal by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -2808,7 +2938,7 @@ async def list_goals(
     team: str | None = Field(None, description="The globally unique identifier of a team to filter goals belonging to that team."),
     workspace: str | None = Field(None, description="The globally unique identifier of a workspace to filter goals within that workspace."),
     time_periods: list[str] | None = Field(None, description="A comma-separated list of globally unique time period identifiers to filter goals associated with those periods. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact goal records, optionally filtered by workspace, team, portfolio, project, task, or time period. Requires the goals:read scope."""
 
     # Construct request model with validation
@@ -2846,7 +2976,7 @@ async def list_goals(
 
 # Tags: Goals
 @mcp.tool()
-async def create_goal(data: _models.GoalRequest | None = Field(None, description="The goal object containing the details for the new goal, such as name, owner, due date, and associated workspace or team.")) -> dict[str, Any]:
+async def create_goal(data: _models.GoalRequest | None = Field(None, description="The goal object containing the details for the new goal, such as name, owner, due date, and associated workspace or team.")) -> dict[str, Any] | ToolResult:
     """Creates a new goal within a specified workspace or team. Returns the full record of the newly created goal."""
 
     # Construct request model with validation
@@ -2894,7 +3024,7 @@ async def set_goal_metric(
     current_number_value: float | None = Field(None, description="The current value of the numeric goal metric, reflecting progress made so far between the initial and target values."),
     progress_source: Literal["manual", "subgoal_progress", "project_task_completion", "project_milestone_completion", "task_completion", "external"] | None = Field(None, description="Defines how the goal's progress value is calculated. Choose 'manual' for user-entered progress, one of the automatic options to derive progress from subgoals, projects, or tasks, or 'external' for integration-managed progress from a source such as Salesforce."),
     is_custom_weight: bool | None = Field(None, description="Only applicable when progress_source is 'subgoal_progress', 'project_task_completion', 'project_milestone_completion', or 'task_completion'. When true, each supporting object's custom weight is used in the progress calculation; when false, all supporting objects are treated as equally weighted."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates and attaches a progress metric to a specified goal, defining how goal completion is measured and tracked. If a metric already exists on the goal, it will be replaced entirely."""
 
     # Construct request model with validation
@@ -2936,7 +3066,7 @@ async def set_goal_metric(
 async def update_goal_metric_value(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal whose metric value you want to update."),
     current_number_value: float | None = Field(None, description="The new current value to record for the goal's numeric metric, reflecting the latest progress toward the goal's target."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the current numeric value of an existing goal metric, allowing progress tracking against a defined target. Requires the goal to already have a numeric metric configured; returns the complete updated goal metric record."""
 
     # Construct request model with validation
@@ -2978,7 +3108,7 @@ async def update_goal_metric_value(
 async def add_goal_followers(
     goal_gid: str = Field(..., description="The unique identifier of the goal to which followers will be added."),
     followers: list[str] = Field(..., description="A list of users to add as followers to the goal. Each item can be the string 'me' to reference the authenticated user, a user's email address, or a user's GID. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more followers (collaborators) to a specified goal. Returns the complete updated goal record reflecting the new followers."""
 
     # Construct request model with validation
@@ -3020,7 +3150,7 @@ async def add_goal_followers(
 async def remove_goal_followers(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal from which followers will be removed."),
     followers: list[str] = Field(..., description="A list of users to remove as followers from the goal. Each item can be the string 'me' to reference the authenticated user, a user's email address, or a user's globally unique identifier (gid). Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more followers (collaborators) from a specified goal. Returns the complete updated goal record reflecting the removed followers."""
 
     # Construct request model with validation
@@ -3059,7 +3189,7 @@ async def remove_goal_followers(
 
 # Tags: Goals
 @mcp.tool()
-async def list_parent_goals(goal_gid: str = Field(..., description="The globally unique identifier of the goal whose parent goals you want to retrieve.")) -> dict[str, Any]:
+async def list_parent_goals(goal_gid: str = Field(..., description="The globally unique identifier of the goal whose parent goals you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all parent goals associated with a specified goal. Useful for traversing goal hierarchies and understanding how a goal rolls up into broader objectives."""
 
     # Construct request model with validation
@@ -3101,7 +3231,7 @@ async def add_custom_field_to_goal(
     is_important: bool | None = Field(None, description="When set to true, marks this custom field as important for the goal, causing it to be prominently displayed in list views of the goal."),
     insert_before: str | None = Field(None, description="The GID of an existing custom field setting on this goal before which the new custom field setting will be inserted to control display order. Cannot be used together with insert_after."),
     insert_after: str | None = Field(None, description="The GID of an existing custom field setting on this goal after which the new custom field setting will be inserted to control display order. Cannot be used together with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associates a custom field with a goal by creating a custom field setting, allowing the field to appear and be tracked on the specified goal."""
 
     # Construct request model with validation
@@ -3143,7 +3273,7 @@ async def add_custom_field_to_goal(
 async def remove_custom_field_from_goal(
     goal_gid: str = Field(..., description="The globally unique identifier of the goal from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to remove from the goal."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom field setting from a specified goal, detaching the custom field and its associated data from the goal. Requires the goals:write scope."""
 
     # Construct request model with validation
@@ -3182,7 +3312,7 @@ async def remove_custom_field_from_goal(
 
 # Tags: Jobs
 @mcp.tool()
-async def get_job(job_gid: str = Field(..., description="The globally unique identifier of the job to retrieve.")) -> dict[str, Any]:
+async def get_job(job_gid: str = Field(..., description="The globally unique identifier of the job to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific asynchronous job by its unique identifier. Useful for polling job status and accessing output resources such as new tasks, projects, portfolios, or templates created by the job."""
 
     # Construct request model with validation
@@ -3222,7 +3352,7 @@ async def list_memberships(
     parent: str | None = Field(None, description="The globally unique identifier of the parent resource to retrieve memberships for; accepted parent types are goal, project, portfolio, custom_type, or custom_field. Optional when both member and resource_subtype are provided together."),
     member: str | None = Field(None, description="The globally unique identifier of a user or team to filter memberships by; when combined with resource_subtype and no parent is specified, returns all memberships of that subtype for this member."),
     resource_subtype: Literal["project_membership"] | None = Field(None, description="Specifies the membership subtype to return; required when parent is absent, and must be paired with a member GID to retrieve all memberships of that type for the given member."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact membership records for a given parent resource (goal, project, portfolio, custom type, or custom field), optionally filtered by a specific member. Alternatively, when no parent is specified, returns all memberships of a given subtype for a specific member by combining the member and resource_subtype parameters."""
 
     # Construct request model with validation
@@ -3260,7 +3390,7 @@ async def list_memberships(
 
 # Tags: Memberships
 @mcp.tool()
-async def create_membership(data: _models.CreateMembershipRequest | None = Field(None, description="The membership details including the resource to join (goal, project, portfolio, custom type, or custom field) and the member to add (Team or User).")) -> dict[str, Any]:
+async def create_membership(data: _models.CreateMembershipRequest | None = Field(None, description="The membership details including the resource to join (goal, project, portfolio, custom type, or custom field) and the member to add (Team or User).")) -> dict[str, Any] | ToolResult:
     """Creates a new membership linking a Team or User to a goal, project, portfolio, custom type, or custom field. Returns the full record of the newly created membership."""
 
     # Construct request model with validation
@@ -3298,7 +3428,7 @@ async def create_membership(data: _models.CreateMembershipRequest | None = Field
 
 # Tags: Memberships
 @mcp.tool()
-async def get_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership record to retrieve, applicable across all membership types (project, goal, portfolio, custom type, or custom field).")) -> dict[str, Any]:
+async def get_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership record to retrieve, applicable across all membership types (project, goal, portfolio, custom type, or custom field).")) -> dict[str, Any] | ToolResult:
     """Retrieves a single membership record by its unique identifier, returning details for any supported membership type including project, goal, portfolio, custom type, or custom field memberships."""
 
     # Construct request model with validation
@@ -3337,7 +3467,7 @@ async def get_membership(membership_gid: str = Field(..., description="The globa
 async def update_membership(
     membership_gid: str = Field(..., description="The globally unique identifier of the membership to update."),
     access_level: str | None = Field(None, description="The access level to assign to the member. Valid values vary by resource type: goals support 'viewer', 'commenter', 'editor', or 'admin'; projects support 'admin', 'editor', or 'commenter'; portfolios support 'admin', 'editor', or 'viewer'; custom fields support 'admin', 'editor', or 'user'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing membership by replacing only the fields provided in the request body, leaving all other fields unchanged. Supports memberships on goals, projects, portfolios, custom types, and custom fields."""
 
     # Construct request model with validation
@@ -3376,7 +3506,7 @@ async def update_membership(
 
 # Tags: Memberships
 @mcp.tool()
-async def delete_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership to delete.")) -> dict[str, Any]:
+async def delete_membership(membership_gid: str = Field(..., description="The globally unique identifier of the membership to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently removes an existing membership from a goal, project, portfolio, custom type, or custom field. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -3412,7 +3542,7 @@ async def delete_membership(membership_gid: str = Field(..., description="The gl
 
 # Tags: Organization exports
 @mcp.tool()
-async def create_organization_export(organization: str | None = Field(None, description="The globally unique identifier of the workspace or organization to export.")) -> dict[str, Any]:
+async def create_organization_export(organization: str | None = Field(None, description="The globally unique identifier of the workspace or organization to export.")) -> dict[str, Any] | ToolResult:
     """Initiates an export request for an entire Asana organization. Asana processes and completes the export asynchronously after the request is submitted."""
 
     # Construct request model with validation
@@ -3450,7 +3580,7 @@ async def create_organization_export(organization: str | None = Field(None, desc
 
 # Tags: Organization exports
 @mcp.tool()
-async def get_organization_export(organization_export_gid: str = Field(..., description="The globally unique identifier of the organization export request to retrieve.")) -> dict[str, Any]:
+async def get_organization_export(organization_export_gid: str = Field(..., description="The globally unique identifier of the organization export request to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the current status and details of a previously requested organization export. Use this to check export progress or access the resulting download URL once complete."""
 
     # Construct request model with validation
@@ -3491,7 +3621,7 @@ async def list_portfolio_memberships(
     workspace: str | None = Field(None, description="The unique identifier of the workspace to filter memberships by. Must be combined with a user identifier when specified."),
     user: str | None = Field(None, description="Identifies the user whose memberships to filter by. Accepts the string 'me' for the current user, a user's email address, or a user's global ID (gid)."),
     limit: int | None = Field(None, description="The number of membership records to return per page. Accepts values between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of portfolio memberships in compact representation. You must provide either a portfolio ID, a portfolio and user combination, or a workspace and user combination to filter results."""
 
     # Construct request model with validation
@@ -3529,7 +3659,7 @@ async def list_portfolio_memberships(
 
 # Tags: Portfolio memberships
 @mcp.tool()
-async def get_portfolio_membership(portfolio_membership_gid: str = Field(..., description="The unique identifier (GID) of the portfolio membership to retrieve.")) -> dict[str, Any]:
+async def get_portfolio_membership(portfolio_membership_gid: str = Field(..., description="The unique identifier (GID) of the portfolio membership to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details of a single portfolio membership record. Use this to inspect a specific user's membership relationship within a portfolio."""
 
     # Construct request model with validation
@@ -3569,7 +3699,7 @@ async def list_portfolio_memberships_for_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filters memberships to a specific user. Accepts the string 'me' for the authenticated user, a user's email address, or a user's globally unique identifier."),
     limit: int | None = Field(None, description="The number of membership records to return per page. Must be between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all membership records for a specified portfolio, returning compact representations of each member. Optionally filter results by a specific user."""
 
     # Construct request model with validation
@@ -3611,7 +3741,7 @@ async def list_portfolio_memberships_for_portfolio(
 async def list_portfolios(
     workspace: str = Field(..., description="The unique identifier of the workspace or organization used to filter the returned portfolios."),
     owner: str | None = Field(None, description="The unique identifier of the user whose portfolios should be returned. Standard API users are limited to their own portfolios; Service Accounts may specify any user or omit this parameter to retrieve all portfolios in the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of portfolios owned by the current API user within a specified workspace. Service Accounts can optionally filter by owner or retrieve all portfolios across the workspace."""
 
     # Construct request model with validation
@@ -3649,7 +3779,7 @@ async def list_portfolios(
 
 # Tags: Portfolios
 @mcp.tool()
-async def create_portfolio(data: _models.PortfolioRequest | None = Field(None, description="Request body containing the portfolio details, including the name and workspace to create the portfolio in.")) -> dict[str, Any]:
+async def create_portfolio(data: _models.PortfolioRequest | None = Field(None, description="Request body containing the portfolio details, including the name and workspace to create the portfolio in.")) -> dict[str, Any] | ToolResult:
     """Creates a new portfolio in a specified workspace with a given name. Note that portfolios created via the API will not include default UI state (such as the 'Priority' custom field) to allow integrations to define their own initial configuration."""
 
     # Construct request model with validation
@@ -3687,7 +3817,7 @@ async def create_portfolio(data: _models.PortfolioRequest | None = Field(None, d
 
 # Tags: Portfolios
 @mcp.tool()
-async def get_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to retrieve.")) -> dict[str, Any]:
+async def get_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single portfolio, including all associated metadata. Requires the portfolios:read scope."""
 
     # Construct request model with validation
@@ -3726,7 +3856,7 @@ async def get_portfolio(portfolio_gid: str = Field(..., description="The globall
 async def update_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to update."),
     data: _models.PortfolioUpdateRequest | None = Field(None, description="An object containing the portfolio fields to update; only the fields included will be modified, all unspecified fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing portfolio by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated portfolio record."""
 
     # Construct request model with validation
@@ -3765,7 +3895,7 @@ async def update_portfolio(
 
 # Tags: Portfolios
 @mcp.tool()
-async def delete_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to delete.")) -> dict[str, Any]:
+async def delete_portfolio(portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing portfolio by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -3804,7 +3934,7 @@ async def delete_portfolio(portfolio_gid: str = Field(..., description="The glob
 async def list_portfolio_items(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio whose items you want to retrieve."),
     limit: int | None = Field(None, description="The number of items to return per page, allowing pagination through large portfolios. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of items within a specified portfolio in compact form. Useful for inspecting the contents of a portfolio, such as projects or other resources it contains."""
 
     # Construct request model with validation
@@ -3848,7 +3978,7 @@ async def add_portfolio_item(
     item: str = Field(..., description="The globally unique identifier of the project or item to add to the portfolio."),
     insert_before: str | None = Field(None, description="The ID of an existing portfolio item before which the new item will be inserted. Cannot be used together with insert_after."),
     insert_after: str | None = Field(None, description="The ID of an existing portfolio item after which the new item will be inserted. Cannot be used together with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a project or item to a specified portfolio, optionally controlling its position relative to an existing item. Returns an empty data block on success."""
 
     # Construct request model with validation
@@ -3890,7 +4020,7 @@ async def add_portfolio_item(
 async def remove_portfolio_item(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which the item will be removed."),
     item: str = Field(..., description="The globally unique identifier of the item to remove from the portfolio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specific item from a portfolio, unlinking it from the portfolio's collection. Returns an empty data block upon success."""
 
     # Construct request model with validation
@@ -3935,7 +4065,7 @@ async def add_custom_field_to_portfolio(
     is_important: bool | None = Field(None, description="When set to true, marks this custom field as important for the portfolio, causing it to be prominently displayed in list views of the portfolio's items."),
     insert_before: str | None = Field(None, description="The GID of an existing custom field setting on this portfolio before which the new custom field setting will be inserted to control ordering. Cannot be used together with insert_after."),
     insert_after: str | None = Field(None, description="The GID of an existing custom field setting on this portfolio after which the new custom field setting will be inserted to control ordering. Cannot be used together with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associates a custom field with a portfolio by creating a custom field setting, allowing the field to appear and be tracked within the portfolio. Optionally controls the display prominence and ordering of the field relative to other custom field settings on the portfolio."""
 
     # Construct request model with validation
@@ -3977,7 +4107,7 @@ async def add_custom_field_to_portfolio(
 async def remove_portfolio_custom_field(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to detach from the portfolio."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom field setting from a portfolio, detaching it so the field no longer appears or collects data for that portfolio. Requires portfolios:write scope."""
 
     # Construct request model with validation
@@ -4019,7 +4149,7 @@ async def remove_portfolio_custom_field(
 async def add_portfolio_members(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to which members will be added."),
     members: str = Field(..., description="A comma-separated list of user identifiers to add as portfolio members; each identifier can be the string 'me', a user's email address, or a user's globally unique identifier (gid). Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more users as members of the specified portfolio, granting them access to view and collaborate on it. Returns the updated portfolio record."""
 
     # Construct request model with validation
@@ -4061,7 +4191,7 @@ async def add_portfolio_members(
 async def remove_portfolio_members(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio from which members will be removed."),
     members: str = Field(..., description="A comma-separated list of user identifiers to remove from the portfolio. Each identifier can be the string 'me' (current user), a user's email address, or a user's globally unique identifier (gid)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more users from the membership list of a specified portfolio. Returns the updated portfolio record reflecting the changes."""
 
     # Construct request model with validation
@@ -4104,7 +4234,7 @@ async def duplicate_portfolio(
     portfolio_gid: str = Field(..., description="The globally unique identifier of the portfolio to duplicate."),
     name: str | None = Field(None, description="The display name to assign to the newly duplicated portfolio."),
     include: str | None = Field(None, description="A comma-separated list of optional elements to copy into the duplicate portfolio. Custom field settings and views are always included automatically. Valid values are: description, members, permissions, templates, rules, child_projects, child_portfolios."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a duplicate of an existing portfolio and returns an asynchronous job that handles the duplication process. Custom field settings and views are always copied; additional elements such as members, rules, and child projects can be optionally included."""
 
     # Construct request model with validation
@@ -4143,7 +4273,7 @@ async def duplicate_portfolio(
 
 # Tags: Project briefs
 @mcp.tool()
-async def get_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier for the project brief to retrieve.")) -> dict[str, Any]:
+async def get_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier for the project brief to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific project brief, including its title, description, and associated project details."""
 
     # Construct request model with validation
@@ -4182,7 +4312,7 @@ async def get_project_brief(project_brief_gid: str = Field(..., description="The
 async def update_project_brief(
     project_brief_gid: str = Field(..., description="The globally unique identifier of the project brief to update."),
     data: _models.ProjectBriefRequest | None = Field(None, description="An object containing the project brief fields to update; only the fields included will be modified, all omitted fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing project brief by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated project brief record."""
 
     # Construct request model with validation
@@ -4221,7 +4351,7 @@ async def update_project_brief(
 
 # Tags: Project briefs
 @mcp.tool()
-async def delete_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier of the project brief to delete.")) -> dict[str, Any]:
+async def delete_project_brief(project_brief_gid: str = Field(..., description="The globally unique identifier of the project brief to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project brief by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -4260,7 +4390,7 @@ async def delete_project_brief(project_brief_gid: str = Field(..., description="
 async def create_project_brief(
     project_gid: str = Field(..., description="The globally unique identifier of the project for which the brief will be created."),
     data: _models.ProjectBriefRequest | None = Field(None, description="The request body containing the fields and values for the new project brief to be created."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project brief for the specified project, returning the full record of the newly created brief. Project briefs provide a structured summary of project goals, context, and key information."""
 
     # Construct request model with validation
@@ -4299,7 +4429,7 @@ async def create_project_brief(
 
 # Tags: Project memberships
 @mcp.tool()
-async def get_project_membership(project_membership_gid: str = Field(..., description="The unique identifier (GID) of the project membership record to retrieve.")) -> dict[str, Any]:
+async def get_project_membership(project_membership_gid: str = Field(..., description="The unique identifier (GID) of the project membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details of a single project membership record, including the member's role and access level within the project."""
 
     # Construct request model with validation
@@ -4339,7 +4469,7 @@ async def list_project_memberships(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filter memberships to a specific user, identified by their GID, email address, or the keyword 'me' to refer to the authenticated user."),
     limit: int | None = Field(None, description="The number of membership records to return per page, between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all membership records for a specified project, showing which users belong to it. Optionally filter results to a single user and control pagination with a per-page limit."""
 
     # Construct request model with validation
@@ -4378,7 +4508,7 @@ async def list_project_memberships(
 
 # Tags: Project portfolio settings
 @mcp.tool()
-async def get_project_portfolio_setting(project_portfolio_setting_gid: str = Field(..., description="The globally unique identifier of the project portfolio setting to retrieve.")) -> dict[str, Any]:
+async def get_project_portfolio_setting(project_portfolio_setting_gid: str = Field(..., description="The globally unique identifier of the project portfolio setting to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project portfolio setting. Requires the `project_portfolio_settings:read` scope."""
 
     # Construct request model with validation
@@ -4417,7 +4547,7 @@ async def get_project_portfolio_setting(project_portfolio_setting_gid: str = Fie
 async def update_project_portfolio_setting(
     project_portfolio_setting_gid: str = Field(..., description="The globally unique identifier of the project portfolio setting to update."),
     is_access_control_inherited: bool | None = Field(None, description="Controls whether portfolio members automatically inherit access to the associated project; when true, portfolio membership grants project access."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing project portfolio setting by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated project portfolio setting record."""
 
     # Construct request model with validation
@@ -4459,7 +4589,7 @@ async def update_project_portfolio_setting(
 async def list_project_portfolio_settings(
     project_gid: str = Field(..., description="The globally unique identifier of the project whose portfolio settings you want to retrieve."),
     limit: int | None = Field(None, description="The number of portfolio settings to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all project portfolio settings associated with a specific project, returned as a compact representation. Requires the project_portfolio_settings:read scope."""
 
     # Construct request model with validation
@@ -4498,7 +4628,7 @@ async def list_project_portfolio_settings(
 
 # Tags: Project statuses
 @mcp.tool()
-async def get_project_status(project_status_gid: str = Field(..., description="The unique global identifier of the project status update to retrieve.")) -> dict[str, Any]:
+async def get_project_status(project_status_gid: str = Field(..., description="The unique global identifier of the project status update to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project status update by its unique identifier. Note: this endpoint is deprecated; new integrations should use the `/status_updates/{status_gid}` route instead."""
 
     # Construct request model with validation
@@ -4534,7 +4664,7 @@ async def get_project_status(project_status_gid: str = Field(..., description="T
 
 # Tags: Project statuses
 @mcp.tool()
-async def delete_project_status(project_status_gid: str = Field(..., description="The unique identifier of the project status update to delete.")) -> dict[str, Any]:
+async def delete_project_status(project_status_gid: str = Field(..., description="The unique identifier of the project status update to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific project status update by its unique identifier. Note: this endpoint is deprecated; new integrations should use the status updates route instead."""
 
     # Construct request model with validation
@@ -4570,7 +4700,7 @@ async def delete_project_status(project_status_gid: str = Field(..., description
 
 # Tags: Project statuses
 @mcp.tool()
-async def list_project_statuses(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any]:
+async def list_project_statuses(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all compact project status update records for a given project. Note: this endpoint is deprecated — new integrations should use the `/status_updates` route instead."""
 
     # Construct request model with validation
@@ -4609,7 +4739,7 @@ async def list_project_statuses(project_gid: str = Field(..., description="Globa
 async def create_project_status(
     project_gid: str = Field(..., description="The globally unique identifier of the project on which to create the status update."),
     data: _models.ProjectStatusBase | None = Field(None, description="The request body containing the status update fields, such as title, text, color, and other relevant status details."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new status update on a specified project and returns the full record of the newly created status. Note: this endpoint is deprecated; new integrations should use the `/status_updates` route instead."""
 
     # Construct request model with validation
@@ -4648,7 +4778,7 @@ async def create_project_status(
 
 # Tags: Project templates
 @mcp.tool()
-async def get_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to retrieve.")) -> dict[str, Any]:
+async def get_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project template, including all its configuration and metadata. Requires the project_templates:read scope."""
 
     # Construct request model with validation
@@ -4684,7 +4814,7 @@ async def get_project_template(project_template_gid: str = Field(..., descriptio
 
 # Tags: Project templates
 @mcp.tool()
-async def delete_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to delete.")) -> dict[str, Any]:
+async def delete_project_template(project_template_gid: str = Field(..., description="The globally unique identifier of the project template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project template by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
     # Construct request model with validation
@@ -4723,7 +4853,7 @@ async def delete_project_template(project_template_gid: str = Field(..., descrip
 async def list_project_templates(
     team: str | None = Field(None, description="The team to filter projects on."),
     workspace: str | None = Field(None, description="The workspace to filter results on."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact records for all project templates available in a given team or workspace. Requires the project_templates:read scope."""
 
     # Construct request model with validation
@@ -4761,7 +4891,7 @@ async def list_project_templates(
 
 # Tags: Project templates
 @mcp.tool()
-async def list_team_project_templates(team_gid: str = Field(..., description="Globally unique identifier for the team.")) -> dict[str, Any]:
+async def list_team_project_templates(team_gid: str = Field(..., description="Globally unique identifier for the team.")) -> dict[str, Any] | ToolResult:
     """Retrieves all project templates belonging to a specified team, returning compact template records. Useful for discovering reusable project structures available within a team."""
 
     # Construct request model with validation
@@ -4804,7 +4934,7 @@ async def create_project_from_template(
     is_strict: bool | None = Field(None, description="Controls how unfulfilled date variables are handled. When true, the request fails with an error if any date variable is missing a value; when false, missing date variables fall back to a default such as the current date."),
     requested_dates: list[_models.DateVariableRequest] | None = Field(None, description="An array of objects mapping each template date variable (identified by its GID from the template's requested_dates array) to a specific calendar date. Required when the project template contains date variables such as a task start date."),
     requested_roles: list[_models.RequestedRoleRequest] | None = Field(None, description="An array of objects mapping each template role to a specific user identifier, used to assign team members to predefined roles defined in the project template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Instantiates a new project from an existing project template, returning an asynchronous job that handles the creation process. Supports mapping template date variables and roles to specific calendar dates and users at instantiation time."""
 
     # Construct request model with validation
@@ -4846,7 +4976,7 @@ async def create_project_from_template(
 async def list_projects(
     workspace: str | None = Field(None, description="The GID of the workspace or organization used to filter the returned projects. Providing this filter is recommended to prevent request timeouts on large domains."),
     archived: bool | None = Field(None, description="When provided, filters results to only include projects whose archived status matches this value. Set to true to return only archived projects, or false to return only active projects."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a filtered list of compact project records accessible to the authenticated user. Use the available filters to narrow results — filtering by workspace is strongly recommended to avoid timeouts on large domains."""
 
     # Construct request model with validation
@@ -4884,7 +5014,7 @@ async def list_projects(
 
 # Tags: Projects
 @mcp.tool()
-async def create_project(data: _models.ProjectRequest | None = Field(None, description="The request body containing project details such as name, workspace, team, and privacy settings required to create the project.")) -> dict[str, Any]:
+async def create_project(data: _models.ProjectRequest | None = Field(None, description="The request body containing project details such as name, workspace, team, and privacy settings required to create the project.")) -> dict[str, Any] | ToolResult:
     """Creates a new project within a specified workspace or organization, optionally associating it with a team. Returns the full record of the newly created project."""
 
     # Construct request model with validation
@@ -4922,7 +5052,7 @@ async def create_project(data: _models.ProjectRequest | None = Field(None, descr
 
 # Tags: Projects
 @mcp.tool()
-async def get_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to retrieve.")) -> dict[str, Any]:
+async def get_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single project, including all available fields and metadata. Requires the `projects:read` scope; accessing the `team` field additionally requires `teams:read`."""
 
     # Construct request model with validation
@@ -4961,7 +5091,7 @@ async def get_project(project_gid: str = Field(..., description="The globally un
 async def update_project(
     project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to update."),
     data: _models.ProjectUpdateRequest | None = Field(None, description="An object containing only the project fields you wish to update; omit any fields that should remain unchanged to avoid overwriting concurrent edits. Note: updating the `team` field is deprecated — use `POST /memberships` instead to share a project with a team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing project by its unique identifier, applying only the fields provided in the request body while leaving unspecified fields unchanged. Returns the complete updated project record."""
 
     # Construct request model with validation
@@ -5000,7 +5130,7 @@ async def update_project(
 
 # Tags: Projects
 @mcp.tool()
-async def delete_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to be deleted.")) -> dict[str, Any]:
+async def delete_project(project_gid: str = Field(..., description="The globally unique identifier (GID) of the project to be deleted.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing project by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
     # Construct request model with validation
@@ -5044,7 +5174,7 @@ async def duplicate_project(
     should_skip_weekends: bool | None = Field(None, description="Required when shifting task dates: determines whether auto-shifted due and start dates should skip Saturday and Sunday when recalculating offsets."),
     due_on: str | None = Field(None, description="An ISO 8601 date (YYYY-MM-DD) to set as the last due date in the duplicated project; all other due dates are offset proportionally relative to this anchor date."),
     start_on: str | None = Field(None, description="An ISO 8601 date (YYYY-MM-DD) to set as the first start date in the duplicated project; all other start dates are offset proportionally relative to this anchor date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates an asynchronous duplication job that copies an existing project into a new project, with configurable options for which elements (members, tasks, dates, etc.) to include. Returns a job object that can be polled to track duplication progress."""
 
     # Construct request model with validation
@@ -5087,7 +5217,7 @@ async def duplicate_project(
 async def list_task_projects(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose associated projects you want to retrieve."),
     limit: int | None = Field(None, description="The number of project records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all projects that contain a specified task. Returns a compact representation of each associated project."""
 
     # Construct request model with validation
@@ -5129,7 +5259,7 @@ async def list_task_projects(
 async def create_team_project(
     team_gid: str = Field(..., description="The globally unique identifier of the team with which the new project will be shared."),
     data: _models.ProjectRequest | None = Field(None, description="The project details and configuration to use when creating the new team project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project shared with the specified team. Returns the full record of the newly created project."""
 
     # Construct request model with validation
@@ -5171,7 +5301,7 @@ async def create_team_project(
 async def list_workspace_projects(
     workspace_gid: str = Field(..., description="Globally unique identifier for the workspace or organization."),
     archived: bool | None = Field(None, description="Filters results to only include projects matching the specified archived status. When set to true, only archived projects are returned; when false, only active projects are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact records for all projects within a specified workspace. Note: this endpoint may time out for large domains; use the memberships endpoint to fetch projects for a specific team."""
 
     # Construct request model with validation
@@ -5213,7 +5343,7 @@ async def list_workspace_projects(
 async def create_project_in_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to create the project."),
     data: _models.ProjectRequest | None = Field(None, description="The project details to use when creating the new project, such as name, team, and other project attributes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new project within the specified workspace or organization. If the workspace is an organization, a team must also be provided to share the project with."""
 
     # Construct request model with validation
@@ -5281,7 +5411,7 @@ async def search_projects(
     start_on: str | None = Field(None, description="ISO 8601 date string to match projects with a start date on an exact date, or `null` to match projects with no start date."),
     start_on_before: str | None = Field(None, alias="start_on.before", description="ISO 8601 date string; returns projects with a start date strictly before this date."),
     start_on_after: str | None = Field(None, alias="start_on.after", description="ISO 8601 date string; returns projects with a start date strictly after this date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search and filter projects within a workspace using advanced criteria including text, ownership, membership, portfolio, dates, and custom fields. Results are eventually consistent and require a premium Asana account; use list_projects instead when immediate consistency after writes is needed."""
 
     # Construct request model with validation
@@ -5326,7 +5456,7 @@ async def add_custom_field_to_project(
     is_important: bool | None = Field(None, description="When true, marks this custom field as important for the project, causing it to be prominently displayed in list views of the project's items."),
     insert_before: str | None = Field(None, description="The GID of an existing custom field setting on this project before which the new setting will be inserted to control ordering. Cannot be used together with insert_after."),
     insert_after: str | None = Field(None, description="The GID of an existing custom field setting on this project after which the new setting will be inserted to control ordering. Cannot be used together with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Associates a custom field with a project by creating a custom field setting, allowing the field to appear and be used within that project. Optionally controls the field's display prominence and its position relative to other custom field settings."""
 
     # Construct request model with validation
@@ -5368,7 +5498,7 @@ async def add_custom_field_to_project(
 async def remove_custom_field_from_project(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which the custom field setting will be removed."),
     custom_field: str = Field(..., description="The globally unique identifier of the custom field to detach from the project."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a custom field setting from a project, detaching it so the field no longer appears or collects data for that project. Requires projects:write scope."""
 
     # Construct request model with validation
@@ -5407,7 +5537,7 @@ async def remove_custom_field_from_project(
 
 # Tags: Projects
 @mcp.tool()
-async def get_project_task_counts(project_gid: str = Field(..., description="The globally unique identifier of the project whose task counts you want to retrieve.")) -> dict[str, Any]:
+async def get_project_task_counts(project_gid: str = Field(..., description="The globally unique identifier of the project whose task counts you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves task count statistics for a specific project, including total, incomplete, and completed task counts (milestones are included). All fields are excluded by default and must be explicitly requested using opt_fields."""
 
     # Construct request model with validation
@@ -5446,7 +5576,7 @@ async def get_project_task_counts(project_gid: str = Field(..., description="The
 async def add_project_members(
     project_gid: str = Field(..., description="The globally unique identifier of the project to which members will be added."),
     members: str = Field(..., description="A comma-separated list of user identifiers to add as project members. Each identifier can be the string 'me', a user's email address, or a user's globally unique identifier (gid)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more users as members of the specified project. Note that added members may also become followers depending on their personal notification settings."""
 
     # Construct request model with validation
@@ -5488,7 +5618,7 @@ async def add_project_members(
 async def remove_project_members(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which members will be removed."),
     members: str = Field(..., description="A comma-separated list of users to remove from the project, where each user can be identified by their GID, email address, or the literal string 'me' to reference the authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more users from the member list of a specified project. Returns the updated project record reflecting the new membership."""
 
     # Construct request model with validation
@@ -5530,7 +5660,7 @@ async def remove_project_members(
 async def add_project_followers(
     project_gid: str = Field(..., description="The unique identifier of the project to which followers will be added."),
     followers: str = Field(..., description="A comma-separated list of user identifiers to add as followers; each identifier can be the string 'me', a user's email address, or a user's GID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more users as followers to a project, automatically making them members if they are not already. Followers receive 'tasks added' notifications for the project."""
 
     # Construct request model with validation
@@ -5572,7 +5702,7 @@ async def add_project_followers(
 async def remove_project_followers(
     project_gid: str = Field(..., description="The globally unique identifier of the project from which followers will be removed."),
     followers: str = Field(..., description="A comma-separated list of users to remove as followers. Each user can be identified by their GID, email address, or the string 'me' to reference the authenticated user."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more users from following a project without affecting their project membership status. Returns the updated project record."""
 
     # Construct request model with validation
@@ -5617,7 +5747,7 @@ async def save_project_as_template(
     public: bool = Field(..., description="Controls whether the project template is publicly visible to all members of its team. Set to false to restrict visibility."),
     team: str | None = Field(None, description="The GID of the team to associate with the new project template. Required when the source project belongs to an organization; do not use alongside workspace."),
     workspace: str | None = Field(None, description="The GID of the workspace to associate with the new project template. Only applicable when the source project exists in a workspace rather than an organization; do not use alongside team."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Converts an existing project into a reusable project template by initiating an asynchronous job. Returns a job object that can be monitored for completion status."""
 
     # Construct request model with validation
@@ -5659,7 +5789,7 @@ async def save_project_as_template(
 async def list_rates(
     parent: str | None = Field(None, description="The globally unique identifier of the parent project whose rates should be retrieved."),
     resource: str | None = Field(None, description="The globally unique identifier of a user or placeholder to filter rates down to a single specific resource."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of rate records associated with a parent project, optionally filtered to a specific user or placeholder resource. Modifying placeholder rates requires an Enterprise or Enterprise+ plan."""
 
     # Construct request model with validation
@@ -5701,7 +5831,7 @@ async def create_rate(
     parent: str = Field(..., description="The globally unique ID of the parent project to which this rate will be assigned."),
     resource: str = Field(..., description="The globally unique ID of the resource (user or placeholder) for whom the rate is being set."),
     rate: float = Field(..., description="The monetary value of the rate to assign to the resource, representing the billing amount per unit of time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a billing rate for a specific resource (user or placeholder) within a parent project, defining the monetary value charged for that resource's time."""
 
     # Construct request model with validation
@@ -5739,7 +5869,7 @@ async def create_rate(
 
 # Tags: Rates
 @mcp.tool()
-async def get_rate(rate_gid: str = Field(..., description="The globally unique identifier for the rate to retrieve.")) -> dict[str, Any]:
+async def get_rate(rate_gid: str = Field(..., description="The globally unique identifier for the rate to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single rate, including all associated pricing details and metadata."""
 
     # Construct request model with validation
@@ -5778,7 +5908,7 @@ async def get_rate(rate_gid: str = Field(..., description="The globally unique i
 async def update_rate(
     rate_gid: str = Field(..., description="The globally unique identifier of the rate record to update."),
     rate: float | None = Field(None, description="The new monetary value to assign to the rate. Must be a valid numeric amount."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the monetary value of an existing rate record. Only the rate field can be modified; all other fields remain unchanged."""
 
     # Construct request model with validation
@@ -5817,7 +5947,7 @@ async def update_rate(
 
 # Tags: Rates
 @mcp.tool()
-async def delete_rate(rate_gid: str = Field(..., description="The globally unique identifier of the rate to delete.")) -> dict[str, Any]:
+async def delete_rate(rate_gid: str = Field(..., description="The globally unique identifier of the rate to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a rate by its unique identifier. This action cannot be undone."""
 
     # Construct request model with validation
@@ -5857,7 +5987,7 @@ async def list_reactions(
     target: str = Field(..., description="The globally unique identifier (GID) of the object to fetch reactions from. Must reference a valid status update or story."),
     emoji_base: str = Field(..., description="Filters results to only include reactions that use this emoji base character. Only reactions matching this exact emoji will be returned."),
     limit: int | None = Field(None, description="The maximum number of reactions to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all reactions matching a specific emoji on a given object, such as a status update or story. Returns a paginated list of reactions filtered by the specified emoji base character."""
 
     # Construct request model with validation
@@ -5895,7 +6025,7 @@ async def list_reactions(
 
 # Tags: Sections
 @mcp.tool()
-async def get_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to retrieve.")) -> dict[str, Any]:
+async def get_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete details for a single section by its unique identifier. Useful for inspecting section metadata such as its name, project association, and ordering."""
 
     # Construct request model with validation
@@ -5936,7 +6066,7 @@ async def update_section(
     name: str | None = Field(None, description="The new display name for the section. Must be a non-empty string."),
     insert_before: str | None = Field(None, description="The unique identifier of an existing section before which this section should be repositioned. Mutually exclusive with insert_after."),
     insert_after: str | None = Field(None, description="The unique identifier of an existing section after which this section should be repositioned. Mutually exclusive with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing section's name or position within its project. Only the fields provided will be modified; all other section properties remain unchanged."""
 
     # Construct request model with validation
@@ -5975,7 +6105,7 @@ async def update_section(
 
 # Tags: Sections
 @mcp.tool()
-async def delete_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to delete.")) -> dict[str, Any]:
+async def delete_section(section_gid: str = Field(..., description="The globally unique identifier (GID) of the section to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing section by its unique identifier. The section must be empty and cannot be the last remaining section in the project."""
 
     # Construct request model with validation
@@ -6011,7 +6141,7 @@ async def delete_section(section_gid: str = Field(..., description="The globally
 
 # Tags: Sections
 @mcp.tool()
-async def list_project_sections(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any]:
+async def list_project_sections(project_gid: str = Field(..., description="Globally unique identifier for the project.")) -> dict[str, Any] | ToolResult:
     """Retrieves all sections within a specified project, returning compact records for each. Useful for understanding a project's organizational structure before creating or moving tasks."""
 
     # Construct request model with validation
@@ -6052,7 +6182,7 @@ async def create_section(
     name: str | None = Field(None, description="The display name for the new section. Must be a non-empty string."),
     insert_before: str | None = Field(None, description="The GID of an existing section in this project before which the new section will be inserted. Mutually exclusive with insert_after; only one may be provided."),
     insert_after: str | None = Field(None, description="The GID of an existing section in this project after which the new section will be inserted. Mutually exclusive with insert_before; only one may be provided."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new section within a specified project to help organize tasks. Returns the full record of the newly created section."""
 
     # Construct request model with validation
@@ -6096,7 +6226,7 @@ async def add_task_to_section(
     task: str | None = Field(None, description="The unique identifier of the task to add to the section. Note: tasks with a resource_subtype of 'section' (separators) are not supported."),
     insert_before: str | None = Field(None, description="The unique identifier of an existing task in this section before which the added task should be inserted. Mutually exclusive with insert_after."),
     insert_after: str | None = Field(None, description="The unique identifier of an existing task in this section after which the added task should be inserted. Mutually exclusive with insert_before."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Moves a task into a specific section within a project, removing it from any other sections. The task is placed at the top of the section by default, or at a specific position using insert_before or insert_after."""
 
     # Construct request model with validation
@@ -6140,7 +6270,7 @@ async def reorder_section(
     section: str | None = Field(None, description="The unique identifier of the section you want to move to a new position within the project."),
     before_section: str | None = Field(None, description="The unique identifier of the reference section that the moved section should be placed immediately before. Mutually exclusive with `after_section`."),
     after_section: str | None = Field(None, description="The unique identifier of the reference section that the moved section should be placed immediately after. Mutually exclusive with `before_section`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Move a section to a new position within a project by placing it before or after another section. Exactly one of `before_section` or `after_section` must be provided; sections cannot be moved across projects."""
 
     # Construct request model with validation
@@ -6179,7 +6309,7 @@ async def reorder_section(
 
 # Tags: Status updates
 @mcp.tool()
-async def get_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to retrieve.")) -> dict[str, Any]:
+async def get_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single status update by its unique identifier. Useful for fetching the full details of a specific project or task status update."""
 
     # Construct request model with validation
@@ -6215,7 +6345,7 @@ async def get_status_update(status_update_gid: str = Field(..., description="The
 
 # Tags: Status updates
 @mcp.tool()
-async def delete_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to delete.")) -> dict[str, Any]:
+async def delete_status_update(status_update_gid: str = Field(..., description="The unique identifier of the status update to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific status update by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -6255,7 +6385,7 @@ async def list_status_updates(
     parent: str = Field(..., description="The globally unique identifier (GID) of the object whose status updates should be retrieved. Must reference a project, portfolio, or goal."),
     limit: int | None = Field(None, description="The maximum number of status update records to return per page, between 1 and 100.", ge=1, le=100),
     created_since: str | None = Field(None, description="Filters results to only include status updates created at or after this timestamp, specified in ISO 8601 date-time format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of status updates for a specified project, portfolio, or goal. Results can be filtered by creation date to surface only recent updates."""
 
     # Construct request model with validation
@@ -6296,7 +6426,7 @@ async def list_status_updates(
 async def create_status_update(
     limit: int | None = Field(None, description="The number of results to return per page, must be between 1 and 100.", ge=1, le=100),
     data: _models.StatusUpdateRequest | None = Field(None, description="The payload containing the status update details to be created on the target object."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new status update on a specified object, such as a project or task. Returns the full record of the newly created status update."""
 
     # Construct request model with validation
@@ -6337,7 +6467,7 @@ async def create_status_update(
 
 # Tags: Stories
 @mcp.tool()
-async def get_story(story_gid: str = Field(..., description="The globally unique identifier (GID) of the story to retrieve.")) -> dict[str, Any]:
+async def get_story(story_gid: str = Field(..., description="The globally unique identifier (GID) of the story to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a single story by its unique identifier. Requires the stories:read scope, with additional attachments:read scope needed to access previews and attachments fields."""
 
     # Construct request model with validation
@@ -6378,7 +6508,7 @@ async def update_story(
     text: str | None = Field(None, description="The plain text content of the comment story to set. Cannot be used together with html_text; only one may be specified per request."),
     is_pinned: bool | None = Field(None, description="Whether the story should be pinned to its parent resource. Pinning is supported only for comment and attachment story types."),
     sticker_name: Literal["green_checkmark", "people_dancing", "dancing_unicorn", "heart", "party_popper", "people_waving_flags", "splashing_narwhal", "trophy", "yeti_riding_unicorn", "celebrating_people", "determined_climbers", "phoenix_spreading_love"] | None = Field(None, description="The name of the sticker to display on the story. Set to null to remove an existing sticker. Must be one of the supported sticker identifiers."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing story on a task, allowing edits to comment text, pin status, or sticker. Only comment stories support text updates, and only comment and attachment stories can be pinned."""
 
     # Construct request model with validation
@@ -6417,7 +6547,7 @@ async def update_story(
 
 # Tags: Stories
 @mcp.tool()
-async def delete_story(story_gid: str = Field(..., description="The globally unique identifier of the story to delete.")) -> dict[str, Any]:
+async def delete_story(story_gid: str = Field(..., description="The globally unique identifier of the story to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a story by its unique identifier. Only the story's creator can delete it; returns an empty data record on success."""
 
     # Construct request model with validation
@@ -6453,7 +6583,7 @@ async def delete_story(story_gid: str = Field(..., description="The globally uni
 
 # Tags: Stories
 @mcp.tool()
-async def list_task_stories(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any]:
+async def list_task_stories(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves all stories (comments, activity, and system events) associated with a specific task. Returns compact story records in chronological order."""
 
     # Construct request model with validation
@@ -6494,7 +6624,7 @@ async def add_task_comment(
     text: str | None = Field(None, description="The plain text content of the comment to post on the task. Cannot be used together with html_text."),
     is_pinned: bool | None = Field(None, description="Whether the story should be pinned to the top of the task's story feed, making it prominently visible."),
     sticker_name: Literal["green_checkmark", "people_dancing", "dancing_unicorn", "heart", "party_popper", "people_waving_flags", "splashing_narwhal", "trophy", "yeti_riding_unicorn", "celebrating_people", "determined_climbers", "phoenix_spreading_love"] | None = Field(None, description="The name of the sticker to attach to this story. Omit or set to null if no sticker is desired."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a comment story to a task, authored by the currently authenticated user and timestamped at the time of the request. Returns the full record of the newly created story."""
 
     # Construct request model with validation
@@ -6533,7 +6663,7 @@ async def add_task_comment(
 
 # Tags: Tags
 @mcp.tool()
-async def list_tags(workspace: str | None = Field(None, description="The unique identifier of the workspace used to filter the returned tags to only those belonging to that workspace.")) -> dict[str, Any]:
+async def list_tags(workspace: str | None = Field(None, description="The unique identifier of the workspace used to filter the returned tags to only those belonging to that workspace.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact tag records, optionally filtered by workspace. Requires the 'tags:read' scope."""
 
     # Construct request model with validation
@@ -6571,7 +6701,7 @@ async def list_tags(workspace: str | None = Field(None, description="The unique 
 
 # Tags: Tags
 @mcp.tool()
-async def create_tag(data: _models.TagCreateRequest | None = Field(None, description="The request body containing the tag details, including the required workspace or organization identifier and any additional tag properties such as name and color.")) -> dict[str, Any]:
+async def create_tag(data: _models.TagCreateRequest | None = Field(None, description="The request body containing the tag details, including the required workspace or organization identifier and any additional tag properties such as name and color.")) -> dict[str, Any] | ToolResult:
     """Creates a new tag within a specified workspace or organization, returning the full record of the newly created tag. Requires the tags:write scope, and the tag's workspace association is permanent once set."""
 
     # Construct request model with validation
@@ -6609,7 +6739,7 @@ async def create_tag(data: _models.TagCreateRequest | None = Field(None, descrip
 
 # Tags: Tags
 @mcp.tool()
-async def get_tag(tag_gid: str = Field(..., description="The globally unique identifier (GID) of the tag to retrieve.")) -> dict[str, Any]:
+async def get_tag(tag_gid: str = Field(..., description="The globally unique identifier (GID) of the tag to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single tag, including its name, color, and associated metadata. Requires the tags:read scope."""
 
     # Construct request model with validation
@@ -6648,7 +6778,7 @@ async def get_tag(tag_gid: str = Field(..., description="The globally unique ide
 async def update_tag(
     tag_gid: str = Field(..., description="The globally unique identifier of the tag to update."),
     data: _models.TagBase | None = Field(None, description="An object containing the tag fields to update. Only include fields you wish to change to avoid overwriting concurrent updates from other users."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the properties of an existing tag by its unique identifier. Only fields provided in the request body will be modified; unspecified fields remain unchanged."""
 
     # Construct request model with validation
@@ -6687,7 +6817,7 @@ async def update_tag(
 
 # Tags: Tags
 @mcp.tool()
-async def delete_tag(tag_gid: str = Field(..., description="The globally unique identifier of the tag to delete.")) -> dict[str, Any]:
+async def delete_tag(tag_gid: str = Field(..., description="The globally unique identifier of the tag to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing tag by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -6726,7 +6856,7 @@ async def delete_tag(tag_gid: str = Field(..., description="The globally unique 
 async def list_task_tags(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose tags you want to retrieve."),
     limit: int | None = Field(None, description="The number of tag results to return per page, must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tags associated with a specific task, returned as compact tag representations. Requires the tags:read scope."""
 
     # Construct request model with validation
@@ -6765,7 +6895,7 @@ async def list_task_tags(
 
 # Tags: Tags
 @mcp.tool()
-async def list_workspace_tags(workspace_gid: str = Field(..., description="Globally unique identifier for the workspace or organization.")) -> dict[str, Any]:
+async def list_workspace_tags(workspace_gid: str = Field(..., description="Globally unique identifier for the workspace or organization.")) -> dict[str, Any] | ToolResult:
     """Retrieves compact tag records for all tags within a specified workspace. Useful for discovering and filtering available tags to organize and categorize work items."""
 
     # Construct request model with validation
@@ -6804,7 +6934,7 @@ async def list_workspace_tags(workspace_gid: str = Field(..., description="Globa
 async def create_tag_in_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to create the tag."),
     data: _models.TagCreateTagForWorkspaceRequest | None = Field(None, description="The tag details to create, including properties such as name, color, and any other supported tag fields."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new tag within a specified workspace or organization. Returns the full record of the newly created tag."""
 
     # Construct request model with validation
@@ -6843,7 +6973,7 @@ async def create_tag_in_workspace(
 
 # Tags: Task templates
 @mcp.tool()
-async def list_task_templates(project: str | None = Field(None, description="The unique identifier of the project whose task templates should be returned. This filter is required to scope results to a specific project.")) -> dict[str, Any]:
+async def list_task_templates(project: str | None = Field(None, description="The unique identifier of the project whose task templates should be returned. This filter is required to scope results to a specific project.")) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact task template records for a specified project. A project must be provided to filter and return the relevant task templates."""
 
     # Construct request model with validation
@@ -6881,7 +7011,7 @@ async def list_task_templates(project: str | None = Field(None, description="The
 
 # Tags: Task templates
 @mcp.tool()
-async def get_task_template(task_template_gid: str = Field(..., description="The globally unique identifier (GID) of the task template to retrieve.")) -> dict[str, Any]:
+async def get_task_template(task_template_gid: str = Field(..., description="The globally unique identifier (GID) of the task template to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single task template, including all its fields and configuration. Requires the task_templates:read scope."""
 
     # Construct request model with validation
@@ -6917,7 +7047,7 @@ async def get_task_template(task_template_gid: str = Field(..., description="The
 
 # Tags: Task templates
 @mcp.tool()
-async def delete_task_template(task_template_gid: str = Field(..., description="The globally unique identifier of the task template to delete.")) -> dict[str, Any]:
+async def delete_task_template(task_template_gid: str = Field(..., description="The globally unique identifier of the task template to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes an existing task template by its unique identifier. This action is irreversible and returns an empty data record upon success."""
 
     # Construct request model with validation
@@ -6956,7 +7086,7 @@ async def delete_task_template(task_template_gid: str = Field(..., description="
 async def instantiate_task_from_template(
     task_template_gid: str = Field(..., description="The globally unique identifier of the task template to instantiate a new task from."),
     name: str | None = Field(None, description="The display name for the newly created task. If omitted, the task inherits the name defined in the source task template."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new task by instantiating a task template, returning an asynchronous job that handles the task creation process. Use this to spin up pre-configured tasks from reusable templates."""
 
     # Construct request model with validation
@@ -7002,7 +7132,7 @@ async def list_tasks(
     workspace: str | None = Field(None, description="Filter tasks within the specified workspace GID. Requires assignee to also be specified."),
     completed_since: str | None = Field(None, description="Return only tasks that are incomplete or were completed on or after this timestamp, provided in ISO 8601 date-time format."),
     modified_since: str | None = Field(None, description="Return only tasks modified on or after this timestamp in ISO 8601 date-time format. Modifications include property changes and association updates such as assigning, renaming, completing, or adding stories."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a filtered list of compact task records based on assignee, project, section, workspace, or time-based criteria. At least one of project, tag, or both assignee and workspace must be specified."""
 
     # Construct request model with validation
@@ -7040,7 +7170,7 @@ async def list_tasks(
 
 # Tags: Tasks
 @mcp.tool()
-async def create_task(data: _models.TaskRequest | None = Field(None, description="The task fields to set on the new task, such as name, workspace, projects, assignee, due date, and other task attributes. A workspace must be determinable either directly or via an associated project or parent task.")) -> dict[str, Any]:
+async def create_task(data: _models.TaskRequest | None = Field(None, description="The task fields to set on the new task, such as name, workspace, projects, assignee, due date, and other task attributes. A workspace must be determinable either directly or via an associated project or parent task.")) -> dict[str, Any] | ToolResult:
     """Creates a new task in a specified workspace, project, or as a child of a parent task. Any fields not explicitly provided will be assigned their default values."""
 
     # Construct request model with validation
@@ -7078,7 +7208,7 @@ async def create_task(data: _models.TaskRequest | None = Field(None, description
 
 # Tags: Tasks
 @mcp.tool()
-async def get_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to retrieve.")) -> dict[str, Any]:
+async def get_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single task, including all fields and metadata. Note that accessing memberships requires projects:read and project_sections:read scopes, and actual_time_minutes requires time_tracking_entries:read scope."""
 
     # Construct request model with validation
@@ -7117,7 +7247,7 @@ async def get_task(task_gid: str = Field(..., description="The unique global ide
 async def update_task(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to update."),
     data: _models.TaskRequest | None = Field(None, description="An object containing only the task fields you wish to update; omitted fields will retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates specific fields of an existing task by its unique identifier. Only the fields provided in the request body will be modified; all other fields remain unchanged."""
 
     # Construct request model with validation
@@ -7156,7 +7286,7 @@ async def update_task(
 
 # Tags: Tasks
 @mcp.tool()
-async def delete_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to delete.")) -> dict[str, Any]:
+async def delete_task(task_gid: str = Field(..., description="The unique global identifier (GID) of the task to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific task by moving it to the requesting user's trash, where it can be recovered within 30 days before being completely removed from the system."""
 
     # Construct request model with validation
@@ -7196,7 +7326,7 @@ async def duplicate_task(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to duplicate."),
     name: str | None = Field(None, description="The name to assign to the newly duplicated task."),
     include: str | None = Field(None, description="A comma-separated list of fields to copy from the original task to the duplicate. Supported fields include: assignee, attachments, dates, dependencies, followers, notes, parent, projects, subtasks, and tags."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Duplicates an existing task and returns an asynchronous job that handles the duplication process. You can specify a new name and choose which fields to carry over to the duplicated task."""
 
     # Construct request model with validation
@@ -7239,7 +7369,7 @@ async def list_project_tasks(
     project_gid: str = Field(..., description="The globally unique identifier (GID) of the project whose tasks you want to retrieve."),
     completed_since: str | None = Field(None, description="Filters results to include only incomplete tasks or tasks completed after this point in time. Accepts an ISO 8601 date-time string or the keyword 'now' to filter relative to the current moment."),
     limit: int | None = Field(None, description="The number of task records to return per page. Must be between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks within a specified project, ordered by their priority within that project. Tasks may belong to multiple projects simultaneously."""
 
     # Construct request model with validation
@@ -7282,7 +7412,7 @@ async def list_section_tasks(
     section_gid: str = Field(..., description="The globally unique identifier of the section whose tasks you want to retrieve."),
     limit: int | None = Field(None, description="Number of task records to return per page. Must be between 1 and 100.", ge=1, le=100),
     completed_since: str | None = Field(None, description="Filters results to include only incomplete tasks or tasks completed after the specified time. Accepts an ISO 8601 date-time string or the keyword 'now'."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks within a specified board section, returning compact task records. Only applicable to board view sections."""
 
     # Construct request model with validation
@@ -7324,7 +7454,7 @@ async def list_section_tasks(
 async def list_tasks_by_tag(
     tag_gid: str = Field(..., description="The globally unique identifier of the tag whose associated tasks you want to retrieve."),
     limit: int | None = Field(None, description="The number of task records to return per page, must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks associated with a specific tag, returning compact task records. A task may belong to multiple tags simultaneously."""
 
     # Construct request model with validation
@@ -7367,7 +7497,7 @@ async def list_user_task_list_tasks(
     user_task_list_gid: str = Field(..., description="The globally unique identifier for the user task list whose tasks you want to retrieve."),
     completed_since: str | None = Field(None, description="Filters results to only include tasks that are incomplete or were completed on or after this point in time. Accepts an ISO 8601 date-time string or the keyword 'now' to return only currently incomplete tasks."),
     limit: int | None = Field(None, description="The number of task objects to return per page, between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the compact list of tasks from a user's My Tasks list, including both complete and incomplete tasks by default. Use the completed_since filter to narrow results, such as returning only incomplete tasks by passing 'now'."""
 
     # Construct request model with validation
@@ -7406,7 +7536,7 @@ async def list_user_task_list_tasks(
 
 # Tags: Tasks
 @mcp.tool()
-async def list_subtasks(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any]:
+async def list_subtasks(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all subtasks belonging to a specified task. Useful for exploring task hierarchies and understanding nested work breakdowns."""
 
     # Construct request model with validation
@@ -7445,7 +7575,7 @@ async def list_subtasks(task_gid: str = Field(..., description="The task to oper
 async def create_subtask(
     task_gid: str = Field(..., description="The unique identifier (GID) of the parent task to which the new subtask will be added."),
     data: _models.TaskRequest | None = Field(None, description="The subtask details to create, including fields such as name, assignee, due date, and notes."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new subtask under the specified parent task and returns the full record of the newly created subtask."""
 
     # Construct request model with validation
@@ -7489,7 +7619,7 @@ async def set_task_parent(
     parent: str = Field(..., description="The unique identifier of the task to set as the new parent, or null to remove the existing parent and make the task top-level."),
     insert_after: str | None = Field(None, description="The unique identifier of an existing subtask of the new parent after which this task should be inserted, or null to insert at the beginning of the subtask list. Cannot be used together with insert_before."),
     insert_before: str | None = Field(None, description="The unique identifier of an existing subtask of the new parent before which this task should be inserted, or null to insert at the end of the subtask list. Cannot be used together with insert_after."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Sets or removes the parent of a task, making it a subtask of another task or a top-level task when parent is null. Optionally controls the position of the task within the parent's subtask list."""
 
     # Construct request model with validation
@@ -7531,7 +7661,7 @@ async def set_task_parent(
 async def list_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose dependencies you want to retrieve."),
     limit: int | None = Field(None, description="The number of dependency records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all tasks that a given task depends on, returned as compact representations. Useful for understanding task prerequisites and dependency chains within a project."""
 
     # Construct request model with validation
@@ -7573,7 +7703,7 @@ async def list_task_dependencies(
 async def add_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to which dependencies will be added."),
     dependencies: list[str] | None = Field(None, description="An array of task GIDs to mark as dependencies of the specified task; order is not significant and each item should be a valid task GID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Marks one or more tasks as dependencies of a specified task, establishing that the target task depends on their completion. A task may have at most 30 dependents and dependencies combined."""
 
     # Construct request model with validation
@@ -7615,7 +7745,7 @@ async def add_task_dependencies(
 async def remove_task_dependencies(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task from which dependencies will be removed."),
     dependencies: list[str] | None = Field(None, description="An array of task GIDs representing the dependency tasks to unlink from the specified task. Order is not significant; each item should be a valid task GID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlinks one or more dependency tasks from a specified task, removing the requirement that those tasks must be completed before this task can proceed."""
 
     # Construct request model with validation
@@ -7657,7 +7787,7 @@ async def remove_task_dependencies(
 async def list_task_dependents(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task whose dependents you want to retrieve."),
     limit: int | None = Field(None, description="The number of dependent task records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact representations of all tasks that depend on a specified task. Useful for understanding downstream impact when changes are made to a task."""
 
     # Construct request model with validation
@@ -7699,7 +7829,7 @@ async def list_task_dependents(
 async def add_task_dependents(
     task_gid: str = Field(..., description="The unique identifier of the task that will become the dependency (i.e., the task that others will depend on)."),
     dependents: list[str] | None = Field(None, description="An array of task GIDs to mark as dependents of the specified task. Order is not significant; each item should be a valid task GID string."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Marks one or more tasks as dependents of the specified task, meaning those tasks depend on this task being completed. A task can have at most 30 dependents and dependencies combined."""
 
     # Construct request model with validation
@@ -7741,7 +7871,7 @@ async def add_task_dependents(
 async def remove_task_dependents(
     task_gid: str = Field(..., description="The unique identifier of the task from which dependents will be unlinked."),
     dependents: list[str] | None = Field(None, description="An array of task GIDs representing the dependent tasks to unlink from the specified task. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Unlinks one or more dependent tasks from a specified task, removing the dependency relationship. Requires tasks:write scope."""
 
     # Construct request model with validation
@@ -7786,7 +7916,7 @@ async def add_task_to_project(
     insert_after: str | None = Field(None, description="The GID of an existing task in the project after which this task should be inserted. Pass null to place the task at the beginning of the list or, when combined with `section`, at the beginning of that section. Cannot be used together with `insert_before`."),
     insert_before: str | None = Field(None, description="The GID of an existing task in the project before which this task should be inserted. Pass null to place the task at the end of the list or, when combined with `section`, at the end of that section. Cannot be used together with `insert_after`."),
     section: str | None = Field(None, description="The GID of a section within the project into which the task should be placed. By default the task is added to the end of the section; combine with `insert_after: null` to place at the beginning, `insert_before: null` to place at the end, or a non-null `insert_before`/`insert_after` task GID to position relative to a specific task within the section."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a task to a specified project, optionally positioning it relative to another task or within a section. Can also be used to reorder a task already in the project; a task may belong to at most 20 projects."""
 
     # Construct request model with validation
@@ -7828,7 +7958,7 @@ async def add_task_to_project(
 async def remove_task_from_project(
     task_gid: str = Field(..., description="The unique identifier of the task to be removed from the project."),
     project: str = Field(..., description="The unique identifier of the project from which the task should be removed."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a task from a specified project without deleting the task itself. The task remains in the system and can still belong to other projects."""
 
     # Construct request model with validation
@@ -7870,7 +8000,7 @@ async def remove_task_from_project(
 async def add_task_tag(
     task_gid: str = Field(..., description="The unique global identifier (GID) of the task to which the tag will be added."),
     tag: str = Field(..., description="The unique global identifier (GID) of the tag to attach to the task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds an existing tag to a specified task, associating them for organization and filtering purposes. Returns an empty data block on success."""
 
     # Construct request model with validation
@@ -7912,7 +8042,7 @@ async def add_task_tag(
 async def remove_task_tag(
     task_gid: str = Field(..., description="The unique global identifier (GID) of the task from which the tag will be removed."),
     tag: str = Field(..., description="The unique global identifier (GID) of the tag to remove from the task."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a tag from a specified task, dissociating the tag without deleting it. Returns an empty data block on success."""
 
     # Construct request model with validation
@@ -7954,7 +8084,7 @@ async def remove_task_tag(
 async def add_task_followers(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task to which followers will be added."),
     followers: list[str] = Field(..., description="A list of users to add as followers, where each entry can be the string 'me', a user's email address, or a user's GID. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds one or more followers to a specified task, associating them with it for updates and visibility. Returns the complete updated task record upon success."""
 
     # Construct request model with validation
@@ -7996,7 +8126,7 @@ async def add_task_followers(
 async def remove_task_followers(
     task_gid: str = Field(..., description="The unique identifier (GID) of the task from which followers will be removed."),
     followers: list[str] = Field(..., description="A list of users to remove as followers from the task. Each item can be the string 'me', a user's email address, or a user's GID. Order is not significant."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes one or more specified followers from a task, leaving all other followers unaffected. Returns the complete, updated task record after the removal."""
 
     # Construct request model with validation
@@ -8038,7 +8168,7 @@ async def remove_task_followers(
 async def get_task_by_custom_id(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization in which to search for the task."),
     custom_id: str = Field(..., description="The custom ID shortcode assigned to the task, typically formatted as a prefix followed by a number (e.g., a project code and sequence number)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a task using its human-readable custom ID shortcode within a specified workspace. Useful when referencing tasks by their display identifiers rather than internal GIDs."""
 
     # Construct request model with validation
@@ -8129,7 +8259,7 @@ async def search_tasks(
     is_subtask: bool | None = Field(None, description="When true, filters results to subtasks only; when false, excludes subtasks from results."),
     sort_by: Literal["due_date", "created_at", "completed_at", "likes", "modified_at"] | None = Field(None, description="Field by which to sort the returned tasks. Defaults to 'modified_at'. Use in combination with sort_ascending to control order direction."),
     sort_ascending: bool | None = Field(None, description="When true, results are sorted in ascending order by the sort_by field; when false (default), results are sorted in descending order."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Search tasks within a workspace using advanced filters including text, assignees, projects, dates, custom fields, and more. Requires a premium Asana workspace or premium team membership; results are eventually consistent and support manual pagination via sort and limit."""
 
     # Construct request model with validation
@@ -8168,7 +8298,7 @@ async def search_tasks(
 
 # Tags: Team memberships
 @mcp.tool()
-async def get_team_membership(team_membership_gid: str = Field(..., description="The unique identifier (GID) of the team membership record to retrieve.")) -> dict[str, Any]:
+async def get_team_membership(team_membership_gid: str = Field(..., description="The unique identifier (GID) of the team membership record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete membership record for a single team membership, including details about the member and their associated team. Requires the `team_memberships:read` scope, with additional `teams:read` scope needed to access team details."""
 
     # Construct request model with validation
@@ -8209,7 +8339,7 @@ async def list_team_memberships(
     team: str | None = Field(None, description="The globally unique identifier (GID) of the team whose memberships should be returned."),
     user: str | None = Field(None, description="Identifies the user whose team memberships to retrieve; accepts the string \"me\", a user email address, or a user GID. Must be used together with the workspace parameter."),
     workspace: str | None = Field(None, description="The globally unique identifier (GID) of the workspace to scope the results to. Must be used together with the user parameter."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of compact team membership records, optionally filtered by team, user, or workspace. Requires the team_memberships:read scope."""
 
     # Construct request model with validation
@@ -8250,7 +8380,7 @@ async def list_team_memberships(
 async def list_team_memberships_for_team(
     team_gid: str = Field(..., description="The globally unique identifier of the team whose memberships you want to retrieve."),
     limit: int | None = Field(None, description="The number of membership records to return per page, accepting values between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all team memberships for a specified team, returning compact membership records for each member. Requires the team_memberships:read scope."""
 
     # Construct request model with validation
@@ -8293,7 +8423,7 @@ async def list_user_team_memberships(
     user_gid: str = Field(..., description="The unique identifier for the user whose team memberships will be retrieved. Accepts the string 'me' for the authenticated user, a user's email address, or a user's global ID (gid)."),
     workspace: str = Field(..., description="The globally unique identifier (gid) of the workspace used to scope the team membership results to a specific organization or workspace."),
     limit: int | None = Field(None, description="The number of team membership records to return per page, allowing pagination through large result sets. Must be an integer between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all team memberships for a specified user within a given workspace, returning compact membership records. Requires the team_memberships:read scope."""
 
     # Construct request model with validation
@@ -8332,7 +8462,7 @@ async def list_user_team_memberships(
 
 # Tags: Teams
 @mcp.tool()
-async def create_team(data: _models.TeamRequest | None = Field(None, description="The configuration details for the new team, such as name and settings.")) -> dict[str, Any]:
+async def create_team(data: _models.TeamRequest | None = Field(None, description="The configuration details for the new team, such as name and settings.")) -> dict[str, Any] | ToolResult:
     """Creates a new team within the current workspace. Use this to organize members and resources under a named group."""
 
     # Construct request model with validation
@@ -8370,7 +8500,7 @@ async def create_team(data: _models.TeamRequest | None = Field(None, description
 
 # Tags: Teams
 @mcp.tool()
-async def get_team(team_gid: str = Field(..., description="The globally unique identifier (GID) for the team to retrieve.")) -> dict[str, Any]:
+async def get_team(team_gid: str = Field(..., description="The globally unique identifier (GID) for the team to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details for a single team by its unique identifier. Requires the teams:read scope."""
 
     # Construct request model with validation
@@ -8409,7 +8539,7 @@ async def get_team(team_gid: str = Field(..., description="The globally unique i
 async def update_team(
     team_gid: str = Field(..., description="The globally unique identifier for the team to be updated."),
     data: _models.TeamRequest | None = Field(None, description="The team fields to update, provided as a data object containing the properties and their new values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates the properties of an existing team within the current workspace. Use this to modify team details such as name or description."""
 
     # Construct request model with validation
@@ -8451,7 +8581,7 @@ async def update_team(
 async def list_workspace_teams(
     workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization whose teams you want to retrieve."),
     limit: int | None = Field(None, description="The number of team records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact records for all teams within a specified workspace or organization that are visible to the authorized user. Requires the 'teams:read' scope."""
 
     # Construct request model with validation
@@ -8494,7 +8624,7 @@ async def list_user_teams(
     user_gid: str = Field(..., description="The unique identifier for the user whose teams you want to retrieve. Accepts the literal string 'me' for the authenticated user, a user's email address, or a numeric user GID."),
     organization: str = Field(..., description="The GID of the workspace or organization used to filter the returned teams, ensuring only teams within that context are included."),
     limit: int | None = Field(None, description="The number of team records to return per page. Must be an integer between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all teams that a specified user belongs to, optionally filtered by a workspace or organization. Returns compact team records for the given user."""
 
     # Construct request model with validation
@@ -8536,7 +8666,7 @@ async def list_user_teams(
 async def add_team_member(
     team_gid: str = Field(..., description="The unique identifier of the team to which the user will be added."),
     user: str | None = Field(None, description="The identifier of the user to add to the team — accepts the literal string 'me' for the current user, a user's email address, or a user's globally unique identifier (GID)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user to the specified team, creating a new team membership record. The requesting user must already be a member of the team, and the user being added must belong to the same organization."""
 
     # Construct request model with validation
@@ -8578,7 +8708,7 @@ async def add_team_member(
 async def remove_team_member(
     team_gid: str = Field(..., description="The globally unique identifier of the team from which the user will be removed."),
     user: str | None = Field(None, description="The identifier of the user to remove, accepted as the string 'me' (for the requesting user), an email address, or a user GID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a specified user from a team. The user making this request must be a member of the team to remove themselves or others."""
 
     # Construct request model with validation
@@ -8617,7 +8747,7 @@ async def remove_team_member(
 
 # Tags: Time periods
 @mcp.tool()
-async def get_time_period(time_period_gid: str = Field(..., description="The globally unique identifier of the time period to retrieve.")) -> dict[str, Any]:
+async def get_time_period(time_period_gid: str = Field(..., description="The globally unique identifier of the time period to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific time period by its unique identifier. Useful for accessing goal-tracking intervals such as fiscal quarters or annual periods."""
 
     # Construct request model with validation
@@ -8658,7 +8788,7 @@ async def list_time_periods(
     limit: int | None = Field(None, description="The number of time period records to return per page, between 1 and 100.", ge=1, le=100),
     start_on: str | None = Field(None, description="Filters results to time periods starting on or after this date, specified in ISO 8601 date format."),
     end_on: str | None = Field(None, description="Filters results to time periods ending on or before this date, specified in ISO 8601 date format."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a paginated list of compact time period records for a given workspace. Useful for browsing available time periods such as fiscal quarters or sprints."""
 
     # Construct request model with validation
@@ -8696,7 +8826,7 @@ async def list_time_periods(
 
 # Tags: Time tracking entries
 @mcp.tool()
-async def list_task_time_tracking_entries(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any]:
+async def list_task_time_tracking_entries(task_gid: str = Field(..., description="The task to operate on.")) -> dict[str, Any] | ToolResult:
     """Retrieves all time tracking entries logged against a specific task. Requires the time_tracking_entries:read scope."""
 
     # Construct request model with validation
@@ -8739,7 +8869,7 @@ async def create_time_entry(
     attributable_to: str | None = Field(None, description="The GID of the project this time entry should be attributed to, allowing time to be associated with a specific project context."),
     billable_status: Literal["billable", "nonBillable", "notApplicable"] | None = Field(None, description="The billable classification of this time entry: 'billable' for client-chargeable time, 'nonBillable' for internal time, or 'notApplicable' when billing status is not relevant."),
     description: str | None = Field(None, description="A free-text note describing the work performed during this time entry, providing context for the logged time."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Logs a new time tracking entry on a specified task, recording duration, date, billable status, and optional project attribution. Returns the newly created time tracking entry record."""
 
     # Construct request model with validation
@@ -8778,7 +8908,7 @@ async def create_time_entry(
 
 # Tags: Time tracking entries
 @mcp.tool()
-async def get_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to retrieve.")) -> dict[str, Any]:
+async def get_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single time tracking entry. Requires the time_tracking_entries:read scope."""
 
     # Construct request model with validation
@@ -8821,7 +8951,7 @@ async def update_time_tracking_entry(
     attributable_to: str | None = Field(None, description="The unique identifier (GID) of the project to which this time entry's effort is attributed."),
     billable_status: Literal["billable", "nonBillable", "notApplicable"] | None = Field(None, description="The billable status of this time entry. Use 'billable' for client-chargeable work, 'nonBillable' for internal work, or 'notApplicable' when billing status is irrelevant."),
     description: str | None = Field(None, description="A free-text description summarizing the work performed during this time entry."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing time tracking entry by its unique identifier, modifying only the fields provided while leaving all other fields unchanged. Returns the complete updated time tracking entry record."""
 
     # Construct request model with validation
@@ -8860,7 +8990,7 @@ async def update_time_tracking_entry(
 
 # Tags: Time tracking entries
 @mcp.tool()
-async def delete_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to delete.")) -> dict[str, Any]:
+async def delete_time_tracking_entry(time_tracking_entry_gid: str = Field(..., description="The globally unique identifier (GID) of the time tracking entry to delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a specific time tracking entry by its unique identifier. Returns an empty data record upon successful deletion."""
 
     # Construct request model with validation
@@ -8905,7 +9035,7 @@ async def list_time_tracking_entries(
     entered_on_start_date: str | None = Field(None, description="The inclusive start date for filtering entries by their entry date, in ISO 8601 date format (YYYY-MM-DD). Use together with `entered_on_end_date` to define a date range."),
     entered_on_end_date: str | None = Field(None, description="The inclusive end date for filtering entries by their entry date, in ISO 8601 date format (YYYY-MM-DD). Use together with `entered_on_start_date` to define a date range."),
     timesheet_approval_status: str | None = Field(None, description="The globally unique identifier of a timesheet approval status to scope results to only time tracking entries matching that approval state."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of time tracking entries, optionally filtered by task, project, portfolio, user, workspace, date range, or timesheet approval status. Requires the `time_tracking_entries:read` scope."""
 
     # Construct request model with validation
@@ -8943,7 +9073,7 @@ async def list_time_tracking_entries(
 
 # Tags: Timesheet approval statuses
 @mcp.tool()
-async def get_timesheet_approval_status(timesheet_approval_status_gid: str = Field(..., description="The globally unique identifier (GID) of the timesheet approval status record to retrieve.")) -> dict[str, Any]:
+async def get_timesheet_approval_status(timesheet_approval_status_gid: str = Field(..., description="The globally unique identifier (GID) of the timesheet approval status record to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete record for a single timesheet approval status, including its current state and associated metadata. Requires the timesheet_approval_statuses:read scope."""
 
     # Construct request model with validation
@@ -8983,7 +9113,7 @@ async def update_timesheet_approval_status(
     timesheet_approval_status_gid: str = Field(..., description="The globally unique identifier of the timesheet approval status record to update."),
     approval_status: Literal["submitted", "draft", "approved", "rejected"] = Field(..., description="The target approval state to transition to. Valid values are 'submitted' (submit for review), 'draft' (recall a submission), 'approved' (approve the timesheet), or 'rejected' (reject the timesheet). Allowed transitions depend on the current state of the record."),
     message: str | None = Field(None, description="An optional message to accompany the status transition, such as a reason for approval or rejection."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Transitions a timesheet approval status to a new state, such as submitting, recalling, approving, or rejecting. Only the provided fields are updated; invalid state transitions return a 400 error."""
 
     # Construct request model with validation
@@ -9028,7 +9158,7 @@ async def list_timesheet_approval_statuses(
     from_date: str | None = Field(None, description="The inclusive start date for filtering timesheet approval statuses, in ISO 8601 date format (YYYY-MM-DD)."),
     to_date: str | None = Field(None, description="The inclusive end date for filtering timesheet approval statuses, in ISO 8601 date format (YYYY-MM-DD)."),
     approval_statuses: str | None = Field(None, description="One or more approval status values to filter by; accepted values are draft, submitted, approved, or rejected. Multiple values may be provided as a comma-separated list."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves a list of timesheet approval statuses for a given workspace, with optional filtering by user, date range, or approval status. Requires the timesheet_approval_statuses:read scope."""
 
     # Construct request model with validation
@@ -9071,7 +9201,7 @@ async def create_timesheet_approval_status(
     workspace: str = Field(..., description="The globally unique identifier of the workspace in which the timesheet exists."),
     start_date: str = Field(..., description="The start date of the timesheet week in ISO 8601 date format; must be a Monday."),
     end_date: str = Field(..., description="The end date of the timesheet week in ISO 8601 date format; must be the Sunday immediately following the start date."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Creates a new timesheet approval status for a specific user's weekly timesheet within a workspace. The week must span exactly Monday through the following Sunday."""
 
     # Construct request model with validation
@@ -9114,7 +9244,7 @@ async def search_workspace_typeahead(
     resource_type: Literal["custom_field", "goal", "project", "project_template", "portfolio", "tag", "task", "team", "user"] = Field(..., description="The type of resource to search for. Accepts a single type from the supported set: custom_field, goal, project, project_template, portfolio, tag, task, team, or user. Multiple types are not supported."),
     query: str | None = Field(None, description="The search string used to match relevant objects by name or other identifying fields. Omitting or passing an empty string returns results ordered by relevance heuristics (e.g., recency or contact frequency) for the authenticated user."),
     count: int | None = Field(None, description="The maximum number of results to return, between 1 and 100. Defaults to 20 if omitted; if fewer matches exist than requested, all available results are returned."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Performs a fast typeahead/auto-completion search within a workspace, returning a compact list of matching objects (users, projects, tasks, etc.) ordered by relevance. Results are limited to a single page and are optimized for speed rather than exhaustive accuracy."""
 
     # Construct request model with validation
@@ -9153,7 +9283,7 @@ async def search_workspace_typeahead(
 
 # Tags: User task lists
 @mcp.tool()
-async def get_user_task_list(user_task_list_gid: str = Field(..., description="The globally unique identifier for the user task list to retrieve.")) -> dict[str, Any]:
+async def get_user_task_list(user_task_list_gid: str = Field(..., description="The globally unique identifier for the user task list to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full record for a specific user task list, including all associated metadata. Requires the tasks:read scope."""
 
     # Construct request model with validation
@@ -9192,7 +9322,7 @@ async def get_user_task_list(user_task_list_gid: str = Field(..., description="T
 async def get_user_task_list_by_user(
     user_gid: str = Field(..., description="The unique identifier for the user whose task list you want to retrieve. Accepts the literal string 'me' for the authenticated user, a user's email address, or a user's global ID (gid)."),
     workspace: str = Field(..., description="The global ID (gid) of the workspace in which to look up the user's task list. Each user has one task list per workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the full task list record for a specified user within a given workspace. Requires the tasks:read scope."""
 
     # Construct request model with validation
@@ -9235,7 +9365,7 @@ async def list_users(
     workspace: str | None = Field(None, description="The unique ID of a workspace or organization to restrict results to only users belonging to that workspace or organization."),
     team: str | None = Field(None, description="The unique ID of a team to restrict results to only users belonging to that team."),
     limit: int | None = Field(None, description="The number of user records to return per page. Must be an integer between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves user records across all workspaces and organizations accessible to the authenticated user, with optional filtering by workspace or team. Requires the 'users:read' scope and returns results sorted by user ID."""
 
     # Construct request model with validation
@@ -9276,7 +9406,7 @@ async def list_users(
 async def get_user(
     user_gid: str = Field(..., description="The unique identifier for the user to retrieve. Accepts a user GID, an email address, or the string 'me' to reference the currently authenticated user."),
     workspace: str | None = Field(None, description="The GID of a workspace used to filter the user results, useful when a user belongs to multiple workspaces."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the full profile record for a single user, identified by their GID, email address, or the shorthand 'me' for the authenticated user. Optionally scoped to a specific workspace."""
 
     # Construct request model with validation
@@ -9319,7 +9449,7 @@ async def update_user(
     user_gid: str = Field(..., description="The unique identifier for the target user, which can be the literal string 'me' to reference the authenticated user, a user's email address, or a numeric user GID."),
     workspace: str | None = Field(None, description="Filters the operation to a specific workspace by its GID, useful when a user belongs to multiple workspaces."),
     data: _models.UserUpdateRequest | None = Field(None, description="An object containing the user fields to update; only the fields included here will be modified, all omitted fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing user's profile by replacing only the fields provided in the request body, leaving all other fields unchanged. Returns the complete updated user record."""
 
     # Construct request model with validation
@@ -9366,7 +9496,7 @@ async def list_user_favorites(
     resource_type: Literal["portfolio", "project", "tag", "task", "user", "project_template"] = Field(..., description="The type of Asana resource to filter favorites by. Must be one of the supported resource types: portfolio, project, tag, task, user, or project_template."),
     workspace: str = Field(..., description="The GID of the workspace in which to look up the user's favorites. All returned favorites will belong to this workspace."),
     limit: int | None = Field(None, description="The number of favorite items to return per page. Must be between 1 and 100 inclusive.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all favorites for a specified user within a given workspace, filtered by resource type, ordered as they appear in the user's Asana sidebar. Note: currently only returns favorites for the authenticated user."""
 
     # Construct request model with validation
@@ -9405,7 +9535,7 @@ async def list_user_favorites(
 
 # Tags: Users
 @mcp.tool()
-async def list_team_members(team_gid: str = Field(..., description="The globally unique identifier of the team whose members you want to retrieve.")) -> dict[str, Any]:
+async def list_team_members(team_gid: str = Field(..., description="The globally unique identifier of the team whose members you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves all users who are members of a specified team, returned as compact records sorted alphabetically. Limited to 2000 results; use the users endpoint for larger result sets."""
 
     # Construct request model with validation
@@ -9441,7 +9571,7 @@ async def list_team_members(team_gid: str = Field(..., description="The globally
 
 # Tags: Users
 @mcp.tool()
-async def list_workspace_users(workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose users you want to retrieve.")) -> dict[str, Any]:
+async def list_workspace_users(workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose users you want to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves a compact list of all users in the specified workspace or organization, sorted alphabetically. Results are capped at 2000 users; use the /users endpoint for larger result sets."""
 
     # Construct request model with validation
@@ -9480,7 +9610,7 @@ async def list_workspace_users(workspace_gid: str = Field(..., description="The 
 async def get_workspace_user(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which to look up the user."),
     user_gid: str = Field(..., description="The identifier for the target user — accepts the literal string \"me\" (for the authenticated user), a user's email address, or a user's globally unique identifier (GID)."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves the full profile record for a specific user within a given workspace or organization. Requires the `users:read` scope."""
 
     # Construct request model with validation
@@ -9520,7 +9650,7 @@ async def update_workspace_user(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization in which the user will be updated."),
     user_gid: str = Field(..., description="The identifier of the user to update, which can be the string 'me' to reference the authenticated user, a user's email address, or a user's globally unique identifier (GID)."),
     data: _models.UserUpdateRequest | None = Field(None, description="The user fields to update within the workspace. Only fields included here will be changed; omitted fields retain their current values."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing user's information within a specified workspace or organization. Only the fields provided in the request body will be modified; all other fields remain unchanged."""
 
     # Construct request model with validation
@@ -9559,7 +9689,7 @@ async def update_workspace_user(
 
 # Tags: Webhooks
 @mcp.tool()
-async def get_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to retrieve.")) -> dict[str, Any]:
+async def get_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a specific webhook by its unique identifier. Requires the webhooks:read scope."""
 
     # Construct request model with validation
@@ -9595,7 +9725,7 @@ async def get_webhook(webhook_gid: str = Field(..., description="The globally un
 
 # Tags: Webhooks
 @mcp.tool()
-async def delete_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to permanently delete.")) -> dict[str, Any]:
+async def delete_webhook(webhook_gid: str = Field(..., description="The globally unique identifier of the webhook to permanently delete.")) -> dict[str, Any] | ToolResult:
     """Permanently deletes a webhook, stopping all future event deliveries to its target URL. Note that in-flight requests sent before deletion may still arrive, but no new requests will be issued."""
 
     # Construct request model with validation
@@ -9631,7 +9761,7 @@ async def delete_webhook(webhook_gid: str = Field(..., description="The globally
 
 # Tags: Workspace memberships
 @mcp.tool()
-async def get_workspace_membership(workspace_membership_gid: str = Field(..., description="The unique identifier (GID) of the workspace membership to retrieve.")) -> dict[str, Any]:
+async def get_workspace_membership(workspace_membership_gid: str = Field(..., description="The unique identifier (GID) of the workspace membership to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the complete membership record for a single workspace membership, including details about the member and their role within the workspace."""
 
     # Construct request model with validation
@@ -9670,7 +9800,7 @@ async def get_workspace_membership(workspace_membership_gid: str = Field(..., de
 async def list_user_workspace_memberships(
     user_gid: str = Field(..., description="The unique identifier for the user whose workspace memberships to retrieve. Accepts the literal string 'me' for the authenticated user, a registered email address, or a numeric user GID."),
     limit: int | None = Field(None, description="The number of membership records to return per page. Must be between 1 and 100 inclusive; use pagination to retrieve additional results beyond the first page.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all workspace memberships for a specified user, returning compact membership records. Useful for discovering which workspaces a user belongs to."""
 
     # Construct request model with validation
@@ -9713,7 +9843,7 @@ async def list_workspace_memberships(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization whose memberships you want to retrieve."),
     user: str | None = Field(None, description="Filter memberships to a specific user, identified by the string 'me' (current user), an email address, or a user GID."),
     limit: int | None = Field(None, description="The number of membership records to return per page. Must be between 1 and 100.", ge=1, le=100),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves compact membership records for all members of a specified workspace or organization. Optionally filter results by a specific user."""
 
     # Construct request model with validation
@@ -9752,7 +9882,7 @@ async def list_workspace_memberships(
 
 # Tags: Workspaces
 @mcp.tool()
-async def list_workspaces(limit: int | None = Field(None, description="Number of workspace records to return per page. Must be between 1 and 100.", ge=1, le=100)) -> dict[str, Any]:
+async def list_workspaces(limit: int | None = Field(None, description="Number of workspace records to return per page. Must be between 1 and 100.", ge=1, le=100)) -> dict[str, Any] | ToolResult:
     """Retrieves all workspaces visible to the authorized user. Returns compact records for each workspace, requiring the workspaces:read scope."""
 
     # Construct request model with validation
@@ -9790,7 +9920,7 @@ async def list_workspaces(limit: int | None = Field(None, description="Number of
 
 # Tags: Workspaces
 @mcp.tool()
-async def get_workspace(workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization to retrieve.")) -> dict[str, Any]:
+async def get_workspace(workspace_gid: str = Field(..., description="The globally unique identifier for the workspace or organization to retrieve.")) -> dict[str, Any] | ToolResult:
     """Retrieves the full details of a single workspace or organization. Requires the workspace's unique identifier to return its complete record."""
 
     # Construct request model with validation
@@ -9829,7 +9959,7 @@ async def get_workspace(workspace_gid: str = Field(..., description="The globall
 async def update_workspace(
     workspace_gid: str = Field(..., description="The globally unique identifier of the workspace or organization to update."),
     name: str | None = Field(None, description="The new display name to assign to the workspace."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Updates an existing workspace by modifying its properties, currently limited to renaming the workspace. Returns the complete updated workspace record."""
 
     # Construct request model with validation
@@ -9871,7 +10001,7 @@ async def update_workspace(
 async def add_workspace_user(
     workspace_gid: str = Field(..., description="The unique identifier of the workspace or organization to which the user will be added."),
     user: str | None = Field(None, description="The identifier of the user to add, accepted as the literal string 'me' (current user), an email address, or a user GID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Adds a user to a workspace or organization by user ID or email address. Returns the full user record for the newly added user."""
 
     # Construct request model with validation
@@ -9913,7 +10043,7 @@ async def add_workspace_user(
 async def remove_workspace_user(
     workspace_gid: str = Field(..., description="The unique identifier of the workspace or organization from which the user will be removed."),
     user: str | None = Field(None, description="The identifier of the user to remove, which can be the literal string 'me', an email address, or a user's globally unique ID."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Removes a user from a workspace or organization, transferring ownership of their resources to the admin or PAT owner. The caller must be a workspace admin; the target user can be identified by their user ID or email address."""
 
     # Construct request model with validation
@@ -9955,7 +10085,7 @@ async def remove_workspace_user(
 async def list_workspace_events(
     workspace_gid: str = Field(..., description="The globally unique identifier for the target workspace or organization whose events should be retrieved."),
     sync: str | None = Field(None, description="A sync token from a previous response used to fetch only events that occurred after that token was issued; omit this parameter on the first request to receive a fresh token. If the token has expired, the API returns a 412 error along with a new valid sync token to use going forward."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Retrieves all events that have occurred in a workspace since a given sync token was issued, enabling incremental polling for changes. Returns up to 1000 events per request; if more exist, the response includes a flag to continue paginating with a refreshed sync token."""
 
     # Construct request model with validation

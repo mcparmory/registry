@@ -1,7 +1,7 @@
 """
 Asana MCP Server - Pydantic Models
 
-Generated: 2026-04-14 18:14:32 UTC
+Generated: 2026-04-23 20:59:03 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
