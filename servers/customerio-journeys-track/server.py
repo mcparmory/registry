@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Customer.io Journeys Track MCP Server
-Generated: 2026-04-14 18:18:58 UTC
+Generated: 2026-04-23 21:10:42 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Literal, cast, overload
 
 try:
     from dotenv import load_dotenv
@@ -35,6 +36,7 @@ import httpx
 import pydantic
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 from pydantic import Field
 
 BASE_URL = os.getenv("BASE_URL", "https://track.customer.io")
@@ -466,12 +468,37 @@ def get_safe_error_response(
 
     return response
 
+class UpstreamAPIError(Exception):
+    """Expected upstream API error that should not become a server traceback."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        request_id: str | None,
+        method: str,
+        path: str,
+        tool_name: str | None,
+        error_data: dict[str, Any],
+        error_message: str,
+    ) -> None:
+        super().__init__(error_message)
+        self.status_code = status_code
+        self.request_id = request_id
+        self.method = method
+        self.path = path
+        self.tool_name = tool_name
+        self.error_data = error_data
+        self.error_message = error_message
+
+
 async def _make_request(
     method: str,
     path: str,
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     tool_name: str | None = None,
@@ -493,7 +520,11 @@ async def _make_request(
     if headers is None:
         headers = {}
     headers.setdefault("Accept", "application/json")
-    if method.upper() in ("POST", "PUT", "PATCH") and (body_content_type is None or body_content_type == "application/json"):
+    if (
+        body is not None
+        and method.upper() in ("POST", "PUT", "PATCH")
+        and (body_content_type is None or body_content_type == "application/json")
+    ):
         headers.setdefault("Content-Type", "application/json")
 
 
@@ -535,18 +566,82 @@ async def _make_request(
         try:
             # Dispatch body to correct httpx kwarg based on content type
             _json = body if body_content_type is None or body_content_type == "application/json" else None
-            _data = body if body_content_type in ("application/x-www-form-urlencoded", "multipart/form-data") else None
+            _form_content = None
+            if body_content_type == "application/x-www-form-urlencoded":
+                _data = body if isinstance(body, dict) else None
+                if isinstance(body, bytearray):
+                    _form_content = bytes(body)
+                elif isinstance(body, (bytes, str)):
+                    _form_content = body
+                elif body is not None and not isinstance(body, dict):
+                    _form_content = str(body)
+                else:
+                    _form_content = None
+            else:
+                _data = None
+            _files = None
+            if body_content_type == "multipart/form-data":
+                _multipart_parts: list[tuple[str, tuple[str | None, Any] | tuple[str, Any, str]]] = []
+                _file_fields = set(multipart_file_fields or [])
+                if isinstance(body, dict):
+                    for _key, _value in body.items():
+                        if _value is None:
+                            continue
+                        if _key in _file_fields:
+                            if isinstance(_value, str):
+                                _file_content = _value.encode("utf-8")
+                            elif isinstance(_value, (bytes, bytearray)):
+                                _file_content = bytes(_value)
+                            else:
+                                raise ValueError(
+                                    f"Unsupported multipart file field '{_key}': "
+                                    f"expected str or bytes, got {type(_value).__name__}"
+                                )
+                            _multipart_parts.append(
+                                (_key, (f"{_key}.bin", _file_content, "application/octet-stream"))
+                            )
+                        else:
+                            if isinstance(_value, (dict, list)):
+                                _part_value = json.dumps(_value)
+                            elif isinstance(_value, bool):
+                                _part_value = "true" if _value else "false"
+                            else:
+                                _part_value = str(_value)
+                            _multipart_parts.append((_key, (None, _part_value)))
+                elif body is not None:
+                    if isinstance(body, str):
+                        _file_content = body.encode("utf-8")
+                    elif isinstance(body, (bytes, bytearray)):
+                        _file_content = bytes(body)
+                    else:
+                        raise ValueError(
+                            "Unsupported multipart file body: expected str or bytes "
+                            f"for file part, got {type(body).__name__}"
+                        )
+                    _field_name = next(iter(_file_fields), "file")
+                    _multipart_parts.append(
+                        (_field_name, (f"{_field_name}.bin", _file_content, "application/octet-stream"))
+                    )
+                _files = _multipart_parts
             _content = None
             if body_content_type is not None and body_content_type not in ("application/json", "application/x-www-form-urlencoded", "multipart/form-data"):
                 _raw = body
-                _content = json.dumps(_raw).encode() if isinstance(_raw, (dict, list)) else _raw
+                if isinstance(_raw, (dict, list)):
+                    _content = json.dumps(_raw).encode()
+                elif isinstance(_raw, bytearray):
+                    _content = bytes(_raw)
+                else:
+                    _content = _raw
+            elif _form_content is not None:
+                _content = _form_content
             response = await client.request(
                 method=method,
                 url=path,
                 params=params,
                 json=_json,
                 data=_data,
-                content=_content,
+                files=_files,
+                content=cast(Any, _content),
                 headers=headers,
                 cookies=cookies
             )
@@ -618,7 +713,15 @@ async def _make_request(
                         request_id=request_id,
                         error_data=sanitized_data
                     )
-                    raise ValueError(error_message)
+                    raise UpstreamAPIError(
+                        status_code=status_code,
+                        request_id=request_id,
+                        method=method,
+                        path=path,
+                        tool_name=tool_name,
+                        error_data=sanitized_data,
+                        error_message=error_message,
+                    )
 
                 # Will retry - continue to backoff logic below
 
@@ -666,6 +769,10 @@ async def _make_request(
         except httpx.HTTPStatusError:
             # Already handled above - shouldn't reach here
             continue
+
+        except UpstreamAPIError:
+            # Expected upstream HTTP error — already logged above.
+            raise
 
         except Exception as e:
             last_error = e
@@ -728,7 +835,15 @@ async def _make_request(
             request_id=request_id,
             error_data=sanitized_error
         )
-        raise ValueError(error_message)
+        raise UpstreamAPIError(
+            status_code=last_error.response.status_code,
+            request_id=request_id,
+            method=method,
+            path=path,
+            tool_name=tool_name,
+            error_data=sanitized_error,
+            error_message=error_message,
+        )
 
     # Network/connection error - structured format for consistency
     error_message = (
@@ -754,10 +869,8 @@ class _JsonCoercionMiddleware(Middleware):
         if context.message.arguments:
             for key, value in context.message.arguments.items():
                 if isinstance(value, str) and len(value) > 1 and value[0] in ('{', '['):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError, ValueError):
                         context.message.arguments[key] = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
         return await call_next(context)
 
 
@@ -846,16 +959,17 @@ async def _execute_tool_request(
     params: dict[str, Any] | None = None,
     body: Any = None,
     body_content_type: str | None = None,
+    multipart_file_fields: list[str] | None = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     raw_querystring: str | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | ToolResult, int]:
     """
     Execute tool request with timeout handling and metrics recording.
 
     Returns:
-        Tuple of (normalized_response_data, status_code).
-        Response data is normalized to dict format for Pydantic validation.
+        Tuple of (normalized_response_data_or_tool_result, status_code).
+        Successful responses are normalized to dict format for Pydantic validation.
         Status code: HTTP status code from the API response.
     """
     start_time = time.time()
@@ -869,6 +983,7 @@ async def _execute_tool_request(
                 params=params,
                 body=body,
                 body_content_type=body_content_type,
+                multipart_file_fields=multipart_file_fields,
                 headers=headers,
                 cookies=cookies,
                 tool_name=tool_name,
@@ -911,6 +1026,21 @@ async def _execute_tool_request(
         )
         raise asyncio.TimeoutError(timeout_message) from e
 
+    except UpstreamAPIError as e:
+        latency_ms = (time.time() - start_time) * 1000.0
+        return ToolResult(
+            content=e.error_message,
+            structured_content={
+                "ok": False,
+                "status": e.status_code,
+                "request_id": e.request_id,
+                "method": e.method,
+                "path": e.path,
+                "error": e.error_message,
+                "details": e.error_data,
+            },
+        ), e.status_code
+
     except ValueError:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
@@ -922,7 +1052,6 @@ async def _execute_tool_request(
     except Exception:
         latency_ms = (time.time() - start_time) * 1000.0
         raise
-
 # ============================================================================
 # Authentication
 # ============================================================================
@@ -1063,7 +1192,7 @@ mcp = FastMCP("Customer.io Journeys Track", middleware=[_JsonCoercionMiddleware(
 
 # Tags: trackRegion
 @mcp.tool()
-async def get_account_region() -> dict[str, Any]:
+async def get_account_region() -> dict[str, Any] | ToolResult:
     """Retrieve your account's region and environment details. This endpoint returns the appropriate regional URL and environment ID for your Track API credentials, which you should use for all subsequent API requests."""
 
     # Extract parameters for API call
@@ -1100,7 +1229,7 @@ async def upsert_customer(
     relationships: list[_models.IdentifyBodyCioRelationshipsRelationshipsItem] | None = Field(None, description="An array of relationship objects to add to or remove from the customer, based on the `action` parameter. Each object represents a single relationship."),
     unsubscribed: bool | None = Field(None, description="Subscription status for the customer. When true, the customer is unsubscribed from all messages. When false or absent, the customer is eligible to receive messages based on their subscription preferences. Automatically updated when a customer clicks an unsubscribe link."),
     topics: dict[str, bool] | None = Field(None, description="An object containing active topics in your workspace, with keys in the format `topic_<id>` and boolean values indicating topic subscription status."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add a new customer or update an existing customer's profile. This operation handles identifier merging, profile creation, and attribute updates based on the identifiers provided in the path and request body."""
 
     # Construct request model with validation
@@ -1141,7 +1270,7 @@ async def upsert_customer(
 
 # Tags: Track Customers
 @mcp.tool()
-async def delete_customer(identifier: str = Field(..., description="The unique identifier for the customer to delete. This can be a customer ID, email address, or cio_id (prefixed with 'cio_') depending on your workspace configuration.")) -> dict[str, Any]:
+async def delete_customer(identifier: str = Field(..., description="The unique identifier for the customer to delete. This can be a customer ID, email address, or cio_id (prefixed with 'cio_') depending on your workspace configuration.")) -> dict[str, Any] | ToolResult:
     """Permanently remove a customer and all associated information from Customer.io. Note that customers recreated through other integration methods (such as the Javascript snippet) after deletion may need to be deleted again."""
 
     # Construct request model with validation
@@ -1180,7 +1309,7 @@ async def delete_customer(identifier: str = Field(..., description="The unique i
 async def register_device(
     identifier: str = Field(..., description="The unique identifier for the customer. Can be an `id`, `email` address, or `cio_id` (prefixed with `cio_`) depending on workspace configuration."),
     device: _models.DeviceObject = Field(..., description="An object containing device properties such as platform type, device token, and attributes. Properties are automatically collected by SDKs unless `autoTrackDeviceAttributes` is disabled. Device properties can be referenced in segments and Liquid templates."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Register or update a device for a customer. Customers can maintain multiple devices (iOS and Android) on their profile."""
 
     # Construct request model with validation
@@ -1222,7 +1351,7 @@ async def register_device(
 async def remove_device(
     identifier: str = Field(..., description="The unique identifier for the customer. This can be an `id`, `email` address, or `cio_id` (prefixed with `cio_`) depending on your workspace configuration."),
     device_id: str = Field(..., description="The unique identifier of the device to remove from the customer profile."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove a device from a customer profile. Ensure you stop sending device data to Customer.io to prevent the device from being automatically re-added."""
 
     # Construct request model with validation
@@ -1258,7 +1387,7 @@ async def remove_device(
 
 # Tags: Track Customers
 @mcp.tool()
-async def suppress_customer(identifier: str = Field(..., description="The unique identifier for the customer to suppress. This can be an email address, customer ID, or CIO ID (prefixed with `cio_`) depending on your workspace configuration. When using CIO ID, the value must be prefixed with `cio_`.")) -> dict[str, Any]:
+async def suppress_customer(identifier: str = Field(..., description="The unique identifier for the customer to suppress. This can be an email address, customer ID, or CIO ID (prefixed with `cio_`) depending on your workspace configuration. When using CIO ID, the value must be prefixed with `cio_`.")) -> dict[str, Any] | ToolResult:
     """Permanently delete a customer profile and suppress their identifier(s) to prevent re-addition to the workspace. All future API calls referencing the suppressed identifier are ignored. This action cannot be undone and should be used primarily for GDPR/CCPA compliance requests."""
 
     # Construct request model with validation
@@ -1294,7 +1423,7 @@ async def suppress_customer(identifier: str = Field(..., description="The unique
 
 # Tags: Track Customers
 @mcp.tool()
-async def unsuppress_customer(identifier: str = Field(..., description="The unique identifier for the customer, which can be their ID, email address, or cio_id (prefixed with 'cio_'). The identifier type depends on your workspace configuration.")) -> dict[str, Any]:
+async def unsuppress_customer(identifier: str = Field(..., description="The unique identifier for the customer, which can be their ID, email address, or cio_id (prefixed with 'cio_'). The identifier type depends on your workspace configuration.")) -> dict[str, Any] | ToolResult:
     """Reactivate a suppressed customer profile to make their identifier available for new profile creation. Unsuppressing does not restore the previous profile history; it only makes the identifier usable again."""
 
     # Construct request model with validation
@@ -1333,7 +1462,7 @@ async def unsuppress_customer(identifier: str = Field(..., description="The uniq
 async def mark_delivery_unsubscribed(
     delivery_id: str = Field(..., description="The unique identifier of the email delivery associated with the unsubscribe request."),
     unsubscribe: bool | None = Field(None, description="Set to true to mark the person as unsubscribed and attribute the unsubscribe action to this delivery."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Mark a person as unsubscribed from a specific email delivery. Use this endpoint with custom unsubscribe pages to record unsubscribe requests and trigger email_unsubscribed events for audience segmentation."""
 
     # Construct request model with validation
@@ -1380,7 +1509,7 @@ async def track_customer_event(
     timestamp: str | None = Field(None, description="The Unix timestamp indicating when the event occurred. If omitted, the server timestamp at receipt is used. Only events from the past 72 hours can trigger campaigns."),
     data: dict[str, Any] | None = Field(None, description="Custom properties associated with the event for use in campaign personalization via liquid templating or for setting customer attributes. Reserved properties (from_address, recipient, reply_to) override campaign settings when present."),
     anonymous_id: str | None = Field(None, description="An identifier for anonymous events (such as a cookie value). When set as a customer attribute, all events with this identifier are associated with that customer. Must be unique and non-reusable."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Record a behavioral event (page view, screen view, or custom event) for a customer to enable campaign triggering and audience segmentation. Events with timestamps within the past 72 hours can activate campaigns."""
 
     _timestamp = _parse_int(timestamp)
@@ -1428,7 +1557,7 @@ async def log_anonymous_event(
     type_: Literal["event", "page", "screen"] | None = Field(None, alias="type", description="The category of event being tracked. Use 'page' for website page views, 'screen' for mobile app screen views, or 'event' for all other event types."),
     timestamp: str | None = Field(None, description="The Unix timestamp indicating when the event occurred. If not provided, the server timestamp at receipt time is used."),
     data: dict[str, Any] | None = Field(None, description="Additional event metadata as key-value pairs. Can include custom attributes to set on the person, or special fields like 'from_address' and 'reply_to' for campaign triggering."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Log an event for an unidentified person using an anonymous identifier. Events can be associated with a person later when their identity is confirmed, enabling campaign triggers within 72 hours of the event timestamp."""
 
     _timestamp = _parse_int(timestamp)
@@ -1471,7 +1600,7 @@ async def log_anonymous_event(
 async def submit_form(
     form_id: str = Field(..., description="The unique identifier for the form. Use a value that is meaningful to your system and traceable to your backend. If Customer.io does not recognize this identifier, a new form connection will be created automatically."),
     data: _models.SubmitFormBodyDataV0 | _models.SubmitFormBodyDataV1 = Field(..., description="An object containing form field data and respondent identifiers. Must include at least one identifier field (id, email, or a field mapped to these identifiers) to identify or create the form respondent. All additional keys represent form fields submitted by the respondent; field values must be formatted as strings. Reserved keys (form_id, form_name, form_type, form_url, form_url_param) are ignored if included."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Submit a form response and create or update the respondent in Customer.io. Form submissions are associated with a form connection; if the form_id is unrecognized, a new form connection is automatically created."""
 
     # Construct request model with validation
@@ -1513,7 +1642,7 @@ async def submit_form(
 async def merge_customers(
     primary: _models.MergeBodyPrimaryV0 | _models.MergeBodyPrimaryV1 | _models.MergeBodyPrimaryV2 = Field(..., description="The customer profile that will remain after the merge. Identified by `id`, `email`, or `cio_id`. This profile receives merged data from the secondary profile. Must already exist in Customer.io at the time of the merge request."),
     secondary: _models.MergeBodySecondaryV0 | _models.MergeBodySecondaryV1 | _models.MergeBodySecondaryV2 = Field(..., description="The customer profile that will be deleted after the merge. Identified by `id`, `email`, or `cio_id`. This profile's attributes, event history, segments, and campaign journeys are merged into the primary profile before deletion."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Merge two customer profiles by consolidating the secondary profile into the primary profile, then deleting the secondary. This operation is irreversible and requires the primary profile to already exist in Customer.io."""
 
     # Construct request model with validation
@@ -1558,7 +1687,7 @@ async def report_metric(
     recipient: str | None = Field(None, description="The email address of the recipient who received the message and triggered this metric event."),
     reason: str | None = Field(None, description="The reason for failure-related metrics such as bounces or drops. Provide context about why the metric occurred."),
     href: str | None = Field(None, description="For clicked metrics, the URL or link that the recipient clicked. Include the full link destination."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Report email metrics from external channels or non-SDK integrations by associating events with a delivery ID from a Customer.io message. Use the CIO-Delivery-ID header value as the delivery_id to track opens, clicks, conversions, bounces, and other email events."""
 
     _timestamp = _parse_int(timestamp)
@@ -1602,7 +1731,7 @@ async def add_customers_to_segment(
     segment_id: str = Field(..., description="The unique identifier of the manual segment. Find this ID in the segment's dashboard page under Usage, or retrieve it using the segments API."),
     ids: list[str] = Field(..., description="Array of customer identifiers to add to the segment. All values must match the id_type parameter. Unmatched entries are ignored. Accepts 1 to 1000 identifiers per request.", min_length=1, max_length=1000),
     id_type: Literal["id", "email", "cio_id"] | None = Field(None, description="The identifier type for all values in the ids array. All customer identifiers must be of the same type. Defaults to customer ID if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Add customers to a manual segment by their identifiers. You can add up to 1000 customers per request using their ID, email, or CIO ID."""
 
     _segment_id = _parse_int(segment_id)
@@ -1650,7 +1779,7 @@ async def remove_customers_from_segment(
     segment_id: str = Field(..., description="The unique identifier of the segment from which to remove customers. You can find this ID in the Segments dashboard under Usage, or retrieve it via the Segments API."),
     ids: list[str] = Field(..., description="Array of customer identifiers to remove from the segment. Must contain between 1 and 1000 identifiers, all matching the type specified in id_type.", min_length=1, max_length=1000),
     id_type: Literal["id", "email", "cio_id"] | None = Field(None, description="The identifier type for the customers being removed. All values in the ids array must match this type. Defaults to id if not specified."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Remove customers from a manual segment by their identifiers. This operation supports up to 1000 customer IDs per request and requires customers to have id attributes in your workspace."""
 
     _segment_id = _parse_int(segment_id)
@@ -1706,7 +1835,7 @@ async def manage_entity(
     device: _models.EntityBodyDevice | None = Field(None, description="Properties representing an individual device, such as device type, OS, and app version. SDKs automatically gather these properties unless disabled."),
     primary: _models.EntityBodyPrimaryV0 | _models.EntityBodyPrimaryV1 | _models.EntityBodyPrimaryV2 | None = Field(None, description="The person to retain after a merge operation, identified by `id`, `email`, or `cio_id`. This person receives attributes from the secondary person. Required when action is `merge`."),
     secondary: _models.EntityBodySecondaryV0 | _models.EntityBodySecondaryV1 | _models.EntityBodySecondaryV2 | None = Field(None, description="The person to delete after a merge operation, identified by `id`, `email`, or `cio_id`. This person's information is merged into the primary person and then deleted. Required when action is `merge`."),
-) -> dict[str, Any]:
+) -> dict[str, Any] | ToolResult:
     """Create, update, delete, or manage relationships for a person or object (such as a company or product) in Customer.io. Supports operations like identifying profiles, tracking events, managing devices, and merging duplicate person records."""
 
     # Construct request model with validation
@@ -1744,7 +1873,7 @@ async def manage_entity(
 
 # Tags: track_v2
 @mcp.tool()
-async def batch_entities(batch: list[Annotated[_models.IdentifyPerson | _models.PersonDelete | _models.PersonEvent | _models.PersonScreen | _models.PersonPage | _models.PersonAddRelationships | _models.PersonDeleteRelationships | _models.PersonAddDevice | _models.PersonDeleteDevice | _models.PersonMerge | _models.PersonSuppress | _models.PersonUnsuppress, Field(discriminator="action")] | Annotated[_models.ObjectIdentify | _models.ObjectIdentifyAnonymous | _models.ObjectDelete | _models.ObjectAddRelationships | _models.ObjectDeleteRelationships, Field(discriminator="action")] | _models.DeliveryOperations] | None = Field(None, description="Array of entity payloads representing individual operations. Each object modifies a single person or object. The batch request must not exceed 500kb total, and each individual entity operation must not exceed 32kb.")) -> dict[str, Any]:
+async def batch_entities(batch: list[Annotated[_models.IdentifyPerson | _models.PersonDelete | _models.PersonEvent | _models.PersonScreen | _models.PersonPage | _models.PersonAddRelationships | _models.PersonDeleteRelationships | _models.PersonAddDevice | _models.PersonDeleteDevice | _models.PersonMerge | _models.PersonSuppress | _models.PersonUnsuppress, Field(discriminator="action")] | Annotated[_models.ObjectIdentify | _models.ObjectIdentifyAnonymous | _models.ObjectDelete | _models.ObjectAddRelationships | _models.ObjectDeleteRelationships, Field(discriminator="action")] | _models.DeliveryOperations] | None = Field(None, description="Array of entity payloads representing individual operations. Each object modifies a single person or object. The batch request must not exceed 500kb total, and each individual entity operation must not exceed 32kb.")) -> dict[str, Any] | ToolResult:
     """Submit multiple entity operations in a single request to create or modify people and objects. Combine different entity types (people, objects, deliveries) in one batch for efficient bulk processing."""
 
     # Construct request model with validation

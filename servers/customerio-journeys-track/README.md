@@ -1,4 +1,5 @@
 # Customer.io Journeys Track MCP Server
+<!-- mcp-name: com.mcparmory/customerio-journeys-track -->
 
 Base URL: https://track.customer.io
 | | |
@@ -88,6 +89,17 @@ Example (if server is at `/home/user/mcp-servers/customerio-journeys-track`):
 
 ## Docker
 
+### Pre-built image (recommended)
+
+```bash
+docker run -p 8000:8000 \
+  -e BASIC_AUTH_USERNAME=YOUR_BASIC_AUTH_USERNAME \
+  -e BASIC_AUTH_PASSWORD=YOUR_BASIC_AUTH_PASSWORD \
+  ghcr.io/mcparmory/customerio-journeys-track:latest
+```
+
+### Build from source
+
 **First**, configure your credentials in `.env` (see [Credentials](#credentials) above).
 
 ```bash
@@ -95,7 +107,9 @@ docker build -t customerio-journeys-track .
 docker run -p 8000:8000 --env-file .env customerio-journeys-track
 ```
 
-**Before running**, make sure ports 8000 are free.For Docker, use SSE transport in your MCP client config:
+**Before running**, make sure ports 8000 are free.### MCP client config (Docker)
+
+For Docker, use SSE transport in your MCP client config:
 ```json
 {
   "mcpServers": {

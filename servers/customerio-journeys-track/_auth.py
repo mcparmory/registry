@@ -1,7 +1,7 @@
 """
 Authentication module for Customer.io Journeys Track MCP server.
 
-Generated: 2026-04-14 18:18:58 UTC
+Generated: 2026-04-23 21:10:42 UTC
 Generator: MCP Blacksmith v1.1.0 (https://mcpblacksmith.com)
 
 This module contains:
@@ -97,12 +97,12 @@ OPERATION_AUTH_MAP: dict[str, list[list[str]]] = {
     "remove_device": [["Tracking-API-Key"]],
     "suppress_customer": [["Tracking-API-Key"]],
     "unsuppress_customer": [["Tracking-API-Key"]],
-    "mark_delivery_unsubscribed": [],
+    "mark_delivery_unsubscribed": [["Tracking-API-Key"]],
     "track_customer_event": [["Tracking-API-Key"]],
     "log_anonymous_event": [["Tracking-API-Key"]],
     "submit_form": [["Tracking-API-Key"]],
     "merge_customers": [["Tracking-API-Key"]],
-    "report_metric": [],
+    "report_metric": [["Tracking-API-Key"]],
     "add_customers_to_segment": [["Tracking-API-Key"]],
     "remove_customers_from_segment": [["Tracking-API-Key"]],
     "manage_entity": [["Tracking-API-Key"]],

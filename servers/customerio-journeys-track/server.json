@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.mcparmory/customerio-journeys-track",
+  "description": "Track customer data, manage audience segments, and trigger personalized campaigns",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/mcparmory/registry",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcparmory-customerio-journeys-track",
+      "version": "1.0.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/mcparmory/customerio-journeys-track:1.0.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.mcparmory.com/customerio-journeys-track"
+    }
+  ]
+}
